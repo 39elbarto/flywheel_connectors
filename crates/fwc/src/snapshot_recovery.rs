@@ -51,23 +51,68 @@ mod tests {
     // ── Canonical command lists ──────────────────────────────────────────
 
     const CANONICAL_COMMANDS: &[&str] = &[
-        "guide", "list", "search", "show", "ops", "schema", "examples",
-        "status", "doctor", "budget", "capabilities", "install", "update",
-        "pin", "unpin", "config", "invoke", "simulate", "pipeline",
-        "batch", "task", "plan", "explain", "do", "template", "history",
-        "replay", "undo", "compare", "approvals",
+        "guide",
+        "list",
+        "search",
+        "show",
+        "ops",
+        "schema",
+        "examples",
+        "status",
+        "doctor",
+        "budget",
+        "capabilities",
+        "install",
+        "update",
+        "pin",
+        "unpin",
+        "config",
+        "invoke",
+        "simulate",
+        "pipeline",
+        "batch",
+        "task",
+        "plan",
+        "explain",
+        "do",
+        "template",
+        "history",
+        "replay",
+        "undo",
+        "compare",
+        "approvals",
     ];
 
     const CONNECTOR_NAMES: &[&str] = &[
-        "github", "gitlab", "jira", "slack", "discord", "telegram",
-        "airtable", "notion", "linear", "asana", "zendesk", "stripe",
-        "twilio", "sendgrid", "shopify", "salesforce",
+        "github",
+        "gitlab",
+        "jira",
+        "slack",
+        "discord",
+        "telegram",
+        "airtable",
+        "notion",
+        "linear",
+        "asana",
+        "zendesk",
+        "stripe",
+        "twilio",
+        "sendgrid",
+        "shopify",
+        "salesforce",
     ];
 
     const OPERATION_NAMES: &[&str] = &[
-        "create_issue", "list_repos", "get_user", "send_message",
-        "create_channel", "update_record", "delete_page",
-        "list_projects", "search_tickets", "get_balance",
+        "create_issue",
+        "list_repos",
+        "get_user",
+        "send_message",
+        "create_channel",
+        "update_record",
+        "delete_page",
+        "list_projects",
+        "search_tickets",
+        "get_balance",
     ];
 
     // ── Levenshtein distance ────────────────────────────────────────────
@@ -155,9 +200,20 @@ mod tests {
 
     fn validate_flag(flag: &str) -> Option<RecoverySuggestion> {
         let known_flags = &[
-            "--format", "--json", "--help", "--host", "--input", "--file",
-            "--set", "--connector", "--operation", "--zone", "--retry",
-            "--token-stats", "--approve", "--version",
+            "--format",
+            "--json",
+            "--help",
+            "--host",
+            "--input",
+            "--file",
+            "--set",
+            "--connector",
+            "--operation",
+            "--zone",
+            "--retry",
+            "--token-stats",
+            "--approve",
+            "--version",
         ];
         if known_flags.contains(&flag) {
             return None; // valid
@@ -188,28 +244,42 @@ mod tests {
 
     fn context_aware_suggestions(command: &str, mode: CliMode) -> Vec<&'static str> {
         let read_only = &[
-            "list", "search", "show", "ops", "schema", "examples",
-            "status", "guide", "history", "compare",
+            "list", "search", "show", "ops", "schema", "examples", "status", "guide", "history",
+            "compare",
         ];
-        let write_commands = &[
-            "invoke", "do", "batch", "install", "update", "pin", "unpin",
-        ];
+        let write_commands = &["invoke", "do", "batch", "install", "update", "pin", "unpin"];
         match mode {
-            CliMode::Offline | CliMode::ReadOnly => {
-                read_only.iter().filter(|c| c.starts_with(command) || command.starts_with(**c) || levenshtein(command, c) <= 2).copied().collect()
-            }
+            CliMode::Offline | CliMode::ReadOnly => read_only
+                .iter()
+                .filter(|c| {
+                    c.starts_with(command)
+                        || command.starts_with(**c)
+                        || levenshtein(command, c) <= 2
+                })
+                .copied()
+                .collect(),
             CliMode::Online => {
                 let mut all: Vec<&str> = read_only.to_vec();
                 all.extend_from_slice(write_commands);
-                all.into_iter().filter(|c| c.starts_with(command) || command.starts_with(*c) || levenshtein(command, c) <= 2).collect()
+                all.into_iter()
+                    .filter(|c| {
+                        c.starts_with(command)
+                            || command.starts_with(*c)
+                            || levenshtein(command, c) <= 2
+                    })
+                    .collect()
             }
         }
     }
 
     fn unknown_subcommand_recovery(parent: &str, sub: &str) -> RecoverySuggestion {
         let subcommands: &[&str] = match parent {
-            "config" => &["get", "set", "unset", "import", "export", "doctor", "schema"],
-            "task" => &["create", "show", "list", "resolve", "ask", "advance", "bind", "approve", "run"],
+            "config" => &[
+                "get", "set", "unset", "import", "export", "doctor", "schema",
+            ],
+            "task" => &[
+                "create", "show", "list", "resolve", "ask", "advance", "bind", "approve", "run",
+            ],
             "pipeline" => &["create", "run", "show", "list", "validate"],
             "approvals" => &["list", "create", "revoke", "show"],
             _ => &[],
@@ -304,7 +374,10 @@ mod tests {
         #[test]
         fn typo_suggestion_has_confidence() {
             let s = suggest_command("serch").unwrap();
-            assert!(matches!(s.confidence, Confidence::High | Confidence::Medium));
+            assert!(matches!(
+                s.confidence,
+                Confidence::High | Confidence::Medium
+            ));
         }
 
         #[test]
@@ -322,7 +395,10 @@ mod tests {
         #[test]
         fn s_is_ambiguous() {
             let matches = resolve_ambiguous("s");
-            assert!(matches.len() > 1, "Single 's' should match multiple commands: {matches:?}");
+            assert!(
+                matches.len() > 1,
+                "Single 's' should match multiple commands: {matches:?}"
+            );
             assert!(matches.contains(&"search"));
             assert!(matches.contains(&"schema"));
             assert!(matches.contains(&"show"));
@@ -707,7 +783,10 @@ mod tests {
         #[test]
         fn online_mode_includes_invoke() {
             let suggestions = context_aware_suggestions("inv", CliMode::Online);
-            assert!(suggestions.contains(&"invoke"), "Online mode should suggest invoke");
+            assert!(
+                suggestions.contains(&"invoke"),
+                "Online mode should suggest invoke"
+            );
         }
 
         #[test]
@@ -728,8 +807,12 @@ mod tests {
         #[test]
         fn online_mode_suggests_both_read_and_write() {
             let read_suggestions = context_aware_suggestions("", CliMode::Online);
-            let has_read = read_suggestions.iter().any(|s| *s == "search" || *s == "list");
-            let has_write = read_suggestions.iter().any(|s| *s == "invoke" || *s == "do");
+            let has_read = read_suggestions
+                .iter()
+                .any(|s| *s == "search" || *s == "list");
+            let has_write = read_suggestions
+                .iter()
+                .any(|s| *s == "invoke" || *s == "do");
             assert!(has_read, "Online mode should include read commands");
             assert!(has_write, "Online mode should include write commands");
         }

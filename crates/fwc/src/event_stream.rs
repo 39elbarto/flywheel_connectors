@@ -170,6 +170,10 @@ pub struct TailConfig {
     pub all: bool,
     /// Historical lookback in seconds.
     pub since_seconds: Option<u64>,
+    /// Optional event-type filter applied to the tail stream.
+    pub event_type: Option<String>,
+    /// Optional resume cursor/event id.
+    pub cursor: Option<String>,
     /// Backpressure buffer size.
     pub buffer_size: usize,
 }
@@ -190,6 +194,8 @@ impl Default for TailConfig {
             connectors: Vec::new(),
             all: false,
             since_seconds: None,
+            event_type: None,
+            cursor: None,
             buffer_size: 1000,
         }
     }
@@ -206,6 +212,10 @@ pub struct TailPlan {
     pub all: bool,
     /// Historical lookback.
     pub since: Option<String>,
+    /// Event-type filter requested for the tail session.
+    pub event_type: Option<String>,
+    /// Resume cursor requested for the tail session.
+    pub cursor: Option<String>,
     /// Buffer capacity.
     pub buffer_size: usize,
 }
@@ -835,11 +845,15 @@ mod tests {
             connectors: vec!["slack".to_owned(), "discord".to_owned()],
             all: false,
             since: Some("5m".to_owned()),
+            event_type: Some("health-check".to_owned()),
+            cursor: Some("evt-9".to_owned()),
             buffer_size: 500,
         };
         let json = serde_json::to_value(&plan).unwrap();
         assert_eq!(json["connectors"].as_array().unwrap().len(), 2);
         assert_eq!(json["since"], "5m");
+        assert_eq!(json["event_type"], "health-check");
+        assert_eq!(json["cursor"], "evt-9");
         assert_eq!(json["buffer_size"], 500);
     }
 
@@ -1157,11 +1171,15 @@ mod tests {
             connectors: vec!["slack".to_owned()],
             all: true,
             since_seconds: Some(300),
+            event_type: Some("lifecycle".to_owned()),
+            cursor: Some("evt-3".to_owned()),
             buffer_size: 500,
         };
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["all"], true);
         assert_eq!(json["since_seconds"], 300);
+        assert_eq!(json["event_type"], "lifecycle");
+        assert_eq!(json["cursor"], "evt-3");
         assert_eq!(json["buffer_size"], 500);
     }
 
@@ -1173,10 +1191,14 @@ mod tests {
             connectors: vec!["github".to_owned()],
             all: false,
             since: None,
+            event_type: None,
+            cursor: None,
             buffer_size: 1000,
         };
         let json = serde_json::to_value(&plan).unwrap();
         assert!(json["since"].is_null());
+        assert!(json["event_type"].is_null());
+        assert!(json["cursor"].is_null());
     }
 
     #[test]
@@ -1185,11 +1207,14 @@ mod tests {
             connectors: Vec::new(),
             all: true,
             since: Some("1h".to_owned()),
+            event_type: Some("drift-detected".to_owned()),
+            cursor: None,
             buffer_size: 2000,
         };
         let json = serde_json::to_value(&plan).unwrap();
         assert_eq!(json["all"], true);
         assert!(json["connectors"].as_array().unwrap().is_empty());
+        assert_eq!(json["event_type"], "drift-detected");
     }
 
     // ── StreamStatus additional ──────────────────────────────────
@@ -1840,6 +1865,8 @@ mod tests {
             connectors: vec!["a".to_owned(), "b".to_owned()],
             all: true,
             since_seconds: Some(600),
+            event_type: Some("health-check".to_owned()),
+            cursor: Some("evt-42".to_owned()),
             buffer_size: 2000,
         };
         let cloned = config.clone();
@@ -1847,6 +1874,8 @@ mod tests {
         assert_eq!(cloned.connectors.len(), 2);
         assert_eq!(cloned.all, true);
         assert_eq!(cloned.since_seconds, Some(600));
+        assert_eq!(cloned.event_type.as_deref(), Some("health-check"));
+        assert_eq!(cloned.cursor.as_deref(), Some("evt-42"));
     }
 
     #[test]
@@ -1863,10 +1892,14 @@ mod tests {
             connectors: vec![],
             all: false,
             since_seconds: None,
+            event_type: None,
+            cursor: None,
             buffer_size: 1000,
         };
         let json = serde_json::to_value(&config).unwrap();
         assert!(json["since_seconds"].is_null());
+        assert!(json["event_type"].is_null());
+        assert!(json["cursor"].is_null());
         assert!(json["connectors"].as_array().unwrap().is_empty());
     }
 
@@ -1878,11 +1911,15 @@ mod tests {
             connectors: vec!["slack".to_owned()],
             all: false,
             since: Some("5m".to_owned()),
+            event_type: Some("config-revision".to_owned()),
+            cursor: Some("evt-5".to_owned()),
             buffer_size: 500,
         };
         let cloned = plan.clone();
         assert_eq!(plan.connectors, cloned.connectors);
         assert_eq!(plan.since, cloned.since);
+        assert_eq!(plan.event_type, cloned.event_type);
+        assert_eq!(plan.cursor, cloned.cursor);
     }
 
     #[test]
@@ -1891,6 +1928,8 @@ mod tests {
             connectors: vec![],
             all: true,
             since: None,
+            event_type: None,
+            cursor: None,
             buffer_size: 1000,
         };
         let debug = format!("{plan:?}");
@@ -1904,6 +1943,8 @@ mod tests {
             connectors: vec![],
             all: false,
             since: None,
+            event_type: None,
+            cursor: None,
             buffer_size: 1000,
         };
         let json = serde_json::to_value(&plan).unwrap();
@@ -1917,10 +1958,14 @@ mod tests {
             connectors: (0..10).map(|i| format!("c{i}")).collect(),
             all: false,
             since: Some("1h".to_owned()),
+            event_type: Some("connector-state-change".to_owned()),
+            cursor: Some("evt-11".to_owned()),
             buffer_size: 5000,
         };
         let json = serde_json::to_value(&plan).unwrap();
         assert_eq!(json["connectors"].as_array().unwrap().len(), 10);
+        assert_eq!(json["event_type"], "connector-state-change");
+        assert_eq!(json["cursor"], "evt-11");
         assert_eq!(json["buffer_size"], 5000);
     }
 
@@ -2191,6 +2236,8 @@ mod tests {
             connectors: vec!["slack".to_owned()],
             all: false,
             since_seconds: Some(300),
+            event_type: Some("lifecycle".to_owned()),
+            cursor: Some("evt-2".to_owned()),
             buffer_size: 3,
         };
         let mut buf = EventBuffer::new(config.buffer_size);
@@ -2235,10 +2282,14 @@ mod tests {
             connectors: TailConfig::parse_connectors("slack,discord"),
             all: false,
             since_seconds: Some(since),
+            event_type: Some("health-check".to_owned()),
+            cursor: Some("evt-7".to_owned()),
             buffer_size: 1000,
         };
         assert_eq!(config.since_seconds, Some(600));
         assert_eq!(config.connectors.len(), 2);
+        assert_eq!(config.event_type.as_deref(), Some("health-check"));
+        assert_eq!(config.cursor.as_deref(), Some("evt-7"));
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -2785,15 +2836,9 @@ mod tests {
             },
         ]);
         // Both match
-        assert!(chain.matches_all(&filter_event(
-            "message.new",
-            json!({"channel": "#general"})
-        )));
+        assert!(chain.matches_all(&filter_event("message.new", json!({"channel": "#general"}))));
         // Type matches but field doesn't
-        assert!(!chain.matches_all(&filter_event(
-            "message.new",
-            json!({"channel": "#random"})
-        )));
+        assert!(!chain.matches_all(&filter_event("message.new", json!({"channel": "#random"}))));
         // Field matches but type doesn't
         assert!(!chain.matches_all(&filter_event(
             "issue.created",
@@ -2914,14 +2959,8 @@ mod tests {
     #[test]
     fn parse_nested_data_field() {
         let f = parse_filter_expr("data.user.name=alice").unwrap();
-        assert!(f.matches(&filter_event(
-            "msg",
-            json!({"user": {"name": "alice"}})
-        )));
-        assert!(!f.matches(&filter_event(
-            "msg",
-            json!({"user": {"name": "bob"}})
-        )));
+        assert!(f.matches(&filter_event("msg", json!({"user": {"name": "alice"}}))));
+        assert!(!f.matches(&filter_event("msg", json!({"user": {"name": "bob"}}))));
     }
 
     #[test]
@@ -3052,20 +3091,11 @@ mod tests {
             },
         ]);
         // Matches: not heartbeat AND priority > 3
-        assert!(chain.matches_all(&filter_event(
-            "alert",
-            json!({"priority": 5})
-        )));
+        assert!(chain.matches_all(&filter_event("alert", json!({"priority": 5}))));
         // Rejected: is heartbeat
-        assert!(!chain.matches_all(&filter_event(
-            "heartbeat",
-            json!({"priority": 5})
-        )));
+        assert!(!chain.matches_all(&filter_event("heartbeat", json!({"priority": 5}))));
         // Rejected: priority too low
-        assert!(!chain.matches_all(&filter_event(
-            "alert",
-            json!({"priority": 2})
-        )));
+        assert!(!chain.matches_all(&filter_event("alert", json!({"priority": 2}))));
     }
 
     #[test]

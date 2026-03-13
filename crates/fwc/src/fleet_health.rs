@@ -317,10 +317,7 @@ pub fn select_cohort<'a>(
 /// Plan execution waves for a bulk operation based on concurrency limits.
 /// Returns a list of waves, each containing connector IDs to process in parallel.
 #[must_use]
-pub fn plan_bulk_operation(
-    op: &BulkOperation,
-    connectors: &[ConnectorHealth],
-) -> Vec<Vec<String>> {
+pub fn plan_bulk_operation(op: &BulkOperation, connectors: &[ConnectorHealth]) -> Vec<Vec<String>> {
     // Filter to only connectors that are in the target list
     let target_ids: Vec<&String> = op
         .targets
@@ -354,10 +351,7 @@ pub fn plan_bulk_operation(
 
 /// Check a connector's health against thresholds, returning a list of violations.
 #[must_use]
-pub fn check_thresholds(
-    health: &ConnectorHealth,
-    thresholds: &HealthThreshold,
-) -> Vec<String> {
+pub fn check_thresholds(health: &ConnectorHealth, thresholds: &HealthThreshold) -> Vec<String> {
     let mut violations = Vec::new();
 
     if health.error_rate > thresholds.error_rate_max {
@@ -394,9 +388,8 @@ pub fn compute_fleet_score(status: &FleetStatus) -> f64 {
         return 1.0;
     }
 
-    let score = (status.healthy as f64)
-        + (status.degraded as f64 * 0.5)
-        + (status.unknown as f64 * 0.25);
+    let score =
+        (status.healthy as f64) + (status.degraded as f64 * 0.5) + (status.unknown as f64 * 0.25);
     // failed contributes 0.0
 
     score / status.total_connectors as f64
@@ -411,22 +404,26 @@ pub fn format_fleet_status_toon(status: &FleetStatus) -> String {
     let _ = writeln!(out, "=== Fleet Health Dashboard ===");
     let _ = writeln!(out, "Total connectors: {}", status.total_connectors);
     let _ = writeln!(
-        out, "  Healthy:  {} ({:.0}%)",
+        out,
+        "  Healthy:  {} ({:.0}%)",
         status.healthy,
         pct(status.healthy, status.total_connectors)
     );
     let _ = writeln!(
-        out, "  Degraded: {} ({:.0}%)",
+        out,
+        "  Degraded: {} ({:.0}%)",
         status.degraded,
         pct(status.degraded, status.total_connectors)
     );
     let _ = writeln!(
-        out, "  Failed:   {} ({:.0}%)",
+        out,
+        "  Failed:   {} ({:.0}%)",
         status.failed,
         pct(status.failed, status.total_connectors)
     );
     let _ = writeln!(
-        out, "  Unknown:  {} ({:.0}%)",
+        out,
+        "  Unknown:  {} ({:.0}%)",
         status.unknown,
         pct(status.unknown, status.total_connectors)
     );
@@ -451,7 +448,8 @@ pub fn format_bulk_result_toon(result: &BulkResult) -> String {
         for r in &result.results {
             let status = if r.success { "OK" } else { "FAIL" };
             let _ = write!(
-                out, "  {} [{}] {:.2}s",
+                out,
+                "  {} [{}] {:.2}s",
                 r.connector_id,
                 status,
                 r.duration.as_secs_f64()
@@ -617,10 +615,7 @@ mod tests {
 
     #[test]
     fn aggregate_all_healthy() {
-        let connectors = vec![
-            ConnectorHealth::healthy("a"),
-            ConnectorHealth::healthy("b"),
-        ];
+        let connectors = vec![ConnectorHealth::healthy("a"), ConnectorHealth::healthy("b")];
         let status = aggregate_fleet_status(&connectors);
         assert_eq!(status.total_connectors, 2);
         assert_eq!(status.healthy, 2);
@@ -690,7 +685,9 @@ mod tests {
         let conns = fleet_connectors();
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByState { states: vec!["healthy".to_string()] },
+            &CohortSelector::ByState {
+                states: vec!["healthy".to_string()],
+            },
         );
         assert_eq!(selected.len(), 2);
     }
@@ -700,7 +697,9 @@ mod tests {
         let conns = fleet_connectors();
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByState { states: vec!["failed".to_string()] },
+            &CohortSelector::ByState {
+                states: vec!["failed".to_string()],
+            },
         );
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].connector_id, "pagerduty");
@@ -711,7 +710,9 @@ mod tests {
         let conns = fleet_connectors();
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByState { states: vec!["healthy".to_string(), "degraded".to_string()] },
+            &CohortSelector::ByState {
+                states: vec!["healthy".to_string(), "degraded".to_string()],
+            },
         );
         assert_eq!(selected.len(), 3);
     }
@@ -721,7 +722,9 @@ mod tests {
         let conns = fleet_connectors();
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByState { states: vec!["stopped".to_string()] },
+            &CohortSelector::ByState {
+                states: vec!["stopped".to_string()],
+            },
         );
         assert!(selected.is_empty());
     }
@@ -735,19 +738,21 @@ mod tests {
         ];
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByTag { tags: vec!["prod".to_string()] },
+            &CohortSelector::ByTag {
+                tags: vec!["prod".to_string()],
+            },
         );
         assert_eq!(selected.len(), 2);
     }
 
     #[test]
     fn select_by_tag_no_match() {
-        let conns = vec![
-            ConnectorHealth::healthy("github").with_tags(vec!["prod".to_string()]),
-        ];
+        let conns = vec![ConnectorHealth::healthy("github").with_tags(vec!["prod".to_string()])];
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByTag { tags: vec!["nonexistent".to_string()] },
+            &CohortSelector::ByTag {
+                tags: vec!["nonexistent".to_string()],
+            },
         );
         assert!(selected.is_empty());
     }
@@ -757,7 +762,9 @@ mod tests {
         let conns = fleet_connectors();
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByPattern { pattern: "git".to_string() },
+            &CohortSelector::ByPattern {
+                pattern: "git".to_string(),
+            },
         );
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].connector_id, "github");
@@ -772,7 +779,9 @@ mod tests {
         ];
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByPattern { pattern: "aws".to_string() },
+            &CohortSelector::ByPattern {
+                pattern: "aws".to_string(),
+            },
         );
         assert_eq!(selected.len(), 2);
     }
@@ -786,19 +795,21 @@ mod tests {
         ];
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByArchetype { archetype: "vcs".to_string() },
+            &CohortSelector::ByArchetype {
+                archetype: "vcs".to_string(),
+            },
         );
         assert_eq!(selected.len(), 2);
     }
 
     #[test]
     fn select_by_archetype_no_match() {
-        let conns = vec![
-            ConnectorHealth::healthy("github").with_archetype("vcs"),
-        ];
+        let conns = vec![ConnectorHealth::healthy("github").with_archetype("vcs")];
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByArchetype { archetype: "messaging".to_string() },
+            &CohortSelector::ByArchetype {
+                archetype: "messaging".to_string(),
+            },
         );
         assert!(selected.is_empty());
     }
@@ -810,7 +821,11 @@ mod tests {
         let conns = fleet_connectors();
         let op = BulkOperation {
             action: "restart".to_string(),
-            targets: vec!["github".to_string(), "slack".to_string(), "jira".to_string()],
+            targets: vec![
+                "github".to_string(),
+                "slack".to_string(),
+                "jira".to_string(),
+            ],
             dry_run: false,
             concurrency: 2,
             on_error: "continue".to_string(),
@@ -899,7 +914,11 @@ mod tests {
         let conns = fleet_connectors();
         let op = BulkOperation {
             action: "restart".to_string(),
-            targets: vec!["github".to_string(), "nonexistent".to_string(), "slack".to_string()],
+            targets: vec![
+                "github".to_string(),
+                "nonexistent".to_string(),
+                "slack".to_string(),
+            ],
             dry_run: false,
             concurrency: 5,
             on_error: "continue".to_string(),
@@ -1227,7 +1246,9 @@ mod tests {
 
     #[test]
     fn cohort_selector_serde_by_pattern() {
-        let s = CohortSelector::ByPattern { pattern: "aws".to_string() };
+        let s = CohortSelector::ByPattern {
+            pattern: "aws".to_string(),
+        };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: CohortSelector = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, CohortSelector::ByPattern { ref pattern } if pattern == "aws"));
@@ -1274,13 +1295,16 @@ mod tests {
     #[test]
     fn select_by_tag_multiple_tags() {
         let conns = vec![
-            ConnectorHealth::healthy("a").with_tags(vec!["prod".to_string(), "us-east".to_string()]),
+            ConnectorHealth::healthy("a")
+                .with_tags(vec!["prod".to_string(), "us-east".to_string()]),
             ConnectorHealth::healthy("b").with_tags(vec!["staging".to_string()]),
             ConnectorHealth::healthy("c").with_tags(vec!["prod".to_string()]),
         ];
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByTag { tags: vec!["us-east".to_string()] },
+            &CohortSelector::ByTag {
+                tags: vec!["us-east".to_string()],
+            },
         );
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].connector_id, "a");
@@ -1291,7 +1315,9 @@ mod tests {
         let conns = fleet_connectors();
         let selected = select_cohort(
             &conns,
-            &CohortSelector::ByPattern { pattern: String::new() },
+            &CohortSelector::ByPattern {
+                pattern: String::new(),
+            },
         );
         assert_eq!(selected.len(), conns.len());
     }
@@ -1414,7 +1440,9 @@ mod tests {
 
     #[test]
     fn cohort_selector_serde_by_state() {
-        let s = CohortSelector::ByState { states: vec!["healthy".to_string()] };
+        let s = CohortSelector::ByState {
+            states: vec!["healthy".to_string()],
+        };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: CohortSelector = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, CohortSelector::ByState { .. }));
@@ -1422,7 +1450,9 @@ mod tests {
 
     #[test]
     fn cohort_selector_serde_by_tag() {
-        let s = CohortSelector::ByTag { tags: vec!["prod".to_string()] };
+        let s = CohortSelector::ByTag {
+            tags: vec!["prod".to_string()],
+        };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: CohortSelector = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, CohortSelector::ByTag { .. }));
@@ -1430,7 +1460,9 @@ mod tests {
 
     #[test]
     fn cohort_selector_serde_by_archetype() {
-        let s = CohortSelector::ByArchetype { archetype: "vcs".to_string() };
+        let s = CohortSelector::ByArchetype {
+            archetype: "vcs".to_string(),
+        };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: CohortSelector = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, CohortSelector::ByArchetype { .. }));

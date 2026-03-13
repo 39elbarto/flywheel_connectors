@@ -89,6 +89,75 @@ struct InstallVerificationFixture {
     verified_attestations: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HostIntegrationArchetype {
+    RequestResponse,
+    Streaming,
+    Webhook,
+    Polling,
+    Browser,
+    Database,
+    LifecycleHeavy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HostIntegrationCoverageMode {
+    MockHost,
+    RealHost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HostIntegrationAuthScope {
+    None,
+    SingleProfile,
+    MultiProfile,
+    TenantScoped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OperationReversibility {
+    Reversible,
+    Mixed,
+    Irreversible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum FixtureReadiness {
+    LiveRuntime,
+    OfflineArtifact,
+    DegradedOffline,
+    Planned,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostIntegrationFixtureCatalog {
+    fixtures: Vec<HostIntegrationFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostIntegrationFixture {
+    id: String,
+    connector_id: String,
+    display_name: String,
+    archetype: HostIntegrationArchetype,
+    coverage_mode: HostIntegrationCoverageMode,
+    risk_level: String,
+    safety_tier: String,
+    readiness: FixtureReadiness,
+    auth_scope: HostIntegrationAuthScope,
+    reversibility: OperationReversibility,
+    operation_family: String,
+    tool_count: usize,
+    #[serde(default)]
+    provenance_markers: Vec<String>,
+    notes: String,
+}
+
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata")
 }
@@ -347,6 +416,10 @@ fn validate_batch_fixture(relative: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn load_host_integration_fixture_catalog() -> HostIntegrationFixtureCatalog {
+    load_json("host_integration/fixture_matrix.json")
 }
 
 #[test]
@@ -612,4 +685,117 @@ fn golden_output_snapshots_are_non_empty_and_dispatchable() {
         assert!(!invocation.argv.is_empty());
         assert_eq!(invocation.argv[0], "fwc");
     }
+}
+
+#[test]
+fn host_integration_fixture_matrix_covers_required_archetypes_and_modes() {
+    let catalog = load_host_integration_fixture_catalog();
+    assert!(
+        catalog.fixtures.len() >= 7,
+        "fixture matrix should cover the core host-backed archetypes"
+    );
+
+    let ids = catalog
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), catalog.fixtures.len(), "fixture ids must be unique");
+
+    let connectors = catalog
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.connector_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        connectors.len(),
+        catalog.fixtures.len(),
+        "fixture matrix should not duplicate connector ids"
+    );
+
+    let archetypes = catalog
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.archetype)
+        .collect::<BTreeSet<_>>();
+    assert!(archetypes.contains(&HostIntegrationArchetype::RequestResponse));
+    assert!(archetypes.contains(&HostIntegrationArchetype::Streaming));
+    assert!(archetypes.contains(&HostIntegrationArchetype::Webhook));
+    assert!(archetypes.contains(&HostIntegrationArchetype::Polling));
+    assert!(archetypes.contains(&HostIntegrationArchetype::Browser));
+    assert!(archetypes.contains(&HostIntegrationArchetype::Database));
+    assert!(archetypes.contains(&HostIntegrationArchetype::LifecycleHeavy));
+
+    let coverage_modes = catalog
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.coverage_mode)
+        .collect::<BTreeSet<_>>();
+    assert!(coverage_modes.contains(&HostIntegrationCoverageMode::MockHost));
+    assert!(coverage_modes.contains(&HostIntegrationCoverageMode::RealHost));
+
+    assert!(catalog.fixtures.iter().any(|fixture| {
+        matches!(
+            fixture.auth_scope,
+            HostIntegrationAuthScope::MultiProfile | HostIntegrationAuthScope::TenantScoped
+        )
+    }));
+    assert!(catalog
+        .fixtures
+        .iter()
+        .any(|fixture| fixture.reversibility == OperationReversibility::Irreversible));
+    assert!(catalog
+        .fixtures
+        .iter()
+        .any(|fixture| fixture.reversibility == OperationReversibility::Reversible));
+    assert!(catalog
+        .fixtures
+        .iter()
+        .all(|fixture| fixture.readiness == FixtureReadiness::LiveRuntime));
+}
+
+#[test]
+fn host_integration_fixture_matrix_entries_are_semantically_complete() {
+    let catalog = load_host_integration_fixture_catalog();
+    for fixture in &catalog.fixtures {
+        assert!(!fixture.id.trim().is_empty());
+        assert!(fixture.connector_id.starts_with("fcp."));
+        assert!(!fixture.display_name.trim().is_empty());
+        assert!(!fixture.risk_level.trim().is_empty());
+        assert!(!fixture.safety_tier.trim().is_empty());
+        assert!(!fixture.operation_family.trim().is_empty());
+        assert!(fixture.tool_count > 0);
+        assert!(
+            !fixture.provenance_markers.is_empty(),
+            "fixture {} should carry provenance markers",
+            fixture.id
+        );
+        assert!(
+            fixture
+                .provenance_markers
+                .iter()
+                .all(|marker| !marker.trim().is_empty())
+        );
+        assert!(
+            !fixture.notes.trim().is_empty(),
+            "fixture {} should explain why it exists",
+            fixture.id
+        );
+    }
+
+    let github = catalog
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.id == "github_issue_workflow")
+        .expect("github workflow fixture should exist");
+    assert_eq!(github.archetype, HostIntegrationArchetype::RequestResponse);
+    assert_eq!(github.coverage_mode, HostIntegrationCoverageMode::MockHost);
+    assert_eq!(github.auth_scope, HostIntegrationAuthScope::TenantScoped);
+    assert_eq!(github.reversibility, OperationReversibility::Mixed);
+    assert_eq!(github.tool_count, 2);
+    assert!(
+        github
+            .notes
+            .contains("workflow_search_to_invoke_to_history_full_chain")
+    );
 }

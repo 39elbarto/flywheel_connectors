@@ -22,6 +22,7 @@
     { "path": "golden/mesh_rollout.toon", "kind": "golden_toon", "purpose": "Future mesh command TOON render snapshot.", "validation": "text" },
     { "path": "golden/setup_repair.json", "kind": "golden_json", "purpose": "Future setup command JSON repair snapshot.", "validation": "json" },
     { "path": "golden/setup_repair.toon", "kind": "golden_toon", "purpose": "Future setup command TOON repair snapshot.", "validation": "text" },
+    { "path": "host_integration/fixture_matrix.json", "kind": "host_integration_matrix", "purpose": "Typed matrix describing representative host-backed fixture coverage across connector archetypes.", "validation": "typed" },
     { "path": "introspection/github_introspection.json", "kind": "introspection", "purpose": "Rich GitHub introspection response with ten operations.", "validation": "typed" },
     { "path": "introspection/large_introspection.json", "kind": "introspection", "purpose": "High-cardinality introspection response with fifty operations.", "validation": "typed" },
     { "path": "introspection/minimal_introspection.json", "kind": "introspection", "purpose": "Minimal single-operation introspection response.", "validation": "typed" },

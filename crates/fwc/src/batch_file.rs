@@ -393,9 +393,18 @@ pub fn format_results_toon(results: &[OpResult]) -> String {
     }
 
     let total = results.len();
-    let successes = results.iter().filter(|r| r.status == OpStatus::Success).count();
-    let errors = results.iter().filter(|r| r.status == OpStatus::Error).count();
-    let skipped = results.iter().filter(|r| r.status == OpStatus::Skipped).count();
+    let successes = results
+        .iter()
+        .filter(|r| r.status == OpStatus::Success)
+        .count();
+    let errors = results
+        .iter()
+        .filter(|r| r.status == OpStatus::Error)
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| r.status == OpStatus::Skipped)
+        .count();
 
     let _ = write!(out, "Batch Results: {successes}/{total} succeeded");
     if errors > 0 {
@@ -407,7 +416,11 @@ pub fn format_results_toon(results: &[OpResult]) -> String {
     out.push('\n');
 
     out.push('\n');
-    let _ = writeln!(out, "{:<20}{:<24}{:<10}{}", "ID", "Operation", "Wave", "Status");
+    let _ = writeln!(
+        out,
+        "{:<20}{:<24}{:<10}{}",
+        "ID", "Operation", "Wave", "Status"
+    );
     out.push_str(&"-".repeat(64));
     out.push('\n');
 
@@ -419,7 +432,11 @@ pub fn format_results_toon(results: &[OpResult]) -> String {
             OpStatus::Skipped => "SKIP",
             OpStatus::Pending => "PEND",
         };
-        let _ = writeln!(out, "{:<20}{:<24}{:<10}{}", r.id, r.operation, wave_str, status_str);
+        let _ = writeln!(
+            out,
+            "{:<20}{:<24}{:<10}{}",
+            r.id, r.operation, wave_str, status_str
+        );
     }
 
     out
@@ -2654,8 +2671,14 @@ mod tests {
                 error: Some(json!({"code": "RATE_LIMIT"})),
             },
         ];
-        let successes = results.iter().filter(|r| r.status == OpStatus::Success).count();
-        let failures = results.iter().filter(|r| r.status == OpStatus::Error).count();
+        let successes = results
+            .iter()
+            .filter(|r| r.status == OpStatus::Success)
+            .count();
+        let failures = results
+            .iter()
+            .filter(|r| r.status == OpStatus::Error)
+            .count();
         assert_eq!(successes, 1);
         assert_eq!(failures, 1);
     }
@@ -2749,10 +2772,16 @@ mod tests {
                 },
             })
             .collect();
-        let success_count = results.iter().filter(|r| r.status == OpStatus::Success).count();
-        let error_count = results.iter().filter(|r| r.status == OpStatus::Error).count();
+        let success_count = results
+            .iter()
+            .filter(|r| r.status == OpStatus::Success)
+            .count();
+        let error_count = results
+            .iter()
+            .filter(|r| r.status == OpStatus::Error)
+            .count();
         assert_eq!(success_count, 6); // i=1,2,4,5,7,8
-        assert_eq!(error_count, 4);   // i=0,3,6,9
+        assert_eq!(error_count, 4); // i=0,3,6,9
     }
 
     // ── TOON output formatting ──────────────────────────────────
@@ -2917,7 +2946,10 @@ mod tests {
     #[test]
     fn comments_and_blanks_only_is_empty() {
         let content = "# header\n# another\n\n# final\n\n";
-        assert_eq!(BatchFile::parse(content).unwrap_err(), BatchFileError::Empty);
+        assert_eq!(
+            BatchFile::parse(content).unwrap_err(),
+            BatchFileError::Empty
+        );
     }
 
     // ── Extremely long chains (20+ steps) ───────────────────────
@@ -3146,18 +3178,16 @@ mod tests {
                 error: None,
             },
         ];
-        let counts: HashMap<&str, usize> = results
-            .iter()
-            .fold(HashMap::new(), |mut acc, r| {
-                let key = match r.status {
-                    OpStatus::Success => "success",
-                    OpStatus::Error => "error",
-                    OpStatus::Skipped => "skipped",
-                    OpStatus::Pending => "pending",
-                };
-                *acc.entry(key).or_insert(0) += 1;
-                acc
-            });
+        let counts: HashMap<&str, usize> = results.iter().fold(HashMap::new(), |mut acc, r| {
+            let key = match r.status {
+                OpStatus::Success => "success",
+                OpStatus::Error => "error",
+                OpStatus::Skipped => "skipped",
+                OpStatus::Pending => "pending",
+            };
+            *acc.entry(key).or_insert(0) += 1;
+            acc
+        });
         assert_eq!(counts["success"], 1);
         assert_eq!(counts["error"], 1);
         assert_eq!(counts["skipped"], 1);
@@ -3199,7 +3229,9 @@ mod tests {
             status: OpStatus::Error,
             wave: Some(0),
             result: None,
-            error: Some(json!({"code": "CHANNEL_NOT_FOUND", "message": "Channel #nonexistent does not exist"})),
+            error: Some(
+                json!({"code": "CHANNEL_NOT_FOUND", "message": "Channel #nonexistent does not exist"}),
+            ),
         }];
         let output = format_results_toon(&results);
         assert!(output.contains("fail_op"));

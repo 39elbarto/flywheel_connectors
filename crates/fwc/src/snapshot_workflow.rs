@@ -44,7 +44,13 @@ mod tests {
         }
 
         fn all() -> &'static [Self] {
-            &[Self::Pending, Self::Running, Self::Complete, Self::Failed, Self::Cancelled]
+            &[
+                Self::Pending,
+                Self::Running,
+                Self::Complete,
+                Self::Failed,
+                Self::Cancelled,
+            ]
         }
 
         const fn is_terminal(self) -> bool {
@@ -81,7 +87,14 @@ mod tests {
         }
 
         fn all() -> &'static [Self] {
-            &[Self::Init, Self::Running, Self::Paused, Self::Complete, Self::Failed, Self::Cancelled]
+            &[
+                Self::Init,
+                Self::Running,
+                Self::Paused,
+                Self::Complete,
+                Self::Failed,
+                Self::Cancelled,
+            ]
         }
     }
 
@@ -168,7 +181,8 @@ mod tests {
         }
 
         fn remaining(&self) -> usize {
-            self.total.saturating_sub(self.completed + self.failed + self.in_progress)
+            self.total
+                .saturating_sub(self.completed + self.failed + self.in_progress)
         }
 
         fn is_done(&self) -> bool {
@@ -256,8 +270,12 @@ mod tests {
     }
 
     fn render_batch_progress_bar(progress: &BatchProgress, width: usize) -> String {
-        let fill = (progress.completed * width).checked_div(progress.total).unwrap_or(width);
-        let fail = (progress.failed * width).checked_div(progress.total).unwrap_or(0);
+        let fill = (progress.completed * width)
+            .checked_div(progress.total)
+            .unwrap_or(width);
+        let fail = (progress.failed * width)
+            .checked_div(progress.total)
+            .unwrap_or(0);
         let empty = width.saturating_sub(fill + fail);
         format!(
             "[{done}{err}{space}] {pct:.1}% ({comp}/{total})",
@@ -664,7 +682,10 @@ mod tests {
                 p.advance_failure();
             }
             let bar = render_batch_progress_bar(&p, 20);
-            assert!(bar.contains('!'), "Progress bar should show failure markers");
+            assert!(
+                bar.contains('!'),
+                "Progress bar should show failure markers"
+            );
         }
 
         #[test]

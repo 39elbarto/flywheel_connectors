@@ -4757,6 +4757,59 @@ serde = "1"
         }
     }
 
+    #[test]
+    fn generate_files_scaffolded_connector_uses_limits_in_validation() {
+        fn generated_file(files: &[(String, String, String)], path: &str) -> String {
+            files
+                .iter()
+                .find(|(file_path, _, _)| file_path == path)
+                .unwrap_or_else(|| panic!("expected {path} to be generated"))
+                .1
+                .clone()
+        }
+
+        let request_response_files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+            false,
+        )
+        .expect("request-response files");
+        let request_response_connector =
+            generated_file(&request_response_files, "src/connector.rs");
+        assert!(request_response_connector.contains("use crate::limits;"));
+        assert!(request_response_connector.contains("limits::MAX_MESSAGE_CHARS"));
+        assert!(request_response_connector.contains("limits::MAX_PAYLOAD_BYTES"));
+
+        let queue_files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::Queue,
+            "z:project:test",
+            false,
+        )
+        .expect("queue files");
+        let queue_connector = generated_file(&queue_files, "src/connector.rs");
+        assert!(queue_connector.contains("use crate::limits;"));
+        assert!(queue_connector.contains("limits::MAX_MESSAGE_BYTES"));
+
+        let file_files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::File,
+            "z:project:test",
+            false,
+        )
+        .expect("file files");
+        let file_connector = generated_file(&file_files, "src/connector.rs");
+        assert!(file_connector.contains("use crate::limits;"));
+        assert!(file_connector.contains("limits::MAX_FILENAME_CHARS"));
+    }
+
     // ---- generate_connector_rs expanded ----
 
     #[test]

@@ -267,7 +267,10 @@ pub fn validate_install_request(req: &InstallRequest) -> Result<(), Vec<String>>
 /// Parse a version string into (major, minor, patch) components.
 /// Strips a leading 'v' or 'V' if present.
 fn parse_semver(version: &str) -> Option<(u64, u64, u64)> {
-    let v = version.strip_prefix('v').or_else(|| version.strip_prefix('V')).unwrap_or(version);
+    let v = version
+        .strip_prefix('v')
+        .or_else(|| version.strip_prefix('V'))
+        .unwrap_or(version);
     // Strip pre-release/build metadata for comparison
     let base = v.split('-').next().unwrap_or(v);
     let base = base.split('+').next().unwrap_or(base);
@@ -331,7 +334,9 @@ pub fn check_for_updates(connector_id: &str, current: &str, latest: &str) -> Upd
 pub fn plan_rollback(connector_id: &str, current: &str, target: &str) -> RollbackPlan {
     let mut steps = Vec::new();
 
-    steps.push(format!("Stop connector '{connector_id}' (current: {current})"));
+    steps.push(format!(
+        "Stop connector '{connector_id}' (current: {current})"
+    ));
     steps.push(format!("Download version {target} from artifact store"));
     steps.push(format!("Verify supply-chain evidence for {target}"));
     steps.push(format!("Replace binary: {current} -> {target}"));
@@ -394,9 +399,7 @@ pub fn pin_version(connector_id: &str, version: &str, reason: &str) -> VersionPi
 /// Check whether a version pin is currently active (non-empty fields).
 #[must_use]
 pub fn is_pin_active(pin: &VersionPin) -> bool {
-    !pin.connector_id.is_empty()
-        && !pin.pinned_version.is_empty()
-        && !pin.pinned_at.is_empty()
+    !pin.connector_id.is_empty() && !pin.pinned_version.is_empty() && !pin.pinned_at.is_empty()
 }
 
 /// Remove a version pin (returns updated pin with empty reason indicating unpin).
@@ -421,8 +424,16 @@ pub fn format_install_result_toon(result: &InstallResult) -> String {
     let _ = writeln!(out, "Connector: {}", result.connector_id);
     let _ = writeln!(out, "Version:   {}", result.version_installed);
     let _ = writeln!(out, "Source:    {}", result.source);
-    let _ = writeln!(out, "Verified:  {}", if result.verified { "YES" } else { "NO" });
-    let _ = writeln!(out, "Pinned:    {}", if result.pinned { "YES" } else { "NO" });
+    let _ = writeln!(
+        out,
+        "Verified:  {}",
+        if result.verified { "YES" } else { "NO" }
+    );
+    let _ = writeln!(
+        out,
+        "Pinned:    {}",
+        if result.pinned { "YES" } else { "NO" }
+    );
     let _ = writeln!(out, "Digest:    {}", result.digest);
     let _ = writeln!(out, "Duration:  {:.2}s", result.duration.as_secs_f64());
 
@@ -449,7 +460,11 @@ pub fn format_verification_report_toon(report: &VerificationReport) -> String {
     let _ = writeln!(out, "Policy:    {}", pass(report.policy_compliant));
 
     let overall = report.digest_match && report.signature_valid && report.policy_compliant;
-    let _ = writeln!(out, "Overall:   {}", if overall { "VERIFIED" } else { "FAILED" });
+    let _ = writeln!(
+        out,
+        "Overall:   {}",
+        if overall { "VERIFIED" } else { "FAILED" }
+    );
     out
 }
 
@@ -481,7 +496,11 @@ pub fn format_rollback_plan_toon(plan: &RollbackPlan) -> String {
     let _ = writeln!(out, "Connector: {}", plan.connector_id);
     let _ = writeln!(out, "Current:   {}", plan.current_version);
     let _ = writeln!(out, "Target:    {}", plan.target_version);
-    let _ = writeln!(out, "Restart:   {}", if plan.requires_restart { "YES" } else { "NO" });
+    let _ = writeln!(
+        out,
+        "Restart:   {}",
+        if plan.requires_restart { "YES" } else { "NO" }
+    );
     let _ = writeln!(out, "Steps ({}):", plan.steps.len());
     for (i, step) in plan.steps.iter().enumerate() {
         let _ = writeln!(out, "  {}. {step}", i + 1);
@@ -524,7 +543,9 @@ mod tests {
         InstallRequest {
             connector_id: "github".to_string(),
             version: Some("1.2.3".to_string()),
-            source: InstallSource::Registry { name: "default".to_string() },
+            source: InstallSource::Registry {
+                name: "default".to_string(),
+            },
             verify: true,
             pin: false,
             dry_run: false,
@@ -535,7 +556,9 @@ mod tests {
         InstallResult {
             connector_id: "github".to_string(),
             version_installed: "1.2.3".to_string(),
-            source: InstallSource::Registry { name: "default".to_string() },
+            source: InstallSource::Registry {
+                name: "default".to_string(),
+            },
             verified: true,
             pinned: false,
             digest: "blake3:abc123".to_string(),
@@ -548,13 +571,17 @@ mod tests {
 
     #[test]
     fn install_source_display_registry() {
-        let src = InstallSource::Registry { name: "default".to_string() };
+        let src = InstallSource::Registry {
+            name: "default".to_string(),
+        };
         assert_eq!(src.to_string(), "registry:default");
     }
 
     #[test]
     fn install_source_display_local() {
-        let src = InstallSource::LocalPath { path: PathBuf::from("/tmp/connector") };
+        let src = InstallSource::LocalPath {
+            path: PathBuf::from("/tmp/connector"),
+        };
         assert_eq!(src.to_string(), "local:/tmp/connector");
     }
 
@@ -634,7 +661,9 @@ mod tests {
     #[test]
     fn validate_empty_registry_name() {
         let mut req = sample_request();
-        req.source = InstallSource::Registry { name: String::new() };
+        req.source = InstallSource::Registry {
+            name: String::new(),
+        };
         let errs = validate_install_request(&req).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("registry")));
     }
@@ -642,7 +671,9 @@ mod tests {
     #[test]
     fn validate_empty_local_path() {
         let mut req = sample_request();
-        req.source = InstallSource::LocalPath { path: PathBuf::from("") };
+        req.source = InstallSource::LocalPath {
+            path: PathBuf::from(""),
+        };
         let errs = validate_install_request(&req).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("path")));
     }
@@ -674,7 +705,9 @@ mod tests {
         let req = InstallRequest {
             connector_id: String::new(),
             version: Some("bad".to_string()),
-            source: InstallSource::Registry { name: String::new() },
+            source: InstallSource::Registry {
+                name: String::new(),
+            },
             verify: false,
             pin: false,
             dry_run: false,
@@ -696,7 +729,9 @@ mod tests {
     #[test]
     fn validate_local_path_valid() {
         let mut req = sample_request();
-        req.source = InstallSource::LocalPath { path: PathBuf::from("/usr/local/connectors/github") };
+        req.source = InstallSource::LocalPath {
+            path: PathBuf::from("/usr/local/connectors/github"),
+        };
         assert!(validate_install_request(&req).is_ok());
     }
 
@@ -1293,7 +1328,9 @@ mod tests {
 
     #[test]
     fn install_source_registry_serde() {
-        let src = InstallSource::Registry { name: "default".to_string() };
+        let src = InstallSource::Registry {
+            name: "default".to_string(),
+        };
         let json = serde_json::to_string(&src).unwrap();
         let decoded: InstallSource = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, src);
@@ -1301,7 +1338,9 @@ mod tests {
 
     #[test]
     fn install_source_local_serde() {
-        let src = InstallSource::LocalPath { path: PathBuf::from("/tmp/conn") };
+        let src = InstallSource::LocalPath {
+            path: PathBuf::from("/tmp/conn"),
+        };
         let json = serde_json::to_string(&src).unwrap();
         let decoded: InstallSource = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, src);
@@ -1380,15 +1419,23 @@ mod tests {
 
     #[test]
     fn install_source_equality() {
-        let a = InstallSource::Registry { name: "default".to_string() };
-        let b = InstallSource::Registry { name: "default".to_string() };
+        let a = InstallSource::Registry {
+            name: "default".to_string(),
+        };
+        let b = InstallSource::Registry {
+            name: "default".to_string(),
+        };
         assert_eq!(a, b);
     }
 
     #[test]
     fn install_source_inequality() {
-        let a = InstallSource::Registry { name: "default".to_string() };
-        let b = InstallSource::Registry { name: "other".to_string() };
+        let a = InstallSource::Registry {
+            name: "default".to_string(),
+        };
+        let b = InstallSource::Registry {
+            name: "other".to_string(),
+        };
         assert_ne!(a, b);
     }
 

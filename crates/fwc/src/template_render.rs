@@ -169,10 +169,7 @@ pub fn parse_template(s: &str) -> Result<Template, TemplateError> {
 }
 
 /// Parse template nodes, optionally stopping at a closing block tag.
-fn parse_nodes(
-    s: &str,
-    end_block: Option<&str>,
-) -> Result<Vec<TemplateNode>, TemplateError> {
+fn parse_nodes(s: &str, end_block: Option<&str>) -> Result<Vec<TemplateNode>, TemplateError> {
     let mut nodes = Vec::new();
     let mut remaining = s;
 
@@ -192,10 +189,12 @@ fn parse_nodes(
             remaining = &remaining[idx..];
 
             // Find the closing `}}`
-            let close = remaining.find("}}").ok_or_else(|| TemplateError::ParseError {
-                message: "unclosed {{ tag".into(),
-                offset: s.len() - remaining.len(),
-            })?;
+            let close = remaining
+                .find("}}")
+                .ok_or_else(|| TemplateError::ParseError {
+                    message: "unclosed {{ tag".into(),
+                    offset: s.len() - remaining.len(),
+                })?;
             let tag_content = remaining[2..close].trim();
             remaining = &remaining[close + 2..];
 
@@ -205,8 +204,7 @@ fn parse_nodes(
                 match block_type {
                     "if" => {
                         let path = TemplatePath::new(arg);
-                        let (body, else_body, after) =
-                            parse_block_with_else(remaining, "if")?;
+                        let (body, else_body, after) = parse_block_with_else(remaining, "if")?;
                         remaining = after;
                         nodes.push(TemplateNode::If {
                             path,
@@ -401,10 +399,12 @@ fn parse_nodes_inner(s: &str) -> Result<Vec<TemplateNode>, TemplateError> {
             }
             remaining = &remaining[idx..];
 
-            let close = remaining.find("}}").ok_or_else(|| TemplateError::ParseError {
-                message: "unclosed {{ tag".into(),
-                offset: 0,
-            })?;
+            let close = remaining
+                .find("}}")
+                .ok_or_else(|| TemplateError::ParseError {
+                    message: "unclosed {{ tag".into(),
+                    offset: 0,
+                })?;
             let tag_content = remaining[2..close].trim();
             remaining = &remaining[close + 2..];
 
@@ -413,8 +413,7 @@ fn parse_nodes_inner(s: &str) -> Result<Vec<TemplateNode>, TemplateError> {
                 match block_type {
                     "if" => {
                         let path = TemplatePath::new(arg);
-                        let (body, else_body, after) =
-                            parse_block_with_else(remaining, "if")?;
+                        let (body, else_body, after) = parse_block_with_else(remaining, "if")?;
                         remaining = after;
                         nodes.push(TemplateNode::If {
                             path,
@@ -525,9 +524,7 @@ fn parse_filter(s: &str) -> Result<TemplateFilter, TemplateError> {
             Ok(TemplateFilter::Default(val))
         }
         "truncate" => {
-            let n: usize = arg
-                .and_then(|a| a.parse().ok())
-                .unwrap_or(80);
+            let n: usize = arg.and_then(|a| a.parse().ok()).unwrap_or(80);
             Ok(TemplateFilter::Truncate(n))
         }
         "replace" => {
@@ -748,9 +745,7 @@ fn value_to_string(value: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.clone(),
-        Value::Array(_) | Value::Object(_) => {
-            serde_json::to_string(value).unwrap_or_default()
-        }
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
     }
 }
 
@@ -836,9 +831,7 @@ fn apply_filter(
             use base64::Engine;
             match base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
                 Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
-                Err(_) => Err(TemplateError::RenderError(
-                    "invalid base64 input".into(),
-                )),
+                Err(_) => Err(TemplateError::RenderError("invalid base64 input".into())),
             }
         }
         TemplateFilter::StripTags => Ok(strip_html_tags(s)),
@@ -851,10 +844,7 @@ fn apply_filter(
         }
         TemplateFilter::Indent(n) => {
             let prefix = " ".repeat(*n);
-            let indented: Vec<String> = s
-                .lines()
-                .map(|line| format!("{prefix}{line}"))
-                .collect();
+            let indented: Vec<String> = s.lines().map(|line| format!("{prefix}{line}")).collect();
             Ok(indented.join("\n"))
         }
     }
@@ -1277,10 +1267,7 @@ mod tests {
 
     #[test]
     fn nested_if_inside_each() {
-        let t = parse_template(
-            "{{#each items}}{{#if active}}*{{/if}}{{name}} {{/each}}",
-        )
-        .unwrap();
+        let t = parse_template("{{#each items}}{{#if active}}*{{/if}}{{name}} {{/each}}").unwrap();
         let data = json!({"items": [
             {"name": "a", "active": true},
             {"name": "b", "active": false},
@@ -1291,10 +1278,8 @@ mod tests {
 
     #[test]
     fn nested_each() {
-        let t = parse_template(
-            "{{#each groups}}{{#each items}}{{this}}{{/each}};{{/each}}",
-        )
-        .unwrap();
+        let t =
+            parse_template("{{#each groups}}{{#each items}}{{this}}{{/each}};{{/each}}").unwrap();
         let data = json!({"groups": [
             {"items": [1, 2]},
             {"items": [3]}
@@ -1542,15 +1527,9 @@ mod tests {
 
     #[test]
     fn complex_list_rendering() {
-        let t = parse_template(
-            "Items:\n{{#each items}}- {{this | upper}}\n{{/each}}",
-        )
-        .unwrap();
+        let t = parse_template("Items:\n{{#each items}}- {{this | upper}}\n{{/each}}").unwrap();
         let data = json!({"items": ["apple", "banana"]});
-        assert_eq!(
-            render(&t, &data).unwrap(),
-            "Items:\n- APPLE\n- BANANA\n"
-        );
+        assert_eq!(render(&t, &data).unwrap(), "Items:\n- APPLE\n- BANANA\n");
     }
 
     #[test]
@@ -1618,10 +1597,8 @@ mod tests {
 
     #[test]
     fn nested_unless_in_each() {
-        let t = parse_template(
-            "{{#each items}}{{#unless disabled}}{{name}}{{/unless}} {{/each}}",
-        )
-        .unwrap();
+        let t = parse_template("{{#each items}}{{#unless disabled}}{{name}}{{/unless}} {{/each}}")
+            .unwrap();
         let data = json!({"items": [
             {"name": "a", "disabled": false},
             {"name": "b", "disabled": true}

@@ -55,6 +55,16 @@ pub enum AuditCommands {
     Verify(VerifyArgs),
     /// Render a timeline of audit events.
     Timeline(TimelineArgs),
+    /// Show connector compliance matrix (metadata completeness).
+    ///
+    /// Scans connector manifest.toml files and reports readiness level,
+    /// operation metadata completeness, agent hint coverage, and gaps.
+    Matrix(MatrixArgs),
+    /// Show metadata gaps across all connectors.
+    ///
+    /// Lists missing capabilities, incomplete operation metadata, and
+    /// other readiness gaps that should be addressed.
+    Gaps(GapsArgs),
 }
 
 /// Arguments for the `fcp audit tail` command.
@@ -145,6 +155,32 @@ pub struct TimelineArgs {
     pub json: bool,
 }
 
+/// Arguments for the `fwc audit matrix` command.
+#[derive(Args, Debug, Clone)]
+pub struct MatrixArgs {
+    /// Optional connector name to filter the matrix to a single connector.
+    pub connector: Option<String>,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for the `fwc audit gaps` command.
+#[derive(Args, Debug, Clone)]
+pub struct GapsArgs {
+    /// Optional connector name to filter gaps.
+    pub connector: Option<String>,
+
+    /// Only show blocking gaps (severity = blocking).
+    #[arg(long, default_value_t = false)]
+    pub blocking_only: bool,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 /// Run the audit command.
 ///
 /// # Errors
@@ -155,6 +191,8 @@ pub fn run(args: AuditArgs) -> Result<()> {
         AuditCommands::Tail(tail_args) => run_tail(&tail_args),
         AuditCommands::Verify(verify_args) => run_verify(&verify_args),
         AuditCommands::Timeline(timeline_args) => run_timeline(&timeline_args),
+        AuditCommands::Matrix(matrix_args) => run_matrix(&matrix_args),
+        AuditCommands::Gaps(gaps_args) => run_gaps(&gaps_args),
     }
 }
 
@@ -567,6 +605,198 @@ fn to_event_output(record: &AuditEventRecord) -> AuditEventOutput {
         operation_id: event.operation.as_ref().map(ToString::to_string),
         prev: event.prev.as_ref().map(ToString::to_string),
     }
+}
+
+// ============================================================================
+// Audit Matrix + Gaps (connector metadata compliance)
+// ============================================================================
+
+/// Locate the connectors directory relative to the workspace root.
+fn find_connectors_root() -> Result<std::path::PathBuf> {
+    // Try relative from CWD (typical workspace layout).
+    let candidates = [
+        std::path::PathBuf::from("connectors"),
+        std::path::PathBuf::from("../connectors"),
+    ];
+    for candidate in &candidates {
+        if candidate.is_dir() {
+            return Ok(candidate.clone());
+        }
+    }
+    anyhow::bail!(
+        "Cannot find connectors directory. Run from the workspace root or a crate directory."
+    )
+}
+
+/// Run the audit matrix command.
+fn run_matrix(args: &MatrixArgs) -> Result<()> {
+    let connectors_root = find_connectors_root()?;
+    let matrix = crate::audit::run_audit(&connectors_root)?;
+
+    if let Some(ref name) = args.connector {
+        let Some(entry) = matrix.connectors.get(name) else {
+            eprintln!("Connector `{name}` not found in audit matrix.");
+            eprintln!(
+                "Available: {}",
+                matrix
+                    .connectors
+                    .keys()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            std::process::exit(2);
+        };
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(entry)
+                    .context("failed to serialize connector audit")?
+            );
+        } else {
+            print_connector_audit(entry);
+        }
+    } else if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&matrix).context("failed to serialize audit matrix")?
+        );
+    } else {
+        print_matrix_summary(&matrix);
+    }
+    Ok(())
+}
+
+/// Run the audit gaps command.
+fn run_gaps(args: &GapsArgs) -> Result<()> {
+    let connectors_root = find_connectors_root()?;
+    let matrix = crate::audit::run_audit(&connectors_root)?;
+
+    let mut all_gaps: Vec<(&str, &crate::readiness::ReadinessGap)> = Vec::new();
+    for (name, entry) in &matrix.connectors {
+        for gap in &entry.gaps {
+            if args.blocking_only && gap.severity != crate::readiness::GapSeverity::Blocking {
+                continue;
+            }
+            if let Some(ref filter) = args.connector {
+                if name != filter {
+                    continue;
+                }
+            }
+            all_gaps.push((name.as_str(), gap));
+        }
+    }
+
+    if args.json {
+        let json_gaps: Vec<serde_json::Value> = all_gaps
+            .iter()
+            .map(|(name, gap)| {
+                serde_json::json!({
+                    "connector": name,
+                    "category": format!("{:?}", gap.category),
+                    "severity": format!("{:?}", gap.severity),
+                    "message": gap.description,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_gaps).context("failed to serialize gaps")?
+        );
+    } else {
+        if all_gaps.is_empty() {
+            println!("No gaps found.");
+            return Ok(());
+        }
+        println!(
+            "Gaps: {} found{}",
+            all_gaps.len(),
+            if args.blocking_only {
+                " (blocking only)"
+            } else {
+                ""
+            }
+        );
+        println!();
+        for (name, gap) in &all_gaps {
+            println!(
+                "  [{sev:?}] {name}: [{cat:?}] {msg}",
+                sev = gap.severity,
+                cat = gap.category,
+                msg = gap.description,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Print a single connector's audit in human-readable format.
+fn print_connector_audit(entry: &crate::audit::ConnectorAudit) {
+    println!("Connector: {}", entry.name);
+    println!("  Cohort:     {:?}", entry.cohort);
+    println!("  Readiness:  {:?}", entry.level);
+    println!(
+        "  Manifest:   {}",
+        if entry.has_manifest { "yes" } else { "no" }
+    );
+    println!(
+        "  Operations: {} total, {:.0}% complete",
+        entry.operations.count,
+        entry.operations.completeness * 100.0
+    );
+    println!(
+        "  Agent hints: {:.0}% coverage",
+        entry.agent_hints.coverage * 100.0
+    );
+    if entry.gaps.is_empty() {
+        println!("  Gaps:       none");
+    } else {
+        println!("  Gaps:       {}", entry.gaps.len());
+        for gap in &entry.gaps {
+            println!(
+                "    [{sev:?}] [{cat:?}] {msg}",
+                sev = gap.severity,
+                cat = gap.category,
+                msg = gap.description,
+            );
+        }
+    }
+}
+
+/// Print audit matrix summary in human-readable format.
+fn print_matrix_summary(matrix: &crate::audit::AuditMatrix) {
+    println!(
+        "Audit Matrix: {} connectors scanned",
+        matrix.total_connectors
+    );
+    println!(
+        "  With manifest: {}  Missing: {}",
+        matrix.with_manifest, matrix.missing_manifest
+    );
+    println!();
+    println!("Readiness:");
+    println!("  Ready:           {}", matrix.summary.ready);
+    println!("  Partially ready: {}", matrix.summary.partially_ready);
+    println!("  Not ready:       {}", matrix.summary.not_ready);
+    println!();
+    println!(
+        "Operations: {} total, {:.0}% mean completeness",
+        matrix.summary.total_operations,
+        matrix.summary.mean_operation_completeness * 100.0
+    );
+    println!(
+        "Agent hints: {:.0}% mean coverage",
+        matrix.summary.mean_hint_coverage * 100.0
+    );
+    println!();
+    println!(
+        "Gaps: {} total ({} blocking, {} degraded, {} cosmetic)",
+        matrix.summary.total_gaps,
+        matrix.summary.blocking_gaps,
+        matrix.summary.degraded_gaps,
+        matrix.summary.cosmetic_gaps
+    );
 }
 
 #[cfg(test)]
@@ -1922,5 +2152,109 @@ mod tests {
             ..Default::default()
         };
         output_human(&[], "z:test", &filter);
+    }
+
+    // ================================================================
+    // Matrix + Gaps subcommands
+    // ================================================================
+
+    #[test]
+    fn matrix_args_parses_connector_and_json() {
+        let args = MatrixArgs {
+            connector: Some("github".to_owned()),
+            json: true,
+        };
+        assert_eq!(args.connector.as_deref(), Some("github"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn matrix_args_defaults_to_none() {
+        let args = MatrixArgs {
+            connector: None,
+            json: false,
+        };
+        assert!(args.connector.is_none());
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn gaps_args_blocking_only() {
+        let args = GapsArgs {
+            connector: None,
+            blocking_only: true,
+            json: false,
+        };
+        assert!(args.blocking_only);
+    }
+
+    #[test]
+    fn gaps_args_connector_filter() {
+        let args = GapsArgs {
+            connector: Some("slack".to_owned()),
+            blocking_only: false,
+            json: true,
+        };
+        assert_eq!(args.connector.as_deref(), Some("slack"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn run_matrix_with_temp_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a minimal connector directory with a manifest.
+        let connector_dir = dir.path().join("test-connector");
+        std::fs::create_dir(&connector_dir).unwrap();
+        std::fs::write(
+            connector_dir.join("manifest.toml"),
+            r#"
+[connector]
+id = "fcp.test"
+name = "Test"
+
+[[operations]]
+id = "list"
+description = "List items"
+capability = "read"
+"#,
+        )
+        .unwrap();
+        let matrix = crate::audit::run_audit(dir.path()).unwrap();
+        assert_eq!(matrix.total_connectors, 1);
+        assert_eq!(matrix.with_manifest, 1);
+        assert!(matrix.connectors.contains_key("test-connector"));
+    }
+
+    #[test]
+    fn run_matrix_json_output_is_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let connector_dir = dir.path().join("example");
+        std::fs::create_dir(&connector_dir).unwrap();
+        std::fs::write(
+            connector_dir.join("manifest.toml"),
+            r#"
+[connector]
+id = "fcp.example"
+name = "Example"
+"#,
+        )
+        .unwrap();
+        let matrix = crate::audit::run_audit(dir.path()).unwrap();
+        let json = serde_json::to_value(&matrix).unwrap();
+        assert_eq!(json["total_connectors"], 1);
+        assert!(json["connectors"]["example"].is_object());
+    }
+
+    #[test]
+    fn run_gaps_missing_manifest_produces_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let connector_dir = dir.path().join("no-manifest");
+        std::fs::create_dir(&connector_dir).unwrap();
+        // No manifest.toml → should produce gaps
+        let matrix = crate::audit::run_audit(dir.path()).unwrap();
+        assert_eq!(matrix.missing_manifest, 1);
+        let entry = &matrix.connectors["no-manifest"];
+        assert!(!entry.has_manifest);
+        assert!(!entry.gaps.is_empty());
     }
 }

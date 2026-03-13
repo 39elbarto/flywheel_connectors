@@ -16,7 +16,9 @@ pub fn generate_template(
     let resolved = resolve_schema(schema);
     let preferred_types = preferred_schema_types(&resolved);
     match preferred_types.as_slice() {
-        [type_name] if type_name == "object" => generate_object(&resolved, required_only, fill, &[]),
+        [type_name] if type_name == "object" => {
+            generate_object(&resolved, required_only, fill, &[])
+        }
         [type_name] if type_name == "array" => generate_array(&resolved, required_only, fill, &[]),
         [_] => generate_property(&resolved, false, required_only, fill, &[]),
         [_, _, ..] => generate_property(&resolved, false, required_only, fill, &[]),
@@ -124,7 +126,9 @@ fn generate_property(
     }
 
     match preferred_types.as_slice() {
-        [type_name] if type_name == "object" => generate_object(&resolved, required_only, fill, path),
+        [type_name] if type_name == "object" => {
+            generate_object(&resolved, required_only, fill, path)
+        }
         [type_name] if type_name == "array" => generate_array(&resolved, required_only, fill, path),
         [type_name] => placeholder_for_type(type_name, is_required),
         [_, _, ..] => placeholder_for_union(&preferred_types, is_required),

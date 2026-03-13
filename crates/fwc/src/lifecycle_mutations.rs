@@ -646,10 +646,7 @@ pub fn format_preflight_toon(check: &PreflightCheck) -> String {
     lines.push(format!("  Risk:     {}", check.risk_level.label()));
     lines.push(format!("  Confirm:  {}", check.requires_confirmation));
     lines.push(format!("  No-op:    {}", check.is_noop));
-    lines.push(format!(
-        "  Duration: {:?}",
-        check.estimated_duration
-    ));
+    lines.push(format!("  Duration: {:?}", check.estimated_duration));
 
     if !check.warnings.is_empty() {
         lines.push("  Warnings:".into());
@@ -734,10 +731,7 @@ pub fn valid_actions(state: LifecycleState) -> Vec<LifecycleAction> {
 }
 
 /// Find the transition rule for a (state, action) pair if one exists.
-pub fn find_rule(
-    state: LifecycleState,
-    action: LifecycleAction,
-) -> Option<TransitionRule> {
+pub fn find_rule(state: LifecycleState, action: LifecycleAction) -> Option<TransitionRule> {
     transition_rules()
         .into_iter()
         .find(|r| r.from_state == state && r.action == action)
@@ -839,14 +833,20 @@ mod tests {
 
     #[test]
     fn noop_enable_when_enabled() {
-        assert!(is_safe_noop(LifecycleState::Enabled, LifecycleAction::Enable));
+        assert!(is_safe_noop(
+            LifecycleState::Enabled,
+            LifecycleAction::Enable
+        ));
         let s = validate_transition(LifecycleState::Enabled, LifecycleAction::Enable);
         assert_eq!(s.unwrap(), LifecycleState::Enabled);
     }
 
     #[test]
     fn noop_disable_when_disabled() {
-        assert!(is_safe_noop(LifecycleState::Disabled, LifecycleAction::Disable));
+        assert!(is_safe_noop(
+            LifecycleState::Disabled,
+            LifecycleAction::Disable
+        ));
         let s = validate_transition(LifecycleState::Disabled, LifecycleAction::Disable);
         assert_eq!(s.unwrap(), LifecycleState::Disabled);
     }
@@ -860,24 +860,36 @@ mod tests {
 
     #[test]
     fn noop_start_when_running() {
-        assert!(is_safe_noop(LifecycleState::Running, LifecycleAction::Start));
+        assert!(is_safe_noop(
+            LifecycleState::Running,
+            LifecycleAction::Start
+        ));
         let s = validate_transition(LifecycleState::Running, LifecycleAction::Start);
         assert_eq!(s.unwrap(), LifecycleState::Running);
     }
 
     #[test]
     fn not_noop_enable_when_disabled() {
-        assert!(!is_safe_noop(LifecycleState::Disabled, LifecycleAction::Enable));
+        assert!(!is_safe_noop(
+            LifecycleState::Disabled,
+            LifecycleAction::Enable
+        ));
     }
 
     #[test]
     fn not_noop_start_when_stopped() {
-        assert!(!is_safe_noop(LifecycleState::Stopped, LifecycleAction::Start));
+        assert!(!is_safe_noop(
+            LifecycleState::Stopped,
+            LifecycleAction::Start
+        ));
     }
 
     #[test]
     fn not_noop_restart_when_running() {
-        assert!(!is_safe_noop(LifecycleState::Running, LifecycleAction::Restart));
+        assert!(!is_safe_noop(
+            LifecycleState::Running,
+            LifecycleAction::Restart
+        ));
     }
 
     // ── Denied transitions ──────────────────────────────────────────
@@ -985,46 +997,82 @@ mod tests {
 
     #[test]
     fn can_accept_disabled_enable() {
-        assert!(state_can_accept(LifecycleState::Disabled, LifecycleAction::Enable));
+        assert!(state_can_accept(
+            LifecycleState::Disabled,
+            LifecycleAction::Enable
+        ));
     }
 
     #[test]
     fn can_accept_disabled_disable_noop() {
-        assert!(state_can_accept(LifecycleState::Disabled, LifecycleAction::Disable));
+        assert!(state_can_accept(
+            LifecycleState::Disabled,
+            LifecycleAction::Disable
+        ));
     }
 
     #[test]
     fn cannot_accept_disabled_start() {
-        assert!(!state_can_accept(LifecycleState::Disabled, LifecycleAction::Start));
+        assert!(!state_can_accept(
+            LifecycleState::Disabled,
+            LifecycleAction::Start
+        ));
     }
 
     #[test]
     fn can_accept_running_all_expected() {
-        assert!(state_can_accept(LifecycleState::Running, LifecycleAction::Stop));
-        assert!(state_can_accept(LifecycleState::Running, LifecycleAction::ForceStop));
-        assert!(state_can_accept(LifecycleState::Running, LifecycleAction::Disable));
-        assert!(state_can_accept(LifecycleState::Running, LifecycleAction::Restart));
-        assert!(state_can_accept(LifecycleState::Running, LifecycleAction::Start)); // noop
+        assert!(state_can_accept(
+            LifecycleState::Running,
+            LifecycleAction::Stop
+        ));
+        assert!(state_can_accept(
+            LifecycleState::Running,
+            LifecycleAction::ForceStop
+        ));
+        assert!(state_can_accept(
+            LifecycleState::Running,
+            LifecycleAction::Disable
+        ));
+        assert!(state_can_accept(
+            LifecycleState::Running,
+            LifecycleAction::Restart
+        ));
+        assert!(state_can_accept(
+            LifecycleState::Running,
+            LifecycleAction::Start
+        )); // noop
     }
 
     #[test]
     fn cannot_accept_running_enable() {
-        assert!(!state_can_accept(LifecycleState::Running, LifecycleAction::Enable));
+        assert!(!state_can_accept(
+            LifecycleState::Running,
+            LifecycleAction::Enable
+        ));
     }
 
     #[test]
     fn can_accept_failed_restart() {
-        assert!(state_can_accept(LifecycleState::Failed, LifecycleAction::Restart));
+        assert!(state_can_accept(
+            LifecycleState::Failed,
+            LifecycleAction::Restart
+        ));
     }
 
     #[test]
     fn can_accept_failed_stop() {
-        assert!(state_can_accept(LifecycleState::Failed, LifecycleAction::Stop));
+        assert!(state_can_accept(
+            LifecycleState::Failed,
+            LifecycleAction::Stop
+        ));
     }
 
     #[test]
     fn can_accept_failed_disable() {
-        assert!(state_can_accept(LifecycleState::Failed, LifecycleAction::Disable));
+        assert!(state_can_accept(
+            LifecycleState::Failed,
+            LifecycleAction::Disable
+        ));
     }
 
     #[test]
@@ -1223,16 +1271,16 @@ mod tests {
 
     #[test]
     fn preflight_force_stop_forced_no_confirmation() {
-        let req = MutationRequest::new("test-connector", LifecycleAction::ForceStop)
-            .with_force(true);
+        let req =
+            MutationRequest::new("test-connector", LifecycleAction::ForceStop).with_force(true);
         let check = preflight(&req, LifecycleState::Running);
         assert!(!check.requires_confirmation);
     }
 
     #[test]
     fn preflight_dry_run_warning() {
-        let req = MutationRequest::new("test-connector", LifecycleAction::Enable)
-            .with_dry_run(true);
+        let req =
+            MutationRequest::new("test-connector", LifecycleAction::Enable).with_dry_run(true);
         let check = preflight(&req, LifecycleState::Disabled);
         assert!(check.warnings.iter().any(|w| w.contains("dry-run")));
     }
@@ -1246,16 +1294,15 @@ mod tests {
 
     #[test]
     fn preflight_force_destructive_warning() {
-        let req = MutationRequest::new("test-connector", LifecycleAction::Disable)
-            .with_force(true);
+        let req = MutationRequest::new("test-connector", LifecycleAction::Disable).with_force(true);
         let check = preflight(&req, LifecycleState::Running);
         assert!(check.warnings.iter().any(|w| w.contains("destructive")));
     }
 
     #[test]
     fn preflight_has_issues_with_warnings() {
-        let req = MutationRequest::new("test-connector", LifecycleAction::Enable)
-            .with_dry_run(true);
+        let req =
+            MutationRequest::new("test-connector", LifecycleAction::Enable).with_dry_run(true);
         let check = preflight(&req, LifecycleState::Disabled);
         assert!(check.has_issues());
     }
@@ -1319,11 +1366,7 @@ mod tests {
 
     #[test]
     fn result_failure() {
-        let r = MutationResult::failure(
-            LifecycleState::Running,
-            "rcpt-002",
-            "timeout exceeded",
-        );
+        let r = MutationResult::failure(LifecycleState::Running, "rcpt-002", "timeout exceeded");
         assert!(!r.success);
         assert_eq!(r.old_state, LifecycleState::Running);
         assert_eq!(r.new_state, LifecycleState::Running); // unchanged
@@ -1354,8 +1397,7 @@ mod tests {
 
     #[test]
     fn receipt_from_request_result() {
-        let req = MutationRequest::new("conn-a", LifecycleAction::Enable)
-            .with_operator("alice");
+        let req = MutationRequest::new("conn-a", LifecycleAction::Enable).with_operator("alice");
         let res = MutationResult::success(
             LifecycleState::Disabled,
             LifecycleState::Enabled,
@@ -1387,8 +1429,7 @@ mod tests {
 
     #[test]
     fn receipt_dry_run_flag() {
-        let req = MutationRequest::new("conn-c", LifecycleAction::Enable)
-            .with_dry_run(true);
+        let req = MutationRequest::new("conn-c", LifecycleAction::Enable).with_dry_run(true);
         let res = MutationResult::success(
             LifecycleState::Disabled,
             LifecycleState::Enabled,
@@ -1401,8 +1442,7 @@ mod tests {
 
     #[test]
     fn receipt_forced_flag() {
-        let req = MutationRequest::new("conn-d", LifecycleAction::ForceStop)
-            .with_force(true);
+        let req = MutationRequest::new("conn-d", LifecycleAction::ForceStop).with_force(true);
         let res = MutationResult::success(
             LifecycleState::Running,
             LifecycleState::Stopped,
@@ -1436,8 +1476,7 @@ mod tests {
 
     #[test]
     fn format_preflight_with_warnings() {
-        let req = MutationRequest::new("c", LifecycleAction::Disable)
-            .with_force(true);
+        let req = MutationRequest::new("c", LifecycleAction::Disable).with_force(true);
         let check = preflight(&req, LifecycleState::Running);
         let toon = format_preflight_toon(&check);
         assert!(toon.contains("Warnings:"));

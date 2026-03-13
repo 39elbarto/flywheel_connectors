@@ -272,10 +272,7 @@ pub fn plan_lease_transfer(
 }
 
 /// Simulate resuming a computation from a checkpoint.
-pub fn simulate_resume(
-    request: &ResumeRequest,
-    checkpoints: &[CheckpointEntry],
-) -> ResumeOutcome {
+pub fn simulate_resume(request: &ResumeRequest, checkpoints: &[CheckpointEntry]) -> ResumeOutcome {
     // Find the checkpoint to resume from.
     let checkpoint = request.from_checkpoint.as_ref().map_or_else(
         || find_best_checkpoint(&request.computation_id, checkpoints),
@@ -348,10 +345,7 @@ pub fn find_best_checkpoint<'a>(
 
 /// Estimate data loss as a percentage between the last checkpoint and current
 /// state.  Loss is proportional to progress made since the checkpoint.
-pub fn estimate_data_loss(
-    last_checkpoint: &CheckpointEntry,
-    current: &ComputationState,
-) -> f64 {
+pub fn estimate_data_loss(last_checkpoint: &CheckpointEntry, current: &ComputationState) -> f64 {
     // If the checkpoint matches current progress, no loss.
     let ckpt_progress = last_checkpoint
         .state_snapshot
@@ -453,7 +447,12 @@ mod tests {
         }
     }
 
-    fn make_checkpoint(id: &str, comp_id: &str, phase: ComputationPhase, progress: f64) -> CheckpointEntry {
+    fn make_checkpoint(
+        id: &str,
+        comp_id: &str,
+        phase: ComputationPhase,
+        progress: f64,
+    ) -> CheckpointEntry {
         CheckpointEntry {
             id: id.to_string(),
             computation_id: comp_id.to_string(),
@@ -628,14 +627,11 @@ mod tests {
 
     #[test]
     fn plan_transfer_filters_by_lease_holder() {
-        let states = vec![
-            make_state("c1", ComputationPhase::Processing, 50.0),
-            {
-                let mut s = make_state("c2", ComputationPhase::Processing, 30.0);
-                s.lease_holder = "node-b".to_string();
-                s
-            },
-        ];
+        let states = vec![make_state("c1", ComputationPhase::Processing, 50.0), {
+            let mut s = make_state("c2", ComputationPhase::Processing, 30.0);
+            s.lease_holder = "node-b".to_string();
+            s
+        }];
         let plan = plan_lease_transfer("node-a", "node-c", &states);
         assert_eq!(plan.transfers.len(), 1);
         assert_eq!(plan.transfers[0].computation_id, "c1");
@@ -643,18 +639,14 @@ mod tests {
 
     #[test]
     fn plan_transfer_excludes_completed() {
-        let states = vec![
-            make_state("c1", ComputationPhase::Completed, 100.0),
-        ];
+        let states = vec![make_state("c1", ComputationPhase::Completed, 100.0)];
         let plan = plan_lease_transfer("node-a", "node-b", &states);
         assert!(plan.transfers.is_empty());
     }
 
     #[test]
     fn plan_transfer_excludes_failed() {
-        let states = vec![
-            make_state("c1", ComputationPhase::Failed, 0.0),
-        ];
+        let states = vec![make_state("c1", ComputationPhase::Failed, 0.0)];
         let plan = plan_lease_transfer("node-a", "node-b", &states);
         assert!(plan.transfers.is_empty());
     }
@@ -1241,7 +1233,10 @@ mod tests {
 
     #[test]
     fn display_computation_phase() {
-        assert_eq!(format!("{}", ComputationPhase::Initializing), "initializing");
+        assert_eq!(
+            format!("{}", ComputationPhase::Initializing),
+            "initializing"
+        );
         assert_eq!(format!("{}", ComputationPhase::Processing), "processing");
         assert_eq!(format!("{}", ComputationPhase::Finalizing), "finalizing");
         assert_eq!(format!("{}", ComputationPhase::Completed), "completed");
@@ -1341,7 +1336,11 @@ mod tests {
         let plan = plan_lease_transfer("node-a", "node-b", &states);
         // Completed and Failed excluded.
         assert_eq!(plan.transfers.len(), 3);
-        let ids: Vec<&str> = plan.transfers.iter().map(|t| t.computation_id.as_str()).collect();
+        let ids: Vec<&str> = plan
+            .transfers
+            .iter()
+            .map(|t| t.computation_id.as_str())
+            .collect();
         assert!(ids.contains(&"c1"));
         assert!(ids.contains(&"c4"));
         assert!(ids.contains(&"c5"));

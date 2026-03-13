@@ -599,7 +599,11 @@ pub fn build_simulate_matrix() -> Vec<SimulateTestCase> {
             "jira",
             "delete_issue",
             serde_json::json!({"issue_key": "TEST-99"}),
-            vec!["would_delete".into(), "destructive".into(), "irreversible".into()],
+            vec![
+                "would_delete".into(),
+                "destructive".into(),
+                "irreversible".into(),
+            ],
             true,
         ),
         SimulateTestCase::new(
@@ -635,8 +639,18 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
         BatchTestCase::new(
             "batch_sequential_two_ops",
             vec![
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "test"}), None),
-                BatchOp::new("github", "get_repo", serde_json::json!({"owner": "test", "repo": "a"}), Some(0)),
+                BatchOp::new(
+                    "github",
+                    "list_repos",
+                    serde_json::json!({"org": "test"}),
+                    None,
+                ),
+                BatchOp::new(
+                    "github",
+                    "get_repo",
+                    serde_json::json!({"owner": "test", "repo": "a"}),
+                    Some(0),
+                ),
             ],
             1,
             OnBatchError::Stop,
@@ -645,7 +659,12 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
         BatchTestCase::new(
             "batch_parallel_two_ops",
             vec![
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "a"}), None),
+                BatchOp::new(
+                    "github",
+                    "list_repos",
+                    serde_json::json!({"org": "a"}),
+                    None,
+                ),
                 BatchOp::new("slack", "list_channels", serde_json::json!({}), None),
             ],
             2,
@@ -655,9 +674,24 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
         BatchTestCase::new(
             "batch_three_ops_with_chain",
             vec![
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "test"}), None),
-                BatchOp::new("github", "get_repo", serde_json::json!({"owner": "test", "repo": "a"}), Some(0)),
-                BatchOp::new("github", "list_issues", serde_json::json!({"owner": "test", "repo": "a"}), Some(1)),
+                BatchOp::new(
+                    "github",
+                    "list_repos",
+                    serde_json::json!({"org": "test"}),
+                    None,
+                ),
+                BatchOp::new(
+                    "github",
+                    "get_repo",
+                    serde_json::json!({"owner": "test", "repo": "a"}),
+                    Some(0),
+                ),
+                BatchOp::new(
+                    "github",
+                    "list_issues",
+                    serde_json::json!({"owner": "test", "repo": "a"}),
+                    Some(1),
+                ),
             ],
             1,
             OnBatchError::Stop,
@@ -667,7 +701,12 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
             "batch_fail_first_stop",
             vec![
                 BatchOp::new("nonexistent", "op", serde_json::json!({}), None),
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "test"}), None),
+                BatchOp::new(
+                    "github",
+                    "list_repos",
+                    serde_json::json!({"org": "test"}),
+                    None,
+                ),
             ],
             1,
             OnBatchError::Stop,
@@ -677,7 +716,12 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
             "batch_fail_first_continue",
             vec![
                 BatchOp::new("nonexistent", "op", serde_json::json!({}), None),
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "test"}), None),
+                BatchOp::new(
+                    "github",
+                    "list_repos",
+                    serde_json::json!({"org": "test"}),
+                    None,
+                ),
             ],
             1,
             OnBatchError::Continue,
@@ -697,9 +741,19 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
         BatchTestCase::new(
             "batch_high_concurrency",
             vec![
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "a"}), None),
+                BatchOp::new(
+                    "github",
+                    "list_repos",
+                    serde_json::json!({"org": "a"}),
+                    None,
+                ),
                 BatchOp::new("slack", "list_channels", serde_json::json!({}), None),
-                BatchOp::new("jira", "search_issues", serde_json::json!({"jql": "project=TEST"}), None),
+                BatchOp::new(
+                    "jira",
+                    "search_issues",
+                    serde_json::json!({"jql": "project=TEST"}),
+                    None,
+                ),
                 BatchOp::new("discord", "list_guilds", serde_json::json!({}), None),
             ],
             4,
@@ -708,9 +762,12 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
         ),
         BatchTestCase::new(
             "batch_single_op",
-            vec![
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "test"}), None),
-            ],
+            vec![BatchOp::new(
+                "github",
+                "list_repos",
+                serde_json::json!({"org": "test"}),
+                None,
+            )],
             1,
             OnBatchError::Stop,
             BatchExpectedResult::AllSuccess,
@@ -718,7 +775,12 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
         BatchTestCase::new(
             "batch_diamond_dependency",
             vec![
-                BatchOp::new("github", "list_repos", serde_json::json!({"org": "test"}), None),
+                BatchOp::new(
+                    "github",
+                    "list_repos",
+                    serde_json::json!({"org": "test"}),
+                    None,
+                ),
                 BatchOp::new("github", "get_repo", serde_json::json!({}), Some(0)),
                 BatchOp::new("github", "list_issues", serde_json::json!({}), Some(0)),
                 BatchOp::new("github", "create_issue", serde_json::json!({}), Some(1)),
@@ -750,56 +812,16 @@ pub fn build_batch_matrix() -> Vec<BatchTestCase> {
 /// Build the result-handle test matrix (at least 8 cases).
 pub fn build_result_handle_matrix() -> Vec<ResultHandleTestCase> {
     vec![
-        ResultHandleTestCase::new(
-            "result_scalar_json",
-            ResultType::Scalar,
-            "json",
-        ),
-        ResultHandleTestCase::new(
-            "result_scalar_text",
-            ResultType::Scalar,
-            "text",
-        ),
-        ResultHandleTestCase::new(
-            "result_array_json",
-            ResultType::Array,
-            "json",
-        ),
-        ResultHandleTestCase::new(
-            "result_array_csv",
-            ResultType::Array,
-            "csv",
-        ),
-        ResultHandleTestCase::new(
-            "result_array_table",
-            ResultType::Array,
-            "table",
-        ),
-        ResultHandleTestCase::new(
-            "result_stream_ndjson",
-            ResultType::Stream,
-            "ndjson",
-        ),
-        ResultHandleTestCase::new(
-            "result_stream_sse",
-            ResultType::Stream,
-            "sse",
-        ),
-        ResultHandleTestCase::new(
-            "result_paginated_json",
-            ResultType::Paginated,
-            "json",
-        ),
-        ResultHandleTestCase::new(
-            "result_paginated_table",
-            ResultType::Paginated,
-            "table",
-        ),
-        ResultHandleTestCase::new(
-            "result_scalar_yaml",
-            ResultType::Scalar,
-            "yaml",
-        ),
+        ResultHandleTestCase::new("result_scalar_json", ResultType::Scalar, "json"),
+        ResultHandleTestCase::new("result_scalar_text", ResultType::Scalar, "text"),
+        ResultHandleTestCase::new("result_array_json", ResultType::Array, "json"),
+        ResultHandleTestCase::new("result_array_csv", ResultType::Array, "csv"),
+        ResultHandleTestCase::new("result_array_table", ResultType::Array, "table"),
+        ResultHandleTestCase::new("result_stream_ndjson", ResultType::Stream, "ndjson"),
+        ResultHandleTestCase::new("result_stream_sse", ResultType::Stream, "sse"),
+        ResultHandleTestCase::new("result_paginated_json", ResultType::Paginated, "json"),
+        ResultHandleTestCase::new("result_paginated_table", ResultType::Paginated, "table"),
+        ResultHandleTestCase::new("result_scalar_yaml", ResultType::Scalar, "yaml"),
     ]
 }
 
@@ -844,9 +866,7 @@ pub fn validate_invoke_result(case: &InvokeTestCase, output: &Value) -> bool {
                 true
             }
         }
-        InvokeExpectedStatus::Timeout => {
-            status == "timeout" || status == "error"
-        }
+        InvokeExpectedStatus::Timeout => status == "timeout" || status == "error",
     }
 }
 
@@ -1047,40 +1067,88 @@ mod tests {
 
     #[test]
     fn invoke_test_case_expects_success() {
-        let tc = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Success, vec![], None);
+        let tc = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec![],
+            None,
+        );
         assert!(tc.expects_success());
         assert!(!tc.expects_error());
     }
 
     #[test]
     fn invoke_test_case_expects_error() {
-        let tc = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Error, vec![], Some("e".into()));
+        let tc = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Error,
+            vec![],
+            Some("e".into()),
+        );
         assert!(!tc.expects_success());
         assert!(tc.expects_error());
     }
 
     #[test]
     fn invoke_test_case_expects_timeout() {
-        let tc = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Timeout, vec![], None);
+        let tc = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Timeout,
+            vec![],
+            None,
+        );
         assert!(!tc.expects_success());
         assert!(tc.expects_error());
     }
 
     #[test]
     fn invoke_test_case_has_error_code() {
-        let tc = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Error, vec![], Some("e".into()));
+        let tc = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Error,
+            vec![],
+            Some("e".into()),
+        );
         assert!(tc.has_error_code());
     }
 
     #[test]
     fn invoke_test_case_no_error_code() {
-        let tc = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Success, vec![], None);
+        let tc = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec![],
+            None,
+        );
         assert!(!tc.has_error_code());
     }
 
     #[test]
     fn invoke_test_case_serde_roundtrip() {
-        let tc = InvokeTestCase::new("r", "gh", "list", json!({"a": 1}), InvokeExpectedStatus::Success, vec!["x".into()], None);
+        let tc = InvokeTestCase::new(
+            "r",
+            "gh",
+            "list",
+            json!({"a": 1}),
+            InvokeExpectedStatus::Success,
+            vec!["x".into()],
+            None,
+        );
         let json_str = serde_json::to_string(&tc).unwrap();
         let back: InvokeTestCase = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.name, "r");
@@ -1089,7 +1157,15 @@ mod tests {
 
     #[test]
     fn invoke_test_case_clone() {
-        let tc = InvokeTestCase::new("cl", "c", "o", json!({}), InvokeExpectedStatus::Success, vec![], None);
+        let tc = InvokeTestCase::new(
+            "cl",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec![],
+            None,
+        );
         let cloned = tc.clone();
         assert_eq!(cloned.name, "cl");
     }
@@ -1098,7 +1174,14 @@ mod tests {
 
     #[test]
     fn simulate_test_case_new() {
-        let tc = SimulateTestCase::new("sim", "github", "create_issue", json!({}), vec!["would_create".into()], true);
+        let tc = SimulateTestCase::new(
+            "sim",
+            "github",
+            "create_issue",
+            json!({}),
+            vec!["would_create".into()],
+            true,
+        );
         assert_eq!(tc.name, "sim");
         assert!(tc.expected_side_effects_none);
     }
@@ -1196,7 +1279,10 @@ mod tests {
 
     #[test]
     fn batch_expected_result_display_partial() {
-        assert_eq!(BatchExpectedResult::PartialSuccess.to_string(), "partial_success");
+        assert_eq!(
+            BatchExpectedResult::PartialSuccess.to_string(),
+            "partial_success"
+        );
     }
 
     #[test]
@@ -1274,14 +1360,26 @@ mod tests {
 
     #[test]
     fn batch_test_case_empty_ops() {
-        let tc = BatchTestCase::new("e", vec![], 1, OnBatchError::Stop, BatchExpectedResult::AllSuccess);
+        let tc = BatchTestCase::new(
+            "e",
+            vec![],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllSuccess,
+        );
         assert_eq!(tc.operation_count(), 0);
         assert!(!tc.has_dependencies());
     }
 
     #[test]
     fn batch_test_case_serde_roundtrip() {
-        let tc = BatchTestCase::new("r", vec![], 1, OnBatchError::Continue, BatchExpectedResult::AllFail);
+        let tc = BatchTestCase::new(
+            "r",
+            vec![],
+            1,
+            OnBatchError::Continue,
+            BatchExpectedResult::AllFail,
+        );
         let json_str = serde_json::to_string(&tc).unwrap();
         let back: BatchTestCase = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.name, "r");
@@ -1289,7 +1387,13 @@ mod tests {
 
     #[test]
     fn batch_test_case_clone() {
-        let tc = BatchTestCase::new("cl", vec![], 1, OnBatchError::Stop, BatchExpectedResult::AllSuccess);
+        let tc = BatchTestCase::new(
+            "cl",
+            vec![],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllSuccess,
+        );
         let cloned = tc.clone();
         assert_eq!(cloned.name, "cl");
     }
@@ -1388,19 +1492,31 @@ mod tests {
     #[test]
     fn build_invoke_matrix_has_success_cases() {
         let cases = build_invoke_matrix();
-        assert!(cases.iter().any(|c| c.expected_status == InvokeExpectedStatus::Success));
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.expected_status == InvokeExpectedStatus::Success)
+        );
     }
 
     #[test]
     fn build_invoke_matrix_has_error_cases() {
         let cases = build_invoke_matrix();
-        assert!(cases.iter().any(|c| c.expected_status == InvokeExpectedStatus::Error));
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.expected_status == InvokeExpectedStatus::Error)
+        );
     }
 
     #[test]
     fn build_invoke_matrix_has_timeout_cases() {
         let cases = build_invoke_matrix();
-        assert!(cases.iter().any(|c| c.expected_status == InvokeExpectedStatus::Timeout));
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.expected_status == InvokeExpectedStatus::Timeout)
+        );
     }
 
     #[test]
@@ -1459,7 +1575,8 @@ mod tests {
     #[test]
     fn build_batch_matrix_covers_all_expected_results() {
         let cases = build_batch_matrix();
-        let results: std::collections::HashSet<_> = cases.iter().map(|c| &c.expected_results).collect();
+        let results: std::collections::HashSet<_> =
+            cases.iter().map(|c| &c.expected_results).collect();
         assert!(results.contains(&BatchExpectedResult::AllSuccess));
         assert!(results.contains(&BatchExpectedResult::PartialSuccess));
         assert!(results.contains(&BatchExpectedResult::AllFail));
@@ -1504,77 +1621,158 @@ mod tests {
 
     #[test]
     fn validate_invoke_result_success_with_fields() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Success, vec!["repos".into()], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec!["repos".into()],
+            None,
+        );
         let output = json!({"status": "success", "repos": [1, 2, 3]});
         assert!(validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_success_ok_status() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Success, vec![], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec![],
+            None,
+        );
         let output = json!({"status": "ok"});
         assert!(validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_success_missing_field() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Success, vec!["missing".into()], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec!["missing".into()],
+            None,
+        );
         let output = json!({"status": "success"});
         assert!(!validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_success_field_in_data() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Success, vec!["repos".into()], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec!["repos".into()],
+            None,
+        );
         let output = json!({"status": "success", "data": {"repos": []}});
         assert!(validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_error_with_code() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Error, vec![], Some("not_found".into()));
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Error,
+            vec![],
+            Some("not_found".into()),
+        );
         let output = json!({"status": "error", "error_code": "not_found"});
         assert!(validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_error_wrong_code() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Error, vec![], Some("not_found".into()));
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Error,
+            vec![],
+            Some("not_found".into()),
+        );
         let output = json!({"status": "error", "error_code": "other"});
         assert!(!validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_error_no_code_expected() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Error, vec![], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Error,
+            vec![],
+            None,
+        );
         let output = json!({"status": "error"});
         assert!(validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_timeout() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Timeout, vec![], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Timeout,
+            vec![],
+            None,
+        );
         let output = json!({"status": "timeout"});
         assert!(validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_timeout_as_error() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Timeout, vec![], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Timeout,
+            vec![],
+            None,
+        );
         let output = json!({"status": "error"});
         assert!(validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_invoke_result_wrong_status() {
-        let case = InvokeTestCase::new("t", "c", "o", json!({}), InvokeExpectedStatus::Success, vec![], None);
+        let case = InvokeTestCase::new(
+            "t",
+            "c",
+            "o",
+            json!({}),
+            InvokeExpectedStatus::Success,
+            vec![],
+            None,
+        );
         let output = json!({"status": "error"});
         assert!(!validate_invoke_result(&case, &output));
     }
 
     #[test]
     fn validate_simulate_result_with_fields() {
-        let case = SimulateTestCase::new("t", "c", "o", json!({}), vec!["would_create".into()], true);
+        let case =
+            SimulateTestCase::new("t", "c", "o", json!({}), vec!["would_create".into()], true);
         let output = json!({"would_create": true, "side_effects": false});
         assert!(validate_simulate_result(&case, &output));
     }
@@ -1602,49 +1800,91 @@ mod tests {
 
     #[test]
     fn validate_batch_result_all_success() {
-        let case = BatchTestCase::new("t", vec![BatchOp::new("c", "o", json!({}), None)], 1, OnBatchError::Stop, BatchExpectedResult::AllSuccess);
+        let case = BatchTestCase::new(
+            "t",
+            vec![BatchOp::new("c", "o", json!({}), None)],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllSuccess,
+        );
         let output = json!({"results": [{"status": "success"}]});
         assert!(validate_batch_result(&case, &output));
     }
 
     #[test]
     fn validate_batch_result_all_success_ok_status() {
-        let case = BatchTestCase::new("t", vec![BatchOp::new("c", "o", json!({}), None)], 1, OnBatchError::Stop, BatchExpectedResult::AllSuccess);
+        let case = BatchTestCase::new(
+            "t",
+            vec![BatchOp::new("c", "o", json!({}), None)],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllSuccess,
+        );
         let output = json!({"results": [{"status": "ok"}]});
         assert!(validate_batch_result(&case, &output));
     }
 
     #[test]
     fn validate_batch_result_all_success_but_has_error() {
-        let case = BatchTestCase::new("t", vec![], 1, OnBatchError::Stop, BatchExpectedResult::AllSuccess);
+        let case = BatchTestCase::new(
+            "t",
+            vec![],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllSuccess,
+        );
         let output = json!({"results": [{"status": "success"}, {"status": "error"}]});
         assert!(!validate_batch_result(&case, &output));
     }
 
     #[test]
     fn validate_batch_result_partial_success() {
-        let case = BatchTestCase::new("t", vec![], 1, OnBatchError::Continue, BatchExpectedResult::PartialSuccess);
+        let case = BatchTestCase::new(
+            "t",
+            vec![],
+            1,
+            OnBatchError::Continue,
+            BatchExpectedResult::PartialSuccess,
+        );
         let output = json!({"results": [{"status": "success"}, {"status": "error"}]});
         assert!(validate_batch_result(&case, &output));
     }
 
     #[test]
     fn validate_batch_result_all_fail() {
-        let case = BatchTestCase::new("t", vec![], 1, OnBatchError::Stop, BatchExpectedResult::AllFail);
+        let case = BatchTestCase::new(
+            "t",
+            vec![],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllFail,
+        );
         let output = json!({"results": [{"status": "error"}, {"status": "error"}]});
         assert!(validate_batch_result(&case, &output));
     }
 
     #[test]
     fn validate_batch_result_empty_all_success() {
-        let case = BatchTestCase::new("t", vec![], 1, OnBatchError::Stop, BatchExpectedResult::AllSuccess);
+        let case = BatchTestCase::new(
+            "t",
+            vec![],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllSuccess,
+        );
         let output = json!({"results": null});
         assert!(validate_batch_result(&case, &output));
     }
 
     #[test]
     fn validate_batch_result_empty_no_results_field() {
-        let case = BatchTestCase::new("t", vec![], 1, OnBatchError::Stop, BatchExpectedResult::AllSuccess);
+        let case = BatchTestCase::new(
+            "t",
+            vec![],
+            1,
+            OnBatchError::Stop,
+            BatchExpectedResult::AllSuccess,
+        );
         let output = json!({});
         assert!(validate_batch_result(&case, &output));
     }
@@ -1708,7 +1948,11 @@ mod tests {
     fn invoke_matrix_connectors_not_empty() {
         let cases = build_invoke_matrix();
         for case in &cases {
-            assert!(!case.connector.is_empty(), "case {} has empty connector", case.name);
+            assert!(
+                !case.connector.is_empty(),
+                "case {} has empty connector",
+                case.name
+            );
         }
     }
 
@@ -1716,7 +1960,11 @@ mod tests {
     fn invoke_matrix_operations_not_empty() {
         let cases = build_invoke_matrix();
         for case in &cases {
-            assert!(!case.operation.is_empty(), "case {} has empty operation", case.name);
+            assert!(
+                !case.operation.is_empty(),
+                "case {} has empty operation",
+                case.name
+            );
         }
     }
 
@@ -1724,7 +1972,11 @@ mod tests {
     fn simulate_matrix_connectors_not_empty() {
         let cases = build_simulate_matrix();
         for case in &cases {
-            assert!(!case.connector.is_empty(), "case {} has empty connector", case.name);
+            assert!(
+                !case.connector.is_empty(),
+                "case {} has empty connector",
+                case.name
+            );
         }
     }
 
@@ -1733,7 +1985,11 @@ mod tests {
         let cases = build_batch_matrix();
         for case in &cases {
             for op in &case.operations {
-                assert!(!op.connector.is_empty(), "case {} has op with empty connector", case.name);
+                assert!(
+                    !op.connector.is_empty(),
+                    "case {} has op with empty connector",
+                    case.name
+                );
             }
         }
     }
@@ -1742,7 +1998,11 @@ mod tests {
     fn result_handle_matrix_formats_not_empty() {
         let cases = build_result_handle_matrix();
         for case in &cases {
-            assert!(!case.expected_format.is_empty(), "case {} has empty format", case.name);
+            assert!(
+                !case.expected_format.is_empty(),
+                "case {} has empty format",
+                case.name
+            );
         }
     }
 }

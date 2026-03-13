@@ -81,15 +81,9 @@ pub struct InputOverride {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DiffLine {
     /// A field/value was added.
-    Added {
-        path: String,
-        value: Value,
-    },
+    Added { path: String, value: Value },
     /// A field/value was removed.
-    Removed {
-        path: String,
-        value: Value,
-    },
+    Removed { path: String, value: Value },
     /// A field/value was changed.
     Changed {
         path: String,
@@ -97,10 +91,7 @@ pub enum DiffLine {
         new: Value,
     },
     /// A field/value was unchanged.
-    Unchanged {
-        path: String,
-        value: Value,
-    },
+    Unchanged { path: String, value: Value },
 }
 
 /// A replay plan describing what will happen when an operation is replayed.
@@ -237,7 +228,7 @@ fn set_at_path(root: &mut Value, path: &str, value: Value) -> Result<(), String>
                     _ => {
                         return Err(format!(
                             "cannot index into non-array at segment `{segment}`"
-                        ))
+                        ));
                     }
                 }
             }
@@ -261,7 +252,7 @@ fn set_at_path(root: &mut Value, path: &str, value: Value) -> Result<(), String>
                 _ => {
                     return Err(format!(
                         "cannot traverse array index `{segment}` in non-array"
-                    ))
+                    ));
                 }
             }
         } else {
@@ -279,11 +270,7 @@ fn set_at_path(root: &mut Value, path: &str, value: Value) -> Result<(), String>
                         }
                         return Ok(());
                     }
-                    _ => {
-                        return Err(format!(
-                            "cannot set key `{segment}` on non-object value"
-                        ))
-                    }
+                    _ => return Err(format!("cannot set key `{segment}` on non-object value")),
                 }
             }
             // Intermediate object key.
@@ -304,7 +291,7 @@ fn set_at_path(root: &mut Value, path: &str, value: Value) -> Result<(), String>
                 _ => {
                     return Err(format!(
                         "cannot traverse key `{segment}` in non-object value"
-                    ))
+                    ));
                 }
             }
         }
@@ -584,10 +571,7 @@ pub fn format_diff_toon(diff: &[DiffLine]) -> String {
         }
     }
 
-    let _ = writeln!(
-        out,
-        "--- +{added} -{removed} ~{changed} ={unchanged}"
-    );
+    let _ = writeln!(out, "--- +{added} -{removed} ~{changed} ={unchanged}");
     out
 }
 
@@ -1064,7 +1048,10 @@ mod tests {
         let old = json!({"a": 1});
         let new = json!({"a": 1, "b": 2});
         let diff = diff_values(&old, &new, "");
-        assert!(diff.iter().any(|d| matches!(d, DiffLine::Added { path, .. } if path == "b")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Added { path, .. } if path == "b"))
+        );
     }
 
     #[test]
@@ -1072,7 +1059,10 @@ mod tests {
         let old = json!({"a": 1, "b": 2});
         let new = json!({"a": 1});
         let diff = diff_values(&old, &new, "");
-        assert!(diff.iter().any(|d| matches!(d, DiffLine::Removed { path, .. } if path == "b")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Removed { path, .. } if path == "b"))
+        );
     }
 
     #[test]
@@ -1080,7 +1070,10 @@ mod tests {
         let old = json!({"a": 1});
         let new = json!({"a": 2});
         let diff = diff_values(&old, &new, "");
-        assert!(diff.iter().any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "a")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "a"))
+        );
     }
 
     #[test]
@@ -1088,9 +1081,10 @@ mod tests {
         let old = json!({"config": {"timeout": 30}});
         let new = json!({"config": {"timeout": 60}});
         let diff = diff_values(&old, &new, "");
-        assert!(diff
-            .iter()
-            .any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "config.timeout")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "config.timeout"))
+        );
     }
 
     #[test]
@@ -1098,9 +1092,10 @@ mod tests {
         let old = json!({"items": [1, 2, 3]});
         let new = json!({"items": [1, 99, 3]});
         let diff = diff_values(&old, &new, "");
-        assert!(diff
-            .iter()
-            .any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "items.1")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "items.1"))
+        );
     }
 
     #[test]
@@ -1108,9 +1103,10 @@ mod tests {
         let old = json!({"items": [1, 2]});
         let new = json!({"items": [1, 2, 3]});
         let diff = diff_values(&old, &new, "");
-        assert!(diff
-            .iter()
-            .any(|d| matches!(d, DiffLine::Added { path, .. } if path == "items.2")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Added { path, .. } if path == "items.2"))
+        );
     }
 
     #[test]
@@ -1118,9 +1114,10 @@ mod tests {
         let old = json!({"items": [1, 2, 3]});
         let new = json!({"items": [1, 2]});
         let diff = diff_values(&old, &new, "");
-        assert!(diff
-            .iter()
-            .any(|d| matches!(d, DiffLine::Removed { path, .. } if path == "items.2")));
+        assert!(
+            diff.iter()
+                .any(|d| matches!(d, DiffLine::Removed { path, .. } if path == "items.2"))
+        );
     }
 
     #[test]
@@ -1155,7 +1152,11 @@ mod tests {
         let entry = sample_ref();
         let plan = build_replay_plan(&entry, &[]);
         assert!(plan.overrides.is_empty());
-        assert!(plan.diff.iter().all(|d| matches!(d, DiffLine::Unchanged { .. })));
+        assert!(
+            plan.diff
+                .iter()
+                .all(|d| matches!(d, DiffLine::Unchanged { .. }))
+        );
         assert_eq!(plan.source.entry_id, "e001");
     }
 
@@ -1202,10 +1203,11 @@ mod tests {
         let entry = sample_ref();
         let ov = parse_override("title=Changed").unwrap();
         let plan = build_replay_plan(&entry, &[ov]);
-        assert!(plan
-            .diff
-            .iter()
-            .any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "title")));
+        assert!(
+            plan.diff
+                .iter()
+                .any(|d| matches!(d, DiffLine::Changed { path, .. } if path == "title"))
+        );
     }
 
     #[test]
@@ -1283,8 +1285,18 @@ mod tests {
     fn compare_same_entry() {
         let entry = sample_ref();
         let result = compare_entries(&entry, &entry);
-        assert!(result.input_diff.iter().all(|d| matches!(d, DiffLine::Unchanged { .. })));
-        assert!(result.output_diff.iter().all(|d| matches!(d, DiffLine::Unchanged { .. })));
+        assert!(
+            result
+                .input_diff
+                .iter()
+                .all(|d| matches!(d, DiffLine::Unchanged { .. }))
+        );
+        assert!(
+            result
+                .output_diff
+                .iter()
+                .all(|d| matches!(d, DiffLine::Unchanged { .. }))
+        );
         assert!(result.metadata_diff.is_empty());
     }
 
@@ -1302,14 +1314,18 @@ mod tests {
         let a = sample_ref();
         let b = sample_ref_b();
         let result = compare_entries(&a, &b);
-        assert!(result
-            .metadata_diff
-            .iter()
-            .any(|(field, _, _)| field == "timestamp"));
-        assert!(result
-            .metadata_diff
-            .iter()
-            .any(|(field, _, _)| field == "entry_id"));
+        assert!(
+            result
+                .metadata_diff
+                .iter()
+                .any(|(field, _, _)| field == "timestamp")
+        );
+        assert!(
+            result
+                .metadata_diff
+                .iter()
+                .any(|(field, _, _)| field == "entry_id")
+        );
     }
 
     #[test]
@@ -1317,14 +1333,18 @@ mod tests {
         let a = sample_ref();
         let b = sample_ref_no_output();
         let result = compare_entries(&a, &b);
-        assert!(result
-            .metadata_diff
-            .iter()
-            .any(|(field, _, _)| field == "connector"));
-        assert!(result
-            .metadata_diff
-            .iter()
-            .any(|(field, _, _)| field == "operation"));
+        assert!(
+            result
+                .metadata_diff
+                .iter()
+                .any(|(field, _, _)| field == "connector")
+        );
+        assert!(
+            result
+                .metadata_diff
+                .iter()
+                .any(|(field, _, _)| field == "operation")
+        );
     }
 
     #[test]
@@ -1345,10 +1365,12 @@ mod tests {
         b.original_input = json!({"x": 1});
         let result = compare_entries(&a, &b);
         // Both outputs are null, so output diff should be all unchanged or empty.
-        assert!(result
-            .output_diff
-            .iter()
-            .all(|d| matches!(d, DiffLine::Unchanged { .. })));
+        assert!(
+            result
+                .output_diff
+                .iter()
+                .all(|d| matches!(d, DiffLine::Unchanged { .. }))
+        );
     }
 
     #[test]
@@ -1795,10 +1817,11 @@ mod tests {
         let ov = parse_override("new_key=value").unwrap();
         let plan = build_replay_plan(&entry, &[ov]);
         assert_eq!(plan.overrides[0].old_value, Value::Null);
-        assert!(plan
-            .diff
-            .iter()
-            .any(|d| matches!(d, DiffLine::Added { path, .. } if path == "new_key")));
+        assert!(
+            plan.diff
+                .iter()
+                .any(|d| matches!(d, DiffLine::Added { path, .. } if path == "new_key"))
+        );
     }
 
     #[test]
@@ -1827,10 +1850,12 @@ mod tests {
         b.entry_id = "e999".to_owned();
         b.operation = "issues.update".to_owned();
         let result = compare_entries(&a, &b);
-        assert!(result
-            .metadata_diff
-            .iter()
-            .any(|(field, _, _)| field == "operation"));
+        assert!(
+            result
+                .metadata_diff
+                .iter()
+                .any(|(field, _, _)| field == "operation")
+        );
     }
 
     #[test]

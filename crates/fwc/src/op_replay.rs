@@ -248,10 +248,7 @@ pub fn build_replay_preview(
     let modified_command = if changes.is_empty() {
         original_command.clone()
     } else {
-        format!(
-            "{connector}/{operation} (+{} overrides)",
-            overrides.len()
-        )
+        format!("{connector}/{operation} (+{} overrides)", overrides.len())
     };
 
     ReplayPreview {
@@ -293,10 +290,13 @@ pub fn validate_replay(preview: &ReplayPreview) -> ReplayValidation {
 
     // Warn about large number of overrides.
     if preview.changes.len() > 10 {
-        validation.add_warning(format!(
-            "{} field changes detected; consider reviewing each change",
-            preview.changes.len()
-        ).as_str());
+        validation.add_warning(
+            format!(
+                "{} field changes detected; consider reviewing each change",
+                preview.changes.len()
+            )
+            .as_str(),
+        );
     }
 
     // Warn if adding new fields.
@@ -394,10 +394,7 @@ pub fn is_replay_safe(connector: &str, operation: &str) -> bool {
 
     // For high-risk connectors, default to unsafe.
     let conn_lower = connector.to_lowercase();
-    if HIGH_RISK_CONNECTORS
-        .iter()
-        .any(|c| conn_lower.contains(c))
-    {
+    if HIGH_RISK_CONNECTORS.iter().any(|c| conn_lower.contains(c)) {
         return false;
     }
 
@@ -505,9 +502,7 @@ fn assess_risk(connector: &str, operation: &str, changes: &[FieldChange]) -> Str
     let conn_lower = connector.to_lowercase();
     let op_lower = operation.to_lowercase();
 
-    let is_high_risk_connector = HIGH_RISK_CONNECTORS
-        .iter()
-        .any(|c| conn_lower.contains(c));
+    let is_high_risk_connector = HIGH_RISK_CONNECTORS.iter().any(|c| conn_lower.contains(c));
 
     if UNSAFE_OPERATIONS.iter().any(|u| op_lower.contains(u)) {
         return "HIGH — destructive operation".to_string();
@@ -548,14 +543,9 @@ const fn value_type_name(v: &Value) -> &'static str {
 
 fn format_change(change: &FieldChange) -> String {
     match change.change_type {
-        ChangeType::Added => {
-            format_value_compact(change.new_value.as_ref())
-        }
+        ChangeType::Added => format_value_compact(change.new_value.as_ref()),
         ChangeType::Removed => {
-            format!(
-                "(was {})",
-                format_value_compact(change.old_value.as_ref())
-            )
+            format!("(was {})", format_value_compact(change.old_value.as_ref()))
         }
         ChangeType::Modified => {
             format!(

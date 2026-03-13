@@ -295,16 +295,12 @@ pub fn check_assertion(value: &Value, assertion: &Assertion) -> bool {
             Value::Null => false,
             _ => true,
         },
-        AssertionCondition::GreaterThan => {
-            as_f64(target)
-                .zip(as_f64(&assertion.expected_value))
-                .is_some_and(|(a, b)| a > b)
-        }
-        AssertionCondition::LessThan => {
-            as_f64(target)
-                .zip(as_f64(&assertion.expected_value))
-                .is_some_and(|(a, b)| a < b)
-        }
+        AssertionCondition::GreaterThan => as_f64(target)
+            .zip(as_f64(&assertion.expected_value))
+            .is_some_and(|(a, b)| a > b),
+        AssertionCondition::LessThan => as_f64(target)
+            .zip(as_f64(&assertion.expected_value))
+            .is_some_and(|(a, b)| a < b),
         AssertionCondition::Matches => {
             // Simple glob-like matching: `*` matches any substring.
             if let (Value::String(text), Value::String(pattern)) =
@@ -412,13 +408,7 @@ pub fn format_playbook_toon(playbook: &Playbook) -> String {
     let _ = writeln!(out);
 
     for (i, step) in playbook.steps.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "  Step {}: {} [{}]",
-            i + 1,
-            step.description,
-            step.id
-        );
+        let _ = writeln!(out, "  Step {}: {} [{}]", i + 1, step.description, step.id);
         let _ = writeln!(out, "    Command:    {}", step.command_template);
         let _ = writeln!(out, "    Timeout:    {}s", step.timeout.as_secs());
         let _ = writeln!(out, "    Assertions: {}", step.assertions.len());
@@ -782,7 +772,8 @@ fn playbook_pipeline_chain() -> Playbook {
 fn playbook_lifecycle_manage() -> Playbook {
     Playbook {
         name: "lifecycle-manage".into(),
-        description: "Full connector lifecycle: enable, start, verify health, stop, and disable.".into(),
+        description: "Full connector lifecycle: enable, start, verify health, stop, and disable."
+            .into(),
         category: PlaybookCategory::Administration,
         complexity: PlaybookComplexity::Moderate,
         tags: vec!["lifecycle".into(), "admin".into(), "health".into()],
@@ -796,42 +787,52 @@ fn playbook_lifecycle_manage() -> Playbook {
                 "enable",
                 "Enable the connector",
                 "fwc lifecycle enable {{connector_id}} --format json",
-                vec![
-                    assert_eq("/status", Value::String("enabled".into()), "Connector should be enabled"),
-                ],
+                vec![assert_eq(
+                    "/status",
+                    Value::String("enabled".into()),
+                    "Connector should be enabled",
+                )],
             ),
             step_with_assert(
                 "start",
                 "Start the connector",
                 "fwc lifecycle start {{connector_id}} --format json",
-                vec![
-                    assert_eq("/status", Value::String("running".into()), "Connector should be running"),
-                ],
+                vec![assert_eq(
+                    "/status",
+                    Value::String("running".into()),
+                    "Connector should be running",
+                )],
             ),
             step_with_assert(
                 "health",
                 "Check connector health",
                 "fwc health check {{connector_id}} --format json",
-                vec![
-                    assert_eq("/healthy", Value::Bool(true), "Connector should be healthy"),
-                ],
+                vec![assert_eq(
+                    "/healthy",
+                    Value::Bool(true),
+                    "Connector should be healthy",
+                )],
             ),
             step_with_cleanup(
                 "stop",
                 "Stop the connector",
                 "fwc lifecycle stop {{connector_id}} --format json",
                 "fwc lifecycle disable {{connector_id}}",
-                vec![
-                    assert_eq("/status", Value::String("stopped".into()), "Connector should be stopped"),
-                ],
+                vec![assert_eq(
+                    "/status",
+                    Value::String("stopped".into()),
+                    "Connector should be stopped",
+                )],
             ),
             step_with_assert(
                 "disable",
                 "Disable the connector",
                 "fwc lifecycle disable {{connector_id}} --format json",
-                vec![
-                    assert_eq("/status", Value::String("disabled".into()), "Connector should be disabled"),
-                ],
+                vec![assert_eq(
+                    "/status",
+                    Value::String("disabled".into()),
+                    "Connector should be disabled",
+                )],
             ),
         ],
     }
@@ -1412,7 +1413,12 @@ mod tests {
     fn builtin_playbooks_all_valid() {
         for pb in get_builtin_playbooks() {
             let issues = validate_playbook(&pb);
-            assert!(issues.is_empty(), "Playbook '{}' has issues: {:?}", pb.name, issues);
+            assert!(
+                issues.is_empty(),
+                "Playbook '{}' has issues: {:?}",
+                pb.name,
+                issues
+            );
         }
     }
 
@@ -1430,7 +1436,12 @@ mod tests {
             let orig = ids.len();
             ids.sort();
             ids.dedup();
-            assert_eq!(orig, ids.len(), "Playbook '{}' has duplicate step IDs", pb.name);
+            assert_eq!(
+                orig,
+                ids.len(),
+                "Playbook '{}' has duplicate step IDs",
+                pb.name
+            );
         }
     }
 
@@ -1438,7 +1449,12 @@ mod tests {
     fn builtin_steps_have_nonzero_timeout() {
         for pb in get_builtin_playbooks() {
             for step in &pb.steps {
-                assert!(!step.timeout.is_zero(), "Step '{}' in '{}' has zero timeout", step.id, pb.name);
+                assert!(
+                    !step.timeout.is_zero(),
+                    "Step '{}' in '{}' has zero timeout",
+                    step.id,
+                    pb.name
+                );
             }
         }
     }
@@ -1447,7 +1463,12 @@ mod tests {
     fn builtin_steps_have_nonempty_commands() {
         for pb in get_builtin_playbooks() {
             for step in &pb.steps {
-                assert!(!step.command_template.is_empty(), "Step '{}' in '{}' has empty command", step.id, pb.name);
+                assert!(
+                    !step.command_template.is_empty(),
+                    "Step '{}' in '{}' has empty command",
+                    step.id,
+                    pb.name
+                );
             }
         }
     }
@@ -1538,7 +1559,11 @@ mod tests {
         let found = reg.find_by_tag("batch");
         assert!(!found.is_empty());
         for pb in &found {
-            assert!(pb.tags.iter().any(|t| t == "batch"), "Playbook '{}' missing batch tag", pb.name);
+            assert!(
+                pb.tags.iter().any(|t| t == "batch"),
+                "Playbook '{}' missing batch tag",
+                pb.name
+            );
         }
     }
 
@@ -2320,7 +2345,10 @@ mod tests {
     #[test]
     fn category_display() {
         assert_eq!(PlaybookCategory::Discovery.to_string(), "discovery");
-        assert_eq!(PlaybookCategory::ErrorRecovery.to_string(), "error-recovery");
+        assert_eq!(
+            PlaybookCategory::ErrorRecovery.to_string(),
+            "error-recovery"
+        );
         assert_eq!(PlaybookCategory::Performance.to_string(), "performance");
     }
 

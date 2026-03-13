@@ -429,9 +429,7 @@ fn resolve_single_ref(
         }
         let step_id = parts[0];
         if parts[1] != "output" {
-            return Err(format!(
-                "step reference must use '.output': {reference}"
-            ));
+            return Err(format!("step reference must use '.output': {reference}"));
         }
 
         let output = step_outputs
@@ -445,9 +443,9 @@ fn resolve_single_ref(
             let field_path = parts[2];
             let mut current = output;
             for field in field_path.split('.') {
-                current = current
-                    .get(field)
-                    .ok_or_else(|| format!("field '{field}' not found in step '{step_id}' output"))?;
+                current = current.get(field).ok_or_else(|| {
+                    format!("field '{field}' not found in step '{step_id}' output")
+                })?;
             }
             Ok(current.clone())
         }
@@ -613,7 +611,11 @@ pub fn format_pipeline_result_toon(result: &PipelineResult) -> String {
     out.push('\n');
 
     out.push('\n');
-    let _ = writeln!(out, "{:<20}{:<12}{:<10}{}", "Step", "Status", "Time", "Details");
+    let _ = writeln!(
+        out,
+        "{:<20}{:<12}{:<10}{}",
+        "Step", "Status", "Time", "Details"
+    );
     out.push_str(&"-".repeat(60));
     out.push('\n');
 
@@ -631,7 +633,11 @@ pub fn format_pipeline_result_toon(result: &PipelineResult) -> String {
         } else {
             String::new()
         };
-        let _ = writeln!(out, "{:<20}{:<12}{:<10}{details}", sr.step_id, status_str, time_str);
+        let _ = writeln!(
+            out,
+            "{:<20}{:<12}{:<10}{details}",
+            sr.step_id, status_str, time_str
+        );
     }
 
     out
@@ -702,7 +708,10 @@ depends_on = ["left", "right"]
     #[test]
     fn parse_with_description_and_version() {
         let def = parse_pipeline_toml(diamond_toml()).unwrap();
-        assert_eq!(def.description.as_deref(), Some("Diamond dependency pattern"));
+        assert_eq!(
+            def.description.as_deref(),
+            Some("Diamond dependency pattern")
+        );
         assert_eq!(def.version.as_deref(), Some("1.0.0"));
     }
 
@@ -859,7 +868,10 @@ depends_on = ["nonexistent"]
 "#;
         let err = parse_pipeline_toml(toml).unwrap_err();
         match err {
-            PipelineError::UnknownDependency { step_id, dependency } => {
+            PipelineError::UnknownDependency {
+                step_id,
+                dependency,
+            } => {
                 assert_eq!(step_id, "s1");
                 assert_eq!(dependency, "nonexistent");
             }
@@ -979,10 +991,11 @@ input = { val = "{{params.x}}" }
         let def = parse_pipeline_toml(toml).unwrap();
         let v = validate_pipeline(&def);
         assert!(v.valid);
-        assert!(v
-            .warnings
-            .iter()
-            .any(|w| w.contains("required") && w.contains("default")));
+        assert!(
+            v.warnings
+                .iter()
+                .any(|w| w.contains("required") && w.contains("default"))
+        );
     }
 
     #[test]
@@ -1098,8 +1111,7 @@ input = { val = "{{params.nonexistent}}" }
     fn resolve_param_template() {
         let mut params = HashMap::new();
         params.insert("repo".to_owned(), json!("my-repo"));
-        let result =
-            resolve_template("{{params.repo}}", &params, &HashMap::new()).unwrap();
+        let result = resolve_template("{{params.repo}}", &params, &HashMap::new()).unwrap();
         assert_eq!(result, json!("my-repo"));
     }
 
@@ -1108,8 +1120,7 @@ input = { val = "{{params.nonexistent}}" }
         let mut outputs = HashMap::new();
         outputs.insert("s1".to_owned(), json!({"count": 42, "items": [1,2,3]}));
         let result =
-            resolve_template("{{steps.s1.output.count}}", &HashMap::new(), &outputs)
-                .unwrap();
+            resolve_template("{{steps.s1.output.count}}", &HashMap::new(), &outputs).unwrap();
         assert_eq!(result, json!(42));
     }
 
@@ -1117,8 +1128,7 @@ input = { val = "{{params.nonexistent}}" }
     fn resolve_step_output_whole() {
         let mut outputs = HashMap::new();
         outputs.insert("s1".to_owned(), json!({"data": "value"}));
-        let result =
-            resolve_template("{{steps.s1.output}}", &HashMap::new(), &outputs).unwrap();
+        let result = resolve_template("{{steps.s1.output}}", &HashMap::new(), &outputs).unwrap();
         assert_eq!(result, json!({"data": "value"}));
     }
 
@@ -1127,38 +1137,33 @@ input = { val = "{{params.nonexistent}}" }
         let mut outputs = HashMap::new();
         outputs.insert("s1".to_owned(), json!({"response": {"id": 123}}));
         let result =
-            resolve_template("{{steps.s1.output.response.id}}", &HashMap::new(), &outputs)
-                .unwrap();
+            resolve_template("{{steps.s1.output.response.id}}", &HashMap::new(), &outputs).unwrap();
         assert_eq!(result, json!(123));
     }
 
     #[test]
     fn resolve_missing_param_error() {
-        let result =
-            resolve_template("{{params.missing}}", &HashMap::new(), &HashMap::new());
+        let result = resolve_template("{{params.missing}}", &HashMap::new(), &HashMap::new());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
 
     #[test]
     fn resolve_missing_step_output_error() {
-        let result =
-            resolve_template("{{steps.missing.output}}", &HashMap::new(), &HashMap::new());
+        let result = resolve_template("{{steps.missing.output}}", &HashMap::new(), &HashMap::new());
         assert!(result.is_err());
     }
 
     #[test]
     fn resolve_invalid_reference_error() {
-        let result =
-            resolve_template("{{unknown.ref}}", &HashMap::new(), &HashMap::new());
+        let result = resolve_template("{{unknown.ref}}", &HashMap::new(), &HashMap::new());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown template reference"));
     }
 
     #[test]
     fn resolve_no_templates() {
-        let result =
-            resolve_template("plain text", &HashMap::new(), &HashMap::new()).unwrap();
+        let result = resolve_template("plain text", &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(result, json!("plain text"));
     }
 
@@ -1168,8 +1173,7 @@ input = { val = "{{params.nonexistent}}" }
         params.insert("owner".to_owned(), json!("org"));
         params.insert("repo".to_owned(), json!("project"));
         let result =
-            resolve_template("{{params.owner}}/{{params.repo}}", &params, &HashMap::new())
-                .unwrap();
+            resolve_template("{{params.owner}}/{{params.repo}}", &params, &HashMap::new()).unwrap();
         assert_eq!(result, json!("org/project"));
     }
 
@@ -1177,8 +1181,7 @@ input = { val = "{{params.nonexistent}}" }
     fn resolve_param_bool() {
         let mut params = HashMap::new();
         params.insert("flag".to_owned(), json!(true));
-        let result =
-            resolve_template("{{params.flag}}", &params, &HashMap::new()).unwrap();
+        let result = resolve_template("{{params.flag}}", &params, &HashMap::new()).unwrap();
         assert_eq!(result, json!(true));
     }
 
@@ -1186,8 +1189,7 @@ input = { val = "{{params.nonexistent}}" }
     fn resolve_param_number() {
         let mut params = HashMap::new();
         params.insert("count".to_owned(), json!(99));
-        let result =
-            resolve_template("{{params.count}}", &params, &HashMap::new()).unwrap();
+        let result = resolve_template("{{params.count}}", &params, &HashMap::new()).unwrap();
         assert_eq!(result, json!(99));
     }
 
@@ -1195,8 +1197,7 @@ input = { val = "{{params.nonexistent}}" }
     fn resolve_step_output_missing_field_error() {
         let mut outputs = HashMap::new();
         outputs.insert("s1".to_owned(), json!({"a": 1}));
-        let result =
-            resolve_template("{{steps.s1.output.nonexistent}}", &HashMap::new(), &outputs);
+        let result = resolve_template("{{steps.s1.output.nonexistent}}", &HashMap::new(), &outputs);
         assert!(result.is_err());
     }
 
@@ -1265,7 +1266,9 @@ operation = "g.o"
     fn plan_long_chain_10_steps() {
         let mut steps_toml = String::new();
         for i in 0..10 {
-            steps_toml.push_str(&format!("\n[[steps]]\nid = \"s{i}\"\noperation = \"g.o\"\n"));
+            steps_toml.push_str(&format!(
+                "\n[[steps]]\nid = \"s{i}\"\noperation = \"g.o\"\n"
+            ));
             if i > 0 {
                 steps_toml.push_str(&format!("depends_on = [\"s{}\"]\n", i - 1));
             }
@@ -1454,10 +1457,7 @@ operation = "g.o"
             serde_json::to_string(&ParamType::Number).unwrap(),
             "\"number\""
         );
-        assert_eq!(
-            serde_json::to_string(&ParamType::Bool).unwrap(),
-            "\"bool\""
-        );
+        assert_eq!(serde_json::to_string(&ParamType::Bool).unwrap(), "\"bool\"");
     }
 
     // ── TOON formatting ─────────────────────────────────────────

@@ -4598,6 +4598,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "clap",
+ "criterion",
  "fcp-async-core",
  "fcp-cbor",
  "fcp-core",

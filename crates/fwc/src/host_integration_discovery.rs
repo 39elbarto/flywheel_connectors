@@ -258,7 +258,10 @@ impl LifecycleTestCase {
 
     /// Whether this action is destructive.
     pub fn is_destructive(&self) -> bool {
-        matches!(self.action, LifecycleAction::Disable | LifecycleAction::Stop)
+        matches!(
+            self.action,
+            LifecycleAction::Disable | LifecycleAction::Stop
+        )
     }
 }
 
@@ -333,7 +336,12 @@ pub struct CategoryResult {
 impl CategoryResult {
     /// Create a new category result.
     pub fn new(total: usize, passed: usize, failed: usize, skipped: usize) -> Self {
-        Self { total, passed, failed, skipped }
+        Self {
+            total,
+            passed,
+            failed,
+            skipped,
+        }
     }
 
     /// Pass rate as a fraction (0.0–1.0).
@@ -353,7 +361,13 @@ impl MatrixResult {
         let passed = by_category.values().map(|c| c.passed).sum();
         let failed = by_category.values().map(|c| c.failed).sum();
         let skipped = by_category.values().map(|c| c.skipped).sum();
-        Self { total, passed, failed, skipped, by_category }
+        Self {
+            total,
+            passed,
+            failed,
+            skipped,
+            by_category,
+        }
     }
 
     /// Overall pass rate as a fraction (0.0–1.0).
@@ -848,7 +862,11 @@ pub fn format_matrix_toon(matrix: &IntegrationMatrix) -> String {
     let _ = writeln!(out, "=== Host Integration Test Matrix ===");
     let _ = writeln!(out);
 
-    let _ = writeln!(out, "--- Discovery ({} cases) ---", matrix.discovery_cases.len());
+    let _ = writeln!(
+        out,
+        "--- Discovery ({} cases) ---",
+        matrix.discovery_cases.len()
+    );
     for (i, case) in matrix.discovery_cases.iter().enumerate() {
         let _ = writeln!(
             out,
@@ -876,7 +894,11 @@ pub fn format_matrix_toon(matrix: &IntegrationMatrix) -> String {
     }
     let _ = writeln!(out);
 
-    let _ = writeln!(out, "--- Lifecycle ({} cases) ---", matrix.lifecycle_cases.len());
+    let _ = writeln!(
+        out,
+        "--- Lifecycle ({} cases) ---",
+        matrix.lifecycle_cases.len()
+    );
     for (i, case) in matrix.lifecycle_cases.iter().enumerate() {
         let _ = writeln!(
             out,
@@ -977,13 +999,7 @@ mod tests {
 
     #[test]
     fn discovery_test_case_new() {
-        let tc = DiscoveryTestCase::new(
-            "test",
-            DiscoveryType::All,
-            5,
-            vec!["id".into()],
-            3000,
-        );
+        let tc = DiscoveryTestCase::new("test", DiscoveryType::All, 5, vec!["id".into()], 3000);
         assert_eq!(tc.name, "test");
         assert_eq!(tc.expected_count, 5);
         assert_eq!(tc.timeout_ms, 3000);
@@ -1012,7 +1028,13 @@ mod tests {
 
     #[test]
     fn discovery_test_case_clone() {
-        let tc = DiscoveryTestCase::new("clone_me", DiscoveryType::ByArchetype, 2, vec!["x".into()], 500);
+        let tc = DiscoveryTestCase::new(
+            "clone_me",
+            DiscoveryType::ByArchetype,
+            2,
+            vec!["x".into()],
+            500,
+        );
         let cloned = tc.clone();
         assert_eq!(cloned.name, "clone_me");
     }
@@ -1130,37 +1152,79 @@ mod tests {
 
     #[test]
     fn config_test_case_is_mutating_set() {
-        let tc = ConfigTestCase::new("m", ConfigOperation::Set, "c", "k", None, ConfigOutcome::Success);
+        let tc = ConfigTestCase::new(
+            "m",
+            ConfigOperation::Set,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         assert!(tc.is_mutating());
     }
 
     #[test]
     fn config_test_case_is_mutating_reset() {
-        let tc = ConfigTestCase::new("m", ConfigOperation::Reset, "c", "k", None, ConfigOutcome::Success);
+        let tc = ConfigTestCase::new(
+            "m",
+            ConfigOperation::Reset,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         assert!(tc.is_mutating());
     }
 
     #[test]
     fn config_test_case_is_mutating_import() {
-        let tc = ConfigTestCase::new("m", ConfigOperation::Import, "c", "k", None, ConfigOutcome::Success);
+        let tc = ConfigTestCase::new(
+            "m",
+            ConfigOperation::Import,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         assert!(tc.is_mutating());
     }
 
     #[test]
     fn config_test_case_not_mutating_get() {
-        let tc = ConfigTestCase::new("m", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Success);
+        let tc = ConfigTestCase::new(
+            "m",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         assert!(!tc.is_mutating());
     }
 
     #[test]
     fn config_test_case_not_mutating_export() {
-        let tc = ConfigTestCase::new("m", ConfigOperation::Export, "c", "k", None, ConfigOutcome::Success);
+        let tc = ConfigTestCase::new(
+            "m",
+            ConfigOperation::Export,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         assert!(!tc.is_mutating());
     }
 
     #[test]
     fn config_test_case_not_mutating_diff() {
-        let tc = ConfigTestCase::new("m", ConfigOperation::Diff, "c", "k", None, ConfigOutcome::Success);
+        let tc = ConfigTestCase::new(
+            "m",
+            ConfigOperation::Diff,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         assert!(!tc.is_mutating());
     }
 
@@ -1182,7 +1246,14 @@ mod tests {
 
     #[test]
     fn config_test_case_clone() {
-        let tc = ConfigTestCase::new("cl", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Error);
+        let tc = ConfigTestCase::new(
+            "cl",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Error,
+        );
         let cloned = tc.clone();
         assert_eq!(cloned.name, "cl");
     }
@@ -1290,49 +1361,105 @@ mod tests {
 
     #[test]
     fn lifecycle_test_case_expects_success() {
-        let tc = LifecycleTestCase::new("ok", "c", LifecycleAction::Start, None, ExpectedState::Running, 0);
+        let tc = LifecycleTestCase::new(
+            "ok",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         assert!(tc.expects_success());
     }
 
     #[test]
     fn lifecycle_test_case_expects_failure() {
-        let tc = LifecycleTestCase::new("fail", "c", LifecycleAction::Start, None, ExpectedState::Unknown, 1);
+        let tc = LifecycleTestCase::new(
+            "fail",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Unknown,
+            1,
+        );
         assert!(!tc.expects_success());
     }
 
     #[test]
     fn lifecycle_test_case_is_destructive_disable() {
-        let tc = LifecycleTestCase::new("d", "c", LifecycleAction::Disable, None, ExpectedState::Disabled, 0);
+        let tc = LifecycleTestCase::new(
+            "d",
+            "c",
+            LifecycleAction::Disable,
+            None,
+            ExpectedState::Disabled,
+            0,
+        );
         assert!(tc.is_destructive());
     }
 
     #[test]
     fn lifecycle_test_case_is_destructive_stop() {
-        let tc = LifecycleTestCase::new("d", "c", LifecycleAction::Stop, None, ExpectedState::Stopped, 0);
+        let tc = LifecycleTestCase::new(
+            "d",
+            "c",
+            LifecycleAction::Stop,
+            None,
+            ExpectedState::Stopped,
+            0,
+        );
         assert!(tc.is_destructive());
     }
 
     #[test]
     fn lifecycle_test_case_not_destructive_enable() {
-        let tc = LifecycleTestCase::new("d", "c", LifecycleAction::Enable, None, ExpectedState::Enabled, 0);
+        let tc = LifecycleTestCase::new(
+            "d",
+            "c",
+            LifecycleAction::Enable,
+            None,
+            ExpectedState::Enabled,
+            0,
+        );
         assert!(!tc.is_destructive());
     }
 
     #[test]
     fn lifecycle_test_case_not_destructive_start() {
-        let tc = LifecycleTestCase::new("d", "c", LifecycleAction::Start, None, ExpectedState::Running, 0);
+        let tc = LifecycleTestCase::new(
+            "d",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         assert!(!tc.is_destructive());
     }
 
     #[test]
     fn lifecycle_test_case_not_destructive_restart() {
-        let tc = LifecycleTestCase::new("d", "c", LifecycleAction::Restart, None, ExpectedState::Running, 0);
+        let tc = LifecycleTestCase::new(
+            "d",
+            "c",
+            LifecycleAction::Restart,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         assert!(!tc.is_destructive());
     }
 
     #[test]
     fn lifecycle_test_case_serde_roundtrip() {
-        let tc = LifecycleTestCase::new("r", "gh", LifecycleAction::Enable, None, ExpectedState::Enabled, 0);
+        let tc = LifecycleTestCase::new(
+            "r",
+            "gh",
+            LifecycleAction::Enable,
+            None,
+            ExpectedState::Enabled,
+            0,
+        );
         let json_str = serde_json::to_string(&tc).unwrap();
         let back: LifecycleTestCase = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.name, "r");
@@ -1341,7 +1468,14 @@ mod tests {
 
     #[test]
     fn lifecycle_test_case_clone() {
-        let tc = LifecycleTestCase::new("cl", "c", LifecycleAction::Stop, None, ExpectedState::Stopped, 0);
+        let tc = LifecycleTestCase::new(
+            "cl",
+            "c",
+            LifecycleAction::Stop,
+            None,
+            ExpectedState::Stopped,
+            0,
+        );
         let cloned = tc.clone();
         assert_eq!(cloned.name, "cl");
     }
@@ -1361,7 +1495,14 @@ mod tests {
 
     #[test]
     fn lifecycle_test_case_without_precondition() {
-        let tc = LifecycleTestCase::new("nopre", "c", LifecycleAction::Enable, None, ExpectedState::Enabled, 0);
+        let tc = LifecycleTestCase::new(
+            "nopre",
+            "c",
+            LifecycleAction::Enable,
+            None,
+            ExpectedState::Enabled,
+            0,
+        );
         assert!(tc.precondition.is_none());
     }
 
@@ -1568,7 +1709,12 @@ mod tests {
         let cases = build_config_matrix();
         let error_cases: Vec<_> = cases
             .iter()
-            .filter(|c| matches!(c.expected_outcome, ConfigOutcome::Error | ConfigOutcome::ValidationError))
+            .filter(|c| {
+                matches!(
+                    c.expected_outcome,
+                    ConfigOutcome::Error | ConfigOutcome::ValidationError
+                )
+            })
             .collect();
         assert!(!error_cases.is_empty());
     }
@@ -1669,98 +1815,196 @@ mod tests {
 
     #[test]
     fn validate_config_result_success() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Success);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         let output = json!({"status": "success"});
         assert!(validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_success_ok() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Success);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         let output = json!({"status": "ok"});
         assert!(validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_error() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Error);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Error,
+        );
         let output = json!({"status": "error"});
         assert!(validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_no_change() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Set, "c", "k", None, ConfigOutcome::NoChange);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Set,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::NoChange,
+        );
         let output = json!({"status": "no_change"});
         assert!(validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_no_change_unchanged() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Set, "c", "k", None, ConfigOutcome::NoChange);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Set,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::NoChange,
+        );
         let output = json!({"status": "unchanged"});
         assert!(validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_validation_error() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Set, "c", "k", None, ConfigOutcome::ValidationError);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Set,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::ValidationError,
+        );
         let output = json!({"status": "validation_error"});
         assert!(validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_unauthorized() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Unauthorized);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Unauthorized,
+        );
         let output = json!({"status": "unauthorized"});
         assert!(validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_mismatch() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Success);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         let output = json!({"status": "error"});
         assert!(!validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_config_result_missing_status() {
-        let case = ConfigTestCase::new("t", ConfigOperation::Get, "c", "k", None, ConfigOutcome::Success);
+        let case = ConfigTestCase::new(
+            "t",
+            ConfigOperation::Get,
+            "c",
+            "k",
+            None,
+            ConfigOutcome::Success,
+        );
         let output = json!({"result": "done"});
         assert!(!validate_config_result(&case, &output));
     }
 
     #[test]
     fn validate_lifecycle_result_match() {
-        let case = LifecycleTestCase::new("t", "c", LifecycleAction::Start, None, ExpectedState::Running, 0);
+        let case = LifecycleTestCase::new(
+            "t",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         let output = json!({"state": "running", "exit_code": 0});
         assert!(validate_lifecycle_result(&case, &output));
     }
 
     #[test]
     fn validate_lifecycle_result_wrong_state() {
-        let case = LifecycleTestCase::new("t", "c", LifecycleAction::Start, None, ExpectedState::Running, 0);
+        let case = LifecycleTestCase::new(
+            "t",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         let output = json!({"state": "stopped", "exit_code": 0});
         assert!(!validate_lifecycle_result(&case, &output));
     }
 
     #[test]
     fn validate_lifecycle_result_wrong_exit_code() {
-        let case = LifecycleTestCase::new("t", "c", LifecycleAction::Start, None, ExpectedState::Running, 0);
+        let case = LifecycleTestCase::new(
+            "t",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         let output = json!({"state": "running", "exit_code": 1});
         assert!(!validate_lifecycle_result(&case, &output));
     }
 
     #[test]
     fn validate_lifecycle_result_missing_state() {
-        let case = LifecycleTestCase::new("t", "c", LifecycleAction::Start, None, ExpectedState::Running, 0);
+        let case = LifecycleTestCase::new(
+            "t",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         let output = json!({"exit_code": 0});
         assert!(!validate_lifecycle_result(&case, &output));
     }
 
     #[test]
     fn validate_lifecycle_result_missing_exit_code() {
-        let case = LifecycleTestCase::new("t", "c", LifecycleAction::Start, None, ExpectedState::Running, 0);
+        let case = LifecycleTestCase::new(
+            "t",
+            "c",
+            LifecycleAction::Start,
+            None,
+            ExpectedState::Running,
+            0,
+        );
         let output = json!({"state": "running"});
         assert!(!validate_lifecycle_result(&case, &output));
     }
@@ -1858,7 +2102,11 @@ mod tests {
     #[test]
     fn discovery_matrix_has_by_connector_case() {
         let cases = build_discovery_matrix();
-        assert!(cases.iter().any(|c| c.discovery_type == DiscoveryType::ByConnector));
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.discovery_type == DiscoveryType::ByConnector)
+        );
     }
 
     #[test]

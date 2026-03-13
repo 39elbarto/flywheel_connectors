@@ -16,21 +16,37 @@ mod tests {
 
     /// Patterns that should be redacted from output.
     const REDACTION_PATTERNS: &[&str] = &[
-        "sk-", "sk_live_", "sk_test_",        // Stripe/OpenAI
-        "ghp_", "gho_", "ghs_",               // GitHub tokens
-        "xoxb-", "xoxp-", "xapp-",            // Slack tokens
-        "AKIA",                                 // AWS access key prefix
-        "Bearer ",                              // Auth headers
-        "Basic ",                               // Basic auth headers
-        "token=", "api_key=", "apikey=",       // Query param keys
-        "password=", "secret=", "credential=", // Credential params
+        "sk-",
+        "sk_live_",
+        "sk_test_", // Stripe/OpenAI
+        "ghp_",
+        "gho_",
+        "ghs_", // GitHub tokens
+        "xoxb-",
+        "xoxp-",
+        "xapp-",   // Slack tokens
+        "AKIA",    // AWS access key prefix
+        "Bearer ", // Auth headers
+        "Basic ",  // Basic auth headers
+        "token=",
+        "api_key=",
+        "apikey=", // Query param keys
+        "password=",
+        "secret=",
+        "credential=", // Credential params
     ];
 
     /// Known safe patterns that should NOT be redacted.
     const SAFE_PATTERNS: &[&str] = &[
-        "connector_id", "operation_id", "request_id",
-        "created_at", "updated_at", "schema_version",
-        "github", "slack", "jira",
+        "connector_id",
+        "operation_id",
+        "request_id",
+        "created_at",
+        "updated_at",
+        "schema_version",
+        "github",
+        "slack",
+        "jira",
     ];
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +158,9 @@ mod tests {
                 let start = pos;
                 let after_pattern = pos + pattern.len();
                 let end = result[after_pattern..]
-                    .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}')
+                    .find(|c: char| {
+                        c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}'
+                    })
                     .map_or(result.len(), |e| after_pattern + e);
                 let redacted_len = end - start;
                 result.replace_range(start..end, &format!("[REDACTED:{redacted_len}]"));
@@ -208,7 +226,10 @@ mod tests {
         fn redacts_stripe_secret_key() {
             let input = r#"{"api_key": "sk-live_abc123def456"}"#;
             let output = redact_secrets(input);
-            assert!(!output.contains("abc123def456"), "Stripe key should be redacted: {output}");
+            assert!(
+                !output.contains("abc123def456"),
+                "Stripe key should be redacted: {output}"
+            );
             assert!(output.contains("[REDACTED:"));
         }
 
@@ -272,7 +293,10 @@ mod tests {
         #[test]
         fn safe_patterns_are_safe() {
             for pattern in SAFE_PATTERNS {
-                assert!(is_safe_content(pattern), "Pattern '{pattern}' should be safe");
+                assert!(
+                    is_safe_content(pattern),
+                    "Pattern '{pattern}' should be safe"
+                );
             }
         }
 
@@ -385,7 +409,11 @@ mod tests {
         fn line_width_enforcement_long() {
             let line = "x".repeat(200);
             let result = enforce_line_width(&line, 120);
-            assert!(result.len() <= 120, "Truncated line should be <= 120 chars: len={}", result.len());
+            assert!(
+                result.len() <= 120,
+                "Truncated line should be <= 120 chars: len={}",
+                result.len()
+            );
             assert!(result.ends_with("..."));
         }
 
@@ -462,7 +490,10 @@ mod tests {
         #[test]
         fn all_codes_have_descriptions() {
             for code in ExitCode::all() {
-                assert!(!code.description().is_empty(), "{code:?} has empty description");
+                assert!(
+                    !code.description().is_empty(),
+                    "{code:?} has empty description"
+                );
             }
         }
 
@@ -588,7 +619,8 @@ mod tests {
 
         #[test]
         fn error_envelope_with_details() {
-            let mut env = build_error_envelope("FCP_ERR_SCHEMA_VIOLATION", "validation", "msg", 5, false);
+            let mut env =
+                build_error_envelope("FCP_ERR_SCHEMA_VIOLATION", "validation", "msg", 5, false);
             env.details = Some(serde_json::json!({"path": "$.name", "expected": "string"}));
             let json = serde_json::to_value(&env).unwrap();
             assert!(json.get("details").is_some());
@@ -597,7 +629,8 @@ mod tests {
 
         #[test]
         fn error_envelope_roundtrips() {
-            let env = build_error_envelope("FCP_ERR_TRANSPORT_FAILED", "transport", "timeout", 8, true);
+            let env =
+                build_error_envelope("FCP_ERR_TRANSPORT_FAILED", "transport", "timeout", 8, true);
             let json = serde_json::to_string(&env).unwrap();
             let parsed: ErrorEnvelope = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.code, env.code);
@@ -625,7 +658,13 @@ mod tests {
 
         #[test]
         fn validation_error_exit_code_5() {
-            let env = build_error_envelope("FCP_ERR_VALIDATION_FAILED", "validation", "Invalid input", 5, false);
+            let env = build_error_envelope(
+                "FCP_ERR_VALIDATION_FAILED",
+                "validation",
+                "Invalid input",
+                5,
+                false,
+            );
             assert_eq!(env.exit_code, 5);
         }
 
@@ -637,7 +676,13 @@ mod tests {
 
         #[test]
         fn rate_limit_is_retryable() {
-            let env = build_error_envelope("FCP_ERR_RATE_LIMITED", "rate_limit", "Too many requests", 7, true);
+            let env = build_error_envelope(
+                "FCP_ERR_RATE_LIMITED",
+                "rate_limit",
+                "Too many requests",
+                7,
+                true,
+            );
             assert!(env.retryable);
         }
 
@@ -655,7 +700,16 @@ mod tests {
 
         #[test]
         fn category_is_lowercase() {
-            let categories = ["parse", "validation", "auth", "rate_limit", "policy", "connector", "transport", "internal"];
+            let categories = [
+                "parse",
+                "validation",
+                "auth",
+                "rate_limit",
+                "policy",
+                "connector",
+                "transport",
+                "internal",
+            ];
             for cat in categories {
                 assert_eq!(cat, cat.to_lowercase(), "Category '{cat}' not lowercase");
             }
@@ -803,7 +857,9 @@ mod tests {
         #[test]
         fn error_envelope_serialization_stable() {
             let env = build_error_envelope("FCP_ERR_RATE_LIMITED", "rate_limit", "retry", 7, true);
-            let results: Vec<String> = (0..5).map(|_| serde_json::to_string(&env).unwrap()).collect();
+            let results: Vec<String> = (0..5)
+                .map(|_| serde_json::to_string(&env).unwrap())
+                .collect();
             for r in &results {
                 assert_eq!(r, &results[0]);
             }

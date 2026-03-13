@@ -501,6 +501,79 @@ impl TruthContext {
     }
 }
 
+/// Reusable fixture metadata that can be projected into truth-context markers.
+///
+/// Host-backed integration matrices use this profile to keep trace evidence
+/// aligned with the same fixture vocabulary across integration and E2E layers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostIntegrationTruthProfile {
+    pub fixture_id: String,
+    pub archetype: String,
+    pub coverage_mode: String,
+    pub risk_level: String,
+    pub readiness: CommandAvailability,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance_markers: Vec<String>,
+}
+
+impl HostIntegrationTruthProfile {
+    /// Create a truth profile for a named host-integration fixture.
+    #[must_use]
+    pub fn new(
+        fixture_id: impl Into<String>,
+        archetype: impl Into<String>,
+        coverage_mode: impl Into<String>,
+        risk_level: impl Into<String>,
+        readiness: CommandAvailability,
+    ) -> Self {
+        Self {
+            fixture_id: fixture_id.into(),
+            archetype: archetype.into(),
+            coverage_mode: coverage_mode.into(),
+            risk_level: risk_level.into(),
+            readiness,
+            provenance_markers: Vec::new(),
+        }
+    }
+
+    /// Add a provenance marker inherited from the fixture catalog.
+    #[must_use]
+    pub fn with_provenance_marker(mut self, marker: impl Into<String>) -> Self {
+        self.provenance_markers.push(marker.into());
+        self
+    }
+
+    fn fixture_markers(&self) -> [String; 4] {
+        [
+            format!("fixture:{}", self.fixture_id),
+            format!("archetype:{}", self.archetype),
+            format!("coverage-mode:{}", self.coverage_mode),
+            format!("risk-level:{}", self.risk_level),
+        ]
+    }
+
+    /// Build a new truth context seeded from this profile.
+    #[must_use]
+    pub fn truth_context(&self) -> TruthContext {
+        self.apply_to_truth_context(TruthContext::new(self.readiness))
+    }
+
+    /// Enrich an existing truth context with fixture-derived markers.
+    #[must_use]
+    pub fn apply_to_truth_context(&self, mut truth: TruthContext) -> TruthContext {
+        if truth.command_availability.is_none() {
+            truth.command_availability = Some(self.readiness);
+        }
+        for marker in self.fixture_markers() {
+            truth = truth.with_provenance_marker(marker);
+        }
+        for marker in &self.provenance_markers {
+            truth = truth.with_provenance_marker(marker.clone());
+        }
+        truth
+    }
+}
+
 /// A single structured log entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceEntry {
@@ -3309,6 +3382,106 @@ mod tests {
         assert!(!json.contains("command_availability"));
         assert!(!json.contains("phase"));
         assert!(!json.contains("host_request_id"));
+    }
+
+    #[test]
+    fn host_integration_truth_profile_builds_truth_context_markers() {
+        let profile = HostIntegrationTruthProfile::new(
+            "github_issue_workflow",
+            "request_response",
+            "mock_host",
+            "medium",
+            CommandAvailability::LiveRuntime,
+        )
+        .with_provenance_marker("live-host-discovery")
+        .with_provenance_marker("mock-host-sequence");
+
+        let truth = profile.truth_context();
+        assert_eq!(
+            truth.command_availability,
+            Some(CommandAvailability::LiveRuntime)
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"fixture:github_issue_workflow".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"archetype:request_response".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"coverage-mode:mock_host".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"risk-level:medium".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"live-host-discovery".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"mock-host-sequence".to_string())
+        );
+    }
+
+    #[test]
+    fn host_integration_truth_profile_respects_existing_availability() {
+        let profile = HostIntegrationTruthProfile::new(
+            "fixture-1",
+            "streaming",
+            "real_host",
+            "high",
+            CommandAvailability::OfflineArtifact,
+        )
+        .with_provenance_marker("artifact-bundle");
+
+        let truth = profile.apply_to_truth_context(
+            TruthContext::new(CommandAvailability::LiveRuntime)
+                .with_provenance_marker("existing-marker"),
+        );
+        assert_eq!(
+            truth.command_availability,
+            Some(CommandAvailability::LiveRuntime)
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"existing-marker".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"fixture:fixture-1".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"archetype:streaming".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"coverage-mode:real_host".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"risk-level:high".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"artifact-bundle".to_string())
+        );
     }
 
     #[test]

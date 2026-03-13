@@ -508,8 +508,8 @@ impl ConnectorRegistry for SubprocessRegistry {
 
     async fn get_archetype(&self, id: &ConnectorId) -> Option<ConnectorArchetype> {
         let state = self.state.read().await;
-        state.connectors.get(id)?;
-        Some(ConnectorArchetype::RequestResponse)
+        let entry = state.connectors.get(id)?;
+        Some(configured_subprocess_archetype(&entry.config))
     }
 
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_core::RateLimitDeclarations> {
@@ -531,6 +531,22 @@ impl ConnectorRegistry for SubprocessRegistry {
 
     fn version(&self) -> u64 {
         self.version.load(Ordering::SeqCst)
+    }
+}
+
+fn configured_subprocess_archetype(config: &ConnectorConfig) -> ConnectorArchetype {
+    match config
+        .env
+        .get("FCP_TEST_CONNECTOR_ARCHETYPE")
+        .map(String::as_str)
+    {
+        Some("streaming") => ConnectorArchetype::Streaming,
+        Some("bidirectional") => ConnectorArchetype::Bidirectional,
+        Some("polling") => ConnectorArchetype::Polling,
+        Some("webhook") => ConnectorArchetype::Webhook,
+        Some("unknown") => ConnectorArchetype::Unknown,
+        Some("request_response") | None => ConnectorArchetype::RequestResponse,
+        Some(_) => ConnectorArchetype::Unknown,
     }
 }
 
@@ -685,7 +701,11 @@ async fn serve_tcp(
                 Err(err) => handle_accept_error(err).await,
             },
             futures_util::future::Either::Right(_) => {
-                tracing::info!(event = "shutdown_signal", transport = "tcp", "stopping accept loop");
+                tracing::info!(
+                    event = "shutdown_signal",
+                    transport = "tcp",
+                    "stopping accept loop"
+                );
                 break;
             }
         }
@@ -713,7 +733,11 @@ async fn serve_unix(
                 Err(err) => handle_accept_error(err).await,
             },
             futures_util::future::Either::Right(_) => {
-                tracing::info!(event = "shutdown_signal", transport = "unix", "stopping accept loop");
+                tracing::info!(
+                    event = "shutdown_signal",
+                    transport = "unix",
+                    "stopping accept loop"
+                );
                 break;
             }
         }
@@ -2063,13 +2087,16 @@ async fn signal_handler_loop(
     use futures_util::StreamExt;
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
-    let mut signals =
-        signal_hook_tokio::Signals::new([SIGHUP, SIGTERM, SIGINT]).expect("register signal handlers");
+    let mut signals = signal_hook_tokio::Signals::new([SIGHUP, SIGTERM, SIGINT])
+        .expect("register signal handlers");
 
     while let Some(sig) = signals.next().await {
         match sig {
             SIGHUP => {
-                tracing::info!(event = "sighup_received", "reloading connector configuration");
+                tracing::info!(
+                    event = "sighup_received",
+                    "reloading connector configuration"
+                );
                 match reload_connectors(&state).await {
                     Ok(count) => {
                         tracing::info!(
@@ -2111,8 +2138,7 @@ async fn signal_handler_loop(
     use futures_util::StreamExt;
     use signal_hook::consts::SIGINT;
 
-    let mut signals =
-        signal_hook_tokio::Signals::new([SIGINT]).expect("register signal handlers");
+    let mut signals = signal_hook_tokio::Signals::new([SIGINT]).expect("register signal handlers");
     if let Some(_sig) = signals.next().await {
         tracing::info!(event = "ctrl_c_received", "initiating graceful shutdown");
         let _ = shutdown_tx.send(true);

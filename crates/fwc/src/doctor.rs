@@ -5,6 +5,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::fmt::Write as _;
 
 // ── Diagnosis types ────────────────────────────────────────────────
 
@@ -538,6 +539,111 @@ fn diagnose_rate_limit(connector_id: &str, percent: u8) -> Option<Diagnosis> {
     } else {
         None
     }
+}
+
+// ── TOON formatting ───────────────────────────────────────────────
+
+/// Format a single diagnostic report as TOON text.
+pub fn format_report_toon(report: &DiagnosticReport) -> String {
+    let mut out = String::new();
+    let indicator = match report.status {
+        HealthStatus::Healthy => "[OK]",
+        HealthStatus::Degraded => "[WARN]",
+        HealthStatus::Unhealthy => "[ERR]",
+        HealthStatus::Unknown => "[???]",
+    };
+    let _ = writeln!(out, "{indicator}  {}", report.connector_id);
+    if report.diagnoses.is_empty() {
+        out.push_str("  No issues detected.\n");
+        return out;
+    }
+    for diag in &report.diagnoses {
+        let _ = writeln!(
+            out,
+            "  [{sev}] {cat}: {msg}",
+            sev = diag.severity.label(),
+            cat = diag.category.display_name(),
+            msg = diag.message,
+        );
+        for fix in &diag.fixes {
+            let safe_tag = if fix.auto_safe { " [auto-safe]" } else { "" };
+            if let Some(cmd) = &fix.command {
+                let _ = writeln!(out, "    -> {}: `{cmd}`{safe_tag}", fix.description);
+            } else {
+                let _ = writeln!(out, "    -> {}{safe_tag}", fix.description);
+            }
+            if let Some(url) = &fix.reference_url {
+                let _ = writeln!(out, "       ref: {url}");
+            }
+        }
+    }
+    out
+}
+
+/// Format multiple diagnostic reports as a fleet summary in TOON.
+pub fn format_fleet_toon(reports: &[DiagnosticReport]) -> String {
+    let mut out = String::new();
+    let total = reports.len();
+    let unhealthy = reports
+        .iter()
+        .filter(|r| r.status == HealthStatus::Unhealthy)
+        .count();
+    let degraded = reports
+        .iter()
+        .filter(|r| r.status == HealthStatus::Degraded)
+        .count();
+    let healthy = reports
+        .iter()
+        .filter(|r| r.status == HealthStatus::Healthy)
+        .count();
+    let total_fixes: usize = reports
+        .iter()
+        .map(DiagnosticReport::auto_fixable_count)
+        .sum();
+
+    let _ = writeln!(
+        out,
+        "Doctor: {total} connector(s) diagnosed — {healthy} healthy, {degraded} degraded, {unhealthy} unhealthy"
+    );
+    if total_fixes > 0 {
+        let _ = writeln!(
+            out,
+            "  {total_fixes} auto-safe fix(es) available (use --fix to apply)"
+        );
+    }
+    out.push('\n');
+    for report in reports {
+        out.push_str(&format_report_toon(report));
+        out.push('\n');
+    }
+    out
+}
+
+/// Collect all auto-safe fix commands from a set of reports.
+pub fn collect_auto_fixes(reports: &[DiagnosticReport]) -> Vec<AutoFix> {
+    reports
+        .iter()
+        .flat_map(|r| {
+            r.diagnoses.iter().flat_map(|d| {
+                d.fixes
+                    .iter()
+                    .filter(|f| f.auto_safe && f.command.is_some())
+                    .map(|f| AutoFix {
+                        connector_id: r.connector_id.clone(),
+                        description: f.description.clone(),
+                        command: f.command.clone().unwrap_or_default(),
+                    })
+            })
+        })
+        .collect()
+}
+
+/// A single auto-safe fix ready to apply.
+#[derive(Clone, Debug, Serialize)]
+pub struct AutoFix {
+    pub connector_id: String,
+    pub description: String,
+    pub command: String,
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -2443,6 +2549,310 @@ mod tests {
         cloned.message = "changed".to_owned();
         assert_eq!(diag.message, "auth");
         assert_eq!(cloned.message, "changed");
+    }
+
+    // ── TOON formatting ─────────────────────────────────────────
+
+    #[test]
+    fn format_report_toon_healthy() {
+        let report = DiagnosticReport::healthy("github");
+        let toon = format_report_toon(&report);
+        assert!(toon.contains("[OK]"));
+        assert!(toon.contains("github"));
+        assert!(toon.contains("No issues detected"));
+    }
+
+    #[test]
+    fn format_report_toon_unhealthy() {
+        let diags = vec![Diagnosis {
+            connector_id: "slack".to_owned(),
+            category: DiagnosisCategory::Auth,
+            severity: Severity::Critical,
+            message: "Authentication failed (401)".to_owned(),
+            fixes: vec![
+                FixAction::command("Re-auth", "fwc auth add slack").safe(),
+                FixAction::manual("Check API key"),
+            ],
+        }];
+        let report = DiagnosticReport::from_diagnoses("slack", diags);
+        let toon = format_report_toon(&report);
+        assert!(toon.contains("[ERR]"));
+        assert!(toon.contains("slack"));
+        assert!(toon.contains("[critical]"));
+        assert!(toon.contains("Authentication"));
+        assert!(toon.contains("`fwc auth add slack`"));
+        assert!(toon.contains("[auto-safe]"));
+        assert!(toon.contains("Check API key"));
+    }
+
+    #[test]
+    fn format_report_toon_degraded() {
+        let diags = vec![Diagnosis {
+            connector_id: "jira".to_owned(),
+            category: DiagnosisCategory::Latency,
+            severity: Severity::Warning,
+            message: "High latency (3000ms)".to_owned(),
+            fixes: vec![FixAction::manual("Monitor")],
+        }];
+        let report = DiagnosticReport::from_diagnoses("jira", diags);
+        let toon = format_report_toon(&report);
+        assert!(toon.contains("[WARN]"));
+        assert!(toon.contains("jira"));
+    }
+
+    #[test]
+    fn format_report_toon_unknown_status() {
+        let report = DiagnosticReport {
+            connector_id: "x".to_owned(),
+            status: HealthStatus::Unknown,
+            diagnoses: vec![],
+        };
+        let toon = format_report_toon(&report);
+        assert!(toon.contains("[???]"));
+    }
+
+    #[test]
+    fn format_report_toon_with_reference_url() {
+        let diags = vec![Diagnosis {
+            connector_id: "test".to_owned(),
+            category: DiagnosisCategory::ServiceError,
+            severity: Severity::Error,
+            message: "Server error (500)".to_owned(),
+            fixes: vec![
+                FixAction::manual("Check status page").with_url("https://status.example.com"),
+            ],
+        }];
+        let report = DiagnosticReport::from_diagnoses("test", diags);
+        let toon = format_report_toon(&report);
+        assert!(toon.contains("ref: https://status.example.com"));
+    }
+
+    #[test]
+    fn format_report_toon_multiple_diagnoses() {
+        let diags = vec![
+            Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Auth,
+                severity: Severity::Error,
+                message: "Auth failed".to_owned(),
+                fixes: vec![],
+            },
+            Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Latency,
+                severity: Severity::Warning,
+                message: "High latency".to_owned(),
+                fixes: vec![],
+            },
+        ];
+        let report = DiagnosticReport::from_diagnoses("test", diags);
+        let toon = format_report_toon(&report);
+        assert!(toon.contains("Auth failed"));
+        assert!(toon.contains("High latency"));
+    }
+
+    // ── Fleet TOON formatting ─────────────────────────────────────
+
+    #[test]
+    fn format_fleet_toon_empty() {
+        let toon = format_fleet_toon(&[]);
+        assert!(toon.contains("0 connector(s) diagnosed"));
+        assert!(toon.contains("0 healthy"));
+    }
+
+    #[test]
+    fn format_fleet_toon_all_healthy() {
+        let reports = vec![
+            DiagnosticReport::healthy("github"),
+            DiagnosticReport::healthy("slack"),
+        ];
+        let toon = format_fleet_toon(&reports);
+        assert!(toon.contains("2 connector(s) diagnosed"));
+        assert!(toon.contains("2 healthy"));
+        assert!(toon.contains("0 degraded"));
+        assert!(toon.contains("0 unhealthy"));
+        assert!(!toon.contains("auto-safe fix"));
+    }
+
+    #[test]
+    fn format_fleet_toon_mixed_statuses() {
+        let reports = vec![
+            DiagnosticReport::healthy("github"),
+            DiagnosticReport::from_diagnoses(
+                "slack",
+                vec![Diagnosis {
+                    connector_id: "slack".to_owned(),
+                    category: DiagnosisCategory::Latency,
+                    severity: Severity::Warning,
+                    message: "slow".to_owned(),
+                    fixes: vec![],
+                }],
+            ),
+            DiagnosticReport::from_diagnoses(
+                "jira",
+                vec![Diagnosis {
+                    connector_id: "jira".to_owned(),
+                    category: DiagnosisCategory::Auth,
+                    severity: Severity::Critical,
+                    message: "auth".to_owned(),
+                    fixes: vec![FixAction::command("Fix", "cmd").safe()],
+                }],
+            ),
+        ];
+        let toon = format_fleet_toon(&reports);
+        assert!(toon.contains("3 connector(s) diagnosed"));
+        assert!(toon.contains("1 healthy"));
+        assert!(toon.contains("1 degraded"));
+        assert!(toon.contains("1 unhealthy"));
+        assert!(toon.contains("1 auto-safe fix"));
+    }
+
+    #[test]
+    fn format_fleet_toon_shows_auto_fix_count() {
+        let reports = vec![DiagnosticReport::from_diagnoses(
+            "test",
+            vec![Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Auth,
+                severity: Severity::Error,
+                message: "err".to_owned(),
+                fixes: vec![
+                    FixAction::command("Fix A", "cmd_a").safe(),
+                    FixAction::command("Fix B", "cmd_b").safe(),
+                    FixAction::manual("Manual"),
+                ],
+            }],
+        )];
+        let toon = format_fleet_toon(&reports);
+        assert!(toon.contains("2 auto-safe fix(es) available"));
+        assert!(toon.contains("--fix"));
+    }
+
+    // ── collect_auto_fixes ────────────────────────────────────────
+
+    #[test]
+    fn collect_auto_fixes_empty_reports() {
+        let fixes = collect_auto_fixes(&[]);
+        assert!(fixes.is_empty());
+    }
+
+    #[test]
+    fn collect_auto_fixes_no_safe_fixes() {
+        let reports = vec![DiagnosticReport::from_diagnoses(
+            "test",
+            vec![Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Auth,
+                severity: Severity::Error,
+                message: "err".to_owned(),
+                fixes: vec![FixAction::manual("Do it yourself")],
+            }],
+        )];
+        let fixes = collect_auto_fixes(&reports);
+        assert!(fixes.is_empty());
+    }
+
+    #[test]
+    fn collect_auto_fixes_picks_only_safe_with_commands() {
+        let reports = vec![DiagnosticReport::from_diagnoses(
+            "github",
+            vec![Diagnosis {
+                connector_id: "github".to_owned(),
+                category: DiagnosisCategory::Auth,
+                severity: Severity::Error,
+                message: "err".to_owned(),
+                fixes: vec![
+                    FixAction::command("Safe fix", "fwc auth refresh github").safe(),
+                    FixAction::command("Unsafe fix", "fwc auth add github"),
+                    FixAction::manual("Manual safe").safe(),
+                    FixAction::command("Another safe", "fwc cache clear").safe(),
+                ],
+            }],
+        )];
+        let fixes = collect_auto_fixes(&reports);
+        assert_eq!(fixes.len(), 2);
+        assert_eq!(fixes[0].command, "fwc auth refresh github");
+        assert_eq!(fixes[0].connector_id, "github");
+        assert_eq!(fixes[1].command, "fwc cache clear");
+    }
+
+    #[test]
+    fn collect_auto_fixes_across_multiple_reports() {
+        let reports = vec![
+            DiagnosticReport::from_diagnoses(
+                "github",
+                vec![Diagnosis {
+                    connector_id: "github".to_owned(),
+                    category: DiagnosisCategory::Auth,
+                    severity: Severity::Error,
+                    message: "err".to_owned(),
+                    fixes: vec![FixAction::command("Fix G", "cmd_g").safe()],
+                }],
+            ),
+            DiagnosticReport::healthy("slack"),
+            DiagnosticReport::from_diagnoses(
+                "jira",
+                vec![Diagnosis {
+                    connector_id: "jira".to_owned(),
+                    category: DiagnosisCategory::Latency,
+                    severity: Severity::Warning,
+                    message: "slow".to_owned(),
+                    fixes: vec![FixAction::command("Fix J", "cmd_j").safe()],
+                }],
+            ),
+        ];
+        let fixes = collect_auto_fixes(&reports);
+        assert_eq!(fixes.len(), 2);
+        assert_eq!(fixes[0].connector_id, "github");
+        assert_eq!(fixes[1].connector_id, "jira");
+    }
+
+    #[test]
+    fn collect_auto_fixes_healthy_report_yields_none() {
+        let reports = vec![
+            DiagnosticReport::healthy("a"),
+            DiagnosticReport::healthy("b"),
+        ];
+        let fixes = collect_auto_fixes(&reports);
+        assert!(fixes.is_empty());
+    }
+
+    // ── AutoFix struct ────────────────────────────────────────────
+
+    #[test]
+    fn auto_fix_clone() {
+        let fix = AutoFix {
+            connector_id: "test".to_owned(),
+            description: "Fix it".to_owned(),
+            command: "fwc fix test".to_owned(),
+        };
+        let cloned = fix.clone();
+        assert_eq!(fix.connector_id, "test");
+        assert_eq!(cloned.command, "fwc fix test");
+    }
+
+    #[test]
+    fn auto_fix_debug() {
+        let fix = AutoFix {
+            connector_id: "test".to_owned(),
+            description: "Fix it".to_owned(),
+            command: "cmd".to_owned(),
+        };
+        let debug = format!("{fix:?}");
+        assert!(debug.contains("AutoFix"));
+    }
+
+    #[test]
+    fn auto_fix_serialize() {
+        let fix = AutoFix {
+            connector_id: "github".to_owned(),
+            description: "Refresh token".to_owned(),
+            command: "fwc auth refresh github".to_owned(),
+        };
+        let json = serde_json::to_value(&fix).unwrap();
+        assert_eq!(json["connector_id"], "github");
+        assert_eq!(json["description"], "Refresh token");
+        assert_eq!(json["command"], "fwc auth refresh github");
     }
 
     // ── diagnose() combo flows ───────────────────────────────────

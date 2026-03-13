@@ -412,11 +412,7 @@ pub fn format_playbook_toon(playbook: &Playbook) -> String {
 
     // Related playbooks
     if !playbook.related_playbooks.is_empty() {
-        let _ = writeln!(
-            out,
-            "  See also: {}",
-            playbook.related_playbooks.join(", ")
-        );
+        let _ = writeln!(out, "  See also: {}", playbook.related_playbooks.join(", "));
     }
 
     out
@@ -437,13 +433,7 @@ pub fn format_playbook_index_toon(index: &PlaybookIndex) -> String {
         }
         let _ = writeln!(out, "  [{cat}]");
         for pb in &pbs {
-            let _ = writeln!(
-                out,
-                "    {:<30} {} ({})",
-                pb.id,
-                pb.title,
-                pb.audience
-            );
+            let _ = writeln!(out, "    {:<30} {} ({})", pb.id, pb.title, pb.audience);
         }
         out.push('\n');
     }
@@ -530,10 +520,7 @@ fn playbook_getting_started() -> Playbook {
             "FWC binary installed and on PATH".into(),
             "Network access to connector registry".into(),
         ],
-        related_playbooks: vec![
-            "daily-ops".into(),
-            "troubleshooting-auth".into(),
-        ],
+        related_playbooks: vec!["daily-ops".into(), "troubleshooting-auth".into()],
         sections: vec![
             Section {
                 title: "Verify Installation".into(),
@@ -555,7 +542,8 @@ fn playbook_getting_started() -> Playbook {
                         description: "List all connectors".into(),
                         command: "fwc catalog list".into(),
                         expected_output: "github   5 ops  Running\nslack    8 ops  Running".into(),
-                        explanation: "Shows all registered connectors with operation counts.".into(),
+                        explanation: "Shows all registered connectors with operation counts."
+                            .into(),
                     },
                     Example {
                         description: "Search for a connector by keyword".into(),
@@ -702,14 +690,8 @@ fn playbook_troubleshooting_connectivity() -> Playbook {
         title: "Host Connectivity and Network Issues".into(),
         audience: Audience::Operator,
         category: PlaybookCategory::Troubleshooting,
-        prerequisites: vec![
-            "FWC installed".into(),
-            "Host endpoint URL known".into(),
-        ],
-        related_playbooks: vec![
-            "troubleshooting-auth".into(),
-            "fleet-management".into(),
-        ],
+        prerequisites: vec!["FWC installed".into(), "Host endpoint URL known".into()],
+        related_playbooks: vec!["troubleshooting-auth".into(), "fleet-management".into()],
         sections: vec![
             Section {
                 title: "Diagnose Connectivity".into(),
@@ -718,7 +700,8 @@ fn playbook_troubleshooting_connectivity() -> Playbook {
                     Example {
                         description: "Run connectivity diagnostics".into(),
                         command: "fwc doctor".into(),
-                        expected_output: "Host: reachable (42ms)\nRegistry: reachable (105ms)\nDNS: ok".into(),
+                        expected_output:
+                            "Host: reachable (42ms)\nRegistry: reachable (105ms)\nDNS: ok".into(),
                         explanation: "Performs health checks on all endpoints.".into(),
                     },
                     Example {
@@ -737,7 +720,8 @@ fn playbook_troubleshooting_connectivity() -> Playbook {
                 examples: vec![Example {
                     description: "Check effective proxy settings".into(),
                     command: "fwc net proxy-info".into(),
-                    expected_output: "HTTP_PROXY: http://proxy.corp:8080\nNO_PROXY: localhost,127.0.0.1".into(),
+                    expected_output:
+                        "HTTP_PROXY: http://proxy.corp:8080\nNO_PROXY: localhost,127.0.0.1".into(),
                     explanation: "Displays the proxy environment variables in use.".into(),
                 }],
                 warnings: vec![],
@@ -757,10 +741,7 @@ fn playbook_batch_operations() -> Playbook {
             "Familiarity with fwc invoke".into(),
             "At least one connector configured".into(),
         ],
-        related_playbooks: vec![
-            "pipeline-authoring".into(),
-            "performance-tuning".into(),
-        ],
+        related_playbooks: vec!["pipeline-authoring".into(), "performance-tuning".into()],
         sections: vec![
             Section {
                 title: "Batch Invocations".into(),
@@ -769,7 +750,8 @@ fn playbook_batch_operations() -> Playbook {
                     description: "Run batch from file".into(),
                     command: "fwc batch run --file ops.json --concurrency 4".into(),
                     expected_output: "Batch complete: 10/10 succeeded, 0 failed (2.3s)".into(),
-                    explanation: "Executes all operations in ops.json with 4 concurrent workers.".into(),
+                    explanation: "Executes all operations in ops.json with 4 concurrent workers."
+                        .into(),
                 }],
                 warnings: vec!["High concurrency may trigger rate limits.".into()],
                 tips: vec!["Use --stop-on-error to halt on first failure.".into()],
@@ -854,10 +836,7 @@ fn playbook_security_hardening() -> Playbook {
             "Admin access to connector credentials".into(),
             "Understanding of FCP capability model".into(),
         ],
-        related_playbooks: vec![
-            "troubleshooting-auth".into(),
-            "fleet-management".into(),
-        ],
+        related_playbooks: vec!["troubleshooting-auth".into(), "fleet-management".into()],
         sections: vec![
             Section {
                 title: "Credential Rotation".into(),
@@ -868,9 +847,7 @@ fn playbook_security_hardening() -> Playbook {
                     expected_output: "Rotated 3 credentials: github, slack, jira".into(),
                     explanation: "Finds and rotates credentials expiring within 7 days.".into(),
                 }],
-                warnings: vec![
-                    "Rotation may cause brief downtime for affected connectors.".into(),
-                ],
+                warnings: vec!["Rotation may cause brief downtime for affected connectors.".into()],
                 tips: vec!["Schedule rotation during maintenance windows.".into()],
             },
             Section {
@@ -879,11 +856,14 @@ fn playbook_security_hardening() -> Playbook {
                 examples: vec![Example {
                     description: "View recent audit entries".into(),
                     command: "fwc audit timeline --last 24h".into(),
-                    expected_output: "2026-03-12 10:00  INVOKE  github.create_issue  agent-1  ok".into(),
+                    expected_output: "2026-03-12 10:00  INVOKE  github.create_issue  agent-1  ok"
+                        .into(),
                     explanation: "Shows timestamped audit entries for all operations.".into(),
                 }],
                 warnings: vec![],
-                tips: vec!["Export audit logs to SIEM with fwc audit export --format syslog.".into()],
+                tips: vec![
+                    "Export audit logs to SIEM with fwc audit export --format syslog.".into(),
+                ],
             },
             Section {
                 title: "Supply-Chain Verification".into(),
@@ -892,11 +872,10 @@ fn playbook_security_hardening() -> Playbook {
                     description: "Verify connector binary".into(),
                     command: "fwc supply-chain verify github".into(),
                     expected_output: "github: signature VALID, hash matches, provenance OK".into(),
-                    explanation: "Checks the binary signature and hash against the registry.".into(),
+                    explanation: "Checks the binary signature and hash against the registry."
+                        .into(),
                 }],
-                warnings: vec![
-                    "Never run unverified connectors in production.".into(),
-                ],
+                warnings: vec!["Never run unverified connectors in production.".into()],
                 tips: vec![],
             },
         ],
@@ -913,10 +892,7 @@ fn playbook_performance_tuning() -> Playbook {
             "FWC configured with at least one connector".into(),
             "Basic familiarity with batch operations".into(),
         ],
-        related_playbooks: vec![
-            "batch-operations".into(),
-            "fleet-management".into(),
-        ],
+        related_playbooks: vec!["batch-operations".into(), "fleet-management".into()],
         sections: vec![
             Section {
                 title: "Token Budget Management".into(),
@@ -924,7 +900,8 @@ fn playbook_performance_tuning() -> Playbook {
                 examples: vec![Example {
                     description: "Check budget usage".into(),
                     command: "fwc budget report".into(),
-                    expected_output: "Daily: 450/1000 tokens used (45%)\nMonthly: 12,000/30,000 (40%)".into(),
+                    expected_output:
+                        "Daily: 450/1000 tokens used (45%)\nMonthly: 12,000/30,000 (40%)".into(),
                     explanation: "Shows current token usage against configured limits.".into(),
                 }],
                 warnings: vec!["Exceeding budget triggers FCP_ERR_BUDGET_EXCEEDED.".into()],
@@ -936,8 +913,11 @@ fn playbook_performance_tuning() -> Playbook {
                 examples: vec![Example {
                     description: "Benchmark optimal concurrency".into(),
                     command: "fwc bench --connector github --concurrency 1,2,4,8".into(),
-                    expected_output: "Concurrency 4: 120 ops/s (optimal)\nConcurrency 8: 95 ops/s (rate-limited)".into(),
-                    explanation: "Tests different concurrency levels to find the sweet spot.".into(),
+                    expected_output:
+                        "Concurrency 4: 120 ops/s (optimal)\nConcurrency 8: 95 ops/s (rate-limited)"
+                            .into(),
+                    explanation: "Tests different concurrency levels to find the sweet spot."
+                        .into(),
                 }],
                 warnings: vec![],
                 tips: vec!["Start with concurrency=2 and increase gradually.".into()],
@@ -968,10 +948,7 @@ fn playbook_agent_integration() -> Playbook {
             "FWC installed and configured".into(),
             "MCP server capability available".into(),
         ],
-        related_playbooks: vec![
-            "pipeline-authoring".into(),
-            "security-hardening".into(),
-        ],
+        related_playbooks: vec!["pipeline-authoring".into(), "security-hardening".into()],
         sections: vec![
             Section {
                 title: "MCP Server Mode".into(),
@@ -980,11 +957,10 @@ fn playbook_agent_integration() -> Playbook {
                     description: "Start MCP server".into(),
                     command: "fwc serve-mcp --port 8080".into(),
                     expected_output: "MCP server listening on :8080 (23 tools exported)".into(),
-                    explanation: "Starts an MCP server that exposes all connector ops as tools.".into(),
+                    explanation: "Starts an MCP server that exposes all connector ops as tools."
+                        .into(),
                 }],
-                warnings: vec![
-                    "MCP server inherits the credentials of the host process.".into(),
-                ],
+                warnings: vec!["MCP server inherits the credentials of the host process.".into()],
                 tips: vec!["Use --export-filter to limit which operations are exposed.".into()],
             },
             Section {
@@ -994,7 +970,8 @@ fn playbook_agent_integration() -> Playbook {
                     description: "Resolve an intent".into(),
                     command: "fwc intent resolve 'create a github issue about login bug'".into(),
                     expected_output: "Resolved: github.create_issue (confidence: 0.94)".into(),
-                    explanation: "Maps the natural language query to the best matching operation.".into(),
+                    explanation: "Maps the natural language query to the best matching operation."
+                        .into(),
                 }],
                 warnings: vec![],
                 tips: vec!["Use --top-k 3 to see alternative matches.".into()],
@@ -1082,23 +1059,20 @@ fn playbook_pipeline_authoring() -> Playbook {
             "Familiarity with fwc invoke and batch".into(),
             "At least two connectors configured".into(),
         ],
-        related_playbooks: vec![
-            "batch-operations".into(),
-            "agent-integration".into(),
-        ],
+        related_playbooks: vec!["batch-operations".into(), "agent-integration".into()],
         sections: vec![
             Section {
                 title: "Define a Pipeline".into(),
-                content: "Create a TOML pipeline definition with steps, dependencies, and data flow.".into(),
+                content:
+                    "Create a TOML pipeline definition with steps, dependencies, and data flow."
+                        .into(),
                 examples: vec![Example {
                     description: "Create a simple pipeline".into(),
                     command: "fwc pipeline validate my-pipeline.toml".into(),
                     expected_output: "Pipeline valid: 4 steps, 2 connectors, no cycles".into(),
                     explanation: "Validates pipeline structure and dependency graph.".into(),
                 }],
-                warnings: vec![
-                    "Circular dependencies will cause validation failure.".into(),
-                ],
+                warnings: vec!["Circular dependencies will cause validation failure.".into()],
                 tips: vec!["Use fwc pipeline visualize to see the DAG.".into()],
             },
             Section {
@@ -1119,8 +1093,11 @@ fn playbook_pipeline_authoring() -> Playbook {
                 examples: vec![Example {
                     description: "Instantiate a pipeline template".into(),
                     command: "fwc pipeline from-template deploy --set version=1.2.3".into(),
-                    expected_output: "Pipeline instantiated from template 'deploy' with version=1.2.3".into(),
-                    explanation: "Creates a pipeline instance from a template with parameter substitution.".into(),
+                    expected_output:
+                        "Pipeline instantiated from template 'deploy' with version=1.2.3".into(),
+                    explanation:
+                        "Creates a pipeline instance from a template with parameter substitution."
+                            .into(),
                 }],
                 warnings: vec![],
                 tips: vec!["Templates support Handlebars syntax for variable substitution.".into()],
@@ -1207,8 +1184,10 @@ fn migration_fcp2_to_fcp3() -> MigrationGuide {
         breaking_changes: vec![
             BreakingChange {
                 component: "Connector manifest".into(),
-                description: "Manifest format changed from JSON to TOML with typed operations".into(),
-                migration_path: "Convert manifest.json to manifest.toml using fwc migrate manifest".into(),
+                description: "Manifest format changed from JSON to TOML with typed operations"
+                    .into(),
+                migration_path: "Convert manifest.json to manifest.toml using fwc migrate manifest"
+                    .into(),
                 before_code: r#"{"operations": [{"name": "list"}]}"#.into(),
                 after_code: r#"[[operations]]\nname = "list"\ntier = "observe""#.into(),
             },
@@ -1386,7 +1365,10 @@ mod tests {
     #[test]
     fn category_label_all_variants() {
         assert_eq!(PlaybookCategory::GettingStarted.label(), "Getting Started");
-        assert_eq!(PlaybookCategory::DailyOperations.label(), "Daily Operations");
+        assert_eq!(
+            PlaybookCategory::DailyOperations.label(),
+            "Daily Operations"
+        );
         assert_eq!(PlaybookCategory::Troubleshooting.label(), "Troubleshooting");
         assert_eq!(PlaybookCategory::Migration.label(), "Migration");
         assert_eq!(PlaybookCategory::Security.label(), "Security");
@@ -1606,7 +1588,11 @@ mod tests {
     #[test]
     fn builtin_playbooks_count() {
         let pbs = get_builtin_playbooks();
-        assert!(pbs.len() >= 12, "expected >= 12 playbooks, got {}", pbs.len());
+        assert!(
+            pbs.len() >= 12,
+            "expected >= 12 playbooks, got {}",
+            pbs.len()
+        );
     }
 
     #[test]
@@ -1779,7 +1765,10 @@ mod tests {
 
     #[test]
     fn migration_effort_display() {
-        assert_eq!(format!("{}", MigrationEffort::Low), MigrationEffort::Low.label());
+        assert_eq!(
+            format!("{}", MigrationEffort::Low),
+            MigrationEffort::Low.label()
+        );
     }
 
     #[test]
@@ -1835,14 +1824,22 @@ mod tests {
     #[test]
     fn migration_guides_all_have_steps() {
         for g in get_migration_guides() {
-            assert!(!g.migration_steps.is_empty(), "{} has no steps", g.version_range());
+            assert!(
+                !g.migration_steps.is_empty(),
+                "{} has no steps",
+                g.version_range()
+            );
         }
     }
 
     #[test]
     fn migration_guides_all_have_rollback() {
         for g in get_migration_guides() {
-            assert!(!g.rollback_plan.is_empty(), "{} has no rollback", g.version_range());
+            assert!(
+                !g.rollback_plan.is_empty(),
+                "{} has no rollback",
+                g.version_range()
+            );
         }
     }
 
@@ -1862,9 +1859,21 @@ mod tests {
         let guides = get_migration_guides();
         // Verify we cover FCP 2.x -> 3.0, 3.0 -> 3.1, 3.1 -> 3.2
         let ranges: Vec<String> = guides.iter().map(|g| g.version_range()).collect();
-        assert!(ranges.iter().any(|r| r.contains("2.x") && r.contains("3.0")));
-        assert!(ranges.iter().any(|r| r.contains("3.0") && r.contains("3.1")));
-        assert!(ranges.iter().any(|r| r.contains("3.1") && r.contains("3.2")));
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.contains("2.x") && r.contains("3.0"))
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.contains("3.0") && r.contains("3.1"))
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.contains("3.1") && r.contains("3.2"))
+        );
     }
 
     // ── PlaybookIndex tests ───────────────────────────────────────────
@@ -1980,7 +1989,10 @@ mod tests {
     fn index_search_multi_term() {
         let idx = PlaybookIndex::new(get_builtin_playbooks());
         let found = idx.search("connector health");
-        assert!(!found.is_empty(), "search for 'connector health' should find results");
+        assert!(
+            !found.is_empty(),
+            "search for 'connector health' should find results"
+        );
     }
 
     #[test]
@@ -2016,7 +2028,10 @@ mod tests {
     fn index_search_partial_word() {
         let idx = PlaybookIndex::new(get_builtin_playbooks());
         let found = idx.search("migrat");
-        assert!(!found.is_empty(), "partial word 'migrat' should match migration playbooks");
+        assert!(
+            !found.is_empty(),
+            "partial word 'migrat' should match migration playbooks"
+        );
     }
 
     #[test]

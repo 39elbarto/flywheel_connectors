@@ -15,13 +15,14 @@ use std::time::{Duration, Instant};
 use chrono::{TimeZone, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_core::{
-    AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityToken,
-    ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot, Introspection,
-    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleManager, LifecycleRecord, LifecycleState,
-    LifecycleStatus, OperationId, RequestId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
-    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SbomFormat,
-    SelfCheckReport, SoftwareBillOfMaterials, SuccessThresholds, SupplyChainAttestation,
-    SupplyChainSignature, TransitionReason, TrustRootBinding, VerificationReasonCode, ZoneId,
+    ApprovalMode, AttestationMaterial, AttestationMetadata, AttestationPredicateType,
+    CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
+    IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleManager,
+    LifecycleRecord, LifecycleState, LifecycleStatus, OperationId, RequestId, RollbackRules,
+    RolloutPolicy, SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent,
+    SbomDependency, SbomFormat, SelfCheckReport, SoftwareBillOfMaterials, SuccessThresholds,
+    SupplyChainAttestation, SupplyChainSignature, TransitionReason, TrustRootBinding,
+    VerificationReasonCode, ZoneId,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -1289,11 +1290,21 @@ async fn assert_discovery_routes(
     Ok(())
 }
 
-fn test_connector_config(
+fn test_connector_config_with_env(
     connector_id: &ConnectorId,
     name: &str,
-    categories: &[&str],
+    categories: &[String],
+    extra_env: &[(&str, &str)],
 ) -> serde_json::Value {
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "FCP_TEST_CONNECTOR_ID".to_string(),
+        json!(connector_id.as_str()),
+    );
+    for (key, value) in extra_env {
+        env.insert((*key).to_string(), json!(*value));
+    }
+
     json!({
         "id": connector_id.as_str(),
         "binary": env!("CARGO_BIN_EXE_fcp-test-connector"),
@@ -1301,10 +1312,350 @@ fn test_connector_config(
         "description": "Binary-level host integration test connector",
         "config": {},
         "categories": categories,
-        "env": {
-            "FCP_TEST_CONNECTOR_ID": connector_id.as_str(),
-        },
+        "env": env,
     })
+}
+
+fn test_connector_config(
+    connector_id: &ConnectorId,
+    name: &str,
+    categories: &[&str],
+) -> serde_json::Value {
+    let categories = categories
+        .iter()
+        .map(|category| (*category).to_string())
+        .collect::<Vec<_>>();
+    test_connector_config_with_env(connector_id, name, &categories, &[])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatrixFixtureFlavor {
+    RequestResponse,
+    Streaming,
+    Polling,
+    Webhook,
+    Browser,
+    Database,
+    LifecycleHeavy,
+}
+
+impl MatrixFixtureFlavor {
+    const fn as_tag(self) -> &'static str {
+        match self {
+            Self::RequestResponse => "request-response",
+            Self::Streaming => "streaming",
+            Self::Polling => "polling",
+            Self::Webhook => "webhook",
+            Self::Browser => "browser",
+            Self::Database => "database",
+            Self::LifecycleHeavy => "lifecycle-heavy",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatrixFixtureAuthState {
+    None,
+    OAuth,
+    MultiProfileTenant,
+}
+
+impl MatrixFixtureAuthState {
+    const fn as_tag(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::OAuth => "oauth",
+            Self::MultiProfileTenant => "multi-profile-tenant",
+        }
+    }
+
+    const fn env_value(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::OAuth => Some("oauth"),
+            Self::MultiProfileTenant => Some("multi_profile_tenant"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatrixFixtureHealthState {
+    Ready,
+    Degraded,
+    Error,
+}
+
+impl MatrixFixtureHealthState {
+    const fn as_tag(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Error => "error",
+        }
+    }
+
+    const fn env_value(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Error => "error",
+        }
+    }
+
+    fn assert_matches(self, actual: &ConnectorHealth, connector_id: &ConnectorId) {
+        match (self, actual) {
+            (Self::Ready, ConnectorHealth::Healthy) => {}
+            (Self::Degraded, ConnectorHealth::Degraded { reason }) => {
+                assert_eq!(
+                    reason,
+                    "fixture degraded",
+                    "connector {} should report degraded reason",
+                    connector_id.as_str()
+                );
+            }
+            (Self::Error, ConnectorHealth::Unavailable { reason, .. }) => {
+                assert_eq!(
+                    reason,
+                    "fixture unavailable",
+                    "connector {} should report unavailable reason",
+                    connector_id.as_str()
+                );
+            }
+            (expected, actual) => panic!(
+                "connector {} health mismatch: expected {:?}, got {:?}",
+                connector_id.as_str(),
+                expected,
+                actual
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatrixArtifactProvenance {
+    LiveHost,
+    ReceiptBacked,
+    RejectFakeArtifact,
+}
+
+impl MatrixArtifactProvenance {
+    const fn as_tag(self) -> &'static str {
+        match self {
+            Self::LiveHost => "live-host",
+            Self::ReceiptBacked => "receipt-backed",
+            Self::RejectFakeArtifact => "reject-fake-artifact",
+        }
+    }
+
+    const fn env_value(self) -> Option<&'static str> {
+        match self {
+            Self::RejectFakeArtifact => Some("reject_fake"),
+            Self::LiveHost | Self::ReceiptBacked => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatrixFixtureOperationMode {
+    Reversible,
+    Irreversible,
+}
+
+impl MatrixFixtureOperationMode {
+    const fn as_tag(self) -> &'static str {
+        match self {
+            Self::Reversible => "reversible",
+            Self::Irreversible => "irreversible",
+        }
+    }
+
+    const fn env_value(self) -> &'static str {
+        match self {
+            Self::Reversible => "reversible",
+            Self::Irreversible => "irreversible",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HostIntegrationFixture {
+    connector_id: &'static str,
+    name: &'static str,
+    runtime_archetype: ConnectorArchetype,
+    flavor: MatrixFixtureFlavor,
+    auth_state: MatrixFixtureAuthState,
+    health_state: MatrixFixtureHealthState,
+    artifact_provenance: MatrixArtifactProvenance,
+    operation_mode: MatrixFixtureOperationMode,
+    profile_scope: Option<&'static str>,
+    tenant_scope: Option<&'static str>,
+}
+
+impl HostIntegrationFixture {
+    fn connector_id(self) -> ConnectorId {
+        ConnectorId::from_static(self.connector_id)
+    }
+
+    const fn runtime_archetype_env(self) -> &'static str {
+        match self.runtime_archetype {
+            ConnectorArchetype::RequestResponse => "request_response",
+            ConnectorArchetype::Streaming => "streaming",
+            ConnectorArchetype::Bidirectional => "bidirectional",
+            ConnectorArchetype::Polling => "polling",
+            ConnectorArchetype::Webhook => "webhook",
+            ConnectorArchetype::Unknown => "unknown",
+        }
+    }
+
+    const fn expected_operation_name(self) -> &'static str {
+        match self.runtime_archetype {
+            ConnectorArchetype::RequestResponse | ConnectorArchetype::Unknown => "test.echo",
+            ConnectorArchetype::Streaming => "test.subscribe",
+            ConnectorArchetype::Bidirectional => "test.send",
+            ConnectorArchetype::Polling => "test.poll",
+            ConnectorArchetype::Webhook => "test.receive",
+        }
+    }
+
+    const fn expected_capability_id(self) -> &'static str {
+        match self.runtime_archetype {
+            ConnectorArchetype::RequestResponse | ConnectorArchetype::Unknown => "cap.test.echo",
+            ConnectorArchetype::Streaming => "cap.test.subscribe",
+            ConnectorArchetype::Bidirectional => "cap.test.send",
+            ConnectorArchetype::Polling => "cap.test.poll",
+            ConnectorArchetype::Webhook => "cap.test.receive",
+        }
+    }
+
+    fn categories(self) -> Vec<String> {
+        let mut categories = vec![
+            "test".to_string(),
+            format!("matrix:{}", self.flavor.as_tag()),
+            format!("auth:{}", self.auth_state.as_tag()),
+            format!("health:{}", self.health_state.as_tag()),
+            format!("artifact:{}", self.artifact_provenance.as_tag()),
+            format!("operation:{}", self.operation_mode.as_tag()),
+        ];
+        if let Some(profile_scope) = self.profile_scope {
+            categories.push(format!("profile:{profile_scope}"));
+        }
+        if let Some(tenant_scope) = self.tenant_scope {
+            categories.push(format!("tenant:{tenant_scope}"));
+        }
+        categories
+    }
+
+    fn extra_env(self) -> Vec<(&'static str, &'static str)> {
+        let mut env = vec![
+            ("FCP_TEST_CONNECTOR_ARCHETYPE", self.runtime_archetype_env()),
+            ("FCP_TEST_CONNECTOR_HEALTH", self.health_state.env_value()),
+            (
+                "FCP_TEST_CONNECTOR_OPERATION_MODE",
+                self.operation_mode.env_value(),
+            ),
+        ];
+        if let Some(auth_mode) = self.auth_state.env_value() {
+            env.push(("FCP_TEST_CONNECTOR_AUTH_MODE", auth_mode));
+        }
+        if let Some(artifact_policy) = self.artifact_provenance.env_value() {
+            env.push(("FCP_TEST_CONNECTOR_ARTIFACT_POLICY", artifact_policy));
+        }
+        env
+    }
+}
+
+const HOST_INTEGRATION_FIXTURES: [HostIntegrationFixture; 7] = [
+    HostIntegrationFixture {
+        connector_id: "fcp.test.matrix-request:utility:1.0.0",
+        name: "Matrix Request",
+        runtime_archetype: ConnectorArchetype::RequestResponse,
+        flavor: MatrixFixtureFlavor::RequestResponse,
+        auth_state: MatrixFixtureAuthState::None,
+        health_state: MatrixFixtureHealthState::Ready,
+        artifact_provenance: MatrixArtifactProvenance::ReceiptBacked,
+        operation_mode: MatrixFixtureOperationMode::Reversible,
+        profile_scope: None,
+        tenant_scope: None,
+    },
+    HostIntegrationFixture {
+        connector_id: "fcp.test.matrix-stream:messaging:1.0.0",
+        name: "Matrix Stream",
+        runtime_archetype: ConnectorArchetype::Streaming,
+        flavor: MatrixFixtureFlavor::Streaming,
+        auth_state: MatrixFixtureAuthState::None,
+        health_state: MatrixFixtureHealthState::Ready,
+        artifact_provenance: MatrixArtifactProvenance::LiveHost,
+        operation_mode: MatrixFixtureOperationMode::Reversible,
+        profile_scope: None,
+        tenant_scope: None,
+    },
+    HostIntegrationFixture {
+        connector_id: "fcp.test.matrix-poll:content:1.0.0",
+        name: "Matrix Poll",
+        runtime_archetype: ConnectorArchetype::Polling,
+        flavor: MatrixFixtureFlavor::Polling,
+        auth_state: MatrixFixtureAuthState::None,
+        health_state: MatrixFixtureHealthState::Degraded,
+        artifact_provenance: MatrixArtifactProvenance::LiveHost,
+        operation_mode: MatrixFixtureOperationMode::Reversible,
+        profile_scope: None,
+        tenant_scope: None,
+    },
+    HostIntegrationFixture {
+        connector_id: "fcp.test.matrix-webhook:devtools:1.0.0",
+        name: "Matrix Webhook",
+        runtime_archetype: ConnectorArchetype::Webhook,
+        flavor: MatrixFixtureFlavor::Webhook,
+        auth_state: MatrixFixtureAuthState::OAuth,
+        health_state: MatrixFixtureHealthState::Ready,
+        artifact_provenance: MatrixArtifactProvenance::RejectFakeArtifact,
+        operation_mode: MatrixFixtureOperationMode::Reversible,
+        profile_scope: None,
+        tenant_scope: None,
+    },
+    HostIntegrationFixture {
+        connector_id: "fcp.test.matrix-browser:automation:1.0.0",
+        name: "Matrix Browser",
+        runtime_archetype: ConnectorArchetype::RequestResponse,
+        flavor: MatrixFixtureFlavor::Browser,
+        auth_state: MatrixFixtureAuthState::MultiProfileTenant,
+        health_state: MatrixFixtureHealthState::Ready,
+        artifact_provenance: MatrixArtifactProvenance::LiveHost,
+        operation_mode: MatrixFixtureOperationMode::Reversible,
+        profile_scope: Some("work"),
+        tenant_scope: Some("acme-browser"),
+    },
+    HostIntegrationFixture {
+        connector_id: "fcp.test.matrix-database:data:1.0.0",
+        name: "Matrix Database",
+        runtime_archetype: ConnectorArchetype::RequestResponse,
+        flavor: MatrixFixtureFlavor::Database,
+        auth_state: MatrixFixtureAuthState::MultiProfileTenant,
+        health_state: MatrixFixtureHealthState::Error,
+        artifact_provenance: MatrixArtifactProvenance::ReceiptBacked,
+        operation_mode: MatrixFixtureOperationMode::Reversible,
+        profile_scope: Some("work"),
+        tenant_scope: Some("acme-data"),
+    },
+    HostIntegrationFixture {
+        connector_id: "fcp.test.matrix-lifecycle:utility:1.0.0",
+        name: "Matrix Lifecycle",
+        runtime_archetype: ConnectorArchetype::RequestResponse,
+        flavor: MatrixFixtureFlavor::LifecycleHeavy,
+        auth_state: MatrixFixtureAuthState::OAuth,
+        health_state: MatrixFixtureHealthState::Ready,
+        artifact_provenance: MatrixArtifactProvenance::ReceiptBacked,
+        operation_mode: MatrixFixtureOperationMode::Irreversible,
+        profile_scope: Some("ops"),
+        tenant_scope: None,
+    },
+];
+
+fn matrix_fixture_config(fixture: HostIntegrationFixture) -> serde_json::Value {
+    let connector_id = fixture.connector_id();
+    let categories = fixture.categories();
+    let extra_env = fixture.extra_env();
+    test_connector_config_with_env(&connector_id, fixture.name, &categories, &extra_env)
 }
 
 fn test_rollout_policy() -> RolloutPolicy {
@@ -1352,6 +1703,228 @@ async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::e
         &capability_signing_key,
     )
     .await?;
+
+    Ok(())
+}
+
+#[test]
+fn host_integration_fixture_matrix_covers_required_dimensions() {
+    for required in [
+        "request-response",
+        "streaming",
+        "polling",
+        "webhook",
+        "browser",
+        "database",
+        "lifecycle-heavy",
+    ] {
+        assert!(
+            HOST_INTEGRATION_FIXTURES
+                .iter()
+                .any(|fixture| { fixture.flavor.as_tag() == required })
+        );
+    }
+
+    for required in ["ready", "degraded", "error"] {
+        assert!(
+            HOST_INTEGRATION_FIXTURES
+                .iter()
+                .any(|fixture| { fixture.health_state.as_tag() == required })
+        );
+    }
+
+    for required in ["none", "oauth", "multi-profile-tenant"] {
+        assert!(
+            HOST_INTEGRATION_FIXTURES
+                .iter()
+                .any(|fixture| { fixture.auth_state.as_tag() == required })
+        );
+    }
+
+    for required in ["live-host", "receipt-backed", "reject-fake-artifact"] {
+        assert!(
+            HOST_INTEGRATION_FIXTURES
+                .iter()
+                .any(|fixture| { fixture.artifact_provenance.as_tag() == required })
+        );
+    }
+
+    assert!(HOST_INTEGRATION_FIXTURES.iter().any(|fixture| {
+        fixture.auth_state == MatrixFixtureAuthState::MultiProfileTenant
+            && fixture.profile_scope.is_some()
+            && fixture.tenant_scope.is_some()
+    }));
+    assert!(
+        HOST_INTEGRATION_FIXTURES
+            .iter()
+            .any(|fixture| { fixture.operation_mode == MatrixFixtureOperationMode::Reversible })
+    );
+    assert!(
+        HOST_INTEGRATION_FIXTURES
+            .iter()
+            .any(|fixture| { fixture.operation_mode == MatrixFixtureOperationMode::Irreversible })
+    );
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_fixture_matrix_surfaces_discovery_and_introspection_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let host = HttpHostProcess::spawn(
+        HOST_INTEGRATION_FIXTURES
+            .iter()
+            .copied()
+            .map(matrix_fixture_config)
+            .collect(),
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let discovery: DiscoveryResponse =
+        http_post_json(host.client.clone(), url("/rpc/discover"), json!({})).await?;
+    assert_eq!(discovery.connectors.len(), HOST_INTEGRATION_FIXTURES.len());
+
+    for fixture in HOST_INTEGRATION_FIXTURES {
+        let connector_id = fixture.connector_id();
+        let connector = discovery
+            .connectors
+            .iter()
+            .find(|connector| connector.id == connector_id)
+            .unwrap_or_else(|| panic!("missing fixture {}", connector_id.as_str()));
+        fixture
+            .health_state
+            .assert_matches(&connector.health, &connector_id);
+
+        for tag in fixture.categories() {
+            assert!(
+                connector.categories.iter().any(|category| category == &tag),
+                "connector {} missing category tag {tag}",
+                connector_id.as_str()
+            );
+        }
+
+        let introspection: IntrospectionResponse = http_get_json(
+            host.client.clone(),
+            url(&format!("/rpc/introspect/{}", connector_id.as_str())),
+        )
+        .await?;
+        assert_eq!(introspection.archetype, fixture.runtime_archetype);
+        assert_eq!(introspection.tools.len(), 1);
+        assert_eq!(
+            introspection.tools[0].name,
+            fixture.expected_operation_name()
+        );
+
+        let expects_streaming = matches!(
+            fixture.runtime_archetype,
+            ConnectorArchetype::Streaming | ConnectorArchetype::Bidirectional
+        );
+        assert_eq!(
+            introspection
+                .introspection
+                .event_caps
+                .as_ref()
+                .map(|caps| caps.streaming)
+                .unwrap_or(false),
+            expects_streaming
+        );
+
+        let expects_auth = fixture.auth_state != MatrixFixtureAuthState::None;
+        assert_eq!(
+            introspection.introspection.auth_caps.is_some(),
+            expects_auth
+        );
+        if expects_auth {
+            let auth_caps = introspection
+                .introspection
+                .auth_caps
+                .as_ref()
+                .expect("auth-heavy fixture should expose auth caps");
+            assert!(auth_caps.methods.iter().any(|method| method == "oauth2"));
+        }
+
+        match fixture.operation_mode {
+            MatrixFixtureOperationMode::Reversible => {
+                assert_eq!(
+                    introspection.tools[0].approval_mode,
+                    Some(ApprovalMode::None)
+                );
+                assert!(introspection.tools[0].requires_confirmation);
+                assert_eq!(
+                    introspection.tools[0].idempotency,
+                    IdempotencyClass::BestEffort
+                );
+            }
+            MatrixFixtureOperationMode::Irreversible => {
+                assert!(introspection.tools[0].requires_confirmation);
+                assert_eq!(
+                    introspection.tools[0].approval_mode,
+                    Some(ApprovalMode::Interactive)
+                );
+                assert_eq!(introspection.tools[0].idempotency, IdempotencyClass::None);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_webhook_fixture_rejects_fake_artifact_input()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = HOST_INTEGRATION_FIXTURES
+        .iter()
+        .copied()
+        .find(|fixture| fixture.artifact_provenance == MatrixArtifactProvenance::RejectFakeArtifact)
+        .expect("fixture matrix should include fake-artifact rejection case");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![matrix_fixture_config(fixture)],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let zone_id = ZoneId::work();
+
+    let response = host
+        .client
+        .post(url("/rpc/invoke"))
+        .json(&InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: fixture.connector_id(),
+            operation: OperationId::from_static(fixture.expected_operation_name()),
+            zone_id: zone_id.clone(),
+            input: json!({
+                "message": "reject this payload",
+                "artifact_provenance": "fake",
+            }),
+            capability_token: build_live_capability_token(
+                &capability_signing_key,
+                fixture.expected_capability_id(),
+                TEST_PRINCIPAL,
+                fixture.expected_operation_name(),
+                &zone_id,
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        })
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await?;
+
+    assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(body.contains("fake artifact provenance rejected"));
 
     Ok(())
 }

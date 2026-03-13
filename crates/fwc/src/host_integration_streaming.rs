@@ -932,7 +932,14 @@ mod tests {
 
     #[test]
     fn stream_test_case_has_filter() {
-        let tc = StreamTestCase::new("t", StreamType::EventTail, "c", Some("type=x".into()), 1, 1000);
+        let tc = StreamTestCase::new(
+            "t",
+            StreamType::EventTail,
+            "c",
+            Some("type=x".into()),
+            1,
+            1000,
+        );
         assert!(tc.has_filter());
     }
 
@@ -1176,7 +1183,14 @@ mod tests {
 
     #[test]
     fn log_test_case_serde_roundtrip() {
-        let tc = LogTestCase::new("r", "gh", LogLevel::Warn, Some("1h".into()), Some("x".into()), 2);
+        let tc = LogTestCase::new(
+            "r",
+            "gh",
+            LogLevel::Warn,
+            Some("1h".into()),
+            Some("x".into()),
+            2,
+        );
         let json_str = serde_json::to_string(&tc).unwrap();
         let back: LogTestCase = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.name, "r");
@@ -1299,7 +1313,8 @@ mod tests {
     #[test]
     fn build_reconnect_matrix_covers_all_behaviors() {
         let cases = build_reconnect_matrix();
-        let behaviors: std::collections::HashSet<_> = cases.iter().map(|c| &c.expected_behavior).collect();
+        let behaviors: std::collections::HashSet<_> =
+            cases.iter().map(|c| &c.expected_behavior).collect();
         assert!(behaviors.contains(&ReconnectBehavior::Resume));
         assert!(behaviors.contains(&ReconnectBehavior::Restart));
         assert!(behaviors.contains(&ReconnectBehavior::Fail));
@@ -1408,21 +1423,42 @@ mod tests {
 
     #[test]
     fn validate_stream_result_filtered_valid_events() {
-        let case = StreamTestCase::new("t", StreamType::EventTail, "c", Some("type=x".into()), 1, 1000);
+        let case = StreamTestCase::new(
+            "t",
+            StreamType::EventTail,
+            "c",
+            Some("type=x".into()),
+            1,
+            1000,
+        );
         let events = vec![json!({"type": "x"})];
         assert!(validate_stream_result(&case, &events));
     }
 
     #[test]
     fn validate_stream_result_filtered_non_object() {
-        let case = StreamTestCase::new("t", StreamType::EventTail, "c", Some("type=x".into()), 1, 1000);
+        let case = StreamTestCase::new(
+            "t",
+            StreamType::EventTail,
+            "c",
+            Some("type=x".into()),
+            1,
+            1000,
+        );
         let events = vec![json!("not_an_object")];
         assert!(!validate_stream_result(&case, &events));
     }
 
     #[test]
     fn validate_stream_result_empty_filter_string() {
-        let case = StreamTestCase::new("t", StreamType::EventTail, "c", Some(String::new()), 1, 1000);
+        let case = StreamTestCase::new(
+            "t",
+            StreamType::EventTail,
+            "c",
+            Some(String::new()),
+            1,
+            1000,
+        );
         let events = vec![json!({"type": "x"})];
         assert!(!validate_stream_result(&case, &events));
     }

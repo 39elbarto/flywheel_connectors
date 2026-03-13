@@ -11,6 +11,10 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[lib]
+name = "fwc"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fwc"
 path = "src/main.rs"
@@ -53,4 +57,9 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+criterion = { workspace = true }
 tempfile = "3"
+
+[[bench]]
+name = "cual_bench"
+harness = false

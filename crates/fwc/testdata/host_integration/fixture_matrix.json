@@ -1,0 +1,139 @@
+{
+  "fixtures": [
+    {
+      "id": "github_issue_workflow",
+      "connector_id": "fcp.github:enterprise:v1",
+      "display_name": "GitHub Enterprise",
+      "archetype": "request_response",
+      "coverage_mode": "mock_host",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "readiness": "live-runtime",
+      "auth_scope": "tenant_scoped",
+      "reversibility": "mixed",
+      "operation_family": "issues",
+      "tool_count": 2,
+      "provenance_markers": [
+        "live-host-discovery",
+        "mock-host-sequence",
+        "cual-workflow"
+      ],
+      "notes": "Primary request-response workflow fixture used by workflow_search_to_invoke_to_history_full_chain."
+    },
+    {
+      "id": "slack_event_stream",
+      "connector_id": "fcp.slack:team:v1",
+      "display_name": "Slack Team",
+      "archetype": "streaming",
+      "coverage_mode": "mock_host",
+      "risk_level": "low",
+      "safety_tier": "safe",
+      "readiness": "live-runtime",
+      "auth_scope": "single_profile",
+      "reversibility": "reversible",
+      "operation_family": "events",
+      "tool_count": 1,
+      "provenance_markers": [
+        "live-host-stream",
+        "reconnect-observable"
+      ],
+      "notes": "Long-lived streaming fixture used to classify watch/log/reconnect scenarios."
+    },
+    {
+      "id": "stripe_webhook_receipts",
+      "connector_id": "fcp.stripe:billing:v1",
+      "display_name": "Stripe Billing",
+      "archetype": "webhook",
+      "coverage_mode": "real_host",
+      "risk_level": "high",
+      "safety_tier": "risky",
+      "readiness": "live-runtime",
+      "auth_scope": "tenant_scoped",
+      "reversibility": "irreversible",
+      "operation_family": "webhooks",
+      "tool_count": 3,
+      "provenance_markers": [
+        "live-host-introspection",
+        "receipt-correlation",
+        "artifact-bundle"
+      ],
+      "notes": "Webhook receipt fixture for irreversible host-backed delivery flows."
+    },
+    {
+      "id": "gmail_polling_sync",
+      "connector_id": "fcp.gmail:workspace:v1",
+      "display_name": "Gmail Workspace",
+      "archetype": "polling",
+      "coverage_mode": "real_host",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "readiness": "live-runtime",
+      "auth_scope": "multi_profile",
+      "reversibility": "mixed",
+      "operation_family": "sync",
+      "tool_count": 2,
+      "provenance_markers": [
+        "live-host-polling",
+        "cursor-state"
+      ],
+      "notes": "Polling fixture covering multi-profile auth and resumable cursor semantics."
+    },
+    {
+      "id": "browser_session_automation",
+      "connector_id": "fcp.browser:default:v1",
+      "display_name": "Browser Automation",
+      "archetype": "browser",
+      "coverage_mode": "mock_host",
+      "risk_level": "medium",
+      "safety_tier": "risky",
+      "readiness": "live-runtime",
+      "auth_scope": "none",
+      "reversibility": "mixed",
+      "operation_family": "browser-session",
+      "tool_count": 2,
+      "provenance_markers": [
+        "session-capture",
+        "artifact-bundle"
+      ],
+      "notes": "Browser-session fixture for automation flows that need replayable evidence."
+    },
+    {
+      "id": "postgres_admin_queries",
+      "connector_id": "fcp.postgresql:analytics:v1",
+      "display_name": "PostgreSQL Analytics",
+      "archetype": "database",
+      "coverage_mode": "real_host",
+      "risk_level": "medium",
+      "safety_tier": "safe",
+      "readiness": "live-runtime",
+      "auth_scope": "tenant_scoped",
+      "reversibility": "reversible",
+      "operation_family": "queries",
+      "tool_count": 2,
+      "provenance_markers": [
+        "live-host-query",
+        "result-handle"
+      ],
+      "notes": "Database fixture for reversible query flows and durable result inspection."
+    },
+    {
+      "id": "connector_lifecycle_admin",
+      "connector_id": "fcp.kubernetes:cluster:v1",
+      "display_name": "Kubernetes Cluster",
+      "archetype": "lifecycle_heavy",
+      "coverage_mode": "real_host",
+      "risk_level": "high",
+      "safety_tier": "risky",
+      "readiness": "live-runtime",
+      "auth_scope": "none",
+      "reversibility": "mixed",
+      "operation_family": "lifecycle",
+      "tool_count": 4,
+      "provenance_markers": [
+        "desired-vs-observed-state",
+        "startup-reconciliation"
+      ],
+      "notes": "Lifecycle-heavy fixture for enable/disable/start/stop/reconcile management scenarios."
+    }
+  ]
+}

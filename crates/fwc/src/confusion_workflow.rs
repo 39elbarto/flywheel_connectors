@@ -80,9 +80,7 @@ impl ConfusionCategory {
             Self::StaleContext => "Session context has expired or changed since last interaction.",
             Self::MissingFact => "The user assumes a fact not present in current state.",
             Self::WrongPinnedContext => "The pinned connector, zone, or session is incorrect.",
-            Self::BrokenPipelineAssumption => {
-                "The assumed pipeline step ordering does not exist."
-            }
+            Self::BrokenPipelineAssumption => "The assumed pipeline step ordering does not exist.",
             Self::UnsafeMacroExpansion => {
                 "Macro or template expansion would be unsafe or nonsensical."
             }
@@ -154,15 +152,11 @@ impl RecoveryAction {
             Self::SuggestAlternative => {
                 "The requested operation is not available. Here is an alternative approach:"
             }
-            Self::ShowCurrentState => {
-                "Here is the current state to help orient your next action:"
-            }
+            Self::ShowCurrentState => "Here is the current state to help orient your next action:",
             Self::RetryWithDefaults => {
                 "Retrying with safe defaults. The following values were used:"
             }
-            Self::AbortWithExplanation => {
-                "The operation has been aborted for safety. Reason:"
-            }
+            Self::AbortWithExplanation => "The operation has been aborted for safety. Reason:",
             Self::EscalateToHuman => {
                 "This situation requires human judgment. Please review and decide:"
             }
@@ -259,7 +253,8 @@ fn stale_context_cases() -> Vec<ConfusionCase> {
             input: "continue where I left off".into(),
             expected_category: ConfusionCategory::StaleContext,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Session context expired; there is no saved checkpoint to resume from.".into(),
+            rationale: "Session context expired; there is no saved checkpoint to resume from."
+                .into(),
         },
         ConfusionCase {
             input: "use the same settings as before".into(),
@@ -271,7 +266,8 @@ fn stale_context_cases() -> Vec<ConfusionCase> {
             input: "apply the fix from yesterday".into(),
             expected_category: ConfusionCategory::StaleContext,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Session does not persist across days; 'yesterday' context is unavailable.".into(),
+            rationale: "Session does not persist across days; 'yesterday' context is unavailable."
+                .into(),
         },
         ConfusionCase {
             input: "rerun with the old parameters".into(),
@@ -323,13 +319,15 @@ fn wrong_pinned_context_cases() -> Vec<ConfusionCase> {
             input: "list issues".into(),
             expected_category: ConfusionCategory::WrongPinnedContext,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Pinned connector is 'slack' but 'list issues' is a Jira/GitHub operation.".into(),
+            rationale: "Pinned connector is 'slack' but 'list issues' is a Jira/GitHub operation."
+                .into(),
         },
         ConfusionCase {
             input: "create a channel".into(),
             expected_category: ConfusionCategory::WrongPinnedContext,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Pinned zone is 'production' but channel creation requires 'staging' zone.".into(),
+            rationale: "Pinned zone is 'production' but channel creation requires 'staging' zone."
+                .into(),
         },
         ConfusionCase {
             input: "query the metrics endpoint".into(),
@@ -341,13 +339,16 @@ fn wrong_pinned_context_cases() -> Vec<ConfusionCase> {
             input: "send notification to #general".into(),
             expected_category: ConfusionCategory::WrongPinnedContext,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Pinned connector is 'email' but #general is a Slack channel reference.".into(),
+            rationale: "Pinned connector is 'email' but #general is a Slack channel reference."
+                .into(),
         },
         ConfusionCase {
             input: "run terraform plan".into(),
             expected_category: ConfusionCategory::WrongPinnedContext,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Pinned connector is 'github' but terraform plan requires the terraform connector.".into(),
+            rationale:
+                "Pinned connector is 'github' but terraform plan requires the terraform connector."
+                    .into(),
         },
     ]
 }
@@ -364,7 +365,8 @@ fn broken_pipeline_cases() -> Vec<ConfusionCase> {
             input: "run the tests before the build".into(),
             expected_category: ConfusionCategory::BrokenPipelineAssumption,
             expected_recovery: RecoveryAction::SuggestAlternative,
-            rationale: "Pipeline defines build before test; reversing would skip compilation.".into(),
+            rationale: "Pipeline defines build before test; reversing would skip compilation."
+                .into(),
         },
         ConfusionCase {
             input: "merge and then run CI".into(),
@@ -376,13 +378,16 @@ fn broken_pipeline_cases() -> Vec<ConfusionCase> {
             input: "deploy without building".into(),
             expected_category: ConfusionCategory::BrokenPipelineAssumption,
             expected_recovery: RecoveryAction::AbortWithExplanation,
-            rationale: "Deploy step depends on build artifact; skipping build makes deploy impossible.".into(),
+            rationale:
+                "Deploy step depends on build artifact; skipping build makes deploy impossible."
+                    .into(),
         },
         ConfusionCase {
             input: "run validation after cleanup".into(),
             expected_category: ConfusionCategory::BrokenPipelineAssumption,
             expected_recovery: RecoveryAction::SuggestAlternative,
-            rationale: "Cleanup removes the resources that validation checks; order is invalid.".into(),
+            rationale: "Cleanup removes the resources that validation checks; order is invalid."
+                .into(),
         },
     ]
 }
@@ -393,19 +398,24 @@ fn unsafe_macro_cases() -> Vec<ConfusionCase> {
             input: "run template deploy-all with target='*'".into(),
             expected_category: ConfusionCategory::UnsafeMacroExpansion,
             expected_recovery: RecoveryAction::AbortWithExplanation,
-            rationale: "Wildcard target expansion would deploy to every environment including production.".into(),
+            rationale:
+                "Wildcard target expansion would deploy to every environment including production."
+                    .into(),
         },
         ConfusionCase {
             input: "expand {{env.SECRET_KEY}} in the config".into(),
             expected_category: ConfusionCategory::UnsafeMacroExpansion,
             expected_recovery: RecoveryAction::AbortWithExplanation,
-            rationale: "Secret key expansion in a config template would leak credentials to logs.".into(),
+            rationale: "Secret key expansion in a config template would leak credentials to logs."
+                .into(),
         },
         ConfusionCase {
             input: "apply macro delete-all-users".into(),
             expected_category: ConfusionCategory::UnsafeMacroExpansion,
             expected_recovery: RecoveryAction::EscalateToHuman,
-            rationale: "Destructive macro 'delete-all-users' requires human review before execution.".into(),
+            rationale:
+                "Destructive macro 'delete-all-users' requires human review before execution."
+                    .into(),
         },
         ConfusionCase {
             input: "batch expand recipe cleanup-stale with scope=global".into(),
@@ -422,13 +432,16 @@ fn interrupted_workflow_cases() -> Vec<ConfusionCase> {
             input: "finish the migration".into(),
             expected_category: ConfusionCategory::InterruptedWorkflow,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Migration workflow was interrupted at step 2/4; resume requires state inspection.".into(),
+            rationale:
+                "Migration workflow was interrupted at step 2/4; resume requires state inspection."
+                    .into(),
         },
         ConfusionCase {
             input: "complete the onboarding flow".into(),
             expected_category: ConfusionCategory::InterruptedWorkflow,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Onboarding was interrupted during credential setup; next step unclear.".into(),
+            rationale: "Onboarding was interrupted during credential setup; next step unclear."
+                .into(),
         },
         ConfusionCase {
             input: "pick up where the import stopped".into(),
@@ -440,7 +453,8 @@ fn interrupted_workflow_cases() -> Vec<ConfusionCase> {
             input: "continue the sync that crashed".into(),
             expected_category: ConfusionCategory::InterruptedWorkflow,
             expected_recovery: RecoveryAction::RetryWithDefaults,
-            rationale: "Sync process crashed mid-way; checkpoint data may allow partial resume.".into(),
+            rationale: "Sync process crashed mid-way; checkpoint data may allow partial resume."
+                .into(),
         },
     ]
 }
@@ -451,7 +465,9 @@ fn blocked_approval_cases() -> Vec<ConfusionCase> {
             input: "just approve it already".into(),
             expected_category: ConfusionCategory::BlockedApproval,
             expected_recovery: RecoveryAction::EscalateToHuman,
-            rationale: "Approval requires a human with the appropriate role; CLI cannot self-approve.".into(),
+            rationale:
+                "Approval requires a human with the appropriate role; CLI cannot self-approve."
+                    .into(),
         },
         ConfusionCase {
             input: "skip the approval step".into(),
@@ -463,7 +479,9 @@ fn blocked_approval_cases() -> Vec<ConfusionCase> {
             input: "force deploy to prod without review".into(),
             expected_category: ConfusionCategory::BlockedApproval,
             expected_recovery: RecoveryAction::AbortWithExplanation,
-            rationale: "Production deployments require review approval; force-skipping violates policy.".into(),
+            rationale:
+                "Production deployments require review approval; force-skipping violates policy."
+                    .into(),
         },
         ConfusionCase {
             input: "auto-approve all pending changes".into(),
@@ -475,7 +493,8 @@ fn blocked_approval_cases() -> Vec<ConfusionCase> {
             input: "override the safety check".into(),
             expected_category: ConfusionCategory::BlockedApproval,
             expected_recovery: RecoveryAction::AbortWithExplanation,
-            rationale: "Safety checks are enforced by policy and cannot be overridden from CLI.".into(),
+            rationale: "Safety checks are enforced by policy and cannot be overridden from CLI."
+                .into(),
         },
     ]
 }
@@ -486,7 +505,8 @@ fn partial_completion_cases() -> Vec<ConfusionCase> {
             input: "all connectors updated".into(),
             expected_category: ConfusionCategory::PartialCompletion,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Batch update completed for 8/12 connectors; 4 failed with auth errors.".into(),
+            rationale: "Batch update completed for 8/12 connectors; 4 failed with auth errors."
+                .into(),
         },
         ConfusionCase {
             input: "retry the failed ones".into(),
@@ -498,7 +518,8 @@ fn partial_completion_cases() -> Vec<ConfusionCase> {
             input: "clean up the partial import".into(),
             expected_category: ConfusionCategory::PartialCompletion,
             expected_recovery: RecoveryAction::ShowCurrentState,
-            rationale: "Import created 200/500 records; cleanup must identify which were created.".into(),
+            rationale: "Import created 200/500 records; cleanup must identify which were created."
+                .into(),
         },
         ConfusionCase {
             input: "the batch is done".into(),
@@ -658,8 +679,9 @@ pub const fn suggest_recovery(category: ConfusionCategory) -> RecoveryAction {
         | ConfusionCategory::InterruptedWorkflow
         | ConfusionCategory::PartialCompletion => RecoveryAction::ShowCurrentState,
         ConfusionCategory::MissingFact => RecoveryAction::SuggestAlternative,
-        ConfusionCategory::BrokenPipelineAssumption
-        | ConfusionCategory::UnsafeMacroExpansion => RecoveryAction::AbortWithExplanation,
+        ConfusionCategory::BrokenPipelineAssumption | ConfusionCategory::UnsafeMacroExpansion => {
+            RecoveryAction::AbortWithExplanation
+        }
         ConfusionCategory::BlockedApproval => RecoveryAction::EscalateToHuman,
     }
 }
@@ -696,10 +718,7 @@ pub fn count_by_recovery(cases: &[ConfusionCase]) -> Vec<(RecoveryAction, usize)
     let mut counts: Vec<(RecoveryAction, usize)> = RecoveryAction::all()
         .iter()
         .map(|act| {
-            let n = cases
-                .iter()
-                .filter(|c| c.expected_recovery == *act)
-                .count();
+            let n = cases.iter().filter(|c| c.expected_recovery == *act).count();
             (*act, n)
         })
         .collect();
@@ -730,11 +749,7 @@ mod tests {
         let cases = get_workflow_confusion_cases();
         for cat in ConfusionCategory::all() {
             let n = cases.iter().filter(|c| c.expected_category == *cat).count();
-            assert!(
-                n >= 1,
-                "category {:?} has no cases in corpus",
-                cat
-            );
+            assert!(n >= 1, "category {:?} has no cases in corpus", cat);
         }
     }
 
@@ -742,15 +757,8 @@ mod tests {
     fn corpus_covers_all_recovery_actions() {
         let cases = get_workflow_confusion_cases();
         for act in RecoveryAction::all() {
-            let n = cases
-                .iter()
-                .filter(|c| c.expected_recovery == *act)
-                .count();
-            assert!(
-                n >= 1,
-                "recovery action {:?} has no cases in corpus",
-                act
-            );
+            let n = cases.iter().filter(|c| c.expected_recovery == *act).count();
+            assert!(n >= 1, "recovery action {:?} has no cases in corpus", act);
         }
     }
 
@@ -758,7 +766,11 @@ mod tests {
     fn corpus_all_have_rationale() {
         let cases = get_workflow_confusion_cases();
         for case in &cases {
-            assert!(!case.rationale.is_empty(), "case '{}' missing rationale", case.input);
+            assert!(
+                !case.rationale.is_empty(),
+                "case '{}' missing rationale",
+                case.input
+            );
         }
     }
 
@@ -782,7 +794,10 @@ mod tests {
             .iter()
             .filter(|c| c.expected_category == ConfusionCategory::AmbiguousIntent)
             .count();
-        assert!(n >= 4, "AmbiguousIntent should have at least 4 cases, got {n}");
+        assert!(
+            n >= 4,
+            "AmbiguousIntent should have at least 4 cases, got {n}"
+        );
     }
 
     #[test]
@@ -812,7 +827,10 @@ mod tests {
             .iter()
             .filter(|c| c.expected_category == ConfusionCategory::WrongPinnedContext)
             .count();
-        assert!(n >= 4, "WrongPinnedContext should have at least 4 cases, got {n}");
+        assert!(
+            n >= 4,
+            "WrongPinnedContext should have at least 4 cases, got {n}"
+        );
     }
 
     #[test]
@@ -822,7 +840,10 @@ mod tests {
             .iter()
             .filter(|c| c.expected_category == ConfusionCategory::BrokenPipelineAssumption)
             .count();
-        assert!(n >= 4, "BrokenPipelineAssumption should have at least 4 cases, got {n}");
+        assert!(
+            n >= 4,
+            "BrokenPipelineAssumption should have at least 4 cases, got {n}"
+        );
     }
 
     #[test]
@@ -832,7 +853,10 @@ mod tests {
             .iter()
             .filter(|c| c.expected_category == ConfusionCategory::UnsafeMacroExpansion)
             .count();
-        assert!(n >= 3, "UnsafeMacroExpansion should have at least 3 cases, got {n}");
+        assert!(
+            n >= 3,
+            "UnsafeMacroExpansion should have at least 3 cases, got {n}"
+        );
     }
 
     #[test]
@@ -842,7 +866,10 @@ mod tests {
             .iter()
             .filter(|c| c.expected_category == ConfusionCategory::InterruptedWorkflow)
             .count();
-        assert!(n >= 3, "InterruptedWorkflow should have at least 3 cases, got {n}");
+        assert!(
+            n >= 3,
+            "InterruptedWorkflow should have at least 3 cases, got {n}"
+        );
     }
 
     #[test]
@@ -852,7 +879,10 @@ mod tests {
             .iter()
             .filter(|c| c.expected_category == ConfusionCategory::BlockedApproval)
             .count();
-        assert!(n >= 4, "BlockedApproval should have at least 4 cases, got {n}");
+        assert!(
+            n >= 4,
+            "BlockedApproval should have at least 4 cases, got {n}"
+        );
     }
 
     #[test]
@@ -862,7 +892,10 @@ mod tests {
             .iter()
             .filter(|c| c.expected_category == ConfusionCategory::PartialCompletion)
             .count();
-        assert!(n >= 4, "PartialCompletion should have at least 4 cases, got {n}");
+        assert!(
+            n >= 4,
+            "PartialCompletion should have at least 4 cases, got {n}"
+        );
     }
 
     // ── Classification accuracy ─────────────────────────────────────
@@ -1274,7 +1307,10 @@ mod tests {
         let case = &get_workflow_confusion_cases()[0];
         let guidance = format_recovery_guidance(case);
         let line_count = guidance.lines().count();
-        assert!(line_count >= 4, "guidance should be multi-line, got {line_count}");
+        assert!(
+            line_count >= 4,
+            "guidance should be multi-line, got {line_count}"
+        );
     }
 
     // ── Category/RecoveryAction enum properties ─────────────────────
@@ -1426,7 +1462,10 @@ mod tests {
 
     #[test]
     fn classify_whitespace_only() {
-        assert_eq!(classify_confusion("   "), ConfusionCategory::AmbiguousIntent);
+        assert_eq!(
+            classify_confusion("   "),
+            ConfusionCategory::AmbiguousIntent
+        );
     }
 
     #[test]

@@ -277,14 +277,22 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Connector discover returns valid introspection",
         ScenarioCategory::Smoke,
         &["connector", "discover"],
-        vec![make_step("discover", "Discover connector capabilities", "fwc discover --connector test")],
+        vec![make_step(
+            "discover",
+            "Discover connector capabilities",
+            "fwc discover --connector test",
+        )],
     ));
     scenarios.push(make_scenario(
         "smoke-search",
         "Search returns results for known connector",
         ScenarioCategory::Smoke,
         &["search"],
-        vec![make_step("search", "Search for operations", "fwc search list")],
+        vec![make_step(
+            "search",
+            "Search for operations",
+            "fwc search list",
+        )],
     ));
     scenarios.push({
         let mut s = make_scenario(
@@ -292,7 +300,11 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
             "Basic invoke completes without error",
             ScenarioCategory::Smoke,
             &["invoke", "basic"],
-            vec![make_step("invoke", "Invoke a safe operation", "fwc invoke test.list_items")],
+            vec![make_step(
+                "invoke",
+                "Invoke a safe operation",
+                "fwc invoke test.list_items",
+            )],
         );
         s.prerequisites.push("smoke-discover".to_string());
         s
@@ -302,14 +314,22 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Manifest validation passes for built-in connectors",
         ScenarioCategory::Smoke,
         &["validate", "manifest"],
-        vec![make_step("validate", "Validate manifests", "fwc validate --all")],
+        vec![make_step(
+            "validate",
+            "Validate manifests",
+            "fwc validate --all",
+        )],
     ));
     scenarios.push(make_scenario(
         "smoke-health",
         "Health check reports live status",
         ScenarioCategory::Smoke,
         &["health"],
-        vec![make_step("health", "Check connector health", "fwc health --connector test")],
+        vec![make_step(
+            "health",
+            "Check connector health",
+            "fwc health --connector test",
+        )],
     ));
 
     // ── Regression (5) ──
@@ -319,8 +339,16 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         ScenarioCategory::Regression,
         &["auth", "expiry"],
         vec![
-            make_step("set-expired", "Set expired token", "fwc auth set --token expired-test"),
-            make_step("invoke", "Invoke should handle auth error", "fwc invoke test.list"),
+            make_step(
+                "set-expired",
+                "Set expired token",
+                "fwc auth set --token expired-test",
+            ),
+            make_step(
+                "invoke",
+                "Invoke should handle auth error",
+                "fwc invoke test.list",
+            ),
         ],
     ));
     scenarios.push(make_scenario(
@@ -328,14 +356,22 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Rate limit response triggers backoff and retry",
         ScenarioCategory::Regression,
         &["rate-limit", "retry"],
-        vec![make_step("invoke-rate", "Invoke with rate-limited endpoint", "fwc invoke test.rate_limited")],
+        vec![make_step(
+            "invoke-rate",
+            "Invoke with rate-limited endpoint",
+            "fwc invoke test.rate_limited",
+        )],
     ));
     scenarios.push(make_scenario(
         "reg-timeout",
         "Request timeout surfaces structured error",
         ScenarioCategory::Regression,
         &["timeout", "error"],
-        vec![make_step("invoke-slow", "Invoke slow endpoint", "fwc invoke test.slow_op --timeout 1")],
+        vec![make_step(
+            "invoke-slow",
+            "Invoke slow endpoint",
+            "fwc invoke test.slow_op --timeout 1",
+        )],
     ));
     scenarios.push(make_scenario(
         "reg-error-recovery",
@@ -343,8 +379,16 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         ScenarioCategory::Regression,
         &["error", "recovery"],
         vec![
-            make_step("start-batch", "Start a batch with flaky items", "fwc batch run flaky.toml"),
-            make_step("check-partial", "Verify partial results saved", "fwc batch status"),
+            make_step(
+                "start-batch",
+                "Start a batch with flaky items",
+                "fwc batch run flaky.toml",
+            ),
+            make_step(
+                "check-partial",
+                "Verify partial results saved",
+                "fwc batch status",
+            ),
         ],
     ));
     scenarios.push(make_scenario(
@@ -352,7 +396,11 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Schema-violating input returns clear validation error",
         ScenarioCategory::Regression,
         &["schema", "validation"],
-        vec![make_step("bad-input", "Send invalid input", "fwc invoke test.create --input '{}'")],
+        vec![make_step(
+            "bad-input",
+            "Send invalid input",
+            "fwc invoke test.create --input '{}'",
+        )],
     ));
 
     // ── Performance (5) ──
@@ -361,14 +409,22 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Batch of 100 items completes within SLA",
         ScenarioCategory::Performance,
         &["batch", "throughput", "sla"],
-        vec![make_step("batch-100", "Run 100-item batch", "fwc batch run perf-100.toml")],
+        vec![make_step(
+            "batch-100",
+            "Run 100-item batch",
+            "fwc batch run perf-100.toml",
+        )],
     ));
     scenarios.push(make_scenario(
         "perf-search-latency",
         "Search response returns within 500ms",
         ScenarioCategory::Performance,
         &["search", "latency"],
-        vec![make_step("search-timed", "Search with timing", "fwc search list --timing")],
+        vec![make_step(
+            "search-timed",
+            "Search with timing",
+            "fwc search list --timing",
+        )],
     ));
     scenarios.push(make_scenario(
         "perf-pipeline-efficiency",
@@ -376,8 +432,16 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         ScenarioCategory::Performance,
         &["pipeline", "efficiency"],
         vec![
-            make_step("single", "Single invoke baseline", "fwc invoke test.transform"),
-            make_step("pipeline", "Pipeline invoke", "fwc pipeline run transform-chain.toml"),
+            make_step(
+                "single",
+                "Single invoke baseline",
+                "fwc invoke test.transform",
+            ),
+            make_step(
+                "pipeline",
+                "Pipeline invoke",
+                "fwc pipeline run transform-chain.toml",
+            ),
         ],
     ));
     scenarios.push(make_scenario(
@@ -385,14 +449,22 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Concurrent discover for 10 connectors completes within SLA",
         ScenarioCategory::Performance,
         &["discover", "concurrency"],
-        vec![make_step("discover-10", "Discover 10 connectors", "fwc discover --all --limit 10")],
+        vec![make_step(
+            "discover-10",
+            "Discover 10 connectors",
+            "fwc discover --all --limit 10",
+        )],
     ));
     scenarios.push(make_scenario(
         "perf-large-payload",
         "Large payload (1MB) serializes and transmits within SLA",
         ScenarioCategory::Performance,
         &["payload", "large"],
-        vec![make_step("large-invoke", "Invoke with large input", "fwc invoke test.upload --input @large.json")],
+        vec![make_step(
+            "large-invoke",
+            "Invoke with large input",
+            "fwc invoke test.upload --input @large.json",
+        )],
     ));
 
     // ── Security (5) ──
@@ -402,8 +474,16 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         ScenarioCategory::Security,
         &["credential", "redaction"],
         vec![
-            make_step("set-cred", "Set a credential", "fwc auth set --token secret123"),
-            make_step("invoke-fail", "Invoke that fails — check no cred leak", "fwc invoke test.fail"),
+            make_step(
+                "set-cred",
+                "Set a credential",
+                "fwc auth set --token secret123",
+            ),
+            make_step(
+                "invoke-fail",
+                "Invoke that fails — check no cred leak",
+                "fwc invoke test.fail",
+            ),
         ],
     ));
     scenarios.push(make_scenario(
@@ -411,28 +491,44 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Token budget enforcement prevents over-spend",
         ScenarioCategory::Security,
         &["budget", "token"],
-        vec![make_step("budget-invoke", "Invoke with tight budget", "fwc invoke test.expensive --budget 10")],
+        vec![make_step(
+            "budget-invoke",
+            "Invoke with tight budget",
+            "fwc invoke test.expensive --budget 10",
+        )],
     ));
     scenarios.push(make_scenario(
         "sec-approval-flow",
         "High-risk operations require approval",
         ScenarioCategory::Security,
         &["approval", "risk"],
-        vec![make_step("risky-invoke", "Invoke risky operation without approval", "fwc invoke test.delete_all")],
+        vec![make_step(
+            "risky-invoke",
+            "Invoke risky operation without approval",
+            "fwc invoke test.delete_all",
+        )],
     ));
     scenarios.push(make_scenario(
         "sec-sandbox-escape",
         "Sandbox prevents filesystem access outside allowed paths",
         ScenarioCategory::Security,
         &["sandbox", "filesystem"],
-        vec![make_step("escape-attempt", "Try reading /etc/passwd via connector", "fwc invoke test.read_file --input '{\"path\":\"/etc/passwd\"}'")],
+        vec![make_step(
+            "escape-attempt",
+            "Try reading /etc/passwd via connector",
+            "fwc invoke test.read_file --input '{\"path\":\"/etc/passwd\"}'",
+        )],
     ));
     scenarios.push(make_scenario(
         "sec-tls-verification",
         "TLS certificate verification cannot be disabled by connector",
         ScenarioCategory::Security,
         &["tls", "certificate"],
-        vec![make_step("tls-check", "Invoke against self-signed endpoint", "fwc invoke test.https_self_signed")],
+        vec![make_step(
+            "tls-check",
+            "Invoke against self-signed endpoint",
+            "fwc invoke test.https_self_signed",
+        )],
     ));
 
     // Four more for good measure (24 total)
@@ -448,7 +544,11 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "Concurrent invokes to same connector serialize correctly",
         ScenarioCategory::Regression,
         &["concurrency", "invoke"],
-        vec![make_step("concurrent", "Run concurrent invokes", "fwc batch run concurrent.toml")],
+        vec![make_step(
+            "concurrent",
+            "Run concurrent invokes",
+            "fwc batch run concurrent.toml",
+        )],
     ));
     scenarios.push(make_scenario(
         "perf-cache-hit",
@@ -457,7 +557,11 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         &["cache", "discover"],
         vec![
             make_step("prime", "Prime the cache", "fwc discover --connector test"),
-            make_step("cached", "Discover again (cached)", "fwc discover --connector test"),
+            make_step(
+                "cached",
+                "Discover again (cached)",
+                "fwc discover --connector test",
+            ),
         ],
     ));
     scenarios.push(make_scenario(
@@ -465,7 +569,11 @@ pub fn build_scenario_matrix() -> ScenarioMatrix {
         "SQL/command injection in input is safely escaped",
         ScenarioCategory::Security,
         &["injection", "input"],
-        vec![make_step("inject", "Try injection payload", "fwc invoke test.query --input '{\"q\":\"'; DROP TABLE x; --\"}'")],
+        vec![make_step(
+            "inject",
+            "Try injection payload",
+            "fwc invoke test.query --input '{\"q\":\"'; DROP TABLE x; --\"}'",
+        )],
     ));
 
     ScenarioMatrix {
@@ -492,17 +600,11 @@ pub fn filter_scenarios<'a>(
                 return false;
             }
             // Tag inclusion filter (empty = accept all).
-            if !filter.tags.is_empty()
-                && !filter.tags.iter().any(|t| s.tags.contains(t))
-            {
+            if !filter.tags.is_empty() && !filter.tags.iter().any(|t| s.tags.contains(t)) {
                 return false;
             }
             // Tag exclusion filter.
-            if filter
-                .exclude_tags
-                .iter()
-                .any(|t| s.tags.contains(t))
-            {
+            if filter.exclude_tags.iter().any(|t| s.tags.contains(t)) {
                 return false;
             }
             // Name pattern filter.
@@ -702,9 +804,7 @@ pub fn plan_execution_order(scenarios: &[E2EScenario]) -> Vec<Vec<usize>> {
         if wave.is_empty() {
             // Remaining scenarios have unsatisfiable prerequisites — push
             // them all into a final wave so nothing is silently dropped.
-            let remaining: Vec<usize> = (0..total)
-                .filter(|i| !scheduled.contains(i))
-                .collect();
+            let remaining: Vec<usize> = (0..total).filter(|i| !scheduled.contains(i)).collect();
             if !remaining.is_empty() {
                 waves.push(remaining.clone());
                 for i in &remaining {
@@ -844,28 +944,44 @@ mod tests {
     #[test]
     fn matrix_smoke_scenarios_count() {
         let m = build_scenario_matrix();
-        let count = m.scenarios.iter().filter(|s| s.category == ScenarioCategory::Smoke).count();
+        let count = m
+            .scenarios
+            .iter()
+            .filter(|s| s.category == ScenarioCategory::Smoke)
+            .count();
         assert!(count >= 5, "smoke count: {count}");
     }
 
     #[test]
     fn matrix_regression_scenarios_count() {
         let m = build_scenario_matrix();
-        let count = m.scenarios.iter().filter(|s| s.category == ScenarioCategory::Regression).count();
+        let count = m
+            .scenarios
+            .iter()
+            .filter(|s| s.category == ScenarioCategory::Regression)
+            .count();
         assert!(count >= 5, "regression count: {count}");
     }
 
     #[test]
     fn matrix_performance_scenarios_count() {
         let m = build_scenario_matrix();
-        let count = m.scenarios.iter().filter(|s| s.category == ScenarioCategory::Performance).count();
+        let count = m
+            .scenarios
+            .iter()
+            .filter(|s| s.category == ScenarioCategory::Performance)
+            .count();
         assert!(count >= 5, "perf count: {count}");
     }
 
     #[test]
     fn matrix_security_scenarios_count() {
         let m = build_scenario_matrix();
-        let count = m.scenarios.iter().filter(|s| s.category == ScenarioCategory::Security).count();
+        let count = m
+            .scenarios
+            .iter()
+            .filter(|s| s.category == ScenarioCategory::Security)
+            .count();
         assert!(count >= 5, "sec count: {count}");
     }
 
@@ -918,7 +1034,11 @@ mod tests {
     fn matrix_tags_are_populated() {
         let m = build_scenario_matrix();
         let with_tags = m.scenarios.iter().filter(|s| !s.tags.is_empty()).count();
-        assert_eq!(with_tags, m.scenarios.len(), "all scenarios should have tags");
+        assert_eq!(
+            with_tags,
+            m.scenarios.len(),
+            "all scenarios should have tags"
+        );
     }
 
     // ── filter_scenarios ────────────────────────────────────────────────
@@ -952,7 +1072,9 @@ mod tests {
         };
         let result = filter_scenarios(&m, &f);
         for s in &result {
-            assert!(s.category == ScenarioCategory::Smoke || s.category == ScenarioCategory::Security);
+            assert!(
+                s.category == ScenarioCategory::Smoke || s.category == ScenarioCategory::Security
+            );
         }
     }
 
@@ -964,7 +1086,11 @@ mod tests {
             ..Default::default()
         };
         let result = filter_scenarios(&m, &f);
-        assert!(result.iter().all(|s| s.tags.contains(&"invoke".to_string())));
+        assert!(
+            result
+                .iter()
+                .all(|s| s.tags.contains(&"invoke".to_string()))
+        );
     }
 
     #[test]
@@ -975,7 +1101,11 @@ mod tests {
             ..Default::default()
         };
         let result = filter_scenarios(&m, &f);
-        assert!(result.iter().all(|s| !s.tags.contains(&"invoke".to_string())));
+        assert!(
+            result
+                .iter()
+                .all(|s| !s.tags.contains(&"invoke".to_string()))
+        );
     }
 
     #[test]
@@ -1043,17 +1173,25 @@ mod tests {
 
     #[test]
     fn validate_valid_scenario_no_errors() {
-        let s = make_scenario("t1", "Test", ScenarioCategory::Smoke, &["a"], vec![
-            make_step("s1", "step1", "echo hello"),
-        ]);
+        let s = make_scenario(
+            "t1",
+            "Test",
+            ScenarioCategory::Smoke,
+            &["a"],
+            vec![make_step("s1", "step1", "echo hello")],
+        );
         assert!(validate_scenario(&s).is_empty());
     }
 
     #[test]
     fn validate_empty_id() {
-        let mut s = make_scenario("", "Test", ScenarioCategory::Smoke, &[], vec![
-            make_step("s1", "step", "cmd"),
-        ]);
+        let mut s = make_scenario(
+            "",
+            "Test",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s1", "step", "cmd")],
+        );
         s.id = String::new();
         let errs = validate_scenario(&s);
         assert!(errs.iter().any(|e| e.contains("id must not be empty")));
@@ -1061,9 +1199,13 @@ mod tests {
 
     #[test]
     fn validate_empty_name() {
-        let s = make_scenario("t1", "", ScenarioCategory::Smoke, &[], vec![
-            make_step("s1", "step", "cmd"),
-        ]);
+        let s = make_scenario(
+            "t1",
+            "",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s1", "step", "cmd")],
+        );
         let errs = validate_scenario(&s);
         assert!(errs.iter().any(|e| e.contains("name must not be empty")));
     }
@@ -1077,9 +1219,13 @@ mod tests {
 
     #[test]
     fn validate_zero_timeout() {
-        let mut s = make_scenario("t1", "Test", ScenarioCategory::Smoke, &[], vec![
-            make_step("s1", "step", "cmd"),
-        ]);
+        let mut s = make_scenario(
+            "t1",
+            "Test",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s1", "step", "cmd")],
+        );
         s.timeout = Duration::ZERO;
         let errs = validate_scenario(&s);
         assert!(errs.iter().any(|e| e.contains("timeout")));
@@ -1087,37 +1233,55 @@ mod tests {
 
     #[test]
     fn validate_duplicate_step_id() {
-        let s = make_scenario("t1", "Test", ScenarioCategory::Smoke, &[], vec![
-            make_step("dup", "step1", "cmd1"),
-            make_step("dup", "step2", "cmd2"),
-        ]);
+        let s = make_scenario(
+            "t1",
+            "Test",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![
+                make_step("dup", "step1", "cmd1"),
+                make_step("dup", "step2", "cmd2"),
+            ],
+        );
         let errs = validate_scenario(&s);
         assert!(errs.iter().any(|e| e.contains("duplicate step id")));
     }
 
     #[test]
     fn validate_empty_step_id() {
-        let s = make_scenario("t1", "Test", ScenarioCategory::Smoke, &[], vec![
-            make_step("", "step", "cmd"),
-        ]);
+        let s = make_scenario(
+            "t1",
+            "Test",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("", "step", "cmd")],
+        );
         let errs = validate_scenario(&s);
         assert!(errs.iter().any(|e| e.contains("step id must not be empty")));
     }
 
     #[test]
     fn validate_empty_step_command() {
-        let s = make_scenario("t1", "Test", ScenarioCategory::Smoke, &[], vec![
-            make_step("s1", "step", ""),
-        ]);
+        let s = make_scenario(
+            "t1",
+            "Test",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s1", "step", "")],
+        );
         let errs = validate_scenario(&s);
         assert!(errs.iter().any(|e| e.contains("empty command")));
     }
 
     #[test]
     fn validate_self_prerequisite() {
-        let mut s = make_scenario("t1", "Test", ScenarioCategory::Smoke, &[], vec![
-            make_step("s1", "step", "cmd"),
-        ]);
+        let mut s = make_scenario(
+            "t1",
+            "Test",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s1", "step", "cmd")],
+        );
         s.prerequisites.push("t1".to_string());
         let errs = validate_scenario(&s);
         assert!(errs.iter().any(|e| e.contains("own prerequisite")));
@@ -1137,7 +1301,12 @@ mod tests {
         let mut s = make_scenario("", "", ScenarioCategory::Smoke, &[], vec![]);
         s.timeout = Duration::ZERO;
         let errs = validate_scenario(&s);
-        assert!(errs.len() >= 3, "expected >=3 errors, got {}: {:?}", errs.len(), errs);
+        assert!(
+            errs.len() >= 3,
+            "expected >=3 errors, got {}: {:?}",
+            errs.len(),
+            errs
+        );
     }
 
     // ── check_assertion ─────────────────────────────────────────────────
@@ -1523,8 +1692,20 @@ mod tests {
     #[test]
     fn plan_no_prerequisites_single_wave() {
         let scenarios = vec![
-            make_scenario("a", "A", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]),
-            make_scenario("b", "B", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]),
+            make_scenario(
+                "a",
+                "A",
+                ScenarioCategory::Smoke,
+                &[],
+                vec![make_step("s", "s", "c")],
+            ),
+            make_scenario(
+                "b",
+                "B",
+                ScenarioCategory::Smoke,
+                &[],
+                vec![make_step("s", "s", "c")],
+            ),
         ];
         let waves = plan_execution_order(&scenarios);
         assert_eq!(waves.len(), 1);
@@ -1533,9 +1714,27 @@ mod tests {
 
     #[test]
     fn plan_linear_chain() {
-        let mut a = make_scenario("a", "A", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
-        let mut b = make_scenario("b", "B", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
-        let mut c_s = make_scenario("c", "C", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut a = make_scenario(
+            "a",
+            "A",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
+        let mut b = make_scenario(
+            "b",
+            "B",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
+        let mut c_s = make_scenario(
+            "c",
+            "C",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         b.prerequisites.push("a".to_string());
         c_s.prerequisites.push("b".to_string());
         let scenarios = vec![a, b, c_s];
@@ -1549,12 +1748,36 @@ mod tests {
     #[test]
     fn plan_diamond_dependency() {
         // a -> b, a -> c, b+c -> d
-        let a = make_scenario("a", "A", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
-        let mut b = make_scenario("b", "B", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let a = make_scenario(
+            "a",
+            "A",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
+        let mut b = make_scenario(
+            "b",
+            "B",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         b.prerequisites.push("a".to_string());
-        let mut c_s = make_scenario("c", "C", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut c_s = make_scenario(
+            "c",
+            "C",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         c_s.prerequisites.push("a".to_string());
-        let mut d = make_scenario("d", "D", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut d = make_scenario(
+            "d",
+            "D",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         d.prerequisites.push("b".to_string());
         d.prerequisites.push("c".to_string());
 
@@ -1574,7 +1797,13 @@ mod tests {
 
     #[test]
     fn plan_unknown_prerequisite_treated_as_met() {
-        let mut s = make_scenario("a", "A", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut s = make_scenario(
+            "a",
+            "A",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         s.prerequisites.push("nonexistent".to_string());
         let scenarios = vec![s];
         let waves = plan_execution_order(&scenarios);
@@ -1584,9 +1813,21 @@ mod tests {
 
     #[test]
     fn plan_circular_dep_still_includes_all() {
-        let mut a = make_scenario("a", "A", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut a = make_scenario(
+            "a",
+            "A",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         a.prerequisites.push("b".to_string());
-        let mut b = make_scenario("b", "B", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut b = make_scenario(
+            "b",
+            "B",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         b.prerequisites.push("a".to_string());
         let scenarios = vec![a, b];
         let waves = plan_execution_order(&scenarios);
@@ -1604,11 +1845,35 @@ mod tests {
 
     #[test]
     fn plan_two_independent_chains() {
-        let a = make_scenario("a", "A", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
-        let mut b = make_scenario("b", "B", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let a = make_scenario(
+            "a",
+            "A",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
+        let mut b = make_scenario(
+            "b",
+            "B",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         b.prerequisites.push("a".to_string());
-        let c_s = make_scenario("c", "C", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
-        let mut d = make_scenario("d", "D", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let c_s = make_scenario(
+            "c",
+            "C",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
+        let mut d = make_scenario(
+            "d",
+            "D",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         d.prerequisites.push("c".to_string());
 
         let scenarios = vec![a, b, c_s, d];
@@ -1789,7 +2054,12 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_scenario_category() {
-        for cat in [ScenarioCategory::Smoke, ScenarioCategory::Regression, ScenarioCategory::Performance, ScenarioCategory::Security] {
+        for cat in [
+            ScenarioCategory::Smoke,
+            ScenarioCategory::Regression,
+            ScenarioCategory::Performance,
+            ScenarioCategory::Security,
+        ] {
             let json = serde_json::to_string(&cat).unwrap();
             let back: ScenarioCategory = serde_json::from_str(&json).unwrap();
             assert_eq!(cat, back);
@@ -1798,7 +2068,12 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_log_level() {
-        for lvl in [LogLevel::Debug, LogLevel::Info, LogLevel::Warn, LogLevel::Error] {
+        for lvl in [
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ] {
             let json = serde_json::to_string(&lvl).unwrap();
             let back: LogLevel = serde_json::from_str(&json).unwrap();
             assert_eq!(lvl, back);
@@ -1822,9 +2097,13 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_scenario() {
-        let s = make_scenario("s1", "Test Scenario", ScenarioCategory::Smoke, &["tag1"], vec![
-            make_step("step1", "first step", "echo hello"),
-        ]);
+        let s = make_scenario(
+            "s1",
+            "Test Scenario",
+            ScenarioCategory::Smoke,
+            &["tag1"],
+            vec![make_step("step1", "first step", "echo hello")],
+        );
         let json = serde_json::to_string(&s).unwrap();
         let back: E2EScenario = serde_json::from_str(&json).unwrap();
         assert_eq!(s.id, back.id);
@@ -1853,7 +2132,8 @@ mod tests {
     fn serde_roundtrip_step() {
         let mut s = make_step("s1", "desc", "cmd");
         s.env_vars.insert("KEY".to_string(), "VAL".to_string());
-        s.capture_vars.insert("out".to_string(), "/result".to_string());
+        s.capture_vars
+            .insert("out".to_string(), "/result".to_string());
         s.retry_count = 3;
         let json = serde_json::to_string(&s).unwrap();
         let back: E2EStep = serde_json::from_str(&json).unwrap();
@@ -1933,14 +2213,16 @@ mod tests {
     #[test]
     fn step_with_env_vars() {
         let mut s = make_step("s1", "desc", "cmd");
-        s.env_vars.insert("API_KEY".to_string(), "secret".to_string());
+        s.env_vars
+            .insert("API_KEY".to_string(), "secret".to_string());
         assert_eq!(s.env_vars.get("API_KEY").unwrap(), "secret");
     }
 
     #[test]
     fn step_with_capture_vars() {
         let mut s = make_step("s1", "desc", "cmd");
-        s.capture_vars.insert("token".to_string(), "/auth/token".to_string());
+        s.capture_vars
+            .insert("token".to_string(), "/auth/token".to_string());
         assert_eq!(s.capture_vars.get("token").unwrap(), "/auth/token");
     }
 
@@ -1958,19 +2240,37 @@ mod tests {
 
     #[test]
     fn scenario_default_cleanup_empty() {
-        let s = make_scenario("t", "T", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let s = make_scenario(
+            "t",
+            "T",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         assert!(s.cleanup.is_empty());
     }
 
     #[test]
     fn scenario_default_prerequisites_empty() {
-        let s = make_scenario("t", "T", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let s = make_scenario(
+            "t",
+            "T",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         assert!(s.prerequisites.is_empty());
     }
 
     #[test]
     fn scenario_default_assertions_empty() {
-        let s = make_scenario("t", "T", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let s = make_scenario(
+            "t",
+            "T",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         assert!(s.assertions.is_empty());
     }
 
@@ -2049,7 +2349,11 @@ mod tests {
         };
         let result = filter_scenarios(&m, &f);
         assert!(result.len() >= 5);
-        assert!(result.iter().all(|s| s.category == ScenarioCategory::Performance));
+        assert!(
+            result
+                .iter()
+                .all(|s| s.category == ScenarioCategory::Performance)
+        );
     }
 
     #[test]
@@ -2065,9 +2369,13 @@ mod tests {
 
     #[test]
     fn plan_single_scenario() {
-        let scenarios = vec![
-            make_scenario("only", "Only", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]),
-        ];
+        let scenarios = vec![make_scenario(
+            "only",
+            "Only",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        )];
         let waves = plan_execution_order(&scenarios);
         assert_eq!(waves.len(), 1);
         assert_eq!(waves[0], vec![0]);
@@ -2075,12 +2383,36 @@ mod tests {
 
     #[test]
     fn plan_all_depend_on_first() {
-        let a = make_scenario("a", "A", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
-        let mut b = make_scenario("b", "B", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let a = make_scenario(
+            "a",
+            "A",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
+        let mut b = make_scenario(
+            "b",
+            "B",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         b.prerequisites.push("a".to_string());
-        let mut c_s = make_scenario("c", "C", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut c_s = make_scenario(
+            "c",
+            "C",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         c_s.prerequisites.push("a".to_string());
-        let mut d = make_scenario("d", "D", ScenarioCategory::Smoke, &[], vec![make_step("s", "s", "c")]);
+        let mut d = make_scenario(
+            "d",
+            "D",
+            ScenarioCategory::Smoke,
+            &[],
+            vec![make_step("s", "s", "c")],
+        );
         d.prerequisites.push("a".to_string());
 
         let scenarios = vec![a, b, c_s, d];

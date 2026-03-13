@@ -239,7 +239,9 @@ mod tests {
                 synopsis: "Manage connector configuration",
                 description: "Get, set, and validate connector configuration values.",
                 examples: vec!["fwc config github get api_key"],
-                subcommands: vec!["get", "set", "unset", "import", "export", "doctor", "schema"],
+                subcommands: vec![
+                    "get", "set", "unset", "import", "export", "doctor", "schema",
+                ],
                 hidden: false,
                 advanced: false,
             },
@@ -279,7 +281,9 @@ mod tests {
                 synopsis: "Manage workflow tasks",
                 description: "Create, inspect, resolve, and execute workflow task capsules.",
                 examples: vec!["fwc task create \"deploy to staging\"", "fwc task list"],
-                subcommands: vec!["create", "show", "list", "resolve", "ask", "advance", "bind", "approve", "run"],
+                subcommands: vec![
+                    "create", "show", "list", "resolve", "ask", "advance", "bind", "approve", "run",
+                ],
                 hidden: false,
                 advanced: false,
             },
@@ -345,7 +349,9 @@ mod tests {
             DisclosureLevel::Advanced => vec![
                 OptionEntry {
                     flag: "--format".into(),
-                    description: "Output format (json, toon, table, csv, tsv, markdown, ndjson, jsonl)".into(),
+                    description:
+                        "Output format (json, toon, table, csv, tsv, markdown, ndjson, jsonl)"
+                            .into(),
                     required: false,
                     default_value: Some("toon".into()),
                 },
@@ -442,7 +448,11 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "search").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Basic);
-            assert!(help.synopsis.contains("Search"), "synopsis: {}", help.synopsis);
+            assert!(
+                help.synopsis.contains("Search"),
+                "synopsis: {}",
+                help.synopsis
+            );
         }
 
         #[test]
@@ -450,7 +460,11 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "invoke").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Basic);
-            assert!(help.synopsis.contains("Invoke"), "synopsis: {}", help.synopsis);
+            assert!(
+                help.synopsis.contains("Invoke"),
+                "synopsis: {}",
+                help.synopsis
+            );
         }
 
         #[test]
@@ -458,7 +472,11 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "validate").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Basic);
-            assert!(help.synopsis.contains("Validate"), "synopsis: {}", help.synopsis);
+            assert!(
+                help.synopsis.contains("Validate"),
+                "synopsis: {}",
+                help.synopsis
+            );
         }
 
         #[test]
@@ -474,7 +492,11 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "history").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Basic);
-            assert!(help.synopsis.contains("history"), "synopsis: {}", help.synopsis);
+            assert!(
+                help.synopsis.contains("history"),
+                "synopsis: {}",
+                help.synopsis
+            );
         }
 
         #[test]
@@ -482,7 +504,11 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "pipeline").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Basic);
-            assert!(help.synopsis.contains("pipeline"), "synopsis: {}", help.synopsis);
+            assert!(
+                help.synopsis.contains("pipeline"),
+                "synopsis: {}",
+                help.synopsis
+            );
         }
 
         #[test]
@@ -490,7 +516,11 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "batch").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Basic);
-            assert!(help.synopsis.contains("Execute"), "synopsis: {}", help.synopsis);
+            assert!(
+                help.synopsis.contains("Execute"),
+                "synopsis: {}",
+                help.synopsis
+            );
         }
 
         #[test]
@@ -695,7 +725,10 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "search").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Basic);
-            assert!(help.examples.is_empty(), "Basic help should have no examples");
+            assert!(
+                help.examples.is_empty(),
+                "Basic help should have no examples"
+            );
         }
 
         #[test]
@@ -715,7 +748,10 @@ mod tests {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "search").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Examples);
-            assert!(!help.examples.is_empty(), "Examples level should show examples");
+            assert!(
+                !help.examples.is_empty(),
+                "Examples level should show examples"
+            );
         }
 
         #[test]
@@ -781,7 +817,11 @@ mod tests {
                 if cmd.hidden {
                     continue;
                 }
-                assert!(!cmd.synopsis.is_empty(), "Command {} has empty synopsis", cmd.name);
+                assert!(
+                    !cmd.synopsis.is_empty(),
+                    "Command {} has empty synopsis",
+                    cmd.name
+                );
             }
         }
 
@@ -792,7 +832,11 @@ mod tests {
                 if cmd.hidden {
                     continue;
                 }
-                assert!(!cmd.description.is_empty(), "Command {} has empty description", cmd.name);
+                assert!(
+                    !cmd.description.is_empty(),
+                    "Command {} has empty description",
+                    cmd.name
+                );
             }
         }
 
@@ -803,7 +847,11 @@ mod tests {
                 if cmd.hidden {
                     continue;
                 }
-                assert!(!cmd.examples.is_empty(), "Command {} has no examples", cmd.name);
+                assert!(
+                    !cmd.examples.is_empty(),
+                    "Command {} has no examples",
+                    cmd.name
+                );
             }
         }
 
@@ -935,7 +983,10 @@ mod tests {
             let cmd = reg.iter().find(|c| c.name == "batch").unwrap();
             let help = build_help_output(cmd, DisclosureLevel::Detailed);
             let toon = render_toon(&help);
-            assert!(toon.contains("OPTIONS:"), "TOON output missing OPTIONS section");
+            assert!(
+                toon.contains("OPTIONS:"),
+                "TOON output missing OPTIONS section"
+            );
         }
     }
 
@@ -948,21 +999,31 @@ mod tests {
         fn pipeline_has_subcommands() {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "pipeline").unwrap();
-            assert!(!cmd.subcommands.is_empty(), "pipeline should have subcommands");
+            assert!(
+                !cmd.subcommands.is_empty(),
+                "pipeline should have subcommands"
+            );
         }
 
         #[test]
         fn config_has_subcommands() {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "config").unwrap();
-            assert!(cmd.subcommands.len() >= 3, "config should have 3+ subcommands");
+            assert!(
+                cmd.subcommands.len() >= 3,
+                "config should have 3+ subcommands"
+            );
         }
 
         #[test]
         fn task_has_nine_subcommands() {
             let reg = command_registry();
             let cmd = reg.iter().find(|c| c.name == "task").unwrap();
-            assert_eq!(cmd.subcommands.len(), 9, "task should have exactly 9 subcommands");
+            assert_eq!(
+                cmd.subcommands.len(),
+                9,
+                "task should have exactly 9 subcommands"
+            );
         }
 
         #[test]
@@ -1035,7 +1096,8 @@ mod tests {
         fn basic_help_excludes_hidden() {
             let reg = command_registry();
             // Build a simulated "basic help overview"
-            let visible_names: BTreeSet<&str> = reg.iter().filter(|c| !c.hidden).map(|c| c.name).collect();
+            let visible_names: BTreeSet<&str> =
+                reg.iter().filter(|c| !c.hidden).map(|c| c.name).collect();
             for h in reg.iter().filter(|c| c.hidden) {
                 assert!(
                     !visible_names.contains(h.name),
@@ -1075,7 +1137,11 @@ mod tests {
     mod error_format {
         use super::*;
 
-        fn make_error_envelope(code: &str, message: &str, suggestion: Option<&str>) -> HelpErrorEnvelope {
+        fn make_error_envelope(
+            code: &str,
+            message: &str,
+            suggestion: Option<&str>,
+        ) -> HelpErrorEnvelope {
             HelpErrorEnvelope {
                 code: code.to_string(),
                 message: message.to_string(),
@@ -1091,7 +1157,8 @@ mod tests {
 
         #[test]
         fn error_envelope_serializes_to_json() {
-            let env = make_error_envelope("FCP_ERR_PARSE_FAILED", "Bad syntax", Some("Try fwc guide"));
+            let env =
+                make_error_envelope("FCP_ERR_PARSE_FAILED", "Bad syntax", Some("Try fwc guide"));
             let json = serde_json::to_value(&env).unwrap();
             assert_eq!(json["code"], "FCP_ERR_PARSE_FAILED");
             assert_eq!(json["message"], "Bad syntax");
@@ -1178,14 +1245,21 @@ mod tests {
         fn category_string_is_lowercase() {
             for cat in CommandCategory::all() {
                 let s = cat.as_str();
-                assert!(s.chars().all(|c| c.is_lowercase() || !c.is_alphabetic()), "Category {cat:?} string not lowercase");
+                assert!(
+                    s.chars().all(|c| c.is_lowercase() || !c.is_alphabetic()),
+                    "Category {cat:?} string not lowercase"
+                );
             }
         }
 
         #[test]
         fn registry_has_at_least_fifteen_commands() {
             let reg = command_registry();
-            assert!(reg.len() >= 15, "Registry should have 15+ commands, got {}", reg.len());
+            assert!(
+                reg.len() >= 15,
+                "Registry should have 15+ commands, got {}",
+                reg.len()
+            );
         }
 
         #[test]

@@ -128,10 +128,7 @@ pub enum HarnessStep {
     /// Run discovery on the connector.
     Discover,
     /// Invoke a specific operation.
-    Invoke {
-        operation: String,
-        input: Value,
-    },
+    Invoke { operation: String, input: Value },
     /// Check connector health.
     CheckHealth,
     /// Perform a lifecycle transition.
@@ -345,50 +342,142 @@ pub fn get_archetype_fixtures() -> Vec<ArchetypeFixture> {
 fn mock_for_operation(archetype: ConnectorArchetype, op: &str) -> MockOperation {
     let (response_template, latency_ms, idempotent) = match archetype {
         ConnectorArchetype::RequestResponse => match op {
-            "get_resource" => (json!({"id": "res-001", "name": "Example Resource", "status": "active"}), 50, true),
+            "get_resource" => (
+                json!({"id": "res-001", "name": "Example Resource", "status": "active"}),
+                50,
+                true,
+            ),
             "create_resource" => (json!({"id": "res-002", "created": true}), 100, false),
             "update_resource" => (json!({"id": "res-001", "updated": true}), 80, true),
             "delete_resource" => (json!({"id": "res-001", "deleted": true}), 60, true),
-            "list_resources" => (json!({"items": [{"id": "res-001"}, {"id": "res-002"}], "total": 2}), 120, true),
+            "list_resources" => (
+                json!({"items": [{"id": "res-001"}, {"id": "res-002"}], "total": 2}),
+                120,
+                true,
+            ),
             _ => (json!({"ok": true}), 50, false),
         },
         ConnectorArchetype::Streaming => match op {
-            "open_stream" => (json!({"stream_id": "strm-001", "status": "open"}), 200, false),
-            "close_stream" => (json!({"stream_id": "strm-001", "status": "closed"}), 50, true),
-            "read_events" => (json!({"events": [{"id": "evt-1", "data": "payload"}], "count": 1}), 150, true),
-            "get_stream_status" => (json!({"stream_id": "strm-001", "active": true, "messages_buffered": 42}), 30, true),
+            "open_stream" => (
+                json!({"stream_id": "strm-001", "status": "open"}),
+                200,
+                false,
+            ),
+            "close_stream" => (
+                json!({"stream_id": "strm-001", "status": "closed"}),
+                50,
+                true,
+            ),
+            "read_events" => (
+                json!({"events": [{"id": "evt-1", "data": "payload"}], "count": 1}),
+                150,
+                true,
+            ),
+            "get_stream_status" => (
+                json!({"stream_id": "strm-001", "active": true, "messages_buffered": 42}),
+                30,
+                true,
+            ),
             _ => (json!({"ok": true}), 50, false),
         },
         ConnectorArchetype::EventDriven => match op {
-            "register_webhook" => (json!({"webhook_id": "wh-001", "url": "https://example.com/hook", "registered": true}), 100, false),
-            "deregister_webhook" => (json!({"webhook_id": "wh-001", "deregistered": true}), 50, true),
-            "list_events" => (json!({"events": [{"id": "evt-1", "type": "order.created"}], "total": 1}), 80, true),
+            "register_webhook" => (
+                json!({"webhook_id": "wh-001", "url": "https://example.com/hook", "registered": true}),
+                100,
+                false,
+            ),
+            "deregister_webhook" => (
+                json!({"webhook_id": "wh-001", "deregistered": true}),
+                50,
+                true,
+            ),
+            "list_events" => (
+                json!({"events": [{"id": "evt-1", "type": "order.created"}], "total": 1}),
+                80,
+                true,
+            ),
             "acknowledge_event" => (json!({"event_id": "evt-1", "acknowledged": true}), 30, true),
-            "replay_event" => (json!({"event_id": "evt-1", "replayed": true, "output": {}}), 150, false),
+            "replay_event" => (
+                json!({"event_id": "evt-1", "replayed": true, "output": {}}),
+                150,
+                false,
+            ),
             _ => (json!({"ok": true}), 50, false),
         },
         ConnectorArchetype::BatchProcessor => match op {
-            "create_batch" => (json!({"batch_id": "batch-001", "item_count": 100, "status": "created"}), 80, false),
-            "submit_batch" => (json!({"batch_id": "batch-001", "status": "running"}), 200, false),
-            "get_batch_status" => (json!({"batch_id": "batch-001", "status": "completed", "processed": 100, "failed": 0}), 30, true),
-            "cancel_batch" => (json!({"batch_id": "batch-001", "status": "cancelled"}), 50, true),
-            "get_batch_results" => (json!({"batch_id": "batch-001", "results": [{"id": "item-1", "ok": true}], "total": 100}), 150, true),
+            "create_batch" => (
+                json!({"batch_id": "batch-001", "item_count": 100, "status": "created"}),
+                80,
+                false,
+            ),
+            "submit_batch" => (
+                json!({"batch_id": "batch-001", "status": "running"}),
+                200,
+                false,
+            ),
+            "get_batch_status" => (
+                json!({"batch_id": "batch-001", "status": "completed", "processed": 100, "failed": 0}),
+                30,
+                true,
+            ),
+            "cancel_batch" => (
+                json!({"batch_id": "batch-001", "status": "cancelled"}),
+                50,
+                true,
+            ),
+            "get_batch_results" => (
+                json!({"batch_id": "batch-001", "results": [{"id": "item-1", "ok": true}], "total": 100}),
+                150,
+                true,
+            ),
             _ => (json!({"ok": true}), 50, false),
         },
         ConnectorArchetype::Gateway => match op {
-            "forward_request" => (json!({"status": 200, "body": {"forwarded": true}, "latency_ms": 45}), 100, false),
-            "list_routes" => (json!({"routes": [{"path": "/api/v1", "target": "svc-a"}], "count": 1}), 30, true),
-            "add_route" => (json!({"path": "/api/v2", "target": "svc-b", "added": true}), 60, false),
+            "forward_request" => (
+                json!({"status": 200, "body": {"forwarded": true}, "latency_ms": 45}),
+                100,
+                false,
+            ),
+            "list_routes" => (
+                json!({"routes": [{"path": "/api/v1", "target": "svc-a"}], "count": 1}),
+                30,
+                true,
+            ),
+            "add_route" => (
+                json!({"path": "/api/v2", "target": "svc-b", "added": true}),
+                60,
+                false,
+            ),
             "remove_route" => (json!({"path": "/api/v1", "removed": true}), 40, true),
-            "get_metrics" => (json!({"requests_total": 1000, "errors_total": 5, "p99_latency_ms": 120}), 50, true),
+            "get_metrics" => (
+                json!({"requests_total": 1000, "errors_total": 5, "p99_latency_ms": 120}),
+                50,
+                true,
+            ),
             _ => (json!({"ok": true}), 50, false),
         },
         ConnectorArchetype::Storage => match op {
-            "read_object" => (json!({"key": "data/file.json", "content": "{}", "size_bytes": 2, "content_type": "application/json"}), 80, true),
-            "write_object" => (json!({"key": "data/file.json", "written": true, "version": "v2"}), 120, false),
+            "read_object" => (
+                json!({"key": "data/file.json", "content": "{}", "size_bytes": 2, "content_type": "application/json"}),
+                80,
+                true,
+            ),
+            "write_object" => (
+                json!({"key": "data/file.json", "written": true, "version": "v2"}),
+                120,
+                false,
+            ),
             "delete_object" => (json!({"key": "data/file.json", "deleted": true}), 50, true),
-            "list_objects" => (json!({"objects": [{"key": "data/file.json"}, {"key": "data/other.json"}], "total": 2}), 100, true),
-            "get_metadata" => (json!({"key": "data/file.json", "size_bytes": 2, "created_at": "2026-01-01T00:00:00Z", "content_type": "application/json"}), 40, true),
+            "list_objects" => (
+                json!({"objects": [{"key": "data/file.json"}, {"key": "data/other.json"}], "total": 2}),
+                100,
+                true,
+            ),
+            "get_metadata" => (
+                json!({"key": "data/file.json", "size_bytes": 2, "created_at": "2026-01-01T00:00:00Z", "content_type": "application/json"}),
+                40,
+                true,
+            ),
             _ => (json!({"ok": true}), 50, false),
         },
     };
@@ -535,11 +624,7 @@ pub fn validate_harness_config(config: &HarnessConfig) -> Vec<String> {
 
         // Check that every supported operation has a mock.
         for op in &fixture.supported_operations {
-            if !fixture
-                .mock_responses
-                .iter()
-                .any(|m| m.operation == *op)
-            {
+            if !fixture.mock_responses.iter().any(|m| m.operation == *op) {
                 issues.push(format!(
                     "Fixture '{}' missing mock for operation '{}'",
                     fixture.connector_id, op
@@ -615,7 +700,10 @@ pub fn format_fixture_matrix_toon(fixtures: &[ArchetypeFixture]) -> String {
         out,
         "Total: {} fixtures, {} operations",
         fixtures.len(),
-        fixtures.iter().map(|f| f.supported_operations.len()).sum::<usize>(),
+        fixtures
+            .iter()
+            .map(|f| f.supported_operations.len())
+            .sum::<usize>(),
     );
 
     out
@@ -637,7 +725,10 @@ mod tests {
 
     #[test]
     fn archetype_display_request_response() {
-        assert_eq!(ConnectorArchetype::RequestResponse.to_string(), "request-response");
+        assert_eq!(
+            ConnectorArchetype::RequestResponse.to_string(),
+            "request-response"
+        );
     }
 
     #[test]
@@ -652,7 +743,10 @@ mod tests {
 
     #[test]
     fn archetype_display_batch_processor() {
-        assert_eq!(ConnectorArchetype::BatchProcessor.to_string(), "batch-processor");
+        assert_eq!(
+            ConnectorArchetype::BatchProcessor.to_string(),
+            "batch-processor"
+        );
     }
 
     #[test]
@@ -686,7 +780,11 @@ mod tests {
     fn capabilities_all_have_introspect() {
         for arch in ConnectorArchetype::ALL {
             let caps = default_capabilities(arch);
-            assert!(caps.contains(&"introspect".to_string()), "{:?} missing introspect", arch);
+            assert!(
+                caps.contains(&"introspect".to_string()),
+                "{:?} missing introspect",
+                arch
+            );
         }
     }
 
@@ -694,7 +792,11 @@ mod tests {
     fn capabilities_all_have_health() {
         for arch in ConnectorArchetype::ALL {
             let caps = default_capabilities(arch);
-            assert!(caps.contains(&"health".to_string()), "{:?} missing health", arch);
+            assert!(
+                caps.contains(&"health".to_string()),
+                "{:?} missing health",
+                arch
+            );
         }
     }
 
@@ -770,7 +872,11 @@ mod tests {
     #[test]
     fn ops_all_nonempty() {
         for arch in ConnectorArchetype::ALL {
-            assert!(!archetype_operations(arch).is_empty(), "{:?} has no ops", arch);
+            assert!(
+                !archetype_operations(arch).is_empty(),
+                "{:?} has no ops",
+                arch
+            );
         }
     }
 
@@ -819,7 +925,11 @@ mod tests {
     fn fixture_connector_ids_prefixed() {
         let fixtures = get_archetype_fixtures();
         for f in &fixtures {
-            assert!(f.connector_id.starts_with("test-"), "Fixture '{}' not prefixed", f.connector_id);
+            assert!(
+                f.connector_id.starts_with("test-"),
+                "Fixture '{}' not prefixed",
+                f.connector_id
+            );
         }
     }
 
@@ -871,7 +981,10 @@ mod tests {
             idempotent: true,
         };
         let resp = mock_operation_response(&mock, &json!({}));
-        assert_eq!(resp.get("operation").unwrap().as_str().unwrap(), "get_resource");
+        assert_eq!(
+            resp.get("operation").unwrap().as_str().unwrap(),
+            "get_resource"
+        );
     }
 
     #[test]
@@ -921,7 +1034,11 @@ mod tests {
         for f in &fixtures {
             for mock in &f.mock_responses {
                 let resp = mock_operation_response(mock, &json!({"test": true}));
-                assert!(resp.is_object(), "Response for '{}' should be an object", mock.operation);
+                assert!(
+                    resp.is_object(),
+                    "Response for '{}' should be an object",
+                    mock.operation
+                );
             }
         }
     }
@@ -996,7 +1113,12 @@ mod tests {
             let orig = names.len();
             names.sort();
             names.dedup();
-            assert_eq!(orig, names.len(), "Duplicate test case names for '{}'", f.connector_id);
+            assert_eq!(
+                orig,
+                names.len(),
+                "Duplicate test case names for '{}'",
+                f.connector_id
+            );
         }
     }
 
@@ -1318,10 +1440,21 @@ mod tests {
     fn mock_idempotent_flags_correct() {
         let fixtures = get_archetype_fixtures();
         // request-response: get is idempotent, create is not
-        let rr = fixtures.iter().find(|f| f.archetype == ConnectorArchetype::RequestResponse).unwrap();
-        let get_mock = rr.mock_responses.iter().find(|m| m.operation == "get_resource").unwrap();
+        let rr = fixtures
+            .iter()
+            .find(|f| f.archetype == ConnectorArchetype::RequestResponse)
+            .unwrap();
+        let get_mock = rr
+            .mock_responses
+            .iter()
+            .find(|m| m.operation == "get_resource")
+            .unwrap();
         assert!(get_mock.idempotent);
-        let create_mock = rr.mock_responses.iter().find(|m| m.operation == "create_resource").unwrap();
+        let create_mock = rr
+            .mock_responses
+            .iter()
+            .find(|m| m.operation == "create_resource")
+            .unwrap();
         assert!(!create_mock.idempotent);
     }
 
@@ -1330,7 +1463,11 @@ mod tests {
         let fixtures = get_archetype_fixtures();
         for f in &fixtures {
             for mock in &f.mock_responses {
-                assert!(!mock.latency.is_zero(), "Mock '{}' has zero latency", mock.operation);
+                assert!(
+                    !mock.latency.is_zero(),
+                    "Mock '{}' has zero latency",
+                    mock.operation
+                );
             }
         }
     }
@@ -1354,7 +1491,10 @@ mod tests {
     #[test]
     fn generate_test_cases_streaming_archetype() {
         let fixtures = get_archetype_fixtures();
-        let streaming = fixtures.iter().find(|f| f.archetype == ConnectorArchetype::Streaming).unwrap();
+        let streaming = fixtures
+            .iter()
+            .find(|f| f.archetype == ConnectorArchetype::Streaming)
+            .unwrap();
         let cases = generate_test_cases(streaming);
         // 3 base + 4 ops = 7
         assert_eq!(cases.len(), 7);
@@ -1364,7 +1504,10 @@ mod tests {
     #[test]
     fn generate_test_cases_event_driven_archetype() {
         let fixtures = get_archetype_fixtures();
-        let ed = fixtures.iter().find(|f| f.archetype == ConnectorArchetype::EventDriven).unwrap();
+        let ed = fixtures
+            .iter()
+            .find(|f| f.archetype == ConnectorArchetype::EventDriven)
+            .unwrap();
         let cases = generate_test_cases(ed);
         assert_eq!(cases.len(), 8); // 3 base + 5 ops
         assert!(cases.iter().any(|c| c.name.contains("register_webhook")));
@@ -1373,7 +1516,10 @@ mod tests {
     #[test]
     fn generate_test_cases_batch_processor_archetype() {
         let fixtures = get_archetype_fixtures();
-        let bp = fixtures.iter().find(|f| f.archetype == ConnectorArchetype::BatchProcessor).unwrap();
+        let bp = fixtures
+            .iter()
+            .find(|f| f.archetype == ConnectorArchetype::BatchProcessor)
+            .unwrap();
         let cases = generate_test_cases(bp);
         assert_eq!(cases.len(), 8);
         assert!(cases.iter().any(|c| c.name.contains("create_batch")));
@@ -1382,7 +1528,10 @@ mod tests {
     #[test]
     fn generate_test_cases_gateway_archetype() {
         let fixtures = get_archetype_fixtures();
-        let gw = fixtures.iter().find(|f| f.archetype == ConnectorArchetype::Gateway).unwrap();
+        let gw = fixtures
+            .iter()
+            .find(|f| f.archetype == ConnectorArchetype::Gateway)
+            .unwrap();
         let cases = generate_test_cases(gw);
         assert_eq!(cases.len(), 8);
         assert!(cases.iter().any(|c| c.name.contains("forward_request")));
@@ -1391,7 +1540,10 @@ mod tests {
     #[test]
     fn generate_test_cases_storage_archetype() {
         let fixtures = get_archetype_fixtures();
-        let st = fixtures.iter().find(|f| f.archetype == ConnectorArchetype::Storage).unwrap();
+        let st = fixtures
+            .iter()
+            .find(|f| f.archetype == ConnectorArchetype::Storage)
+            .unwrap();
         let cases = generate_test_cases(st);
         assert_eq!(cases.len(), 8);
         assert!(cases.iter().any(|c| c.name.contains("read_object")));
@@ -1413,8 +1565,14 @@ mod tests {
 
     #[test]
     fn archetype_equality() {
-        assert_eq!(ConnectorArchetype::RequestResponse, ConnectorArchetype::RequestResponse);
-        assert_ne!(ConnectorArchetype::RequestResponse, ConnectorArchetype::Streaming);
+        assert_eq!(
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::RequestResponse
+        );
+        assert_ne!(
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming
+        );
     }
 
     #[test]

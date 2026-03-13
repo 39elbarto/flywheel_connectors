@@ -328,10 +328,9 @@ impl ScenarioRunner {
 /// Returns `ScenarioError::ParseError` if the TOML is malformed or missing
 /// required fields.
 pub fn parse_scenario(toml_str: &str) -> Result<Scenario, ScenarioError> {
-    let scenario: Scenario =
-        toml::from_str(toml_str).map_err(|e| ScenarioError::ParseError {
-            message: e.to_string(),
-        })?;
+    let scenario: Scenario = toml::from_str(toml_str).map_err(|e| ScenarioError::ParseError {
+        message: e.to_string(),
+    })?;
     if scenario.name.is_empty() {
         return Err(ScenarioError::MissingField {
             field: "name".to_string(),
@@ -585,11 +584,7 @@ pub fn format_scenario_report(results: &[ScenarioResult]) -> String {
     for result in results {
         let status = if result.passed { "PASS" } else { "FAIL" };
         let duration_ms = result.duration.as_millis();
-        let _ = writeln!(
-            out,
-            "[{status}] {} ({duration_ms}ms)",
-            result.scenario_name
-        );
+        let _ = writeln!(out, "[{status}] {} ({duration_ms}ms)", result.scenario_name);
         if let Some(ref step) = result.failed_step {
             let _ = writeln!(out, "       failed at step: {step}");
         }
@@ -619,7 +614,10 @@ pub fn format_scenario_report(results: &[ScenarioResult]) -> String {
 pub fn format_step_outcome(outcome: &StepOutcome) -> String {
     let status = if outcome.passed { "PASS" } else { "FAIL" };
     let ms = outcome.duration.as_millis();
-    let mut out = format!("[{status}] step `{}` (exit={}, {ms}ms)", outcome.step_id, outcome.exit_code);
+    let mut out = format!(
+        "[{status}] step `{}` (exit={}, {ms}ms)",
+        outcome.step_id, outcome.exit_code
+    );
     if let Some(ref reason) = outcome.failure_reason {
         let _ = write!(out, " -- {reason}");
     }
@@ -875,7 +873,10 @@ command = "fwc version"
 expected_output_not_contains = ["ERROR", "panic"]
 "#;
         let s = parse_scenario(toml).unwrap();
-        assert_eq!(s.steps[0].expected_output_not_contains, vec!["ERROR", "panic"]);
+        assert_eq!(
+            s.steps[0].expected_output_not_contains,
+            vec!["ERROR", "panic"]
+        );
     }
 
     #[test]
@@ -935,10 +936,7 @@ expected_exit_code = 1
 
     #[test]
     fn validate_duplicate_step_ids() {
-        let s = minimal_scenario(
-            "dup",
-            vec![step("s1", "echo a"), step("s1", "echo b")],
-        );
+        let s = minimal_scenario("dup", vec![step("s1", "echo a"), step("s1", "echo b")]);
         let issues = validate_scenario(&s);
         assert!(issues.iter().any(|i| i.contains("duplicate step id")));
     }
@@ -1192,10 +1190,7 @@ expected_exit_code = 1
         let mut r = ScenarioRunner::new(Duration::from_secs(60));
         r.add_scenario(minimal_scenario(
             "test",
-            vec![
-                step("a", "echo a"),
-                step_with_deps("b", "echo b", &["a"]),
-            ],
+            vec![step("a", "echo a"), step_with_deps("b", "echo b", &["a"])],
         ));
         let plan = r.plan();
         assert_eq!(plan.len(), 1);
@@ -1602,7 +1597,10 @@ expected_exit_code = 1
     #[test]
     fn format_plan_output() {
         let plan = vec![
-            ("scenario1".to_string(), vec!["a".to_string(), "b".to_string()]),
+            (
+                "scenario1".to_string(),
+                vec!["a".to_string(), "b".to_string()],
+            ),
             ("scenario2".to_string(), vec!["x".to_string()]),
         ];
         let formatted = format_plan(&plan);
@@ -1616,10 +1614,7 @@ expected_exit_code = 1
 
     #[test]
     fn build_result_all_pass() {
-        let s = minimal_scenario(
-            "test",
-            vec![step("a", "echo a"), step("b", "echo b")],
-        );
+        let s = minimal_scenario("test", vec![step("a", "echo a"), step("b", "echo b")]);
         let outcomes = vec![
             StepOutcome {
                 stdout: "output-a".to_string(),
@@ -1639,14 +1634,8 @@ expected_exit_code = 1
 
     #[test]
     fn build_result_with_failure() {
-        let s = minimal_scenario(
-            "test",
-            vec![step("a", "echo a"), step("b", "echo b")],
-        );
-        let outcomes = vec![
-            passing_outcome("a"),
-            failing_outcome("b", "boom"),
-        ];
+        let s = minimal_scenario("test", vec![step("a", "echo a"), step("b", "echo b")]);
+        let outcomes = vec![passing_outcome("a"), failing_outcome("b", "boom")];
         let result = build_scenario_result(&s, &outcomes, Duration::from_millis(100));
         assert!(!result.passed);
         assert_eq!(result.failed_step.as_deref(), Some("b"));
@@ -1674,28 +1663,35 @@ expected_exit_code = 1
 
     #[test]
     fn build_result_metadata() {
-        let s = minimal_scenario(
-            "test",
-            vec![step("a", "echo a"), step("b", "echo b")],
-        );
+        let s = minimal_scenario("test", vec![step("a", "echo a"), step("b", "echo b")]);
         let outcomes = vec![passing_outcome("a"), passing_outcome("b")];
         let result = build_scenario_result(&s, &outcomes, Duration::from_millis(100));
         assert_eq!(result.artifacts.metadata.get("total_steps").unwrap(), "2");
-        assert_eq!(result.artifacts.metadata.get("executed_steps").unwrap(), "2");
+        assert_eq!(
+            result.artifacts.metadata.get("executed_steps").unwrap(),
+            "2"
+        );
     }
 
     #[test]
     fn build_result_partial_execution() {
         let s = minimal_scenario(
             "test",
-            vec![step("a", "echo a"), step("b", "echo b"), step("c", "echo c")],
+            vec![
+                step("a", "echo a"),
+                step("b", "echo b"),
+                step("c", "echo c"),
+            ],
         );
         // Only one step executed (e.g., first step failed and runner stopped).
         let outcomes = vec![failing_outcome("a", "crash")];
         let result = build_scenario_result(&s, &outcomes, Duration::from_millis(30));
         assert!(!result.passed);
         assert_eq!(result.failed_step.as_deref(), Some("a"));
-        assert_eq!(result.artifacts.metadata.get("executed_steps").unwrap(), "1");
+        assert_eq!(
+            result.artifacts.metadata.get("executed_steps").unwrap(),
+            "1"
+        );
     }
 
     #[test]
@@ -1719,10 +1715,7 @@ expected_exit_code = 1
 
     #[test]
     fn scenario_step_ids() {
-        let s = minimal_scenario(
-            "test",
-            vec![step("a", "x"), step("b", "y"), step("c", "z")],
-        );
+        let s = minimal_scenario("test", vec![step("a", "x"), step("b", "y"), step("c", "z")]);
         let ids = s.step_ids();
         assert_eq!(ids.len(), 3);
         assert!(ids.contains("a"));
@@ -1895,7 +1888,10 @@ expected_exit_code = 1
             timeout_secs: 0,
         };
         let issues = validate_scenario(&s);
-        assert!(issues.len() >= 3, "expected at least 3 issues, got: {issues:?}");
+        assert!(
+            issues.len() >= 3,
+            "expected at least 3 issues, got: {issues:?}"
+        );
     }
 
     #[test]
@@ -2001,7 +1997,10 @@ command = "echo hello"
         let result = build_scenario_result(&s, &outcomes, Duration::from_millis(0));
         // No outcomes means all_passed stays true (no failure detected).
         assert!(result.passed);
-        assert_eq!(result.artifacts.metadata.get("executed_steps").unwrap(), "0");
+        assert_eq!(
+            result.artifacts.metadata.get("executed_steps").unwrap(),
+            "0"
+        );
     }
 
     #[test]

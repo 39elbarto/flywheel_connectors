@@ -157,9 +157,7 @@ pub fn parse_extract(expr: &str) -> Result<ExtractExpr, ExtractError> {
             .filter(|s| !s.is_empty())
             .collect();
         if fields.is_empty() {
-            return Err(ExtractError::ParseError(
-                "empty object construction".into(),
-            ));
+            return Err(ExtractError::ParseError("empty object construction".into()));
         }
         return Ok(ExtractExpr::ObjectConstruct(fields));
     }
@@ -299,9 +297,7 @@ fn parse_chain(s: &str) -> Result<Vec<ChainSegment>, ExtractError> {
                 .unwrap_or(remaining.len());
             let field = &remaining[..end];
             if field.is_empty() {
-                return Err(ExtractError::ParseError(
-                    "empty field name in chain".into(),
-                ));
+                return Err(ExtractError::ParseError("empty field name in chain".into()));
             }
             segments.push(ChainSegment::Field(field.to_string()));
             remaining = &remaining[end..];
@@ -500,9 +496,7 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                 Ok(Value::Array(keys))
             }
             Value::Array(arr) => {
-                let keys: Vec<Value> = (0..arr.len())
-                    .map(|i| Value::Number(i.into()))
-                    .collect();
+                let keys: Vec<Value> = (0..arr.len()).map(|i| Value::Number(i.into())).collect();
                 Ok(Value::Array(keys))
             }
             _ => Err(ExtractError::TypeError(format!(
@@ -538,9 +532,7 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                 }
                 Ok(Value::Array(out))
             }
-            _ => Err(ExtractError::TypeError(
-                "flatten requires an array".into(),
-            )),
+            _ => Err(ExtractError::TypeError("flatten requires an array".into())),
         },
         PipeFunc::Reverse => match value {
             Value::Array(arr) => {
@@ -561,8 +553,7 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                     .filter_map(|v| v.as_f64())
                     .reduce(f64::min)
                     .map_or(Value::Null, |n| {
-                        serde_json::Number::from_f64(n)
-                            .map_or(Value::Null, Value::Number)
+                        serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
                     });
                 Ok(min)
             }
@@ -576,8 +567,7 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                     .filter_map(|v| v.as_f64())
                     .reduce(f64::max)
                     .map_or(Value::Null, |n| {
-                        serde_json::Number::from_f64(n)
-                            .map_or(Value::Null, Value::Number)
+                        serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
                     });
                 Ok(max)
             }
@@ -602,7 +592,9 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                     let fa = a.as_f64();
                     let fb = b.as_f64();
                     match (fa, fb) {
-                        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Some(x), Some(y)) => {
+                            x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+                        }
                         _ => {
                             let sa = format_extracted(a);
                             let sb = format_extracted(b);
@@ -630,8 +622,7 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                 let code = n.as_u64().unwrap_or(0);
                 if code <= 127 {
                     Ok(Value::String(
-                        char::from_u32(code as u32)
-                            .map_or(String::new(), |c| c.to_string()),
+                        char::from_u32(code as u32).map_or(String::new(), |c| c.to_string()),
                     ))
                 } else {
                     Ok(Value::Null)
@@ -661,8 +652,7 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                 if let Ok(n) = s.parse::<i64>() {
                     Ok(Value::Number(n.into()))
                 } else if let Ok(n) = s.parse::<f64>() {
-                    Ok(serde_json::Number::from_f64(n)
-                        .map_or(Value::Null, Value::Number))
+                    Ok(serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number))
                 } else {
                     Err(ExtractError::TypeError(format!(
                         "cannot convert string '{s}' to number"
@@ -696,11 +686,9 @@ fn apply_pipe_func(value: &Value, func: &PipeFunc) -> Result<Value, ExtractError
                 // If all numbers, sum them
                 if arr.iter().all(|v| v.is_number()) {
                     let sum: f64 = arr.iter().filter_map(|v| v.as_f64()).sum();
-                    Ok(serde_json::Number::from_f64(sum)
-                        .map_or(Value::Null, Value::Number))
+                    Ok(serde_json::Number::from_f64(sum).map_or(Value::Null, Value::Number))
                 } else if arr.iter().all(|v| v.is_string()) {
-                    let concat: String =
-                        arr.iter().filter_map(|v| v.as_str()).collect();
+                    let concat: String = arr.iter().filter_map(|v| v.as_str()).collect();
                     Ok(Value::String(concat))
                 } else if arr.iter().all(Value::is_array) {
                     let mut out = Vec::new();
@@ -930,10 +918,7 @@ mod tests {
         let expr = parse_extract(".[0][1]").unwrap();
         assert_eq!(
             expr,
-            ExtractExpr::Chain(vec![
-                ChainSegment::Index(0),
-                ChainSegment::Index(1),
-            ])
+            ExtractExpr::Chain(vec![ChainSegment::Index(0), ChainSegment::Index(1),])
         );
     }
 
@@ -964,10 +949,7 @@ mod tests {
     #[test]
     fn parse_object_construct_single() {
         let expr = parse_extract("{id}").unwrap();
-        assert_eq!(
-            expr,
-            ExtractExpr::ObjectConstruct(vec!["id".into()])
-        );
+        assert_eq!(expr, ExtractExpr::ObjectConstruct(vec!["id".into()]));
     }
 
     #[test]
@@ -975,12 +957,7 @@ mod tests {
         let expr = parse_extract("{a, b, c, d}").unwrap();
         assert_eq!(
             expr,
-            ExtractExpr::ObjectConstruct(vec![
-                "a".into(),
-                "b".into(),
-                "c".into(),
-                "d".into(),
-            ])
+            ExtractExpr::ObjectConstruct(vec!["a".into(), "b".into(), "c".into(), "d".into(),])
         );
     }
 
@@ -1574,13 +1551,7 @@ mod tests {
         let v = json!([1]);
         let expr = parse_extract(".[999]").unwrap();
         let err = apply_extract(&v, &expr).unwrap_err();
-        assert_eq!(
-            err,
-            ExtractError::IndexOutOfBounds {
-                index: 999,
-                len: 1
-            }
-        );
+        assert_eq!(err, ExtractError::IndexOutOfBounds { index: 999, len: 1 });
     }
 
     #[test]

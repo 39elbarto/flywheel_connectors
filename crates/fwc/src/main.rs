@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+#[allow(dead_code)] // Access-planning command family.
+mod access_cmd;
 #[allow(dead_code)] // Multi-agent coordination wired when Agent Mail integration lands.
 mod agent_coord;
 #[allow(dead_code)] // Agent Mail multi-agent coordination.
@@ -99,6 +101,8 @@ mod lifecycle_mutations;
 mod manifest_cmd;
 #[allow(dead_code)]
 mod mcp_resources;
+#[allow(dead_code)] // Mesh targeting and availability command family.
+mod mesh_cmd;
 mod net_cmd;
 #[allow(dead_code)] // Connector scaffolding command.
 mod new_cmd;
@@ -141,6 +145,8 @@ mod secretless;
 mod serve_mcp;
 #[allow(dead_code)]
 mod session;
+#[allow(dead_code)] // Onboarding and repair command family.
+mod setup_cmd;
 #[cfg(test)]
 mod snapshot_help;
 #[cfg(test)]
@@ -382,6 +388,9 @@ enum Commands {
 
     /// List connectors with concise lifecycle and health signals.
     List(ListArgs),
+
+    /// Summarize zone topology, connector bindings, and inferred policy posture.
+    Zones(ZonesArgs),
 
     /// Search connectors and operations without expanding full schemas.
     Search(SearchArgs),
@@ -1021,6 +1030,16 @@ struct ListArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ZonesArgs {
+    /// Optional zone id to inspect in detail.
+    zone: Option<String>,
+
+    /// Include inferred policy guidance for the requested zone.
+    #[arg(long, default_value_t = false)]
+    policy: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2945,6 +2964,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         }
         Commands::Do(args) => intent_do_dispatch(args)?,
         Commands::List(args) => list_dispatch(args, cli.host.as_deref())?,
+        Commands::Zones(args) => zones_dispatch(args)?,
         Commands::Search(args) => search_dispatch(args, cli.host.as_deref())?,
         Commands::Show(args) => show_dispatch(args, cli.host.as_deref())?,
         Commands::Ops(args) => ops_dispatch(args, cli.host.as_deref())?,
@@ -5396,6 +5416,239 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
     })
 }
 
+#[derive(Debug, Serialize)]
+struct ZonePolicySummary {
+    zone_id: String,
+    policy_type: String,
+    well_known: bool,
+    source: &'static str,
+    summary: String,
+    constraints: Vec<String>,
+}
+
+fn zones_dispatch(args: &ZonesArgs) -> Result<DispatchOutcome> {
+    if args.policy && args.zone.is_none() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "zones",
+                "error": {
+                    "type": "missing-zone-selector",
+                    "message": "`fwc zones --policy` requires a zone selector such as `z:work`.",
+                    "recoverable": true,
+                },
+                "details": {
+                    "policy": true,
+                },
+                "next_actions": [
+                    "Run `fwc zones z:work --policy` to inspect one zone's inferred policy posture.".to_owned(),
+                    "Run `fwc zones` to list configured zones first.".to_owned(),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+
+    let catalog = DiscoveryCatalog::load()?;
+    let registry = zone_registry_from_catalog(&catalog);
+    let overview = zone_scope::zone_overview(&registry);
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "zones");
+    let connector_count = catalog.connectors().len();
+    let mut payload = json!({
+        "status": "ok",
+        "command": "zones",
+        "source": "workspace-manifests",
+        "mode": "offline-artifact",
+        "message": format!(
+            "Summarized zone topology from {} workspace manifest{}.",
+            connector_count,
+            if connector_count == 1 { "" } else { "s" }
+        ),
+    });
+
+    if let Some(zone) = args.zone.as_deref() {
+        let zone_id = match zone.parse::<ZoneId>() {
+            Ok(zone_id) => zone_id,
+            Err(error) => {
+                return Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "zones",
+                        "error": {
+                            "type": "invalid-zone",
+                            "message": format!("`{zone}` is not a valid zone id: {error}"),
+                            "recoverable": true,
+                        },
+                        "details": {
+                            "zone": zone,
+                        },
+                        "next_actions": [
+                            "Retry with a canonical zone id such as `z:work`.".to_owned(),
+                            "Use `fwc zones` to inspect the configured zone ids currently surfaced from manifests.".to_owned(),
+                        ],
+                    }),
+                    exit_code: CliExitCode::Validation,
+                });
+            }
+        };
+
+        let zone_info = overview
+            .iter()
+            .find(|info| info.zone_id == zone_id.as_str())
+            .cloned()
+            .unwrap_or_else(|| zone_scope::ZoneInfo {
+                zone_id: zone_id.to_string(),
+                connector_count: 0,
+                tool_count: 0,
+                connectors: Vec::new(),
+                capabilities: Vec::new(),
+                well_known: zone_id.as_str().starts_with("z:"),
+                policy_type: zone_scope::infer_policy_type(&zone_scope::ZoneId::from(zone_id.as_str())),
+            });
+        let policy = zone_policy_summary(&zone_info);
+        let mut toon = zone_scope::format_zone_detail_toon(&zone_info);
+        if args.policy {
+            toon.push('\n');
+            toon.push_str(&format_zone_policy_toon(&policy));
+        }
+
+        payload["filters"] = json!({
+            "zone": zone_id.as_str(),
+            "policy": args.policy,
+        });
+        payload["message"] = json!(if zone_info.connector_count == 0 {
+            format!(
+                "Zone `{}` is syntactically valid but currently has no connector bindings in workspace manifests.",
+                zone_id
+            )
+        } else {
+            format!("Inspected zone `{}` from workspace manifests.", zone_id)
+        });
+        payload["zone"] = serde_json::to_value(&zone_info)?;
+        payload["policy"] = serde_json::to_value(&policy)?;
+        payload["toon"] = json!(toon);
+        payload["next_actions"] = json!([
+            format!("fwc zones {} --policy", zone_id),
+            "Use `fwc list --offline --zone <zone>` to inspect connector inventory inside one zone.".to_owned(),
+        ]);
+    } else {
+        let unique_connectors = catalog
+            .connectors()
+            .iter()
+            .map(|connector| connector.slug.clone())
+            .collect::<BTreeSet<_>>();
+        let total_tools = overview.iter().map(|info| info.tool_count).sum::<usize>();
+        payload["summary"] = json!({
+            "zone_count": overview.len(),
+            "connector_count": unique_connectors.len(),
+            "tool_count": total_tools,
+        });
+        payload["zones"] = serde_json::to_value(&overview)?;
+        payload["toon"] = json!(zone_scope::format_zones_toon(&overview));
+        payload["next_actions"] = json!([
+            "Use `fwc zones <zone>` to inspect one zone in detail.".to_owned(),
+            "Use `fwc zones <zone> --policy` when you want the inferred policy posture for that zone.".to_owned(),
+        ]);
+    }
+
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn zone_registry_from_catalog(catalog: &DiscoveryCatalog) -> zone_scope::ZoneRegistry {
+    let mut registry = zone_scope::ZoneRegistry::new();
+
+    for connector in catalog.connectors() {
+        let zones = connector
+            .supported_zones
+            .iter()
+            .map(|zone| zone_scope::parse_zone(zone))
+            .collect::<Vec<_>>();
+        if zones.is_empty() {
+            continue;
+        }
+
+        for operation in &connector.operations {
+            let mut tool = zone_scope::ZoneScopedTool::new(
+                connector.slug.clone(),
+                operation.preferred_selector.clone(),
+            )
+            .with_description(operation.summary.summary.clone())
+            .with_capability(operation.summary.capability.clone());
+
+            for zone in &zones {
+                tool = tool.with_zone(zone.clone());
+            }
+            registry.register_tool(tool);
+        }
+    }
+
+    registry
+}
+
+fn zone_policy_summary(info: &zone_scope::ZoneInfo) -> ZonePolicySummary {
+    let (summary, constraints) = match info.policy_type.as_str() {
+        "restricted" => (
+            "Private-style zone inferred from the zone id; keep bindings narrow and review risky capabilities explicitly.".to_owned(),
+            vec![
+                "Prefer least-privilege connector bindings for private data paths.".to_owned(),
+                "Review write-capable or destructive operations before exposing them in this zone.".to_owned(),
+            ],
+        ),
+        "open" => (
+            "Public-style zone inferred from the zone id; assume inputs are untrusted and minimize exposed write surfaces.".to_owned(),
+            vec![
+                "Treat inbound data as hostile unless another layer proves otherwise.".to_owned(),
+                "Prefer read-only or heavily validated connector operations for public ingress.".to_owned(),
+            ],
+        ),
+        "standard" => (
+            "Work-style zone inferred from the zone id; routine integrations are expected, but capability scope still needs review.".to_owned(),
+            vec![
+                "Confirm connector bindings match the intended work-domain trust boundary.".to_owned(),
+                "Keep high-risk capabilities explicit even when the zone name looks familiar.".to_owned(),
+            ],
+        ),
+        _ => (
+            "Custom zone policy inferred only from the explicit bindings currently declared in manifests.".to_owned(),
+            vec![
+                "Review connector bindings directly because no well-known policy preset is implied.".to_owned(),
+                "Treat cross-zone access and risky capabilities as opt-in, not assumed.".to_owned(),
+            ],
+        ),
+    };
+
+    ZonePolicySummary {
+        zone_id: info.zone_id.clone(),
+        policy_type: info.policy_type.clone(),
+        well_known: info.well_known,
+        source: "inferred-from-zone-id",
+        summary,
+        constraints,
+    }
+}
+
+fn format_zone_policy_toon(policy: &ZonePolicySummary) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Policy guidance:");
+    let _ = writeln!(out, "  Type: {}", policy.policy_type);
+    let _ = writeln!(out, "  Well-known: {}", policy.well_known);
+    let _ = writeln!(out, "  Source: {}", policy.source);
+    let _ = writeln!(out, "  Summary: {}", policy.summary);
+    if !policy.constraints.is_empty() {
+        let _ = writeln!(out, "  Constraints:");
+        for constraint in &policy.constraints {
+            let _ = writeln!(out, "    - {constraint}");
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_lines)]
 fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
     match &args.command {
@@ -7753,9 +8006,6 @@ fn health_dispatch(args: &HealthArgs, explicit_host: Option<&str>) -> Result<Dis
             });
         }
 
-        if !payload.get("next_actions").is_some_and(|v| v.is_array()) {
-            payload["next_actions"] = json!([]);
-        }
     }
 
     Ok(DispatchOutcome {
@@ -7772,23 +8022,19 @@ fn fleet_health_from_catalog(
         .connectors
         .iter()
         .map(|connector| {
-            let state = if connector.summary.health.is_healthy() {
-                fleet_health::ConnectorState::Healthy
+            let (state, error_rate) = if connector.summary.health.is_healthy() {
+                (fleet_health::ConnectorState::Healthy, 0.0)
             } else if connector.summary.health.is_available() {
-                fleet_health::ConnectorState::Degraded
+                (fleet_health::ConnectorState::Degraded, 0.05)
             } else {
-                fleet_health::ConnectorState::Failed
+                (fleet_health::ConnectorState::Failed, 1.0)
             };
             fleet_health::ConnectorHealth {
                 connector_id: connector.summary.id.to_string(),
                 state,
                 uptime: 86400, // default; real uptime from host API if available
                 last_check: chrono::Utc::now().to_rfc3339(),
-                error_rate: if connector.summary.health.is_healthy() {
-                    0.0
-                } else {
-                    0.05
-                },
+                error_rate,
                 latency_p50: 50.0,
                 latency_p99: 200.0,
                 tags: Vec::new(),
@@ -8135,7 +8381,7 @@ fn lifecycle_dispatch(args: &LifecycleArgs, explicit_host: Option<&str>) -> Resu
             "toon": toon,
             "next_actions": if check.can_proceed() {
                 vec![
-                    format!("fwc lifecycle {} --action {} --host {} (when ready to execute)", connector.slug, action.label(), host.endpoint),
+                    format!("fwc lifecycle {} --action {} --host {}", connector.slug, action.label(), host.endpoint),
                 ]
             } else {
                 vec![
@@ -19009,7 +19255,9 @@ fn materialize_safe_resolution_steps(
 
 fn is_resolution_safe_step(step: &intent::CompiledStep) -> bool {
     match step.command.as_str() {
-        "show" | "ops" | "schema" | "examples" | "search" | "list" | "status" => true,
+        "show" | "ops" | "schema" | "examples" | "search" | "list" | "zones" | "status" => {
+            true
+        }
         "config" => matches!(
             step.argv.get(2).map(String::as_str),
             Some("schema" | "get" | "doctor" | "export")
@@ -24443,6 +24691,86 @@ deny_ptrace = true
                     connector["slug"] == "github" && connector["canonical_id"] == "fcp.github"
                 })
         );
+    }
+
+    #[test]
+    fn prepare_cli_parses_zones_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "zones".to_owned(),
+            "z:work".to_owned(),
+            "--policy".to_owned(),
+        ])
+        .expect("zones command should parse");
+
+        match prepared.cli.command {
+            Commands::Zones(args) => {
+                assert_eq!(args.zone.as_deref(), Some("z:work"));
+                assert!(args.policy);
+            }
+            command => panic!("expected zones command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_zones_returns_manifest_backed_topology() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "zones"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "zones");
+        assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["mode"], "offline-artifact");
+        assert!(payload["zones"].as_array().is_some_and(|zones| !zones.is_empty()));
+        assert!(payload["toon"].as_str().is_some_and(|toon| toon.contains("Zones:")));
+        assert!(payload["zones"].as_array().unwrap().iter().any(|zone| {
+            zone["zone_id"] == "z:work"
+                && zone["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| !caps.is_empty())
+        }));
+    }
+
+    #[test]
+    fn execute_zone_detail_includes_policy_and_capabilities() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "zones", "z:work", "--policy"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "zones");
+        assert_eq!(payload["zone"]["zone_id"], "z:work");
+        assert_eq!(payload["policy"]["policy_type"], "standard");
+        assert_eq!(payload["policy"]["source"], "inferred-from-zone-id");
+        assert!(
+            payload["zone"]["capabilities"]
+                .as_array()
+                .is_some_and(|caps| !caps.is_empty())
+        );
+        assert!(payload["toon"].as_str().is_some_and(|toon| {
+            toon.contains("Zone: z:work") && toon.contains("Policy guidance:")
+        }));
+    }
+
+    #[test]
+    fn execute_zones_policy_requires_zone_selector() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "zones", "--policy"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "zones");
+        assert_eq!(payload["error"]["type"], "missing-zone-selector");
+    }
+
+    #[test]
+    fn execute_zones_allows_empty_valid_zone_detail() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "zones", "z:totally-empty-test-zone"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(
+            payload["zone"]["zone_id"],
+            "z:totally-empty-test-zone"
+        );
+        assert_eq!(payload["zone"]["connector_count"], 0);
+        assert_eq!(payload["zone"]["tool_count"], 0);
+        assert_eq!(payload["zone"]["policy_type"], "custom");
     }
 
     #[test]

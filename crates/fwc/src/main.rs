@@ -25,6 +25,8 @@ mod bench_cmd;
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
 mod checkpoint;
+#[allow(dead_code)] // Computation migration checkpoint, lease transfer, and resume.
+mod computation_migration;
 #[allow(dead_code)] // Workflow confusion corpus for task/session/pipeline cases.
 mod confusion_workflow;
 #[allow(dead_code)] // Auth verify + credential backend trait.
@@ -32,11 +34,15 @@ mod credential;
 #[allow(dead_code)]
 mod credential_store;
 #[allow(dead_code)]
+mod doc_playbooks;
+#[allow(dead_code)]
 mod doctor;
 #[allow(dead_code)] // E2E playbooks for agent workflow scenarios.
 mod e2e_playbooks;
 #[allow(dead_code)] // E2E scenario runner and artifact bundler.
 mod e2e_scenario;
+#[allow(dead_code)] // E2E scenario matrix with detailed logging.
+mod e2e_scripts;
 #[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
 mod error_taxonomy;
 mod event_stream;
@@ -55,6 +61,12 @@ mod health;
 mod history_replay;
 #[allow(dead_code)] // Host integration test harness with archetype fixtures.
 mod host_harness;
+#[allow(dead_code)] // Host integration: discovery, config, lifecycle test matrix.
+mod host_integration_discovery;
+#[allow(dead_code)] // Host integration: invoke, simulate, batch test matrix.
+mod host_integration_invoke;
+#[allow(dead_code)] // Host integration: streaming, logs, watch, reconnect test matrix.
+mod host_integration_streaming;
 #[allow(
     dead_code,
     clippy::writeln_empty_string,
@@ -1177,6 +1189,14 @@ struct DoctorArgs {
     /// Force connector self-check execution. Implied when `--connector` is present.
     #[arg(long, default_value_t = false)]
     self_check: bool,
+
+    /// Diagnose all connectors from fleet health data (symptom-based).
+    #[arg(long, default_value_t = false)]
+    all: bool,
+
+    /// Auto-apply safe fixes (e.g. clear caches, retry health checks). Unsafe fixes require confirmation.
+    #[arg(long, default_value_t = false)]
+    fix: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -7042,6 +7062,56 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         self_check: args.self_check || !args.connector.is_empty(),
     })?;
 
+    // ── Local symptom-based diagnosis ─────────────────────────────
+    // Map connector self-check results into doctor::Symptoms and run
+    // the local diagnosis engine to produce fix-it recipes.
+    let mut diagnostic_reports: Vec<doctor::DiagnosticReport> = Vec::new();
+
+    // If --all was requested, get the catalog and diagnose every connector.
+    if args.all {
+        let (catalog, _) = client.catalog(None)?;
+        for connector in &catalog.connectors {
+            let symptoms = symptoms_from_connector_health(
+                &connector.summary.health,
+                connector.summary.enabled,
+            );
+            let diag = doctor::diagnose(connector.summary.id.as_str(), &symptoms);
+            diagnostic_reports.push(diag);
+        }
+    }
+
+    // Also diagnose any explicitly requested connectors from their self-checks.
+    for sc in &report.connector_self_checks {
+        let msg = sc.report.message.as_deref().unwrap_or("");
+        let symptoms = doctor::Symptoms {
+            installed: true,
+            has_credentials: true,
+            http_status: None,
+            latency_ms: None,
+            error_message: if msg.is_empty() {
+                None
+            } else {
+                Some(msg.to_owned())
+            },
+            rate_limit_percent: None,
+            last_op_success: Some(matches!(sc.report.status, fcp_core::SelfCheckStatus::Ok)),
+        };
+        // Avoid duplicating if --all already produced a report for this id.
+        if !diagnostic_reports
+            .iter()
+            .any(|r| r.connector_id == sc.connector_id)
+        {
+            diagnostic_reports.push(doctor::diagnose(&sc.connector_id, &symptoms));
+        }
+    }
+
+    let auto_fixes = doctor::collect_auto_fixes(&diagnostic_reports);
+    let fleet_toon = if diagnostic_reports.is_empty() {
+        String::new()
+    } else {
+        doctor::format_fleet_toon(&diagnostic_reports)
+    };
+
     let mut next_actions = vec![format!("fwc status --host {}", host.endpoint)];
     if let Some(first) = requested_connectors
         .first()
@@ -7052,6 +7122,12 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         next_actions.push(format!("fwc status {first} --host {}", host.endpoint));
     } else {
         next_actions.push(format!("fwc list --host {}", host.endpoint));
+    }
+    if !auto_fixes.is_empty() && !args.fix {
+        next_actions.push(format!(
+            "fwc doctor --zone {} --all --fix --host {}",
+            args.zone, host.endpoint
+        ));
     }
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "doctor");
@@ -7070,6 +7146,12 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
             "is_degraded": report.degraded_mode.is_degraded,
         },
         "report": report,
+        "diagnosis": {
+            "reports": diagnostic_reports.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
+            "auto_fixes": auto_fixes,
+            "fix_mode": args.fix,
+        },
+        "toon": fleet_toon,
         "next_actions": next_actions,
     });
     envelope.inject_into(&mut payload);
@@ -7077,6 +7159,33 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         payload,
         exit_code: CliExitCode::Success,
     })
+}
+
+/// Map `fcp_core::ConnectorHealth` into `doctor::Symptoms` for local diagnosis.
+fn symptoms_from_connector_health(
+    health: &fcp_core::ConnectorHealth,
+    enabled: bool,
+) -> doctor::Symptoms {
+    match health {
+        fcp_core::ConnectorHealth::Healthy => doctor::Symptoms {
+            installed: true,
+            has_credentials: enabled,
+            ..Default::default()
+        },
+        fcp_core::ConnectorHealth::Degraded { reason } => doctor::Symptoms {
+            installed: true,
+            has_credentials: enabled,
+            error_message: Some(reason.clone()),
+            ..Default::default()
+        },
+        fcp_core::ConnectorHealth::Unavailable { reason, .. } => doctor::Symptoms {
+            installed: true,
+            has_credentials: enabled,
+            error_message: Some(reason.clone()),
+            last_op_success: Some(false),
+            ..Default::default()
+        },
+    }
 }
 
 fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
@@ -22788,6 +22897,202 @@ deny_ptrace = true
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["report"]["zone_id"], "z:work");
         assert_eq!(payload["summary"]["overall_status"], "OK");
+    }
+
+    #[test]
+    fn doctor_all_includes_local_diagnosis() {
+        // Mock host with a degraded connector so diagnosis engine produces fix-it recipes.
+        let degraded_health = serde_json::to_value(fcp_core::ConnectorHealth::Degraded {
+            reason: "Connection refused to api.github.com".to_owned(),
+        })
+        .expect("health should serialize");
+        let connector = json!({
+            "id": "fcp.github:enterprise:v1",
+            "name": "GitHub Enterprise",
+            "description": "GitHub connector.",
+            "version": "1.2.3",
+            "categories": ["code"],
+            "tool_count": 2,
+            "max_safety_tier": "risky",
+            "enabled": true,
+            "health": degraded_health,
+            "last_health_check": "2026-03-10T00:00:00Z",
+        });
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_with_connectors(vec![connector]),
+                ),
+                ("POST /doctor".to_owned(), mock_doctor_report_json()),
+            ]),
+            2,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "doctor", "--zone", "z:work", "--all",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        // Diagnosis section should exist with reports
+        let reports = &payload["diagnosis"]["reports"];
+        assert!(reports.is_array(), "diagnosis.reports should be an array");
+        assert!(!reports.as_array().unwrap().is_empty(), "should have at least one report");
+        let first = &reports[0];
+        assert_eq!(first["connector_id"], "fcp.github:enterprise:v1");
+        // Degraded connector with "Connection refused" should produce a Network diagnosis.
+        assert!(
+            first["diagnoses"].as_array().unwrap().iter().any(|d| d["category"] == "network"),
+            "expected network diagnosis for connection refused"
+        );
+    }
+
+    #[test]
+    fn doctor_all_healthy_no_issues() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                ("POST /doctor".to_owned(), mock_doctor_report_json()),
+            ]),
+            2,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "doctor", "--zone", "z:work", "--all",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let reports = &payload["diagnosis"]["reports"];
+        assert!(reports.is_array());
+        let first = &reports[0];
+        // Healthy connector should have no diagnoses.
+        assert!(first["diagnoses"].as_array().unwrap().is_empty());
+        assert_eq!(first["status"], "healthy");
+    }
+
+    #[test]
+    fn doctor_fix_flag_appears_in_payload() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                ("POST /doctor".to_owned(), mock_doctor_report_json()),
+            ]),
+            2,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "doctor", "--zone", "z:work", "--all", "--fix",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["diagnosis"]["fix_mode"], true);
+    }
+
+    #[test]
+    fn doctor_toon_output_present_with_all() {
+        let degraded_health = serde_json::to_value(fcp_core::ConnectorHealth::Degraded {
+            reason: "SSL certificate verify failed".to_owned(),
+        })
+        .expect("health should serialize");
+        let connector = json!({
+            "id": "fcp.github:enterprise:v1",
+            "name": "GitHub Enterprise",
+            "description": "GitHub connector.",
+            "version": "1.2.3",
+            "categories": ["code"],
+            "tool_count": 2,
+            "max_safety_tier": "risky",
+            "enabled": true,
+            "health": degraded_health,
+            "last_health_check": "2026-03-10T00:00:00Z",
+        });
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_with_connectors(vec![connector]),
+                ),
+                ("POST /doctor".to_owned(), mock_doctor_report_json()),
+            ]),
+            2,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "doctor", "--zone", "z:work", "--all",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let toon = payload["toon"].as_str().unwrap_or("");
+        assert!(toon.contains("Doctor:"), "TOON should contain header");
+        assert!(toon.contains("diagnosed"), "TOON should contain 'diagnosed'");
+        assert!(toon.contains("Certificate"), "TOON should show certificate diagnosis");
+    }
+
+    #[test]
+    fn doctor_without_all_has_empty_diagnosis() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([("POST /doctor".to_owned(), mock_doctor_report_json())]),
+            1,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "doctor", "--zone", "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        // Without --all, no local diagnosis is run (unless self-checks returned).
+        let reports = &payload["diagnosis"]["reports"];
+        assert!(reports.is_array());
+        assert!(reports.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn doctor_auto_fixes_collected_for_degraded() {
+        let degraded_health = serde_json::to_value(fcp_core::ConnectorHealth::Unavailable {
+            reason: "Connection refused".to_owned(),
+            since: chrono::Utc::now(),
+        })
+        .expect("health should serialize");
+        let connector = json!({
+            "id": "fcp.github:enterprise:v1",
+            "name": "GitHub Enterprise",
+            "description": "GitHub connector.",
+            "version": "1.2.3",
+            "categories": ["code"],
+            "tool_count": 2,
+            "max_safety_tier": "risky",
+            "enabled": true,
+            "health": degraded_health,
+            "last_health_check": "2026-03-10T00:00:00Z",
+        });
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_with_connectors(vec![connector]),
+                ),
+                ("POST /doctor".to_owned(), mock_doctor_report_json()),
+            ]),
+            2,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "doctor", "--zone", "z:work", "--all",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let reports = &payload["diagnosis"]["reports"];
+        assert!(!reports.as_array().unwrap().is_empty());
+        // The connector is Unavailable with "Connection refused" → network diagnosis
+        let first = &reports[0];
+        assert_eq!(first["status"], "unhealthy");
     }
 
     #[test]

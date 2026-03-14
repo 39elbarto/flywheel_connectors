@@ -789,13 +789,15 @@ fn playbook_migration_fcp2_to_fcp3() -> Playbook {
         sections: vec![
             Section {
                 title: "Understand the Changes".into(),
-                content: "FCP3 introduces typed OperationInfo, COSE-signed capability tokens, and the mesh-native protocol. Connectors must declare operations via introspect() instead of static manifests.".into(),
+                content: "FCP3 introduces typed operation and host-truth surfaces, COSE-signed capability tokens, and a wave-based connector migration program built around ConnectorRuntime, RetryLoop, and ConnectorErrorMapping. Connectors migrate by archetype batch instead of by ad-hoc one-off rewrites.".into(),
                 examples: vec![],
                 warnings: vec![
                     "FCP2 connectors are not binary-compatible with FCP3 hosts.".into(),
+                    "Do not keep a dual-stack FCP2/FCP3 connector path alive after the replacement batch is proven.".into(),
                 ],
                 tips: vec![
                     "Use fwc validate manifest to check compatibility.".into(),
+                    "Classify the connector by archetype and lifecycle complexity before choosing the migration batch.".into(),
                 ],
             },
             Section {
@@ -809,6 +811,27 @@ fn playbook_migration_fcp2_to_fcp3() -> Playbook {
                 }],
                 warnings: vec![],
                 tips: vec!["The fwc new --from-fcp2 flag can scaffold the migration.".into()],
+            },
+            Section {
+                title: "Migrate by Archetype Wave".into(),
+                content: "Run migrations in the repository's declared order: request-response and operational-heavy connectors first, streaming and bidirectional connectors second, polling/webhook/singleton-writer connectors last. Each wave must delete bespoke runtime glue and ship unit, host-backed integration, and replayable E2E evidence before the next wave expands.".into(),
+                examples: vec![Example {
+                    description: "Inspect a connector before assigning it to a migration wave".into(),
+                    command: "fwc show slack".into(),
+                    expected_output: "slack => archetypes: operational, streaming, bidirectional".into(),
+                    explanation: "Use declared archetypes plus lifecycle complexity to decide whether the connector belongs in the request-response, streaming, or stateful migration wave.".into(),
+                }],
+                warnings: vec![
+                    "Do not treat a streaming or stateful connector as \"done\" just because the request-response migration helpers compile.".into(),
+                ],
+                tips: vec![
+                    "Pure operational connectors such as sendgrid/mailchimp/segment are the fastest deletion wins.",
+                    "Slack/Discord/GitHub/Linear need reconnect, drain, and backpressure proof before their batch can be called complete.",
+                    "Gmail/Telegram/webhook receivers need durable-state, lease, and replay proof rather than only request/response parity.",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             },
             Section {
                 title: "Implement introspect()".into(),
@@ -1183,45 +1206,66 @@ fn migration_fcp2_to_fcp3() -> MigrationGuide {
         to_version: "FCP 3.0".into(),
         breaking_changes: vec![
             BreakingChange {
-                component: "Connector manifest".into(),
-                description: "Manifest format changed from JSON to TOML with typed operations"
-                    .into(),
-                migration_path: "Convert manifest.json to manifest.toml using fwc migrate manifest"
-                    .into(),
-                before_code: r#"{"operations": [{"name": "list"}]}"#.into(),
-                after_code: r#"[[operations]]\nname = "list"\ntier = "observe""#.into(),
+                component: "Connector lifecycle".into(),
+                description:
+                    "Ad-hoc runtime bootstrap, timeout handling, and retry loops are replaced by ConnectorRuntime, RetryLoop, and ConnectorErrorMapping."
+                        .into(),
+                migration_path:
+                    "Adopt fcp_sdk::migration helpers and delete bespoke retry/deadline plumbing."
+                        .into(),
+                before_code:
+                    "let ctx = ExecutionContext::request_scoped(...); loop { /* retry + timeout glue */ }"
+                        .into(),
+                after_code:
+                    "let ctx = runtime.request_context(); RetryLoop::execute(&ctx, &policy, ...)"
+                        .into(),
             },
             BreakingChange {
-                component: "fwc invoke".into(),
-                description: "Operation names must be fully qualified (connector.operation)".into(),
-                migration_path: "Prefix bare operation names with connector ID".into(),
-                before_code: "fwc invoke list_repos".into(),
-                after_code: "fwc invoke github list_repos".into(),
+                component: "Connector metadata truth".into(),
+                description:
+                    "Connector surfaces must report host-backed, FCP3-native truth instead of compatibility-era defaults or guessed metadata."
+                        .into(),
+                migration_path:
+                    "Verify introspection and discovery against the host-backed catalog before cutting a connector batch forward."
+                        .into(),
+                before_code:
+                    "Assume archetype/rate-limit/support flags from static defaults or local guesses"
+                        .into(),
+                after_code:
+                    "Require host-backed introspection/discovery output and preserve explicit unknown states"
+                        .into(),
             },
             BreakingChange {
-                component: "Capability tokens".into(),
-                description: "Plain JWT tokens replaced with COSE-signed capability tokens".into(),
-                migration_path: "Regenerate tokens using fwc auth issue-token".into(),
-                before_code: "Authorization: Bearer eyJhbG...".into(),
-                after_code: "fwc invoke --cap-token cap.cose github list_repos".into(),
+                component: "Wave-based cutover".into(),
+                description:
+                    "Connectors migrate by archetype batch with explicit deletion criteria; steady-state dual-stack operation is not the blessed migration model."
+                        .into(),
+                migration_path:
+                    "Place the connector in the request-response, streaming, or stateful wave and land the batch proof before expanding further."
+                        .into(),
+                before_code:
+                    "Migrate one connector ad hoc and leave compatibility glue around just in case"
+                        .into(),
+                after_code:
+                    "Request-response batch -> streaming batch -> stateful batch, each with required evidence and immediate cleanup"
+                        .into(),
             },
         ],
         migration_steps: vec![
-            "Back up existing configuration and credentials".into(),
-            "Install FCP 3.0 SDK and fwc CLI".into(),
-            "Convert manifests: fwc migrate manifest *.json".into(),
-            "Update connector source to implement introspect()".into(),
-            "Regenerate capability tokens with fwc auth issue-token".into(),
-            "Run fwc validate manifest on all converted manifests".into(),
-            "Run integration tests against the new host".into(),
-            "Deploy connectors to staging and verify health".into(),
-            "Cut over production traffic".into(),
+            "Inventory the connector's declared archetypes, state model, and long-lived behavior.".into(),
+            "Place the connector into the request-response, streaming, or stateful migration wave before touching runtime code.".into(),
+            "Adopt ConnectorRuntime during configure()/shutdown() and remove ad-hoc context bootstrap.".into(),
+            "Replace bespoke retry/error handling with RetryLoop and ConnectorErrorMapping.".into(),
+            "Update connector metadata so host-backed introspection/discovery becomes the source of truth.".into(),
+            "Run unit coverage for success, retry, terminal, cancellation, and deadline paths.".into(),
+            "Run host-backed integration checks and replayable E2E or transcript evidence for the current wave.".into(),
+            "Delete the compatibility scaffolding that the completed batch was meant to retire before expanding the next wave.".into(),
         ],
         rollback_plan: vec![
-            "Keep FCP2 host running in parallel during migration".into(),
-            "Restore backed-up configuration files".into(),
-            "Revert DNS/routing to FCP2 host".into(),
-            "Re-issue FCP2 JWT tokens if needed".into(),
+            "Revert only the current migration wave's commit set before the next wave begins.".into(),
+            "Restore the last known-good FCP3 connector package and replay its host-backed evidence bundle.".into(),
+            "Re-run the previous proven batch against the current host to confirm the rollback target still matches reality.".into(),
+            "Do not preserve a long-lived FCP2/FCP3 dual path as the rollback mechanism.".into(),
         ],
         estimated_effort: MigrationEffort::High,
     }
@@ -1859,21 +1903,15 @@ mod tests {
         let guides = get_migration_guides();
         // Verify we cover FCP 2.x -> 3.0, 3.0 -> 3.1, 3.1 -> 3.2
         let ranges: Vec<String> = guides.iter().map(|g| g.version_range()).collect();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| r.contains("2.x") && r.contains("3.0"))
-        );
-        assert!(
-            ranges
-                .iter()
-                .any(|r| r.contains("3.0") && r.contains("3.1"))
-        );
-        assert!(
-            ranges
-                .iter()
-                .any(|r| r.contains("3.1") && r.contains("3.2"))
-        );
+        assert!(ranges
+            .iter()
+            .any(|r| r.contains("2.x") && r.contains("3.0")));
+        assert!(ranges
+            .iter()
+            .any(|r| r.contains("3.0") && r.contains("3.1")));
+        assert!(ranges
+            .iter()
+            .any(|r| r.contains("3.1") && r.contains("3.2")));
     }
 
     // ── PlaybookIndex tests ───────────────────────────────────────────

@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, ObjectId, RequestId, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, ObjectId, OperationId, RequestId,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{

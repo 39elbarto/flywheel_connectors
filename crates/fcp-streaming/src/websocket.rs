@@ -184,9 +184,10 @@ impl WsTransport {
     }
 
     async fn close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+        let cx = websocket_cx();
         match self {
-            Self::Plain(socket) => socket.close(reason).await,
-            Self::Tls(socket) => socket.close(reason).await,
+            Self::Plain(socket) => socket.close(&cx, reason).await,
+            Self::Tls(socket) => socket.close(&cx, reason).await,
         }
     }
 }

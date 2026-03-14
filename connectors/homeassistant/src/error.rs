@@ -124,6 +124,38 @@ impl HomeAssistantError {
     }
 }
 
+impl fcp_sdk::migration::ConnectorErrorMapping for HomeAssistantError {
+    fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
+        use fcp_async_core::AsyncError;
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                status_code: 408,
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Api {
+                status_code: 0,
+                message: "request cancelled".into(),
+            },
+            other => Self::Api {
+                status_code: 0,
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +504,81 @@ mod tests {
             }
             .to_string(),
             "Home Assistant API error (500): Internal"
+        );
+    }
+
+    // ── ConnectorErrorMapping ────────────────────────────────────────
+
+    #[test]
+    fn connector_error_mapping_timeout() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err =
+            HomeAssistantError::from_async_error(AsyncError::Timeout { timeout_ms: 2000 });
+        assert!(matches!(
+            err,
+            HomeAssistantError::Api {
+                status_code: 408,
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("2000"));
+    }
+
+    #[test]
+    fn connector_error_mapping_cancelled() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = HomeAssistantError::from_async_error(AsyncError::Cancelled);
+        assert!(matches!(
+            err,
+            HomeAssistantError::Api {
+                status_code: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn connector_error_mapping_protocol_io() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = HomeAssistantError::from_async_error(AsyncError::ProtocolIo {
+            message: "connection reset".into(),
+        });
+        assert!(matches!(err, HomeAssistantError::Api { .. }));
+    }
+
+    #[test]
+    fn connector_error_mapping_to_fcp_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = HomeAssistantError::Unauthorized;
+        let fcp = ConnectorErrorMapping::to_fcp_error(&err);
+        assert!(matches!(
+            fcp,
+            FcpError::External {
+                status_code: Some(401),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn connector_error_mapping_is_retryable_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = HomeAssistantError::Unavailable;
+        assert!(ConnectorErrorMapping::is_retryable(&err));
+    }
+
+    #[test]
+    fn connector_error_mapping_retry_after_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = HomeAssistantError::RateLimited {
+            retry_after_ms: 10_000,
+        };
+        assert_eq!(
+            ConnectorErrorMapping::retry_after(&err),
+            Some(Duration::from_secs(10))
         );
     }
 

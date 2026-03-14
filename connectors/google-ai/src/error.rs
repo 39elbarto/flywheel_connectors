@@ -100,6 +100,41 @@ impl GoogleAiError {
     }
 }
 
+impl fcp_sdk::migration::ConnectorErrorMapping for GoogleAiError {
+    fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
+        use fcp_async_core::AsyncError;
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+                error_type: None,
+            },
+            AsyncError::Cancelled => Self::Api {
+                message: "request cancelled".into(),
+                status_code: None,
+                error_type: None,
+            },
+            other => Self::Api {
+                message: other.to_string(),
+                status_code: None,
+                error_type: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +773,85 @@ mod tests {
     fn error_trait_can_be_boxed_send_sync() {
         let err = GoogleAiError::InvalidConfig("test".into());
         let _: Box<dyn std::error::Error + Send + Sync> = Box::new(err);
+    }
+
+    // ── ConnectorErrorMapping ────────────────────────────────────────
+
+    #[test]
+    fn connector_error_mapping_timeout() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = GoogleAiError::from_async_error(AsyncError::Timeout { timeout_ms: 3000 });
+        assert!(matches!(
+            err,
+            GoogleAiError::Api {
+                status_code: Some(408),
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("3000"));
+    }
+
+    #[test]
+    fn connector_error_mapping_cancelled() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = GoogleAiError::from_async_error(AsyncError::Cancelled);
+        assert!(matches!(
+            err,
+            GoogleAiError::Api {
+                status_code: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn connector_error_mapping_channel_closed() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = GoogleAiError::from_async_error(AsyncError::ChannelClosed);
+        assert!(matches!(err, GoogleAiError::Api { .. }));
+    }
+
+    #[test]
+    fn connector_error_mapping_runtime_error() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = GoogleAiError::from_async_error(AsyncError::Runtime {
+            message: "runtime panic".into(),
+        });
+        assert!(matches!(err, GoogleAiError::Api { .. }));
+        assert!(err.to_string().contains("runtime"));
+    }
+
+    #[test]
+    fn connector_error_mapping_to_fcp_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = GoogleAiError::InvalidConfig("bad".into());
+        let fcp = ConnectorErrorMapping::to_fcp_error(&err);
+        assert!(matches!(fcp, FcpError::InvalidRequest { code: 1003, .. }));
+    }
+
+    #[test]
+    fn connector_error_mapping_is_retryable_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = GoogleAiError::RateLimit {
+            retry_after_ms: 1000,
+        };
+        assert!(ConnectorErrorMapping::is_retryable(&err));
+    }
+
+    #[test]
+    fn connector_error_mapping_retry_after_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = GoogleAiError::RateLimit {
+            retry_after_ms: 5000,
+        };
+        assert_eq!(
+            ConnectorErrorMapping::retry_after(&err),
+            Some(Duration::from_secs(5))
+        );
     }
 
     // ── Additional coverage ─────────────────────────────────────────

@@ -1,11 +1,13 @@
 //! Gmail API client.
+//!
+//! Uses `fcp-google-discovery` shared auth substrate for unified credential
+//! handling (bearer tokens, credential references, OAuth refresh).
 
-use std::fmt;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_core::CredentialId;
+use fcp_google_discovery::auth::GoogleMaterializedAuth;
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument, warn};
 
@@ -18,48 +20,17 @@ use crate::{
 };
 
 /// Default Gmail API base URL.
-const DEFAULT_BASE_URL: &str = "https://gmail.googleapis.com/gmail/v1";
-
-/// Authentication mode for Gmail API requests.
-#[derive(Clone)]
-pub enum GmailAuth {
-    /// Direct OAuth access token.
-    AccessToken(String),
-    /// Secretless credential reference (egress proxy injection).
-    CredentialId(CredentialId),
-}
-
-impl GmailAuth {
-    /// Render a redacted label suitable for logs/diagnostics.
-    #[must_use]
-    pub fn redacted_label(&self) -> String {
-        match self {
-            Self::AccessToken(_) => "access_token:redacted".to_string(),
-            Self::CredentialId(id) => format!("credential_id:{id}"),
-        }
-    }
-
-    /// Whether this auth mode requires egress proxy credential injection.
-    #[must_use]
-    pub const fn is_secretless(&self) -> bool {
-        matches!(self, Self::CredentialId(_))
-    }
-}
-
-impl fmt::Debug for GmailAuth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AccessToken(_) => f.debug_tuple("AccessToken").field(&"<redacted>").finish(),
-            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
-        }
-    }
-}
+pub const DEFAULT_BASE_URL: &str = "https://gmail.googleapis.com/gmail/v1";
 
 /// Gmail API client with retry logic and rate limit awareness.
+///
+/// Auth is handled via the shared `GoogleMaterializedAuth` from
+/// `fcp-google-discovery`, which supports bearer tokens and secretless
+/// credential references.
 #[derive(Debug)]
 pub struct GmailClient {
     client: Client,
-    auth: GmailAuth,
+    auth: GoogleMaterializedAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -68,13 +39,8 @@ pub struct GmailClient {
 }
 
 impl GmailClient {
-    /// Create a new Gmail client with an `OAuth2` access token.
-    pub fn new(token: impl Into<String>) -> GmailResult<Self> {
-        Self::new_with_auth(GmailAuth::AccessToken(token.into()))
-    }
-
-    /// Create a new Gmail client with explicit auth mode.
-    pub fn new_with_auth(auth: GmailAuth) -> GmailResult<Self> {
+    /// Create a new Gmail client with shared Google auth.
+    pub fn new_with_auth(auth: GoogleMaterializedAuth) -> GmailResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-gmail/0.1.0")
@@ -119,10 +85,23 @@ impl GmailClient {
         self.total_requests.load(Ordering::Relaxed)
     }
 
-    /// Get current auth mode.
+    /// Get current auth.
     #[must_use]
-    pub const fn auth(&self) -> &GmailAuth {
+    pub const fn auth(&self) -> &GoogleMaterializedAuth {
         &self.auth
+    }
+
+    /// Render a redacted auth label for diagnostics.
+    #[must_use]
+    pub fn auth_redacted_label(&self) -> String {
+        match &self.auth {
+            GoogleMaterializedAuth::BearerToken { source, .. } => {
+                format!("bearer:{source}")
+            }
+            GoogleMaterializedAuth::CredentialReference {
+                credential_id, ..
+            } => format!("credential_id:{credential_id}"),
+        }
     }
 
     /// Get the configured base URL.
@@ -402,12 +381,21 @@ impl GmailClient {
         None
     }
 
-    /// Apply authentication headers to a request.
+    /// Apply authentication headers to a request using the shared Google auth.
     fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            GmailAuth::AccessToken(token) => builder.bearer_auth(token),
-            GmailAuth::CredentialId(credential_id) => {
-                builder.header("X-FCP-Credential-ID", credential_id.to_string())
+            GoogleMaterializedAuth::BearerToken { access_token, .. } => {
+                builder.bearer_auth(access_token)
+            }
+            GoogleMaterializedAuth::CredentialReference {
+                credential_id,
+                quota_project_id,
+            } => {
+                let mut b = builder.header("X-FCP-Credential-ID", credential_id.to_string());
+                if let Some(project) = quota_project_id {
+                    b = b.header("x-goog-user-project", project.as_str());
+                }
+                b
             }
         }
     }

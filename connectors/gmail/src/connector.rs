@@ -9,74 +9,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use reqwest::Url;
+use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{client::GmailClient, error::GmailError};
 
-const DEFAULT_BASE_URL: &str = "https://gmail.googleapis.com/gmail/v1";
-const DEFAULT_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_HISTORY_CURSOR_FILE: &str = "fcp-gmail-history-cursor.json";
 
 #[derive(Debug, Clone)]
-enum GmailAuthMode {
-    AccessToken,
-    CredentialId(CredentialId),
-    OAuthRefresh {
-        client_id: String,
-        token_url: String,
-    },
-}
-
-impl GmailAuthMode {
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::AccessToken => "access_token",
-            Self::CredentialId(_) => "credential_id",
-            Self::OAuthRefresh { .. } => "oauth_refresh",
-        }
-    }
-
-    fn summary(&self) -> String {
-        match self {
-            Self::AccessToken => "access_token".to_string(),
-            Self::CredentialId(id) => format!("credential_id:{id}"),
-            Self::OAuthRefresh {
-                client_id,
-                token_url,
-            } => format!("oauth_refresh:{client_id}@{token_url}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 struct GmailConfig {
-    auth_mode: GmailAuthMode,
+    auth: GoogleMaterializedAuth,
     base_url: String,
     required_scopes: Vec<String>,
     granted_scopes: Vec<String>,
     history_cursor_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct GmailOAuthRefreshCredentials {
-    client_id: String,
-    client_secret: String,
-    refresh_token: String,
-    token_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GmailOAuthTokenResponse {
-    access_token: String,
-    #[serde(default)]
-    scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +99,9 @@ impl GmailConnector {
 
     /// Handle configure method.
     ///
+    /// Uses the shared `GoogleAuthSelection` from `fcp-google-discovery` for
+    /// unified credential handling (bearer tokens, credential refs, OAuth refresh).
+    ///
     /// # Errors
     /// Returns [`FcpError`] if the configuration is invalid or client creation fails.
     #[instrument(skip(self, params))]
@@ -157,84 +112,80 @@ impl GmailConnector {
         let base_url = parse_base_url(&params)?;
         let required_scopes = parse_required_scopes(&params)?;
         let history_cursor_path = parse_history_cursor_path(&params)?;
-        let access_token = parse_access_token(&params);
-        let credential_id = parse_credential_id(&params)?;
-        let oauth_refresh = parse_oauth_refresh(&params)?;
 
-        let selected_sources = [
-            access_token.is_some(),
-            credential_id.is_some(),
-            oauth_refresh.is_some(),
-        ]
-        .into_iter()
-        .filter(|selected| *selected)
-        .count();
-        if selected_sources != 1 {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Provide exactly one auth source: token, credential_id, or oauth_refresh"
-                    .into(),
-            });
-        }
+        // Use shared Google auth substrate for credential resolution.
+        let selection =
+            GoogleAuthSelection::from_connector_config(&params).map_err(|error| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid Google auth configuration: {error}"),
+                }
+            })?;
 
-        let mut status = "configured";
+        let materialized =
+            selection
+                .materialize()
+                .await
+                .map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Failed to materialize Google auth: {error}"),
+                })?;
+
+        let granted_scopes = match &materialized {
+            GoogleMaterializedAuth::BearerToken {
+                granted_scopes, ..
+            } => granted_scopes.clone(),
+            GoogleMaterializedAuth::CredentialReference { .. } => Vec::new(),
+        };
+
+        let status = match &materialized {
+            GoogleMaterializedAuth::CredentialReference { .. } => {
+                "configured_pending_token_materialization"
+            }
+            _ => "configured",
+        };
+
         let mut details = json!({
             "base_url": base_url,
             "required_scopes": required_scopes,
             "history_cursor_path": history_cursor_path.to_string_lossy().to_string(),
         });
 
-        let (auth_mode, granted_scopes, client) = if let Some(token) = access_token {
-            let client = GmailClient::new(token)
-                .map_err(|e| FcpError::Internal {
-                    message: format!("Failed to create HTTP client: {e}"),
-                })?
-                .with_base_url(base_url.clone());
-            (GmailAuthMode::AccessToken, Vec::new(), Some(client))
-        } else if let Some(id) = credential_id {
-            status = "configured_pending_token_materialization";
-            details["credential_id"] = json!(id.to_string());
+        if !granted_scopes.is_empty() {
+            details["granted_scopes"] = json!(granted_scopes);
+        }
+
+        if let GoogleMaterializedAuth::CredentialReference {
+            credential_id, ..
+        } = &materialized
+        {
+            details["credential_id"] = json!(credential_id.to_string());
             details["note"] = json!(
                 "credential_id configured; live calls require egress proxy token materialization"
             );
-            (GmailAuthMode::CredentialId(id), Vec::new(), None)
-        } else if let Some(oauth) = oauth_refresh {
-            let (token, granted_scopes) = exchange_refresh_token(&oauth, &required_scopes).await?;
-            details["granted_scopes"] = json!(granted_scopes);
-            let client = GmailClient::new(token)
-                .map_err(|e| FcpError::Internal {
-                    message: format!("Failed to create HTTP client: {e}"),
-                })?
-                .with_base_url(base_url.clone());
-            (
-                GmailAuthMode::OAuthRefresh {
-                    client_id: oauth.client_id,
-                    token_url: oauth.token_url,
-                },
-                granted_scopes,
-                Some(client),
-            )
-        } else {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: "No supported auth mode selected".into(),
-            });
-        };
+        }
+
+        let client = GmailClient::new_with_auth(materialized.clone())
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?
+            .with_base_url(base_url.clone());
 
         self.config = Some(GmailConfig {
-            auth_mode,
+            auth: materialized,
             base_url: base_url.clone(),
             required_scopes,
             granted_scopes,
             history_cursor_path,
         });
-        self.client = client;
+        self.client = Some(client);
         self.base.set_configured(true);
-        info!(
-            auth_mode = %self.config.as_ref().map_or_else(|| "unknown".to_string(), |config| config.auth_mode.summary()),
-            status,
-            "Gmail connector configured"
-        );
+
+        let auth_label = self
+            .client
+            .as_ref()
+            .map_or_else(|| "unknown".to_string(), GmailClient::auth_redacted_label);
+        info!(auth = %auth_label, status, "Gmail connector configured");
 
         Ok(json!({ "status": status, "details": details }))
     }

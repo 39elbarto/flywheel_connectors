@@ -64,16 +64,24 @@ These are the FCP3 target patterns. They stay and expand:
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 ```
 
-**Classification:** DELETE
+**Classification:** DELETE (after prerequisite)
 
-**Why:** `fcp-async-core::io` re-exports equivalent traits (`AsyncBufRead`,
-`AsyncReadExt`, `AsyncWriteExt`, `BufReader`). This is the only non-test file
-that directly imports `tokio::io`.
+**Why:** This is the only non-test production file that directly imports
+`tokio::io`. However, `fcp-async-core::io` does NOT yet re-export all needed
+types:
+- `AsyncBufRead` — available in fcp-async-core
+- `AsyncWriteExt` — available in fcp-async-core
+- `AsyncWrite` (the trait, used as a bound) — **NOT yet re-exported**
+- `AsyncBufReadExt` with `.lines()` — **NOT yet available** (fcp-async-core's
+  `AsyncBufReadExt` only provides `read_line`, not `lines()`)
 
-**Cutover signal:** Replace import with `use fcp_async_core::io::*` and verify
-MCP stdio server still works.
+**Prerequisite:** Add `AsyncWrite` re-export and a `lines()` method to
+`fcp-async-core::io` before this import can be replaced.
 
-**Deletion trigger:** One PR, zero risk.
+**Cutover signal:** After fcp-async-core::io extension, replace import with
+`use fcp_async_core::io::*` and verify MCP stdio server still works.
+
+**Deletion trigger:** One PR after the prerequisite, low risk.
 
 ### 2.2 Exception-ledger thinking (hand-rolled error handling)
 

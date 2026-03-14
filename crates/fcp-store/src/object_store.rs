@@ -1530,14 +1530,8 @@ mod tests {
                 store.put(test_stored_object(1, b"aaa")).await.unwrap();
                 store.put(test_stored_object(2, b"bbb")).await.unwrap();
 
-                store
-                    .delete(&ObjectId::from_bytes([1; 32]))
-                    .await
-                    .unwrap();
-                store
-                    .delete(&ObjectId::from_bytes([2; 32]))
-                    .await
-                    .unwrap();
+                store.delete(&ObjectId::from_bytes([1; 32])).await.unwrap();
+                store.delete(&ObjectId::from_bytes([2; 32])).await.unwrap();
 
                 assert_eq!(store.storage_used().await, 0);
 

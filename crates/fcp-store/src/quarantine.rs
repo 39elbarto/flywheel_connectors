@@ -2236,10 +2236,7 @@ mod tests {
 
                 // Zero-byte quota means nothing can ever fit (data > 0 bytes)
                 let result = store.quarantine(test_object(1, 100, 1000));
-                assert!(matches!(
-                    result,
-                    Err(QuarantineError::QuotaExceeded { .. })
-                ));
+                assert!(matches!(result, Err(QuarantineError::QuotaExceeded { .. })));
 
                 StoreLogData {
                     details: Some(json!({
@@ -2367,40 +2364,34 @@ mod tests {
 
     #[test]
     fn promote_without_schema_validation_succeeds_when_policy_disabled() {
-        run_store_test(
-            "promote_schema_disabled",
-            "verify",
-            "promotion",
-            2,
-            || {
-                let policy = ObjectAdmissionPolicy {
-                    require_schema_validation: false,
-                    ..Default::default()
-                };
-                let store = QuarantineStore::new(policy);
+        run_store_test("promote_schema_disabled", "verify", "promotion", 2, || {
+            let policy = ObjectAdmissionPolicy {
+                require_schema_validation: false,
+                ..Default::default()
+            };
+            let store = QuarantineStore::new(policy);
 
-                let obj = test_object(1, 100, 1000);
-                let id = obj.object_id;
-                store.quarantine(obj).unwrap();
+            let obj = test_object(1, 100, 1000);
+            let id = obj.object_id;
+            store.quarantine(obj).unwrap();
 
-                // schema_valid=false but policy doesn't require it
-                let reason = PromotionReason::LocalPin {
-                    reason: "operator override".into(),
-                };
-                let promoted = store.promote(&id, &reason, false).unwrap();
-                assert_eq!(promoted.object_id, id);
-                assert!(!store.contains(&id));
+            // schema_valid=false but policy doesn't require it
+            let reason = PromotionReason::LocalPin {
+                reason: "operator override".into(),
+            };
+            let promoted = store.promote(&id, &reason, false).unwrap();
+            assert_eq!(promoted.object_id, id);
+            assert!(!store.contains(&id));
 
-                StoreLogData {
-                    object_id: Some(id),
-                    details: Some(json!({
-                        "schema_disabled": true,
-                        "promoted": true
-                    })),
-                    ..StoreLogData::default()
-                }
-            },
-        );
+            StoreLogData {
+                object_id: Some(id),
+                details: Some(json!({
+                    "schema_disabled": true,
+                    "promoted": true
+                })),
+                ..StoreLogData::default()
+            }
+        });
     }
 
     #[test]
@@ -2445,36 +2436,30 @@ mod tests {
 
     #[test]
     fn remove_updates_zone_byte_count_correctly() {
-        run_store_test(
-            "remove_updates_bytes",
-            "verify",
-            "quarantine",
-            3,
-            || {
-                let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+        run_store_test("remove_updates_bytes", "verify", "quarantine", 3, || {
+            let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
 
-                store.quarantine(test_object(1, 100, 1000)).unwrap();
-                store.quarantine(test_object(2, 200, 2000)).unwrap();
+            store.quarantine(test_object(1, 100, 1000)).unwrap();
+            store.quarantine(test_object(2, 200, 2000)).unwrap();
 
-                let stats_before = store.zone_stats(&test_zone());
-                assert_eq!(stats_before.used_bytes, 300);
+            let stats_before = store.zone_stats(&test_zone());
+            assert_eq!(stats_before.used_bytes, 300);
 
-                store.remove(&ObjectId::from_bytes([1; 32])).unwrap();
+            store.remove(&ObjectId::from_bytes([1; 32])).unwrap();
 
-                let stats_after = store.zone_stats(&test_zone());
-                assert_eq!(stats_after.used_bytes, 200);
-                assert_eq!(stats_after.object_count, 1);
+            let stats_after = store.zone_stats(&test_zone());
+            assert_eq!(stats_after.used_bytes, 200);
+            assert_eq!(stats_after.object_count, 1);
 
-                StoreLogData {
-                    details: Some(json!({
-                        "bytes_before": 300,
-                        "bytes_after": 200,
-                        "correctly_decremented": true
-                    })),
-                    ..StoreLogData::default()
-                }
-            },
-        );
+            StoreLogData {
+                details: Some(json!({
+                    "bytes_before": 300,
+                    "bytes_after": 200,
+                    "correctly_decremented": true
+                })),
+                ..StoreLogData::default()
+            }
+        });
     }
 
     #[test]
@@ -2508,61 +2493,49 @@ mod tests {
 
     #[test]
     fn evict_expired_returns_zero_when_all_fresh() {
-        run_store_test(
-            "evict_expired_all_fresh",
-            "verify",
-            "quarantine",
-            2,
-            || {
-                let policy = ObjectAdmissionPolicy {
-                    quarantine_ttl_secs: 100,
-                    ..Default::default()
-                };
-                let store = QuarantineStore::new(policy);
+        run_store_test("evict_expired_all_fresh", "verify", "quarantine", 2, || {
+            let policy = ObjectAdmissionPolicy {
+                quarantine_ttl_secs: 100,
+                ..Default::default()
+            };
+            let store = QuarantineStore::new(policy);
 
-                store.quarantine(test_object(1, 100, 1000)).unwrap();
-                store.quarantine(test_object(2, 100, 1050)).unwrap();
+            store.quarantine(test_object(1, 100, 1000)).unwrap();
+            store.quarantine(test_object(2, 100, 1050)).unwrap();
 
-                // Check at time 1099 — both are within TTL
-                let evicted = store.evict_expired(1099);
-                assert_eq!(evicted, 0);
+            // Check at time 1099 — both are within TTL
+            let evicted = store.evict_expired(1099);
+            assert_eq!(evicted, 0);
 
-                let stats = store.zone_stats(&test_zone());
-                assert_eq!(stats.object_count, 2);
+            let stats = store.zone_stats(&test_zone());
+            assert_eq!(stats.object_count, 2);
 
-                StoreLogData {
-                    details: Some(json!({
-                        "all_fresh": true,
-                        "evicted": 0
-                    })),
-                    ..StoreLogData::default()
-                }
-            },
-        );
+            StoreLogData {
+                details: Some(json!({
+                    "all_fresh": true,
+                    "evicted": 0
+                })),
+                ..StoreLogData::default()
+            }
+        });
     }
 
     #[test]
     fn list_zone_returns_empty_for_unknown_zone() {
-        run_store_test(
-            "list_zone_unknown",
-            "verify",
-            "quarantine",
-            1,
-            || {
-                let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+        run_store_test("list_zone_unknown", "verify", "quarantine", 1, || {
+            let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
 
-                let unknown_zone: ZoneId = "z:project:nonexistent".parse().unwrap();
-                let ids = store.list_zone(&unknown_zone);
-                assert!(ids.is_empty());
+            let unknown_zone: ZoneId = "z:project:nonexistent".parse().unwrap();
+            let ids = store.list_zone(&unknown_zone);
+            assert!(ids.is_empty());
 
-                StoreLogData {
-                    details: Some(json!({
-                        "unknown_zone": true,
-                        "empty_list": true
-                    })),
-                    ..StoreLogData::default()
-                }
-            },
-        );
+            StoreLogData {
+                details: Some(json!({
+                    "unknown_zone": true,
+                    "empty_list": true
+                })),
+                ..StoreLogData::default()
+            }
+        });
     }
 }

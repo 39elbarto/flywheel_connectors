@@ -2212,7 +2212,9 @@ mod tests {
                     .put(test_object(
                         1,
                         vec![],
-                        RetentionClass::Lease { expires_at: u64::MAX },
+                        RetentionClass::Lease {
+                            expires_at: u64::MAX,
+                        },
                     ))
                     .await
                     .unwrap();
@@ -2242,67 +2244,61 @@ mod tests {
 
     #[test]
     fn gc_mixed_retention_classes_sweeps_correctly() {
-        run_store_test(
-            "gc_mixed_retention_classes",
-            "verify",
-            "gc",
-            4,
-            || async {
-                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-                let gc = GarbageCollector::new(GcConfig::default());
+        run_store_test("gc_mixed_retention_classes", "verify", "gc", 4, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
 
-                // Ephemeral (unreachable) → evict
-                store
-                    .put(test_object(1, vec![], RetentionClass::Ephemeral))
-                    .await
-                    .unwrap();
-                // Pinned (unreachable) → skip
-                store
-                    .put(test_object(2, vec![], RetentionClass::Pinned))
-                    .await
-                    .unwrap();
-                // Expired lease (unreachable) → evict + mark expired
-                store
-                    .put(test_object(
-                        3,
-                        vec![],
-                        RetentionClass::Lease { expires_at: 50 },
-                    ))
-                    .await
-                    .unwrap();
-                // Valid lease (unreachable) → keep
-                store
-                    .put(test_object(
-                        4,
-                        vec![],
-                        RetentionClass::Lease { expires_at: 9999 },
-                    ))
-                    .await
-                    .unwrap();
+            // Ephemeral (unreachable) → evict
+            store
+                .put(test_object(1, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            // Pinned (unreachable) → skip
+            store
+                .put(test_object(2, vec![], RetentionClass::Pinned))
+                .await
+                .unwrap();
+            // Expired lease (unreachable) → evict + mark expired
+            store
+                .put(test_object(
+                    3,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 50 },
+                ))
+                .await
+                .unwrap();
+            // Valid lease (unreachable) → keep
+            store
+                .put(test_object(
+                    4,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 9999 },
+                ))
+                .await
+                .unwrap();
 
-                let roots = GcRoots::new();
-                let result = gc.collect(&test_zone(), &roots, &store, 100).await.unwrap();
+            let roots = GcRoots::new();
+            let result = gc.collect(&test_zone(), &roots, &store, 100).await.unwrap();
 
-                assert_eq!(result.live, 0);
-                assert_eq!(result.evicted, 2); // ephemeral + expired lease
-                assert_eq!(result.expired_leases, 1);
-                assert_eq!(result.pinned, 1);
-                assert!(!store.exists(&ObjectId::from_bytes([1; 32])).await);
-                assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
-                assert!(!store.exists(&ObjectId::from_bytes([3; 32])).await);
-                assert!(store.exists(&ObjectId::from_bytes([4; 32])).await);
+            assert_eq!(result.live, 0);
+            assert_eq!(result.evicted, 2); // ephemeral + expired lease
+            assert_eq!(result.expired_leases, 1);
+            assert_eq!(result.pinned, 1);
+            assert!(!store.exists(&ObjectId::from_bytes([1; 32])).await);
+            assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
+            assert!(!store.exists(&ObjectId::from_bytes([3; 32])).await);
+            assert!(store.exists(&ObjectId::from_bytes([4; 32])).await);
 
-                StoreLogData {
-                    details: Some(json!({
-                        "ephemeral_evicted": true,
-                        "pinned_skipped": true,
-                        "expired_lease_evicted": true,
-                        "valid_lease_kept": true
-                    })),
-                    ..StoreLogData::default()
-                }
-            },
-        );
+            StoreLogData {
+                details: Some(json!({
+                    "ephemeral_evicted": true,
+                    "pinned_skipped": true,
+                    "expired_lease_evicted": true,
+                    "valid_lease_kept": true
+                })),
+                ..StoreLogData::default()
+            }
+        });
     }
 
     // =========================================================================
@@ -2490,44 +2486,38 @@ mod tests {
 
     #[test]
     fn gc_max_evictions_zero_evicts_nothing() {
-        run_store_test(
-            "gc_max_evictions_zero",
-            "verify",
-            "gc",
-            2,
-            || async {
-                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-                let config = GcConfig {
-                    max_evictions_per_run: 0,
-                    ..Default::default()
-                };
-                let gc = GarbageCollector::new(config);
+        run_store_test("gc_max_evictions_zero", "verify", "gc", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let config = GcConfig {
+                max_evictions_per_run: 0,
+                ..Default::default()
+            };
+            let gc = GarbageCollector::new(config);
 
-                store
-                    .put(test_object(1, vec![], RetentionClass::Ephemeral))
-                    .await
-                    .unwrap();
-                store
-                    .put(test_object(2, vec![], RetentionClass::Ephemeral))
-                    .await
-                    .unwrap();
+            store
+                .put(test_object(1, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            store
+                .put(test_object(2, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
 
-                let roots = GcRoots::new();
-                let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
+            let roots = GcRoots::new();
+            let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
 
-                assert_eq!(result.evicted, 0);
-                assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
-                assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
+            assert_eq!(result.evicted, 0);
+            assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
+            assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
 
-                StoreLogData {
-                    details: Some(json!({
-                        "max_evictions": 0,
-                        "all_preserved": true
-                    })),
-                    ..StoreLogData::default()
-                }
-            },
-        );
+            StoreLogData {
+                details: Some(json!({
+                    "max_evictions": 0,
+                    "all_preserved": true
+                })),
+                ..StoreLogData::default()
+            }
+        });
     }
 
     #[test]

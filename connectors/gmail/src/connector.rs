@@ -150,7 +150,7 @@ impl GmailConnector {
             GoogleMaterializedAuth::CredentialReference { .. } => {
                 "configured_pending_token_materialization"
             }
-            _ => "configured",
+            GoogleMaterializedAuth::BearerToken { .. } => "configured",
         };
 
         let mut details = json!({

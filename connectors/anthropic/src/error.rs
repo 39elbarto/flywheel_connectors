@@ -153,15 +153,15 @@ impl ConnectorErrorMapping for AnthropicError {
     }
 
     fn to_fcp_error(&self) -> FcpError {
-        AnthropicError::to_fcp_error(self)
+        Self::to_fcp_error(self)
     }
 
     fn is_retryable(&self) -> bool {
-        AnthropicError::is_retryable(self)
+        Self::is_retryable(self)
     }
 
     fn retry_after(&self) -> Option<Duration> {
-        AnthropicError::retry_after(self)
+        Self::retry_after(self)
     }
 }
 

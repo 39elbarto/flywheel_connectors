@@ -2193,6 +2193,73 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn computation_checkpoint_inline_transfer_detects_payload_integrity_mismatch() {
+        let checkpoint = test_computation_checkpoint(vec![1, 2, 3, 4]);
+        let mut canonical_bytes = checkpoint.canonical_bytes().unwrap();
+        canonical_bytes[0] ^= 0xFF;
+
+        let encoding = CheckpointTransferEncoding::Inline {
+            object_id: checkpoint.object_id().unwrap(),
+            canonical_bytes,
+        };
+
+        let err = ComputationCheckpoint::from_transfer_encoding(&encoding).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointChunkError::PayloadIntegrityMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn reconstruct_chunked_payload_rejects_payload_length_mismatch() {
+        let chunks = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let chunked = ChunkedCheckpoint {
+            manifest: ChunkedObjectManifest {
+                payload_object_id: test_object_id("payload"),
+                total_bytes: 5,
+                chunk_size_bytes: 3,
+                chunk_object_ids: chunks
+                    .iter()
+                    .map(|chunk| ObjectId::from_unscoped_bytes(chunk))
+                    .collect(),
+            },
+            chunks,
+        };
+
+        let err = reconstruct_chunked_payload(&chunked).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointChunkError::PayloadLengthMismatch {
+                expected: 5,
+                got: 6
+            }
+        ));
+    }
+
+    #[test]
+    fn reconstruct_chunked_payload_rejects_payload_integrity_mismatch() {
+        let chunks = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let chunked = ChunkedCheckpoint {
+            manifest: ChunkedObjectManifest {
+                payload_object_id: test_object_id("wrong-payload"),
+                total_bytes: 6,
+                chunk_size_bytes: 3,
+                chunk_object_ids: chunks
+                    .iter()
+                    .map(|chunk| ObjectId::from_unscoped_bytes(chunk))
+                    .collect(),
+            },
+            chunks,
+        };
+
+        let err = reconstruct_chunked_payload(&chunked).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointChunkError::PayloadIntegrityMismatch { .. }
+        ));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // NEW: Additional checkpoint tests for 110+ coverage
     // ─────────────────────────────────────────────────────────────────────────

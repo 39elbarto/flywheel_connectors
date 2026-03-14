@@ -3302,23 +3302,16 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
             }))
     );
 
-    let (host_zone, server_zone) = spawn_mock_host_sequence(vec![(
-        "POST /rpc/discover".to_owned(),
-        mock_discovery_response_json(&[github_connector]),
-    )]);
     let (exit_code, zone_payload, _stderr) = run_json(&[
         "--json",
         "--host",
-        &host_zone,
+        "http://127.0.0.1:9",
         "mesh",
         "availability",
         "github",
         "--zone",
         "z:work",
     ]);
-    server_zone
-        .join()
-        .expect("mock host thread should complete");
     assert_ne!(
         exit_code, 0,
         "live zone-scoped availability must fail closed"

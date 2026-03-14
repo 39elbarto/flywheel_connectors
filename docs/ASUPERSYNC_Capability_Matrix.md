@@ -79,7 +79,7 @@ Snapshot totals (2026-02-28):
 | `fcp-anthropic` | 16 | 12 | 1 | 0 | 0 | 0 | 2 | No | Yes | Yes | No | Medium |
 | `fcp-e2e` | 15 | 9 | 0 | 1 | 0 | 0 | 0 | No | Yes | Yes | No | Low |
 | `fcp-conformance` | 14 | 14 | 0 | 0 | 0 | 0 | 0 | No | No | No | No | Low |
-| `fcp-cli` | 11 | 8 | 2 | 0 | 0 | 0 | 1 | No | Yes | Yes | Yes | Medium |
+| `fwc` | 11 | 8 | 2 | 0 | 0 | 0 | 1 | No | Yes | Yes | Yes | Medium |
 | `fcp-tailscale` | 10 | 9 | 0 | 0 | 0 | 0 | 0 | No | Yes | Yes | No | Low |
 | `fcp-telemetry` | 10 | 9 | 0 | 0 | 0 | 0 | 0 | No | No | No | No | Low |
 | `fcp-store` | 9 | 1 | 5 | 0 | 0 | 0 | 0 | No | No | No | Yes | Low |

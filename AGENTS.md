@@ -131,17 +131,17 @@ We do not care about backwards compatibility—we're in early development with n
 
 ## Compiler Checks (CRITICAL)
 
-**After any substantive code changes, you MUST verify no errors were introduced:**
+**After any substantive code changes, you MUST verify no errors were introduced. In shared sessions, offload the Cargo work through `rch`:**
 
 ```bash
 # Check for compiler errors and warnings (workspace-wide)
-cargo check --workspace --all-targets
+rch exec -- cargo check --workspace --all-targets
 
 # Check for clippy lints (pedantic + nursery are enabled)
-cargo clippy --workspace --all-targets -- -D warnings
+rch exec -- cargo clippy --workspace --all-targets -- -D warnings
 
 # Verify formatting
-cargo fmt --check
+rch exec -- cargo fmt --check
 ```
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
@@ -157,32 +157,36 @@ Every component crate includes inline `#[cfg(test)]` unit tests alongside the im
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
 
-Cross-component integration tests live in the workspace `tests/` directory.
+Cross-component integration coverage is distributed across crate-local `tests/`
+directories (for example `crates/fcp-conformance/tests`,
+`crates/fcp-e2e/tests`, and `crates/fcp-host/tests`) plus per-connector
+integration tests. Do not assume a single monolithic root `tests/` directory is
+the primary integration surface.
 
 ### Unit Tests
 
 ```bash
 # Run all tests across the workspace
-cargo test --workspace
+rch exec -- cargo test --workspace
 
 # Run with output
-cargo test --workspace -- --nocapture
+rch exec -- cargo test --workspace -- --nocapture
 
 # Run tests for a specific crate
-cargo test -p fcp-core
-cargo test -p fcp-protocol
-cargo test -p fcp-crypto
-cargo test -p fcp-sandbox
-cargo test -p fcp-manifest
-cargo test -p fcp-sdk
-cargo test -p fcp-conformance
+rch exec -- cargo test -p fcp-core
+rch exec -- cargo test -p fcp-protocol
+rch exec -- cargo test -p fcp-crypto
+rch exec -- cargo test -p fcp-sandbox
+rch exec -- cargo test -p fcp-manifest
+rch exec -- cargo test -p fcp-sdk
+rch exec -- cargo test -p fcp-conformance
 
 # Run specific connector tests
-cargo test -p fcp-connector-telegram
-cargo test -p fcp-connector-discord
+rch exec -- cargo test -p fcp-telegram
+rch exec -- cargo test -p fcp-discord
 
 # Run tests with all features enabled
-cargo test --workspace --all-features
+rch exec -- cargo test --workspace --all-features
 ```
 
 ### Test Categories
@@ -215,7 +219,7 @@ cargo test --workspace --all-features
 | `fcp-testkit` | Shared test helpers, mock connectors, fixtures |
 | `connectors/*` | Per-connector unit + integration tests |
 | `fuzz/` | Fuzz targets for protocol parsing and CBOR handling |
-| `tests/` | Cross-component integration, test vectors |
+| `crates/*/tests` | Cross-crate integration, host-backed scenarios, test vectors |
 
 ### Mock External Services
 
@@ -250,43 +254,54 @@ Gateway -> Zone Check -> Capability Check -> Connector -> External Service
 
 ### Workspace Structure
 
+This is a schematic map, not an exhaustive directory dump. The current tree has
+29 crate directories (28 active Cargo workspace members) and 89 connector
+crates.
+
 ```
 flywheel_connectors/
 |-- Cargo.toml                         # Workspace root
 |-- crates/
-|   |-- fcp-core/                      # Zone model, capabilities, principals, errors
-|   |-- fcp-protocol/                  # FCP wire protocol, message framing
+|   |-- fcp-async-core/                # Runtime substrate and async primitives
+|   |-- fcp-async-core-macros/         # Async-core proc macros
+|   |-- fcp-core/                      # Zone model, capabilities, provenance, lifecycle
+|   |-- fcp-protocol/                  # FCPC/FCPS framing and sessions
 |   |-- fcp-crypto/                    # Ed25519, X25519, HPKE, COSE, Blake3
-|   |-- fcp-cbor/                      # CBOR serialization layer
+|   |-- fcp-cbor/                      # Deterministic CBOR serialization
 |   |-- fcp-manifest/                  # Connector manifest parsing and validation
-|   |-- fcp-sandbox/                   # WASI runtime isolation
-|   |-- fcp-sdk/                       # Connector SDK (trait-based interface)
-|   |-- fcp-host/                      # Gateway orchestrator
-|   |-- fcp-mesh/                      # Multi-node connector mesh
-|   |-- fcp-registry/                  # Connector discovery and versioning
-|   |-- fcp-oauth/                     # OAuth2 flow support
-|   |-- fcp-ratelimit/                 # Rate limiting primitives
-|   |-- fcp-store/                     # Persistent state storage
-|   |-- fcp-streaming/                 # Event stream support
-|   |-- fcp-webhook/                   # Webhook delivery and verification
-|   |-- fcp-graphql/                   # GraphQL schema layer
-|   |-- fcp-audit/                     # Audit logging
-|   |-- fcp-telemetry/                 # Metrics and tracing export
-|   |-- fcp-tailscale/                 # Tailscale network integration
-|   |-- fcp-raptorq/                   # Fountain codes for reliable transfer
+|   |-- fcp-sandbox/                   # WASI/runtime isolation and guardrails
+|   |-- fcp-store/                     # Object store, symbol store, repair, GC
+|   |-- fcp-raptorq/                   # Fountain-code codec and chunking
+|   |-- fcp-tailscale/                 # Mesh identity and ACL/tag integration
+|   |-- fcp-mesh/                      # Mesh routing, admission, placement, leases
+|   |-- fcp-host/                      # Host/orchestrator and admin API
+|   |-- fcp-sdk/                       # Connector authoring/runtime helpers
+|   |-- fcp-streaming/                 # Shared streaming substrate
+|   |-- fcp-oauth/                     # OAuth flows and token lifecycle
+|   |-- fcp-graphql/                   # Typed GraphQL client helpers
+|   |-- fcp-google-discovery/          # Google discovery/provisioning substrate
+|   |-- fcp-registry/                  # Registry/install/update verification
+|   |-- fcp-telemetry/                 # Metrics and structured tracing
+|   |-- fcp-webhook/                   # Webhook delivery/runtime helpers
+|   |-- fcp-audit/                     # Audit receipts and logging
 |   |-- fcp-bootstrap/                 # First-run setup and provisioning
-|   |-- fcp-cli/                       # CLI tooling
-|   |-- fcp-conformance/               # Protocol conformance test suite
-|   |-- fcp-testkit/                   # Shared test utilities
-|   +-- fcp-e2e/                       # End-to-end test harness
-|-- connectors/
-|   |-- anthropic/                     # Anthropic API connector
-|   |-- discord/                       # Discord bot connector
-|   |-- openai/                        # OpenAI API connector
-|   |-- telegram/                      # Telegram Bot API connector
-|   |-- twitter/                       # Twitter/X API connector
-|   +-- vectordb/                      # Vector database connector
-|-- tests/                             # Cross-component integration tests
+|   |-- fcp-conformance/               # Protocol conformance tooling/tests
+|   |-- fcp-testkit/                   # Shared fixtures and mocks
+|   |-- fcp-e2e/                       # End-to-end harness
+|   +-- fwc/                           # Canonical Flywheel connectors CLI
+|-- connectors/                        # 89 connector crates at varying maturity
+|   |-- anthropic/
+|   |-- discord/
+|   |-- github/
+|   |-- gmail/
+|   |-- slack/
+|   |-- stripe/
+|   |-- telegram/
+|   |-- kubernetes/
+|   +-- ...
+|-- crates/fcp-conformance/tests/      # Cross-crate conformance coverage
+|-- crates/fcp-e2e/tests/              # Host-backed end-to-end scenarios
+|-- crates/fcp-host/tests/             # Host/admin integration tests
 +-- fuzz/                              # Fuzz testing targets
 ```
 

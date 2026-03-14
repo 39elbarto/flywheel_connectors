@@ -195,7 +195,7 @@ Queue semantics:
   - `1`: critical/unavailable
   - `2`: degraded
 
-Legacy repair/status work previously lived under `crates/fcp-cli`; bead `235t.24` MUST land real mesh/store-backed status semantics in the canonical `fwc` surface without breaking schema or exit-code semantics.
+A predecessor repair/status surface previously lived under the old `fcp-cli` naming; the current canonical implementation home is `crates/fwc`, and bead `235t.24` MUST land real mesh/store-backed status semantics there without breaking schema or exit-code semantics.
 
 ---
 
@@ -217,7 +217,7 @@ Minimum required fields include run/scenario correlation, operation phase, bound
 | `235t.21` (`fcp-raptorq` migration) | Sections 4, 5, 6 |
 | `235t.22` (`fcp-store` migration) | Sections 4, 7 |
 | `235t.23` (`fcp-mesh` degraded + repair loop) | Sections 5, 6, 7 |
-| `235t.24` (`fcp-cli` async repair flows) | Sections 4, 8, 9 |
+| `235t.24` (`fwc` async repair flows) | Sections 4, 8, 9 |
 | `235t.25` (vectors + adversarial suite) | Sections 4, 5, 6, 7, 9 |
 
 Each downstream bead must link this document in completion evidence and demonstrate parity against Wave D contracts.

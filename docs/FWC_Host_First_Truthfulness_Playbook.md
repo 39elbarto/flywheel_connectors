@@ -1,12 +1,12 @@
 # FWC Host-First Truthfulness Playbook
 
-> Status: active operator/agent guide for the `fwc` truthfulness migration  
-> Primary beads: `flywheel_connectors-1g7z0.29.8`, `flywheel_connectors-1g7z0.29.8.3`  
+> Status: active operator/agent guide for the current `fwc` host-first truth contract
+> Primary beads: `flywheel_connectors-1g7z0.29.8`, `flywheel_connectors-1g7z0.29.8.3`
 > Implementation anchors: `crates/fwc/src/catalog.rs`, `crates/fwc/src/readiness.rs`, `crates/fwc/src/main.rs`, `crates/fwc/tests/cual_integration.rs`, `crates/fwc/src/test_observability.rs`, `docs/testing/e2e_log_schema.md`, `docs/testing/coverage-inventory.md`
 
 ## Purpose
 
-This playbook explains how `fwc` is supposed to behave now that the CLI is moving to a host-first truthful model.
+This playbook explains how `fwc` is supposed to behave now that the CLI follows a host-first truthful model.
 
 The short version:
 
@@ -40,7 +40,7 @@ The contract is strict: dispatch resolves mode once, before doing work, and no h
 
 ## The No-Fakes Invariant
 
-The truthfulness migration is not just about better labels. It is a ban on fake runtime confidence.
+The truthfulness contract is not just about better labels. It is a ban on fake runtime confidence.
 
 `fwc` must never:
 

@@ -834,7 +834,7 @@ For operator and agent workflows, migration guidance, and evidence-bundle expect
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 29 directories under `crates/`, 28 of which are active Cargo workspace members today, plus 82 connector crates under `connectors/`. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 29 directories under `crates/`, 28 of which are active Cargo workspace members today, plus 89 connector crates under `connectors/`. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/
@@ -865,7 +865,7 @@ flywheel_connectors/
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
 │   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
-├── connectors/                # 82 connector crates at varying maturity
+├── connectors/                # 89 connector crates at varying maturity
 │   ├── github/
 │   ├── gmail/
 │   ├── slack/
@@ -929,7 +929,7 @@ The remaining quarantine surfaces (see `docs/FCP3_Retirement_Kill_List.md` for t
 
 - `fcp-async-core` wraps the Asupersync runtime and retains a Tokio compatibility bridge for wiremock/reqwest test infrastructure. The bridge is quarantined with explicit removal triggers.
 - `fwc/src/serve_mcp.rs` has one remaining `tokio::io` import, quarantined until `fcp-async-core::io` gains `AsyncWrite` and `lines()` support.
-- 16 connectors have adopted `ConnectorErrorMapping`; the migration framework (`ConnectorRuntime`, `RetryLoop`) is proven across request-response, streaming, and polling archetypes.
+- 14 connectors currently implement `ConnectorErrorMapping`; the migration framework (`ConnectorRuntime`, `RetryLoop`) is proven across request-response, streaming, and polling archetypes.
 
 The FCP3 runtime kernel uses Asupersync natively. All production transport code (including WebSocket in `fcp-streaming`) runs on the Asupersync runtime. No compatibility-first holdouts remain in production paths.
 

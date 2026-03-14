@@ -1,6 +1,11 @@
 # Test Coverage Inventory and Mock Usage Map
 
 > Generated: 2026-01-27 | Bead: bd-32k7
+>
+> Snapshot caveat: this is a dated inventory, not a live source-of-truth scan.
+> Prefer current crate-local `tests/` directories plus `rg` for up-to-date
+> coverage state. References to the old `fcp-cli` surface map to the current
+> `fwc` CLI.
 
 ## Executive Summary
 
@@ -37,7 +42,7 @@ The flywheel_connectors codebase has **~3,600+ test markers** across **177 files
 
 | Crate | Test Files | Test Count | Notes |
 |-------|-----------|------------|-------|
-| fcp-cli | 2 | ~32 | Bench test, doctor test |
+| fwc | 2 | ~32 | Bench test, doctor test |
 | fcp-bootstrap | 2 | ~25 | Golden vectors, integration |
 | fcp-manifest | 1 | ~40 | Golden vectors |
 

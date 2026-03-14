@@ -8,6 +8,10 @@
 > Purpose: Explicit kill-list for every compatibility abstraction that should
 > disappear rather than evolve, classified as **immediate delete**, **temporary
 > quarantine**, or **replace-after-pilot**.
+>
+> Clarification: despite the bead title, `ExecutionContext` and
+> `ConnectorRuntime` remain target FCP3 abstractions. The retirement targets are
+> compatibility wrappers, holdouts, and exception-ledger habits around them.
 
 ---
 
@@ -17,14 +21,16 @@ The codebase has successfully migrated from Tokio to Asupersync via the
 `fcp-async-core` abstraction layer. The infrastructure is mature and correct.
 What remains is:
 
-1. **Adopting `ConnectorRuntime`** in all 85+ connectors (currently zero use it)
-2. **Consolidating raw `asupersync::` imports** behind `fcp-async-core` wrappers
+1. **Adopting `ConnectorRuntime`** across all 89 connector crates (currently 2
+   direct call sites in connector code)
+2. **Consolidating raw `asupersync::` imports** behind `fcp-async-core`
+   wrappers
 3. **Maintaining Tokio compat bridges** until test infrastructure goes native
 4. **Fixing one `tokio::` holdout** in `fwc/src/serve_mcp.rs`
 
-There is **no ExceptionLedger abstraction** in the codebase. The "exception-ledger
-thinking" to retire is the pattern of hand-rolled, per-connector error handling
-that `ConnectorErrorMapping` replaces.
+There is **no ExceptionLedger abstraction** in the codebase. The
+"exception-ledger thinking" to retire is the pattern of hand-rolled,
+per-connector error handling that `ConnectorErrorMapping` replaces.
 
 ---
 
@@ -225,10 +231,10 @@ using only `fcp-async-core` imports.
 **Deletion trigger:** When zero non-test Rust files outside `fcp-async-core`
 contain `use asupersync::`.
 
-### 4.2 85+ connectors → ConnectorRuntime adoption
+### 4.2 89 connector crates → ConnectorRuntime adoption
 
-**Current state:** Zero connectors under `connectors/` use `ConnectorRuntime`.
-All use direct constructor patterns with hand-rolled lifecycle.
+**Current state:** `ConnectorRuntime::new` currently appears in 2 direct
+connector call sites, so the repo is still in the early pattern-proving phase.
 
 **Classification:** REPLACE
 
@@ -258,7 +264,7 @@ ctx.run(async { /* operation */ }).await
 **Cutover signal:** Pilot connectors pass all existing tests with
 `ConnectorRuntime`, zero hand-rolled retry/timeout code remains.
 
-**Deletion trigger:** All 85+ connectors migrated. Delete old lifecycle
+**Deletion trigger:** All 89 connector crates migrated. Delete old lifecycle
 patterns from connector scaffold template (`fwc new_cmd.rs`).
 
 #### Current migration snapshot (2026-03-14)
@@ -267,9 +273,11 @@ Repository scan after the first two archetype batches:
 
 - `ConnectorRuntime::new` appears in **2** connector call sites.
 - `RetryLoop::execute` appears in **4** connector call sites.
-- `impl ConnectorErrorMapping` exists in **11** connector error modules.
-- Manifest-declared archetypes already cluster the fleet into a small number of
-  repeatable migration families instead of 80+ one-off plans.
+- `impl ConnectorErrorMapping` exists in **87/87** connector error modules (100%).
+- All connectors have `fcp-sdk` as a dependency.
+- Remaining migration: adopt `ConnectorRuntime` lifecycle and `RetryLoop` in
+  connectors that still use hand-rolled retry (the `ConnectorErrorMapping` trait
+  is the prerequisite foundation, now universally in place).
 
 That means the current work is still in the pattern-proving phase, not the
 "mass migration complete" phase. The goal of bead `9syku.11.3` is therefore to
@@ -325,7 +333,7 @@ These items were searched for but do not exist:
 | S3 | reqwest/wiremock replaced OR eliminated | Tokio compat handle (3.1, 3.2, 3.4) |
 | S4 | HTTP server stack decision made | asupersync-tokio-compat (3.3) |
 | S5 | fcp-streaming pilot succeeds | Raw asupersync imports (4.1) |
-| S6 | All 85 connectors use ConnectorRuntime | Old lifecycle patterns (4.2) |
+| S6 | All 89 connector crates use ConnectorRuntime | Old lifecycle patterns (4.2) |
 
 ---
 

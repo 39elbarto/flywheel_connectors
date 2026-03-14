@@ -927,6 +927,57 @@ mod tests {
                 .await
                 .expect_err("cancelled context should fail decode");
             assert!(matches!(err, DecodeError::Cancelled));
+            assert_eq!(controller.active_count(), 0);
+            assert!(controller.has_capacity());
+        })
+        .expect("runtime available for async decode test");
+    }
+
+    #[test]
+    fn decode_with_context_cancellation_after_acquire_releases_admission_slot() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let controller = DecodeAdmissionController::with_limits(
+                1,
+                8 * 1024 * 1024,
+                Duration::from_secs(30),
+                200_000,
+            );
+            let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let task_context = context.clone();
+            let task_controller = controller.clone();
+
+            let decode_task = fcp_async_core::task::spawn(async move {
+                let mut decoder =
+                    RaptorQDecoder::with_expected_symbols(50_000, 3_200_000, 64, &test_config());
+                let symbols: Vec<(u32, Vec<u8>)> =
+                    (0..50_000).map(|esi| (esi, vec![0u8; 64])).collect();
+                task_controller
+                    .decode_with_context(&task_context, &mut decoder, symbols)
+                    .await
+            });
+
+            let mut acquired = false;
+            for _ in 0..1_000 {
+                if controller.active_count() == 1 {
+                    acquired = true;
+                    break;
+                }
+                fcp_async_core::task::yield_now().await;
+            }
+            assert!(acquired, "decode task should acquire an admission slot");
+
+            context.cancel();
+
+            let err = decode_task
+                .await
+                .expect("decode task should join")
+                .expect_err("cancellation after acquire should fail decode");
+            assert!(matches!(err, DecodeError::Cancelled));
+            assert_eq!(controller.active_count(), 0);
+            assert!(controller.has_capacity());
+            let _permit = controller
+                .acquire()
+                .expect("cancelled decode should release its permit");
         })
         .expect("runtime available for async decode test");
     }
@@ -952,6 +1003,8 @@ mod tests {
                 .await
                 .expect_err("expired deadline should fail decode");
             assert!(matches!(err, DecodeError::Timeout));
+            assert_eq!(controller.active_count(), 0);
+            assert!(controller.has_capacity());
         })
         .expect("runtime available for async decode test");
     }
@@ -1002,6 +1055,12 @@ mod tests {
                 }
                 other => panic!("expected insufficient symbols, got {other:?}"),
             }
+
+            assert_eq!(controller.active_count(), 0);
+            assert!(controller.has_capacity());
+            let _permit = controller
+                .acquire()
+                .expect("insufficient-symbol decode should release its permit");
         })
         .expect("runtime available for async decode test");
     }

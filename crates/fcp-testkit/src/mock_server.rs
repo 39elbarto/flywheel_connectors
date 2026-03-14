@@ -1034,6 +1034,64 @@ mod tests {
         assert_eq!(body["delayed"], true);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_reqwest_roundtrip_inside_spawned_task() {
+        let mock = MockApiServer::start().await;
+        mock.expect_get("/api/spawned", serde_json::json!({"spawned": true}))
+            .await;
+
+        let url = format!("{}/api/spawned", mock.base_url());
+        let body = fcp_async_core::task::spawn(async move {
+            let client = reqwest::Client::new();
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .expect("spawned request should succeed");
+            assert_eq!(response.status(), 200);
+            response
+                .json::<serde_json::Value>()
+                .await
+                .expect("spawned response should decode")
+        })
+        .await
+        .expect("spawned request task should join");
+
+        assert_eq!(body["spawned"], true);
+        mock.assert_request_count(1).await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_delayed_reqwest_honors_context_cancellation() {
+        let mock = MockApiServer::start().await;
+        mock.expect_delayed(
+            "/api/cancelled",
+            std::time::Duration::from_millis(250),
+            serde_json::json!({"delayed": true}),
+        )
+        .await;
+
+        let context =
+            fcp_async_core::ExecutionContext::request_scoped(std::time::Duration::from_secs(5));
+        let cancel_context = context.clone();
+        let cancel_task = fcp_async_core::task::spawn(async move {
+            fcp_async_core::time::sleep(std::time::Duration::from_millis(25)).await;
+            cancel_context.cancel();
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/cancelled", mock.base_url());
+        let err = context
+            .run(async move { client.get(url).send().await })
+            .await
+            .expect_err("context cancellation should win over delayed response");
+        assert!(matches!(err, fcp_async_core::AsyncError::Cancelled));
+        cancel_task.await.expect("cancel task should join");
+
+        let requests = mock.received_requests().await;
+        assert_eq!(requests.len(), 1);
+    }
+
     // ---- MockApiServer: expect_json with various content types ----
 
     #[fcp_async_core::runtime::test]

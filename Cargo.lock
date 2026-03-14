@@ -3811,6 +3811,7 @@ dependencies = [
  "fcp-core",
  "fcp-crypto",
  "fcp-manifest",
+ "fcp-sdk",
  "fcp-streaming",
  "fcp-testkit",
  "futures-util",

@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -746,6 +746,40 @@ async fn wait_for_host_readiness(
     .into())
 }
 
+async fn wait_for_host_exit(
+    child: &mut Child,
+    timeout: Duration,
+    stderr_logs: &StderrLogs,
+) -> Result<ExitStatus, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let raw_stderr = stderr_logs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            return Err(format!(
+                "timed out waiting for fcp-host exit after {timeout:?}; stderr: {raw_stderr:?}"
+            )
+            .into());
+        }
+        fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(unix)]
+fn send_sigterm(child: &Child) -> Result<(), Box<dyn std::error::Error>> {
+    let pid = child.id().to_string();
+    let status = Command::new("kill").args(["-TERM", &pid]).status()?;
+    if !status.success() {
+        return Err(format!("failed to send SIGTERM to fcp-host pid {pid}: {status}").into());
+    }
+    Ok(())
+}
+
 impl HttpHostProcess {
     async fn spawn(
         connector_configs: Vec<serde_json::Value>,
@@ -982,6 +1016,34 @@ async fn wait_for_log_events(
         if Instant::now() >= deadline {
             return Err(format!(
                 "timed out waiting for log events {events:?}; raw stderr lines: {raw_lines:?}"
+            )
+            .into());
+        }
+        fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_log_entry(
+    stderr_logs: &Arc<StdMutex<Vec<String>>>,
+    description: &str,
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let raw_lines = stderr_logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let parsed_logs: Vec<Value> = raw_lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect();
+        if parsed_logs.iter().any(&predicate) {
+            return Ok(parsed_logs);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for log entry {description}; raw stderr lines: {raw_lines:?}"
             )
             .into());
         }
@@ -2872,6 +2934,121 @@ async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_cancel_route_allows_follow_up_invoke_after_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.cancel-follow-up:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Cancel Follow Up Echo",
+            &["test", "cancel"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let (mut slow_request, _) = build_invoke_request(connector_id.clone(), &capability_signing_key);
+    slow_request.input = json!({
+        "message": "slow",
+        "delay_ms": 300_u64,
+    });
+    let cancelled_operation_id = slow_request.id.to_string();
+
+    let invoke_task = fcp_async_core::task::spawn({
+        let client = host.client.clone();
+        let invoke_url = url("/rpc/invoke");
+        async move {
+            http_post_json::<_, InvokeResponse>(client, invoke_url, slow_request)
+                .await
+                .map_err(|err| err.to_string())
+        }
+    });
+
+    let logs = wait_for_log_events(&host.stderr_logs, &["invoke_request"]).await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_request")
+            && entry.get("operation_id").and_then(Value::as_str)
+                == Some(cancelled_operation_id.as_str())
+    }));
+
+    fcp_async_core::time::sleep(Duration::from_millis(50)).await;
+
+    let cancel_response: CancellationResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/operations/cancel"),
+        CancellationRequest {
+            operation_id: cancelled_operation_id.clone(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::BestEffort,
+            return_partial: true,
+        },
+    )
+    .await?;
+
+    assert_eq!(cancel_response.operation_id, cancelled_operation_id);
+    assert_eq!(cancel_response.outcome, CancellationOutcome::Cancelled);
+    assert!(cancel_response.cleanup_result.is_some());
+
+    let cancelled_response = invoke_task
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)?;
+    assert_eq!(cancelled_response.status, InvokeStatus::Ok);
+
+    let (mut follow_up_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    follow_up_request.input = json!({ "message": "after-cancel" });
+    let follow_up_operation_id = follow_up_request.id.to_string();
+
+    let follow_up_response: InvokeResponse =
+        http_post_json(host.client.clone(), url("/rpc/invoke"), follow_up_request).await?;
+    assert_eq!(follow_up_response.status, InvokeStatus::Ok);
+    assert_eq!(
+        follow_up_response
+            .output
+            .as_ref()
+            .and_then(|output| output.get("result"))
+            .and_then(|result| result.get("echo"))
+            .and_then(|echo| echo.get("message"))
+            .and_then(Value::as_str),
+        Some("after-cancel")
+    );
+
+    let logs = wait_for_log_entry(&host.stderr_logs, "follow-up invoke_response", |entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_response")
+            && entry.get("operation_id").and_then(Value::as_str)
+                == Some(follow_up_operation_id.as_str())
+            && entry.get("status").and_then(Value::as_str) == Some("Ok")
+    })
+    .await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("cancel_response")
+            && entry.get("operation_id").and_then(Value::as_str)
+                == Some(cancelled_operation_id.as_str())
+            && entry.get("outcome").and_then(Value::as_str) == Some("Cancelled")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_request")
+            && entry.get("operation_id").and_then(Value::as_str)
+                == Some(follow_up_operation_id.as_str())
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_response")
+            && entry.get("operation_id").and_then(Value::as_str)
+                == Some(follow_up_operation_id.as_str())
+            && entry.get("status").and_then(Value::as_str) == Some("Ok")
+    }));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_cancel_route_returns_too_late_for_completed_invoke()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.cancel-too-late:utility:1.0.0");
@@ -2931,6 +3108,73 @@ async fn fcp_host_binary_cancel_route_returns_too_late_for_completed_invoke()
             && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
             && entry.get("outcome").and_then(Value::as_str) == Some("TooLate")
     }));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_sigterm_shutdown_exits_cleanly_and_stops_serving_http()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.shutdown-http:utility:1.0.0");
+    let mut host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Shutdown Echo",
+        &["test", "shutdown"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    send_sigterm(&host.child)?;
+
+    let status =
+        wait_for_host_exit(&mut host.child, Duration::from_secs(2), &host.stderr_logs).await?;
+    assert!(
+        status.success(),
+        "expected graceful shutdown exit, got {status}"
+    );
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "sigterm_received",
+            "shutdown_signal",
+            "host_shutdown_complete",
+        ],
+    )
+    .await?;
+    let sigterm_index = logs
+        .iter()
+        .position(|entry| entry.get("event").and_then(Value::as_str) == Some("sigterm_received"))
+        .expect("sigterm_received log should be present");
+    let shutdown_index = logs
+        .iter()
+        .position(|entry| entry.get("event").and_then(Value::as_str) == Some("shutdown_signal"))
+        .expect("shutdown_signal log should be present");
+    let complete_index = logs
+        .iter()
+        .position(|entry| {
+            entry.get("event").and_then(Value::as_str) == Some("host_shutdown_complete")
+        })
+        .expect("host_shutdown_complete log should be present");
+    assert!(sigterm_index < shutdown_index);
+    assert!(shutdown_index < complete_index);
+
+    let shutdown_probe = fcp_async_core::time::timeout(
+        Duration::from_millis(500),
+        http_get_status(host.client.clone(), url("/rpc/health")),
+    )
+    .await
+    .expect("post-shutdown health probe should not hang");
+    let shutdown_err = shutdown_probe.expect_err("health request should fail after SIGTERM");
+    let shutdown_err = shutdown_err.to_string();
+    assert!(
+        shutdown_err.contains("connection")
+            || shutdown_err.contains("refused")
+            || shutdown_err.contains("closed")
+            || shutdown_err.contains("error sending request"),
+        "unexpected post-shutdown reqwest error: {shutdown_err}"
+    );
 
     Ok(())
 }

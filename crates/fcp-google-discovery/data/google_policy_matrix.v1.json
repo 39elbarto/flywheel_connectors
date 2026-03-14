@@ -1,6 +1,6 @@
 {
   "version": "2026-03-06",
-  "generated_from_bead": "flywheel_connectors-lszk.45.1.8.1",
+  "generated_from_bead": "flywheel_connectors-lszk.45.3.7",
   "provisioning_policy": {
     "intent": "Provisioning must keep default scopes narrow, treat consent restrictions as first-class policy, and separate setup-time Google Cloud automation from runtime connector credentials.",
     "default_scope_posture": "Start with the least-broad scope set that supports the selected workflow; widen only on explicit feature selection or a method-level requirement that cannot be satisfied otherwise.",
@@ -162,6 +162,108 @@
         ],
         "notes": [
           "The current handwritten Calendar connector already separates runtime auth from setup by accepting token or credential_id only; migration should preserve that runtime shape while moving setup logic into the shared substrate."
+        ]
+      },
+      {
+        "surface_id": "people",
+        "display_name": "Google People/Contacts connector provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/contacts.readonly"
+        ],
+        "required_api_enablement": [
+          "People API"
+        ],
+        "project_prerequisites": [
+          "OAuth consent screen configured for the selected project.",
+          "OAuth client created for the People user-auth flow used by the host provisioning UX."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "User enables contact create, update, photo update, or group-membership mutation workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/contacts"
+            ],
+            "notes": [
+              "Contact mutation requires the broad contacts scope; do not hide this behind read-only flows."
+            ]
+          },
+          {
+            "trigger": "User enables reads from Google-suggested other contacts.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/contacts.other.readonly"
+            ],
+            "notes": [
+              "Other Contacts is a distinct personal-data surface and should be an explicit opt-in above ordinary contact reads."
+            ]
+          },
+          {
+            "trigger": "User enables Google Workspace directory search or lookup workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/directory.readonly"
+            ],
+            "notes": [
+              "Directory reads expose org-wide profile data and should remain separate from personal contact access."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Confirm People API enablement before launching user consent.",
+          "Preflight whether the requested workflow can stay on contacts.readonly before adding contact mutation or directory scopes."
+        ],
+        "fallback_steps": [
+          "Provide manual console steps for People API enablement and OAuth client selection when gcloud cannot manage the project.",
+          "Keep personal-contact, other-contacts, and directory scope choices explicit in the manual fallback path."
+        ],
+        "runtime_materialization": [
+          "Runtime should use credential_id handles or ephemeral access tokens from the shared Google auth chain, never raw local credentials files.",
+          "Provisioning-only auth sources such as ADC may assist setup diagnostics but must not define steady-state connector auth."
+        ],
+        "notes": [
+          "People/Contacts reads are privacy-sensitive even when they are non-mutating, so the connector should expose field-mask and source choices explicitly rather than widening by convenience wrapper.",
+          "Self-profile (`people/me`) access can require additional personal-profile scopes and is intentionally not part of the default contact-read path."
+        ]
+      },
+      {
+        "surface_id": "admin_reports",
+        "display_name": "Google Workspace Admin Reports connector provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/admin.reports.audit.readonly"
+        ],
+        "required_api_enablement": [
+          "Admin SDK API"
+        ],
+        "project_prerequisites": [
+          "OAuth consent screen configured for the selected project or delegated Workspace-admin auth path.",
+          "A Google Workspace domain administrator or approved delegated-admin credential path exists for the selected tenant.",
+          "The selected tenant permits the requested Admin Reports restricted scopes."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "User enables usage-report workflows (user, customer, or entity usage metrics).",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/admin.reports.usage.readonly"
+            ],
+            "notes": [
+              "Usage telemetry is a separate restricted admin surface and should not be silently bundled into audit-log access."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Confirm Admin SDK API enablement for the selected project before launching consent.",
+          "Validate that the selected account or delegated credential path actually has Workspace admin access for the target tenant.",
+          "Preflight whether the requested workflow can stay on audit.readonly or needs the separate usage.readonly scope."
+        ],
+        "fallback_steps": [
+          "Provide manual console steps for Admin SDK API enablement and admin-approved OAuth client selection when gcloud cannot manage the project.",
+          "Do not mark runtime readiness until domain-admin consent or delegated credential materialization succeeds for the selected tenant."
+        ],
+        "runtime_materialization": [
+          "Runtime should use credential_id handles or ephemeral access tokens from the shared Google auth chain; domain-wide delegated service-account material remains a host/provisioning concern.",
+          "Provisioning-only auth sources such as ADC may assist diagnostics but must not silently become steady-state runtime auth for admin connectors."
+        ],
+        "notes": [
+          "Admin Reports is a domain-admin surface, not an end-user personal-data connector; setup must make tenant and admin assumptions explicit.",
+          "Audit and usage scopes should stay separately explainable because many environments will permit one but not the other."
         ]
       },
       {
@@ -726,6 +828,73 @@
       ]
     },
     {
+      "service": "admin",
+      "api_versions": ["reports_v1"],
+      "recommended_zones": ["z:work"],
+      "host_allow": ["admin.googleapis.com"],
+      "exceptions": [
+        "Admin Reports is domain-wide and admin-only; the connector must keep tenant and delegated-admin assumptions explicit.",
+        "Audit and usage scopes are separate restricted surfaces and should not be silently bundled."
+      ],
+      "rules": [
+        {
+          "operation_pattern": "activities.list",
+          "capability": "admin.reports.audit.read",
+          "risk_level": "high",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/admin.reports.audit.readonly"],
+          "notes": [
+            "Domain-wide audit logs are read-only but sensitive enough that host policy should approve and zone the call explicitly."
+          ]
+        },
+        {
+          "operation_pattern": "userUsageReport.get",
+          "capability": "admin.reports.usage.read",
+          "risk_level": "high",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/admin.reports.usage.readonly"],
+          "notes": [
+            "User usage reports expose organization-level productivity telemetry and should stay outside the default audit-only posture."
+          ]
+        },
+        {
+          "operation_pattern": "customerUsageReports.get",
+          "capability": "admin.reports.usage.read",
+          "risk_level": "high",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/admin.reports.usage.readonly"],
+          "notes": [
+            "Customer-wide usage reports summarize domain activity and should remain explicitly policy-gated."
+          ]
+        },
+        {
+          "operation_pattern": "entityUsageReports.get",
+          "capability": "admin.reports.usage.read",
+          "risk_level": "high",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/admin.reports.usage.readonly"],
+          "notes": [
+            "Entity usage reports are niche but still admin-only telemetry and should fail closed without explicit policy mapping."
+          ]
+        },
+        {
+          "operation_pattern": "*",
+          "capability": "google.review_required",
+          "risk_level": "high",
+          "safety_tier": "forbidden",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": [
+            "Fail closed for unmapped methods until explicit policy classification is added."
+          ]
+        }
+      ]
+    },
+    {
       "service": "generativelanguage",
       "api_versions": ["v1", "v1beta"],
       "recommended_zones": ["z:project:ml", "z:work"],
@@ -998,6 +1167,237 @@
             "https://mail.google.com/",
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.metadata"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "*",
+          "capability": "google.review_required",
+          "risk_level": "high",
+          "safety_tier": "forbidden",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": [
+            "Fail closed for unmapped methods until explicit policy classification is added."
+          ]
+        }
+      ]
+    },
+    {
+      "service": "people",
+      "api_versions": ["v1"],
+      "recommended_zones": ["z:private", "z:work"],
+      "host_allow": ["people.googleapis.com"],
+      "exceptions": [
+        "People field masks materially change the sensitivity of returned data and must stay explicit in connector UX rather than hidden behind broad defaults.",
+        "Self-profile reads (`people/me`) can require additional personal-profile scopes beyond contacts.readonly and should remain an explicit separate choice."
+      ],
+      "rules": [
+        {
+          "operation_pattern": "people.deleteContact",
+          "capability": "people.contacts.delete",
+          "risk_level": "critical",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://www.googleapis.com/auth/contacts"],
+          "notes": [
+            "Permanent contact deletion is user-visible data loss and should require explicit confirmation."
+          ]
+        },
+        {
+          "operation_pattern": "people.batchDeleteContacts",
+          "capability": "people.contacts.delete",
+          "risk_level": "critical",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://www.googleapis.com/auth/contacts"],
+          "notes": [
+            "Bulk contact deletion should never ride on the default read-only posture."
+          ]
+        },
+        {
+          "operation_pattern": "people.createContact",
+          "capability": "people.contacts.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/contacts"],
+          "notes": [
+            "Contact creation writes durable personal data and should stay outside the default read-only path."
+          ]
+        },
+        {
+          "operation_pattern": "people.updateContact",
+          "capability": "people.contacts.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/contacts"],
+          "notes": [
+            "Contact updates should keep field-mask changes explicit so the caller knows which personal fields are being mutated."
+          ]
+        },
+        {
+          "operation_pattern": "people.batchCreateContacts",
+          "capability": "people.contacts.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/contacts"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "people.batchUpdateContacts",
+          "capability": "people.contacts.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/contacts"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "people.updateContactPhoto",
+          "capability": "people.contacts.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/contacts"],
+          "notes": [
+            "Photo updates still mutate durable personal profile data."
+          ]
+        },
+        {
+          "operation_pattern": "people.get",
+          "capability": "people.profile.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.readonly",
+            "https://www.googleapis.com/auth/contacts",
+            "https://www.googleapis.com/auth/directory.readonly",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile"
+          ],
+          "notes": [
+            "Exact scope needs depend on the resource and requested personFields; self-profile reads should stay explicit."
+          ]
+        },
+        {
+          "operation_pattern": "people.getBatchGet",
+          "capability": "people.profile.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.readonly",
+            "https://www.googleapis.com/auth/contacts",
+            "https://www.googleapis.com/auth/directory.readonly",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile"
+          ],
+          "notes": [
+            "Batch profile reads amplify privacy impact even when they are non-mutating."
+          ]
+        },
+        {
+          "operation_pattern": "people.connections.list",
+          "capability": "people.contacts.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.readonly",
+            "https://www.googleapis.com/auth/contacts"
+          ],
+          "notes": [
+            "Bulk contact enumeration is privacy-sensitive even without mutation."
+          ]
+        },
+        {
+          "operation_pattern": "people.searchContacts",
+          "capability": "people.contacts.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.readonly",
+            "https://www.googleapis.com/auth/contacts"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "otherContacts.*",
+          "capability": "people.other_contacts.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.other.readonly"
+          ],
+          "notes": [
+            "Other Contacts is a separate auto-suggested contact corpus and should remain an explicit opt-in."
+          ]
+        },
+        {
+          "operation_pattern": "people.listDirectoryPeople",
+          "capability": "people.directory.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/directory.readonly"
+          ],
+          "notes": [
+            "Directory lookups expose org-wide profile data rather than just the user's contacts."
+          ]
+        },
+        {
+          "operation_pattern": "people.searchDirectoryPeople",
+          "capability": "people.directory.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/directory.readonly"
+          ],
+          "notes": [
+            "Directory search should stay policy-gated because it broadens discovery across the workspace."
+          ]
+        },
+        {
+          "operation_pattern": "contactGroups.batchGet",
+          "capability": "people.contact_groups.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.readonly",
+            "https://www.googleapis.com/auth/contacts"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "contactGroups.get",
+          "capability": "people.contact_groups.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.readonly",
+            "https://www.googleapis.com/auth/contacts"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "contactGroups.list",
+          "capability": "people.contact_groups.read",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/contacts.readonly",
+            "https://www.googleapis.com/auth/contacts"
           ],
           "notes": []
         },

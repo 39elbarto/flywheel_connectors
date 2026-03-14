@@ -1093,7 +1093,13 @@ mod tests {
 
     #[test]
     fn recipe_has_five_steps_for_all_surfaces() {
-        for surface_id in &["gmail", "calendar", "workspace_events"] {
+        for surface_id in &[
+            "gmail",
+            "calendar",
+            "admin_reports",
+            "people",
+            "workspace_events",
+        ] {
             let bundle = load_default_google_provisioning_bundle(surface_id)
                 .unwrap_or_else(|err| panic!("{surface_id} bundle should load: {err}"));
             assert_eq!(
@@ -1165,7 +1171,13 @@ mod tests {
 
     #[test]
     fn setup_descriptor_has_five_human_prompts() {
-        for surface_id in &["gmail", "calendar", "workspace_events"] {
+        for surface_id in &[
+            "gmail",
+            "calendar",
+            "admin_reports",
+            "people",
+            "workspace_events",
+        ] {
             let bundle = load_default_google_provisioning_bundle(surface_id)
                 .unwrap_or_else(|err| panic!("{surface_id} bundle should load: {err}"));
             assert_eq!(
@@ -1448,6 +1460,60 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("calendar")),
             "calendar should have calendar-related scopes"
+        );
+    }
+
+    #[test]
+    fn people_bundle_has_explicit_contact_directory_scope_posture() {
+        let bundle =
+            load_default_google_provisioning_bundle("people").expect("people bundle should load");
+        assert_eq!(bundle.surface.surface_id, "people");
+        assert_eq!(
+            bundle.surface.default_scopes,
+            vec!["https://www.googleapis.com/auth/contacts.readonly".to_string()]
+        );
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .any(|path| path.trigger.contains("directory search"))
+        );
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .flat_map(|path| path.add_scopes.iter())
+                .any(|scope| scope == "https://www.googleapis.com/auth/directory.readonly")
+        );
+    }
+
+    #[test]
+    fn admin_reports_bundle_keeps_audit_default_and_usage_escalation() {
+        let bundle = load_default_google_provisioning_bundle("admin_reports")
+            .expect("admin_reports bundle should load");
+        assert_eq!(bundle.surface.surface_id, "admin_reports");
+        assert_eq!(
+            bundle.surface.default_scopes,
+            vec!["https://www.googleapis.com/auth/admin.reports.audit.readonly".to_string()]
+        );
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .any(|path| path.trigger.contains("usage-report workflows"))
+        );
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .flat_map(|path| path.add_scopes.iter())
+                .any(
+                    |scope| scope == "https://www.googleapis.com/auth/admin.reports.usage.readonly"
+                )
         );
     }
 

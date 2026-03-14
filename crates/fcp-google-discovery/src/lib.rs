@@ -250,6 +250,18 @@ impl Default for ServiceAliasRegistry {
             DiscoveryServiceId::new("drive", "v3").expect("static alias must be valid"),
         );
         aliases.insert(
+            "admin-reports".to_string(),
+            DiscoveryServiceId::new("admin", "reports_v1").expect("static alias must be valid"),
+        );
+        aliases.insert(
+            "people".to_string(),
+            DiscoveryServiceId::new("people", "v1").expect("static alias must be valid"),
+        );
+        aliases.insert(
+            "contacts".to_string(),
+            DiscoveryServiceId::new("people", "v1").expect("static alias must be valid"),
+        );
+        aliases.insert(
             "docs".to_string(),
             DiscoveryServiceId::new("docs", "v1").expect("static alias must be valid"),
         );
@@ -1395,6 +1407,9 @@ mod tests {
             "youtube",
             "bigquery",
             "drive",
+            "admin-reports",
+            "people",
+            "contacts",
             "docs",
             "sheets",
             "google-ai",

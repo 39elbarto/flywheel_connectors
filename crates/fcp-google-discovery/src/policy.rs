@@ -773,16 +773,20 @@ mod tests {
         let catalog = default_google_policy_catalog();
         assert_eq!(
             catalog.generated_from_bead,
-            "flywheel_connectors-lszk.45.1.8.1"
+            "flywheel_connectors-lszk.45.3.7"
         );
         assert!(catalog.service("gmail").is_some());
         assert!(catalog.service("calendar").is_some());
+        assert!(catalog.service("admin").is_some());
+        assert!(catalog.service("people").is_some());
         assert!(catalog.service("youtube").is_some());
         assert!(catalog.service("bigquery").is_some());
         assert!(catalog.service("generativelanguage").is_some());
         assert!(!catalog.provisioning_policy.default_scope_posture.is_empty());
         assert!(catalog.provisioning_surface("gmail").is_some());
         assert!(catalog.provisioning_surface("calendar").is_some());
+        assert!(catalog.provisioning_surface("admin_reports").is_some());
+        assert!(catalog.provisioning_surface("people").is_some());
         assert!(catalog.provisioning_surface("workspace_events").is_some());
         assert!(!catalog.helper_overlay_policy.require_all.is_empty());
         assert!(
@@ -831,6 +835,34 @@ mod tests {
                 .iter()
                 .any(|path| path.trigger.contains("outbound send"))
         );
+
+        let people = catalog
+            .provisioning_surface("people")
+            .expect("people provisioning surface should exist");
+        assert_eq!(
+            people.display_name,
+            "Google People/Contacts connector provisioning"
+        );
+        assert!(
+            people
+                .escalation_paths
+                .iter()
+                .any(|path| path.trigger.contains("directory search"))
+        );
+
+        let admin_reports = catalog
+            .provisioning_surface("admin_reports")
+            .expect("admin_reports provisioning surface should exist");
+        assert_eq!(
+            admin_reports.display_name,
+            "Google Workspace Admin Reports connector provisioning"
+        );
+        assert!(
+            admin_reports
+                .escalation_paths
+                .iter()
+                .any(|path| path.trigger.contains("usage-report workflows"))
+        );
     }
 
     #[test]
@@ -856,6 +888,30 @@ mod tests {
         assert_eq!(matched.rule.operation_pattern, "events.*");
         assert_eq!(matched.rule.capability, "gcal.read");
         assert_eq!(matched.rule.safety_tier, PolicySafetyTier::Safe);
+    }
+
+    #[test]
+    fn classify_people_contact_delete_requires_interactive_approval() {
+        let catalog = default_google_policy_catalog();
+        let matched = catalog
+            .classify_operation("people", "people.deleteContact")
+            .expect("people deleteContact should match");
+
+        assert_eq!(matched.rule.capability, "people.contacts.delete");
+        assert_eq!(matched.rule.safety_tier, PolicySafetyTier::Dangerous);
+        assert_eq!(matched.rule.approval_mode, PolicyApprovalMode::Interactive);
+    }
+
+    #[test]
+    fn classify_admin_reports_activity_requires_policy_approval() {
+        let catalog = default_google_policy_catalog();
+        let matched = catalog
+            .classify_operation("admin", "activities.list")
+            .expect("admin activities.list should match");
+
+        assert_eq!(matched.rule.capability, "admin.reports.audit.read");
+        assert_eq!(matched.rule.safety_tier, PolicySafetyTier::Safe);
+        assert_eq!(matched.rule.approval_mode, PolicyApprovalMode::Policy);
     }
 
     #[test]

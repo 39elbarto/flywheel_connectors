@@ -51,9 +51,9 @@ async fn calendar_introspect_has_required_operations() {
 
     // Core Calendar operations that must survive migration.
     let required = [
-        "calendar.list_events",
-        "calendar.get_event",
-        "calendar.create_event",
+        "gcal.list_events",
+        "gcal.get_event",
+        "gcal.create_event",
     ];
 
     for op in &required {

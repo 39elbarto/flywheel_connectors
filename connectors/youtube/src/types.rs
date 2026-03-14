@@ -424,6 +424,85 @@ pub struct ApiErrorDetail {
     pub reason: Option<String>,
 }
 
+// ── Analytics ─────────────────────────────────────────────────
+
+/// Aggregated analytics for a channel's recent videos.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelAnalytics {
+    pub channel_id: String,
+    pub video_count: u32,
+    pub total_views: u64,
+    pub total_likes: u64,
+    pub total_comments: u64,
+    pub videos: Vec<VideoAnalyticsSummary>,
+}
+
+/// Per-video analytics summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoAnalyticsSummary {
+    pub video_id: String,
+    pub title: String,
+    pub published_at: Option<String>,
+    pub view_count: u64,
+    pub like_count: u64,
+    pub comment_count: u64,
+    pub duration: Option<String>,
+}
+
+// ── Upload ────────────────────────────────────────────────────
+
+/// Video upload metadata (sent as part of resumable upload init).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoUploadMetadata {
+    pub snippet: VideoUploadSnippet,
+    pub status: VideoUploadStatus,
+}
+
+/// Snippet for a video being uploaded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoUploadSnippet {
+    pub title: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_language: Option<String>,
+}
+
+/// Privacy and publish status for an uploaded video.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoUploadStatus {
+    pub privacy_status: PrivacyStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_declared_made_for_kids: Option<bool>,
+}
+
+/// Video privacy status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PrivacyStatus {
+    Private,
+    Unlisted,
+    Public,
+}
+
+/// Result of a video upload operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoUploadResult {
+    pub video_id: String,
+    pub title: String,
+    pub privacy_status: String,
+    pub upload_status: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

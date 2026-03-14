@@ -777,6 +777,86 @@ impl YouTubeConnector {
                         related: vec![CapabilityId::from_static("youtube.get_caption_transcript")],
                     },
                 ),
+                op_info(
+                    "youtube.get_analytics",
+                    "Get aggregated analytics for a channel's recent videos",
+                    json!({
+                        "type": "object",
+                        "required": ["channel_id"],
+                        "properties": {
+                            "channel_id": { "type": "string" },
+                            "max_videos": { "type": "integer", "minimum": 1, "maximum": 50 }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "channelId": { "type": "string" },
+                            "videoCount": { "type": "integer" },
+                            "totalViews": { "type": "integer" },
+                            "totalLikes": { "type": "integer" },
+                            "totalComments": { "type": "integer" },
+                            "videos": { "type": "array" }
+                        }
+                    }),
+                    "youtube.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get aggregated view/like/comment statistics for a channel's recent videos.".into(),
+                        common_mistakes: vec![
+                            "Uses multiple API calls (channel + playlist + videos) - costs ~150 quota units".into(),
+                        ],
+                        examples: vec![
+                            r#"{"channel_id": "UCuAXFkgsw1L7xaCfnd5JJOw", "max_videos": 10}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("youtube.get_channel"),
+                            CapabilityId::from_static("youtube.get_video"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "youtube.upload_video",
+                    "Upload a video to YouTube",
+                    json!({
+                        "type": "object",
+                        "required": ["title", "description", "video_data_base64"],
+                        "properties": {
+                            "title": { "type": "string" },
+                            "description": { "type": "string" },
+                            "privacy": { "type": "string", "enum": ["private", "unlisted", "public"] },
+                            "video_data_base64": { "type": "string", "description": "Base64-encoded video file data" },
+                            "tags": { "type": "array", "items": { "type": "string" } },
+                            "category_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "videoId": { "type": "string" },
+                            "title": { "type": "string" },
+                            "privacyStatus": { "type": "string" },
+                            "uploadStatus": { "type": "string" }
+                        }
+                    }),
+                    "youtube.write",
+                    RiskLevel::Critical,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Upload a video to YouTube. Defaults to private visibility.".into(),
+                        common_mistakes: vec![
+                            "Video uploads are expensive (1600 quota units) and cannot be undone easily".into(),
+                            "Always upload as private first, then change visibility after review".into(),
+                        ],
+                        examples: vec![
+                            r#"{"title":"My Video","description":"A test video","video_data_base64":"...","privacy":"private"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("youtube.get_video")],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -876,6 +956,8 @@ impl YouTubeConnector {
             "youtube.get_captions" => self.invoke_get_captions(input).await,
             "youtube.get_caption_transcript" => self.invoke_get_caption_transcript(input).await,
             "youtube.upload_caption" => self.invoke_upload_caption(input).await,
+            "youtube.get_analytics" => self.invoke_get_analytics(input).await,
+            "youtube.upload_video" => self.invoke_upload_video(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1102,6 +1184,59 @@ impl YouTubeConnector {
         }))
     }
 
+    async fn invoke_get_analytics(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let channel_id = require_str(&input, "channel_id")?;
+        let max_videos = input
+            .get("max_videos")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
+
+        let analytics = client
+            .get_channel_analytics(channel_id, max_videos)
+            .await
+            .map_err(|e: YouTubeError| e.to_fcp_error())?;
+
+        serde_json::to_value(analytics).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize analytics: {e}"),
+        })
+    }
+
+    async fn invoke_upload_video(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let title = require_str(&input, "title")?;
+        let description = require_str(&input, "description")?;
+        let privacy = input
+            .get("privacy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("private");
+        let video_data = require_str(&input, "video_data_base64")?;
+        let tags: Option<Vec<String>> = input
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
+        let category_id = input.get("category_id").and_then(|v| v.as_str());
+
+        let result = client
+            .upload_video(title, description, privacy, video_data, tags, category_id)
+            .await
+            .map_err(|e: YouTubeError| e.to_fcp_error())?;
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize upload result: {e}"),
+        })
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &self,
@@ -1200,7 +1335,7 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "youtube.post_comment" | "youtube.upload_caption" => "youtube.write",
+            "youtube.post_comment" | "youtube.upload_caption" | "youtube.upload_video" => "youtube.write",
             _ => "youtube.read",
         };
         let now = Utc::now();
@@ -1335,7 +1470,9 @@ mod tests {
         assert!(op_ids.contains(&"youtube.get_captions"));
         assert!(op_ids.contains(&"youtube.get_caption_transcript"));
         assert!(op_ids.contains(&"youtube.upload_caption"));
-        assert_eq!(ops.len(), 11);
+        assert!(op_ids.contains(&"youtube.get_analytics"));
+        assert!(op_ids.contains(&"youtube.upload_video"));
+        assert_eq!(ops.len(), 13);
     }
 
     // ── Provisioning / doctor / self_check tests ──────────────

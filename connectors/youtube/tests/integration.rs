@@ -847,7 +847,9 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"youtube.get_captions"));
     assert!(op_ids.contains(&"youtube.get_caption_transcript"));
     assert!(op_ids.contains(&"youtube.upload_caption"));
-    assert_eq!(ops.len(), 11);
+    assert!(op_ids.contains(&"youtube.get_analytics"));
+    assert!(op_ids.contains(&"youtube.upload_video"));
+    assert_eq!(ops.len(), 13);
 }
 
 #[fcp_async_core::runtime::test]

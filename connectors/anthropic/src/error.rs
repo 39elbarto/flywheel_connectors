@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Anthropic-specific errors.
@@ -126,6 +128,40 @@ impl AnthropicError {
                 message: format!("JSON error: {e}"),
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for AnthropicError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                error_type: "deadline_timeout".into(),
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+            },
+            AsyncError::Cancelled => Self::Api {
+                error_type: "request_cancelled".into(),
+                message: "request cancelled".into(),
+                status_code: None,
+            },
+            other => Self::Api {
+                error_type: "runtime".into(),
+                message: other.to_string(),
+                status_code: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        AnthropicError::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        AnthropicError::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        AnthropicError::retry_after(self)
     }
 }
 

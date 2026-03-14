@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Figma-specific errors.
@@ -124,6 +126,37 @@ impl FigmaError {
                 message: format!("JSON error: {e}"),
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for FigmaError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                status: 408,
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Api {
+                status: 499,
+                message: "request cancelled".into(),
+            },
+            other => Self::Api {
+                status: 500,
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        FigmaError::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        FigmaError::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        FigmaError::retry_after(self)
     }
 }
 

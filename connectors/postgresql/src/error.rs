@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Result alias for `PostgreSQL` operations.
@@ -167,5 +169,35 @@ impl PostgresError {
                 retry_after: None,
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for PostgresError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Timeout(format!(
+                "deadline exceeded after {timeout_ms}ms"
+            )),
+            AsyncError::Cancelled => Self::Api {
+                status_code: 499,
+                message: "request cancelled".into(),
+            },
+            other => Self::Api {
+                status_code: 500,
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        PostgresError::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        PostgresError::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        PostgresError::retry_after(self)
     }
 }

@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// GitHub-specific errors.
@@ -124,6 +126,40 @@ impl GitHubError {
                 message: format!("JSON error: {e}"),
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for GitHubError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+                documentation_url: None,
+            },
+            AsyncError::Cancelled => Self::Api {
+                message: "request cancelled".into(),
+                status_code: Some(499),
+                documentation_url: None,
+            },
+            other => Self::Api {
+                message: other.to_string(),
+                status_code: Some(500),
+                documentation_url: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        GitHubError::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        GitHubError::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        GitHubError::retry_after(self)
     }
 }
 

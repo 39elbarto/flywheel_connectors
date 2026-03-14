@@ -327,9 +327,10 @@ impl WorkspaceEventsClient {
                 .to_string();
             Err(map_api_error(code, message, missing_kind))
         } else {
+            let preview: String = body.chars().take(200).collect();
             warn!(
                 status = code,
-                body_preview = &body[..body.len().min(200)],
+                body_preview = %preview,
                 "Workspace Events API error"
             );
             Err(map_api_error(code, body, missing_kind))

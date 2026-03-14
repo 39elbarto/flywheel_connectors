@@ -269,6 +269,15 @@ impl DocsConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -280,23 +289,21 @@ impl DocsConnector {
         let input = params.get("input").cloned().unwrap_or(json!({}));
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        self.base.record_request(true);
-
         match operation {
             "docs.get" => {
                 let document_id = require_str(&input, "document_id")?;
-                let doc = client.get_document(document_id).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let doc = client
+                    .get_document(document_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "document": doc }))
             }
             "docs.create" => {
                 let title = require_str(&input, "title")?;
-                let doc = client.create_document(title).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let doc = client
+                    .create_document(title)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "document": doc }))
             }
             "docs.batch_update" => {
@@ -310,16 +317,13 @@ impl DocsConnector {
                         code: 1001,
                         message: "Missing or invalid 'requests' (must be array)".into(),
                     })?;
-                let result = client
+                let batch_result = client
                     .batch_update(document_id, requests)
                     .await
-                    .map_err(|e| {
-                        self.base.record_request(false);
-                        e.to_fcp_error()
-                    })?;
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({
-                    "document_id": result.document_id,
-                    "replies": result.replies,
+                    "document_id": batch_result.document_id,
+                    "replies": batch_result.replies,
                 }))
             }
             _ => Err(FcpError::InvalidRequest {

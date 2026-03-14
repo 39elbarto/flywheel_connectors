@@ -318,6 +318,12 @@ impl ChatConnector {
     }
 
     pub async fn handle_invoke(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -329,55 +335,53 @@ impl ChatConnector {
         let input = params.get("input").cloned().unwrap_or(json!({}));
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        self.base.record_request(true);
-
         match operation {
             "chat.list_spaces" => {
-                let spaces = client.list_spaces().await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let spaces = client
+                    .list_spaces()
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "spaces": spaces }))
             }
             "chat.get_space" => {
                 let space_name = require_str(&input, "space_name")?;
-                let space = client.get_space(space_name).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let space = client
+                    .get_space(space_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "space": space }))
             }
             "chat.send_message" => {
                 let space_name = require_str(&input, "space_name")?;
                 let text = require_str(&input, "text")?;
-                let message = client.create_message(space_name, text).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let message = client
+                    .create_message(space_name, text)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "message": message }))
             }
             "chat.list_messages" => {
                 let space_name = require_str(&input, "space_name")?;
-                let messages = client.list_messages(space_name).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let messages = client
+                    .list_messages(space_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "messages": messages }))
             }
             "chat.get_message" => {
                 let message_name = require_str(&input, "message_name")?;
-                let message = client.get_message(message_name).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let message = client
+                    .get_message(message_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "message": message }))
             }
             "chat.list_members" => {
                 let space_name = require_str(&input, "space_name")?;
-                let members = client.list_members(space_name).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let members = client
+                    .list_members(space_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "members": members }))
             }
             _ => Err(FcpError::InvalidRequest {

@@ -550,9 +550,18 @@ impl WorkspaceEventsConnector {
         })
     }
 
-    #[allow(clippy::single_match_else)]
     pub async fn handle_invoke(
         &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    #[allow(clippy::single_match_else)]
+    async fn handle_invoke_internal(
+        &self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let operation = params
@@ -564,9 +573,8 @@ impl WorkspaceEventsConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
-        self.base.record_request(true);
 
-        match operation {
+        let result: FcpResult<serde_json::Value> = match operation {
             "workspace_events.describe_provisioning" => {
                 let scope_triggers =
                     parse_string_array_field(&input, "scope_triggers")?.unwrap_or_default();
@@ -600,10 +608,7 @@ impl WorkspaceEventsConnector {
                         let response = client
                             .list_subscriptions(page_size, page_token)
                             .await
-                            .map_err(|e| {
-                                self.base.record_request(false);
-                                e.to_fcp_error()
-                            })?;
+                            .map_err(|e| e.to_fcp_error())?;
                         Ok(json!({
                             "subscriptions": response.subscriptions,
                             "next_page_token": response.next_page_token,
@@ -614,10 +619,7 @@ impl WorkspaceEventsConnector {
                         let subscription = client
                             .get_subscription(subscription_name)
                             .await
-                            .map_err(|e| {
-                                self.base.record_request(false);
-                                e.to_fcp_error()
-                            })?;
+                            .map_err(|e| e.to_fcp_error())?;
                         Ok(json!({ "subscription": subscription }))
                     }
                     "workspace_events.create_subscription" => {
@@ -638,10 +640,7 @@ impl WorkspaceEventsConnector {
                                 field_mask,
                             )
                             .await
-                            .map_err(|e| {
-                                self.base.record_request(false);
-                                e.to_fcp_error()
-                            })?;
+                            .map_err(|e| e.to_fcp_error())?;
                         Ok(json!({ "operation": operation }))
                     }
                     "workspace_events.reactivate_subscription" => {
@@ -650,10 +649,7 @@ impl WorkspaceEventsConnector {
                         let operation = client
                             .reactivate_subscription(subscription_name, ttl)
                             .await
-                            .map_err(|e| {
-                                self.base.record_request(false);
-                                e.to_fcp_error()
-                            })?;
+                            .map_err(|e| e.to_fcp_error())?;
                         Ok(json!({ "operation": operation }))
                     }
                     "workspace_events.delete_subscription" => {
@@ -663,10 +659,7 @@ impl WorkspaceEventsConnector {
                         let operation = client
                             .delete_subscription(subscription_name, validate_only)
                             .await
-                            .map_err(|e| {
-                                self.base.record_request(false);
-                                e.to_fcp_error()
-                            })?;
+                            .map_err(|e| e.to_fcp_error())?;
                         Ok(json!({ "operation": operation }))
                     }
                     "workspace_events.pull_events" => {
@@ -675,10 +668,7 @@ impl WorkspaceEventsConnector {
                         let response = client
                             .pull_events(pubsub_subscription, max_messages)
                             .await
-                            .map_err(|e| {
-                                self.base.record_request(false);
-                                e.to_fcp_error()
-                            })?;
+                            .map_err(|e| e.to_fcp_error())?;
                         let decoded_events = decode_received_messages(&response.received_messages);
                         Ok(json!({
                             "received_messages": response.received_messages,
@@ -691,10 +681,7 @@ impl WorkspaceEventsConnector {
                         let _ = client
                             .ack_events(pubsub_subscription, &ack_ids)
                             .await
-                            .map_err(|e| {
-                                self.base.record_request(false);
-                                e.to_fcp_error()
-                            })?;
+                            .map_err(|e| e.to_fcp_error())?;
                         Ok(json!({
                             "status": "acked",
                             "acked_count": ack_ids.len(),

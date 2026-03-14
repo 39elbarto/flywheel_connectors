@@ -298,6 +298,12 @@ impl SheetsConnector {
     }
 
     pub async fn handle_invoke(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -309,8 +315,6 @@ impl SheetsConnector {
         let input = params.get("input").cloned().unwrap_or(json!({}));
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        self.base.record_request(true);
-
         match operation {
             "sheets.get_spreadsheet" => {
                 let spreadsheet_id = input
@@ -320,19 +324,19 @@ impl SheetsConnector {
                         code: 1001,
                         message: "Missing 'spreadsheet_id'".into(),
                     })?;
-                let ss = client.get_spreadsheet(spreadsheet_id).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let ss = client
+                    .get_spreadsheet(spreadsheet_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "spreadsheet": ss }))
             }
             "sheets.get_values" => {
                 let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
                 let range = require_str(&input, "range")?;
-                let vr = client.get_values(spreadsheet_id, range).await.map_err(|e| {
-                    self.base.record_request(false);
-                    e.to_fcp_error()
-                })?;
+                let vr = client
+                    .get_values(spreadsheet_id, range)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "range": vr.range, "values": vr.values }))
             }
             "sheets.update_values" => {
@@ -348,10 +352,7 @@ impl SheetsConnector {
                 let ur = client
                     .update_values(spreadsheet_id, range, values)
                     .await
-                    .map_err(|e| {
-                        self.base.record_request(false);
-                        e.to_fcp_error()
-                    })?;
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({
                     "updated_range": ur.updated_range,
                     "updated_cells": ur.updated_cells,
@@ -371,10 +372,7 @@ impl SheetsConnector {
                 let ar = client
                     .append_values(spreadsheet_id, range, values)
                     .await
-                    .map_err(|e| {
-                        self.base.record_request(false);
-                        e.to_fcp_error()
-                    })?;
+                    .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({
                     "table_range": ar.table_range,
                     "updates": ar.updates,
@@ -383,14 +381,11 @@ impl SheetsConnector {
             "sheets.clear_values" => {
                 let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
                 let range = require_str(&input, "range")?;
-                let result = client
+                let clear_result = client
                     .clear_values(spreadsheet_id, range)
                     .await
-                    .map_err(|e| {
-                        self.base.record_request(false);
-                        e.to_fcp_error()
-                    })?;
-                Ok(result)
+                    .map_err(|e| e.to_fcp_error())?;
+                Ok(clear_result)
             }
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,

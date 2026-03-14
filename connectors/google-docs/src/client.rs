@@ -140,7 +140,8 @@ impl DocsClient {
         if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&body) {
             Err(map_api_error(api_err.error))
         } else {
-            warn!(status = code, body_preview = &body[..body.len().min(200)], "Docs API error");
+            let preview: String = body.chars().take(200).collect();
+            warn!(status = code, body_preview = %preview, "Docs API error");
             Err(DocsError::Api {
                 status_code: code,
                 message: body,

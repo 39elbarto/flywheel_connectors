@@ -214,7 +214,8 @@ impl SheetsClient {
         if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&body) {
             Err(map_api_error(api_err.error))
         } else {
-            warn!(status = code, body_preview = &body[..body.len().min(200)], "Sheets API error");
+            let preview: String = body.chars().take(200).collect();
+            warn!(status = code, body_preview = %preview, "Sheets API error");
             Err(SheetsError::Api {
                 status_code: code,
                 message: body,

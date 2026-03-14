@@ -115,7 +115,7 @@ impl FcpConnector for GmailConnectorAdapter {
                         "message": { "type": "object" }
                     }
                 }),
-                capability: CapabilityId::from_static("gmail.messages.read"),
+                capability: CapabilityId::from_static("gmail.read"),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
@@ -307,22 +307,15 @@ fn gmail_get_message_success_response() -> serde_json::Value {
 // ============================================================================
 
 /// Default deny: invoke without matching capability triggers error.
-/// Token grants "gmail.messages.send" but invoke targets "gmail.get_message"
-/// (which requires "gmail.messages.read").
+/// Token grants `gmail.send` but invoke targets `gmail.get_message`
+/// (which requires `gmail.read`).
 #[fcp_async_core::runtime::test]
 async fn gmail_default_deny_compliance_suite_passes() {
     let mut connector = GmailConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["gmail.messages.send"],
-    );
-    // Token grants "gmail.messages.send" but invoke targets "gmail.get_message" → denial
-    let token = build_token(
-        &signing_key,
-        "gmail.messages.send",
-        &["gmail.messages.send"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gmail.send"]);
+    // Token grants `gmail.send` but invoke targets `gmail.get_message` → denial
+    let token = build_token(&signing_key, "gmail.send", &["gmail.send_message"]);
     let invoke = invoke_request(
         "gmail.get_message",
         json!({ "message_id": "18d1234abc567890" }),
@@ -378,11 +371,8 @@ async fn gmail_allow_valid_token_connector_suite_passes() {
 
     let mut connector = GmailConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["gmail.get_message"],
-    );
-    let token = build_token(&signing_key, "gmail.get_message", &["gmail.get_message"]);
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gmail.read"]);
+    let token = build_token(&signing_key, "gmail.read", &["gmail.get_message"]);
     let invoke = invoke_request(
         "gmail.get_message",
         json!({ "message_id": "18d1234abc567890" }),

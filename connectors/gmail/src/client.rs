@@ -467,6 +467,7 @@ fn map_rest_error(error: GoogleRestError) -> GmailError {
 fn map_google_api_error(error: GoogleApiError) -> GmailError {
     match error.status_code {
         code if code == StatusCode::UNAUTHORIZED.as_u16() => GmailError::Unauthorized,
+        code if code == StatusCode::FORBIDDEN.as_u16() => GmailError::Unauthorized,
         code if code == StatusCode::TOO_MANY_REQUESTS.as_u16() => GmailError::RateLimited {
             retry_after_secs: 60,
         },

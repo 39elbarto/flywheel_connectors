@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use fcp_google_discovery::{
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleAuthSourceKind, GoogleMaterializedAuth},
@@ -255,11 +256,17 @@ impl GmailConnector {
     /// Returns [`FcpError`] if the health status cannot be determined.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let metrics = self.base.metrics();
+        let scope_limited_operations = self
+            .config
+            .as_ref()
+            .filter(|config| granted_scopes_are_authoritative(config))
+            .map_or_else(Vec::new, missing_scope_limited_operations);
         let status = match self.config.as_ref() {
             Some(GmailConfig {
                 auth: GoogleMaterializedAuth::CredentialReference { .. },
                 ..
             }) => "degraded_pending_credential_materialization",
+            Some(_) if !scope_limited_operations.is_empty() => "degraded_scope_limited",
             Some(_) => "healthy",
             None => "not_configured",
         };
@@ -274,6 +281,7 @@ impl GmailConnector {
             "history_cursor_path": self.config.as_ref().map(|config| config.history_cursor_path.to_string_lossy().to_string()),
             "required_scopes": self.config.as_ref().map(|config| config.required_scopes.clone()).unwrap_or_default(),
             "granted_scopes": self.config.as_ref().map(|config| config.granted_scopes.clone()).unwrap_or_default(),
+            "scope_limited_operations": scope_limited_operations,
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
@@ -422,6 +430,23 @@ impl GmailConnector {
             });
         }
 
+        if granted_scopes_are_authoritative(config) {
+            let missing_operations = missing_scope_limited_operations(config);
+            checks.push(DoctorCheck {
+                name: "operation_scope_coverage".into(),
+                passed: missing_operations.is_empty(),
+                message: if missing_operations.is_empty() {
+                    "Known granted scopes cover all exposed Gmail operations".into()
+                } else {
+                    format!(
+                        "Known granted scopes do not cover exposed operations: {}",
+                        missing_operations.join(", ")
+                    )
+                },
+                critical: false,
+            });
+        }
+
         DoctorResult::from_checks(checks)
     }
 
@@ -471,12 +496,29 @@ impl GmailConnector {
                 }
             }
         };
+        let scope_limited_operations = if granted_scopes_are_authoritative(config) {
+            missing_scope_limited_operations(config)
+        } else {
+            Vec::new()
+        };
+        if matches!(report.status, fcp_core::SelfCheckStatus::Ok)
+            && !scope_limited_operations.is_empty()
+        {
+            report = SelfCheckReport::degraded(
+                "scope_limited",
+                format!(
+                    "Known granted scopes do not cover exposed operations: {}",
+                    scope_limited_operations.join(", ")
+                ),
+            );
+        }
         report.details = Some(json!({
             "auth_mode": auth_label_for_materialized(&config.auth),
             "base_url": config.base_url,
             "history_cursor_path": config.history_cursor_path.to_string_lossy().to_string(),
             "required_scopes": config.required_scopes,
             "granted_scopes": config.granted_scopes,
+            "scope_limited_operations": scope_limited_operations,
         }));
 
         serde_json::to_value(report).map_err(|e| FcpError::Internal {
@@ -496,26 +538,31 @@ impl GmailConnector {
                     "Send an email message",
                     json!({
                         "type": "object",
-                        "required": ["raw"],
                         "properties": {
-                            "raw": { "type": "string", "description": "Base64url-encoded RFC 2822 message" }
-                        }
+                            "raw": { "type": "string", "description": "Optional base64url-encoded RFC 2822 message" },
+                            "to": { "type": "string", "description": "Recipient email address when raw is omitted" },
+                            "subject": { "type": "string", "description": "Subject line when raw is omitted" },
+                            "body": { "type": "string", "description": "Plaintext body when raw is omitted" }
+                        },
+                        "anyOf": [
+                            { "required": ["raw"] },
+                            { "required": ["to", "subject", "body"] }
+                        ]
                     }),
                     json!({ "type": "object", "properties": { "message": { "type": "object" } } }),
-                    "gmail.messages.send",
+                    "gmail.send",
                     RiskLevel::High,
-                    SafetyTier::Risky,
+                    SafetyTier::Dangerous,
                     IdempotencyClass::None,
+                    Some(ApprovalMode::Interactive),
                     AgentHint {
-                        when_to_use: "Send a new email. The raw field must be a base64url-encoded RFC 2822 message.".into(),
-                        common_mistakes: vec!["Using standard base64 instead of base64url encoding".into()],
+                        when_to_use: "Send a new email. Provide either a prebuilt base64url MIME payload in raw or structured to/subject/body fields.".into(),
+                        common_mistakes: vec!["Using standard base64 instead of base64url encoding for raw payloads".into()],
                         examples: vec![
                             r#"{"raw": "RnJvbTogc2VuZGVyQGV4YW1wbGUuY29tClRvOiByZWNpcGllbnRAZXhhbXBsZS5jb20KU3ViamVjdDogVGVzdAoKSGVsbG8h"}"#.into(),
+                            r#"{"to": "recipient@example.com", "subject": "Test", "body": "Hello!"}"#.into(),
                         ],
-                        related: vec![
-                            CapabilityId::from_static("gmail.get_message"),
-                            CapabilityId::from_static("gmail.list_messages"),
-                        ],
+                        related: vec![CapabilityId::from_static("gmail.read")],
                     },
                 ),
                 op_info(
@@ -529,20 +576,18 @@ impl GmailConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "message": { "type": "object" } } }),
-                    "gmail.messages.read",
+                    "gmail.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
+                    None,
                     AgentHint {
                         when_to_use: "Retrieve full details of a specific email message.".into(),
                         common_mistakes: vec![],
                         examples: vec![
                             r#"{"message_id": "18d1234abc567890"}"#.into(),
                         ],
-                        related: vec![
-                            CapabilityId::from_static("gmail.list_messages"),
-                            CapabilityId::from_static("gmail.get_thread"),
-                        ],
+                        related: vec![CapabilityId::from_static("gmail.read")],
                     },
                 ),
                 op_info(
@@ -564,19 +609,18 @@ impl GmailConnector {
                             "result_size_estimate": { "type": "integer" }
                         }
                     }),
-                    "gmail.messages.read",
+                    "gmail.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
+                    None,
                     AgentHint {
                         when_to_use: "List or search email messages. Uses Gmail search syntax.".into(),
                         common_mistakes: vec!["Expecting full message bodies; list returns only IDs and thread IDs".into()],
                         examples: vec![
                             r#"{"query": "from:notifications@github.com is:unread", "max_results": 10}"#.into(),
                         ],
-                        related: vec![
-                            CapabilityId::from_static("gmail.get_message"),
-                        ],
+                        related: vec![CapabilityId::from_static("gmail.read")],
                     },
                 ),
                 op_info(
@@ -611,6 +655,7 @@ impl GmailConnector {
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
+                    None,
                     AgentHint {
                         when_to_use: "Perform incremental mailbox sync with persisted historyId cursor and restart-safe dedup semantics.".into(),
                         common_mistakes: vec![
@@ -621,10 +666,7 @@ impl GmailConnector {
                             r#"{"start_history_id":"1000","lease_seq":1,"lease_object_id":"lease-a"}"#.into(),
                             r#"{"history_types":["messageAdded","labelRemoved"],"lease_seq":2}"#.into(),
                         ],
-                        related: vec![
-                            CapabilityId::from_static("gmail.list_messages"),
-                            CapabilityId::from_static("gmail.get_message"),
-                        ],
+                        related: vec![CapabilityId::from_static("gmail.read")],
                     },
                 ),
                 op_info(
@@ -640,10 +682,11 @@ impl GmailConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "message": { "type": "object" } } }),
-                    "gmail.messages.modify",
+                    "gmail.write",
                     RiskLevel::Medium,
                     SafetyTier::Risky,
                     IdempotencyClass::BestEffort,
+                    Some(ApprovalMode::Policy),
                     AgentHint {
                         when_to_use: "Add or remove labels from a message (e.g., mark as read, archive).".into(),
                         common_mistakes: vec!["Using label names instead of label IDs".into()],
@@ -651,8 +694,8 @@ impl GmailConnector {
                             r#"{"message_id": "18d1234abc", "remove_label_ids": ["UNREAD"]}"#.into(),
                         ],
                         related: vec![
-                            CapabilityId::from_static("gmail.list_labels"),
-                            CapabilityId::from_static("gmail.get_message"),
+                            CapabilityId::from_static("gmail.read"),
+                            CapabilityId::from_static("gmail.write"),
                         ],
                     },
                 ),
@@ -667,17 +710,18 @@ impl GmailConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "message": { "type": "object" } } }),
-                    "gmail.messages.modify",
+                    "gmail.delete",
                     RiskLevel::Medium,
                     SafetyTier::Risky,
                     IdempotencyClass::BestEffort,
+                    Some(ApprovalMode::Policy),
                     AgentHint {
                         when_to_use: "Move an email message to the trash.".into(),
                         common_mistakes: vec![],
                         examples: vec![
                             r#"{"message_id": "18d1234abc567890"}"#.into(),
                         ],
-                        related: vec![CapabilityId::from_static("gmail.get_message")],
+                        related: vec![CapabilityId::from_static("gmail.read")],
                     },
                 ),
                 op_info(
@@ -691,20 +735,18 @@ impl GmailConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "thread": { "type": "object" } } }),
-                    "gmail.threads.read",
+                    "gmail.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
+                    None,
                     AgentHint {
                         when_to_use: "Retrieve all messages in an email thread/conversation.".into(),
                         common_mistakes: vec![],
                         examples: vec![
                             r#"{"thread_id": "18d1234abc567890"}"#.into(),
                         ],
-                        related: vec![
-                            CapabilityId::from_static("gmail.get_message"),
-                            CapabilityId::from_static("gmail.list_messages"),
-                        ],
+                        related: vec![CapabilityId::from_static("gmail.read")],
                     },
                 ),
                 op_info(
@@ -715,15 +757,16 @@ impl GmailConnector {
                         "type": "object",
                         "properties": { "labels": { "type": "array", "items": { "type": "object" } } }
                     }),
-                    "gmail.labels.manage",
+                    "gmail.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
+                    None,
                     AgentHint {
                         when_to_use: "List all labels in the Gmail account (system and user-created).".into(),
                         common_mistakes: vec![],
                         examples: vec!["{}".into()],
-                        related: vec![CapabilityId::from_static("gmail.modify_message")],
+                        related: vec![CapabilityId::from_static("gmail.write")],
                     },
                 ),
                 op_info(
@@ -737,15 +780,16 @@ impl GmailConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "draft": { "type": "object" } } }),
-                    "gmail.messages.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
+                    "gmail.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
                     IdempotencyClass::Strict,
+                    Some(ApprovalMode::Policy),
                     AgentHint {
                         when_to_use: "Retrieve a saved email draft.".into(),
                         common_mistakes: vec![],
                         examples: vec![r#"{"draft_id": "r1234567890"}"#.into()],
-                        related: vec![CapabilityId::from_static("gmail.send_draft")],
+                        related: vec![CapabilityId::from_static("gmail.send")],
                     },
                 ),
                 op_info(
@@ -759,17 +803,18 @@ impl GmailConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "message": { "type": "object" } } }),
-                    "gmail.messages.send",
+                    "gmail.send",
                     RiskLevel::High,
-                    SafetyTier::Risky,
+                    SafetyTier::Dangerous,
                     IdempotencyClass::None,
+                    Some(ApprovalMode::Interactive),
                     AgentHint {
                         when_to_use: "Send a draft that was previously created and saved.".into(),
                         common_mistakes: vec!["The draft is deleted after sending".into()],
                         examples: vec![r#"{"draft_id": "r1234567890"}"#.into()],
                         related: vec![
-                            CapabilityId::from_static("gmail.get_draft"),
-                            CapabilityId::from_static("gmail.send_message"),
+                            CapabilityId::from_static("gmail.write"),
+                            CapabilityId::from_static("gmail.send"),
                         ],
                     },
                 ),
@@ -844,24 +889,12 @@ impl GmailConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
+        let cap_str = required_capability_for_operation(operation).ok_or_else(|| {
+            FcpError::OperationNotGranted {
                 operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
+            }
         })?;
+        let cap_id = CapabilityId::from_static(cap_str);
 
         if let Some(verifier) = &self.verifier {
             verifier.verify(&token, &cap_id, &op_id, &[])?;
@@ -890,10 +923,13 @@ impl GmailConnector {
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let raw = require_str(&input, "raw")?;
+        let raw = match input.get("raw").and_then(|value| value.as_str()) {
+            Some(raw) => raw.to_owned(),
+            None => build_raw_message_from_fields(&input)?,
+        };
 
         let message = client
-            .send_message(raw)
+            .send_message(&raw)
             .await
             .map_err(|e: GmailError| e.to_fcp_error())?;
 
@@ -1359,6 +1395,78 @@ fn parse_history_types(input: &serde_json::Value) -> FcpResult<Option<Vec<String
     Ok(Some(normalized))
 }
 
+fn required_capability_for_operation(operation: &str) -> Option<&'static str> {
+    match operation {
+        "gmail.send_message" | "gmail.send_draft" => Some("gmail.send"),
+        "gmail.get_message" | "gmail.list_messages" | "gmail.get_thread" | "gmail.list_labels" => {
+            Some("gmail.read")
+        }
+        "gmail.sync_history" => Some("gmail.history.read"),
+        "gmail.modify_message" | "gmail.get_draft" => Some("gmail.write"),
+        "gmail.trash_message" => Some("gmail.delete"),
+        _ => None,
+    }
+}
+
+fn granted_scopes_are_authoritative(config: &GmailConfig) -> bool {
+    matches!(
+        config.auth,
+        GoogleMaterializedAuth::BearerToken {
+            source: GoogleAuthSourceKind::OAuthRefresh,
+            ..
+        }
+    ) && !config.granted_scopes.is_empty()
+}
+
+fn missing_scope_limited_operations(config: &GmailConfig) -> Vec<&'static str> {
+    let granted: BTreeSet<&str> = config.granted_scopes.iter().map(String::as_str).collect();
+    [
+        (
+            "gmail.send_message",
+            &[
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.send",
+            ][..],
+        ),
+        (
+            "gmail.send_draft",
+            &[
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.send",
+            ][..],
+        ),
+        (
+            "gmail.modify_message",
+            &[
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.modify",
+            ][..],
+        ),
+        (
+            "gmail.trash_message",
+            &[
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.modify",
+            ][..],
+        ),
+        (
+            "gmail.get_draft",
+            &[
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.compose",
+            ][..],
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(operation, accepted_scopes)| {
+        accepted_scopes
+            .iter()
+            .all(|scope| !granted.contains(*scope))
+            .then_some(operation)
+    })
+    .collect()
+}
+
 /// Produce a redacted auth label from materialized auth for diagnostics.
 fn auth_label_for_materialized(auth: &GoogleMaterializedAuth) -> String {
     match auth {
@@ -1507,6 +1615,7 @@ fn op_info(
     risk_level: RiskLevel,
     safety_tier: SafetyTier,
     idempotency: IdempotencyClass,
+    requires_approval: Option<ApprovalMode>,
     ai_hints: AgentHint,
 ) -> OperationInfo {
     OperationInfo {
@@ -1518,11 +1627,25 @@ fn op_info(
         risk_level,
         description: None,
         rate_limit: None,
-        requires_approval: None,
+        requires_approval,
         safety_tier,
         idempotency,
         ai_hints,
     }
+}
+
+fn build_raw_message_from_fields(input: &serde_json::Value) -> FcpResult<String> {
+    let to = require_str(input, "to")?;
+    let subject = require_str(input, "subject")?;
+    let body = require_str(input, "body")?;
+    let normalized_body = body
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n");
+    let rfc_2822 = format!(
+        "To: {to}\r\nSubject: {subject}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{normalized_body}"
+    );
+    Ok(URL_SAFE_NO_PAD.encode(rfc_2822.as_bytes()))
 }
 
 #[cfg(test)]
@@ -1538,17 +1661,7 @@ mod tests {
     };
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
-        let cap = match op {
-            "gmail.send_message" | "gmail.send_draft" => "gmail.messages.send",
-            "gmail.get_message" | "gmail.list_messages" | "gmail.get_draft" => {
-                "gmail.messages.read"
-            }
-            "gmail.sync_history" => "gmail.history.read",
-            "gmail.modify_message" | "gmail.trash_message" => "gmail.messages.modify",
-            "gmail.get_thread" => "gmail.threads.read",
-            "gmail.list_labels" => "gmail.labels.manage",
-            _ => "gmail.messages.read",
-        };
+        let cap = required_capability_for_operation(op).unwrap_or("gmail.read");
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
@@ -2004,6 +2117,23 @@ mod tests {
         assert_eq!(compare_history_ids("abc", "abd"), std::cmp::Ordering::Less);
     }
 
+    #[test]
+    fn build_raw_message_from_fields_accepts_manifest_style_input() {
+        let raw = build_raw_message_from_fields(&json!({
+            "to": "recipient@example.com",
+            "subject": "Test Subject",
+            "body": "Hello,\nworld!"
+        }))
+        .unwrap();
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(raw)
+            .unwrap();
+        let message = String::from_utf8(decoded).unwrap();
+        assert!(message.contains("To: recipient@example.com"));
+        assert!(message.contains("Subject: Test Subject"));
+        assert!(message.ends_with("\r\n\r\nHello,\r\nworld!"));
+    }
+
     // ── determine_effective_start_history_id ────────────────────────
 
     #[test]
@@ -2132,7 +2262,6 @@ mod tests {
             "gmail.list_messages",
             "gmail.get_thread",
             "gmail.list_labels",
-            "gmail.get_draft",
             "gmail.sync_history",
         ];
         for op in ops {
@@ -2153,7 +2282,11 @@ mod tests {
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
 
-        let modify_ops = ["gmail.modify_message", "gmail.trash_message"];
+        let modify_ops = [
+            "gmail.modify_message",
+            "gmail.trash_message",
+            "gmail.get_draft",
+        ];
         for op in ops {
             let id = op["id"].as_str().unwrap();
             if modify_ops.contains(&id) {
@@ -2358,7 +2491,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": vec![0u8; 32],
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gmail.messages.read"]
+                "capabilities_requested": ["gmail.read"]
             }))
             .await
             .unwrap();
@@ -2375,7 +2508,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": vec![0u8; 32],
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gmail.messages.read", "gmail.messages.send"]
+                "capabilities_requested": ["gmail.read", "gmail.send"]
             }))
             .await
             .unwrap();
@@ -2483,7 +2616,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": vec![0u8; 32],
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gmail.messages.read"]
+                "capabilities_requested": ["gmail.read"]
             }))
             .await
             .unwrap();
@@ -2579,8 +2712,10 @@ mod tests {
 
         assert_eq!(result["status"], "configured");
         let health = connector.handle_health().await.unwrap();
-        assert_eq!(health["status"], "healthy");
+        assert_eq!(health["status"], "degraded_scope_limited");
         assert_eq!(health["auth_mode"], "oauth_refresh");
+        let limited = health["scope_limited_operations"].as_array().unwrap();
+        assert!(limited.iter().any(|op| op == "gmail.send_message"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -2613,7 +2748,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gmail.list_labels"]
+                "capabilities_requested": ["gmail.read"]
             }))
             .await
             .unwrap();
@@ -2655,7 +2790,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gmail.get_message"]
+                "capabilities_requested": ["gmail.read"]
             }))
             .await
             .unwrap();

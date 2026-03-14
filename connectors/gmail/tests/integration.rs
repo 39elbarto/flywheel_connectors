@@ -34,13 +34,14 @@ use fcp_gmail::{client::GmailClient, connector::GmailConnector, error::GmailErro
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
     let cap = match op {
-        "gmail.send_message" | "gmail.send_draft" => "gmail.messages.send",
-        "gmail.get_message" | "gmail.list_messages" | "gmail.get_draft" => "gmail.messages.read",
+        "gmail.send_message" | "gmail.send_draft" => "gmail.send",
+        "gmail.get_message" | "gmail.list_messages" | "gmail.get_thread" | "gmail.list_labels" => {
+            "gmail.read"
+        }
         "gmail.sync_history" => "gmail.history.read",
-        "gmail.modify_message" | "gmail.trash_message" => "gmail.messages.modify",
-        "gmail.get_thread" => "gmail.threads.read",
-        "gmail.list_labels" => "gmail.labels.manage",
-        _ => "gmail.messages.read",
+        "gmail.modify_message" | "gmail.get_draft" => "gmail.write",
+        "gmail.trash_message" => "gmail.delete",
+        _ => "gmail.read",
     };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
@@ -119,6 +120,32 @@ async fn error_401_maps_to_unauthorized() {
     Mock::given(method("GET"))
         .and(path("/users/me/messages/msg1"))
         .respond_with(ResponseTemplate::new(401))
+        .mount(&mock_server)
+        .await;
+
+    let client = GmailClient::new("bad-token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 100, 100);
+
+    let err = client.get_message("msg1").await.unwrap_err();
+    assert!(matches!(err, GmailError::Unauthorized));
+
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, FcpError::Unauthorized { code: 2001, .. }),
+        "expected Unauthorized, got: {fcp_err:?}"
+    );
+}
+
+/// 403 Forbidden scope/auth failures also map to `GmailError::Unauthorized`.
+#[fcp_async_core::runtime::test]
+async fn error_403_maps_to_unauthorized() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/messages/msg1"))
+        .respond_with(ResponseTemplate::new(403))
         .mount(&mock_server)
         .await;
 
@@ -583,7 +610,7 @@ async fn invoke_list_labels_through_connector() {
 
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key = setup_handshake(&mut connector, &["gmail.list_labels"]).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.read"]).await;
     let token = generate_valid_token(&signing_key, "gmail.list_labels");
 
     let result = connector
@@ -615,7 +642,7 @@ async fn invoke_get_message_through_connector() {
 
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key = setup_handshake(&mut connector, &["gmail.get_message"]).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.read"]).await;
     let token = generate_valid_token(&signing_key, "gmail.get_message");
 
     let result = connector
@@ -629,6 +656,42 @@ async fn invoke_get_message_through_connector() {
 
     assert_eq!(result["message"]["id"], "msg42");
     assert_eq!(result["message"]["threadId"], "thread42");
+}
+
+/// Invoke `gmail.send_message` through the connector with structured fields.
+#[fcp_async_core::runtime::test]
+async fn invoke_send_message_accepts_structured_fields() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/users/me/messages/send"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg-sent",
+            "threadId": "thread-sent",
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GmailConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.send"]).await;
+    let token = generate_valid_token(&signing_key, "gmail.send_message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gmail.send_message",
+            "input": {
+                "to": "recipient@example.com",
+                "subject": "Structured test",
+                "body": "Hello!"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["message"]["id"], "msg-sent");
+    assert_eq!(result["message"]["threadId"], "thread-sent");
 }
 
 /// Invoke `gmail.trash_message` through the connector.
@@ -648,7 +711,7 @@ async fn invoke_trash_message_through_connector() {
 
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key = setup_handshake(&mut connector, &["gmail.trash_message"]).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.delete"]).await;
     let token = generate_valid_token(&signing_key, "gmail.trash_message");
 
     let result = connector
@@ -670,8 +733,8 @@ async fn wrong_capability_rejected() {
 
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key = setup_handshake(&mut connector, &["gmail.list_labels"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.list_labels");
+    let signing_key = setup_handshake(&mut connector, &["gmail.send"]).await;
+    let token = generate_valid_token(&signing_key, "gmail.send_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -691,7 +754,7 @@ async fn missing_required_field_returns_invalid_request() {
 
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key = setup_handshake(&mut connector, &["gmail.get_message"]).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.read"]).await;
     let token = generate_valid_token(&signing_key, "gmail.get_message");
 
     let result = connector
@@ -816,7 +879,7 @@ async fn invoke_sync_history_persists_and_resumes_cursor() {
         }))
         .await
         .unwrap();
-    let signing_key = setup_handshake(&mut connector, &["gmail.sync_history"]).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.history.read"]).await;
     let token = generate_valid_token(&signing_key, "gmail.sync_history");
 
     let first = connector
@@ -845,7 +908,7 @@ async fn invoke_sync_history_persists_and_resumes_cursor() {
         }))
         .await
         .unwrap();
-    let signing_key2 = setup_handshake(&mut restarted, &["gmail.sync_history"]).await;
+    let signing_key2 = setup_handshake(&mut restarted, &["gmail.history.read"]).await;
     let token2 = generate_valid_token(&signing_key2, "gmail.sync_history");
 
     let resumed = restarted
@@ -885,15 +948,12 @@ fn manifest_approval_name(mode: ManifestApprovalMode) -> &'static str {
     }
 }
 
-/// Shared Gmail generation can be compared against the current handwritten baseline.
+/// Shared Gmail generation now matches the canonical list/send/history metadata surface.
 ///
-/// This intentionally captures the current overlap and the remaining drift:
-/// generated + manifest agree on the list/send capability + approval shape,
-/// while handwritten introspection still uses connector-local capability IDs and
-/// omits approval metadata. `sync_history` exists only in the handwritten
-/// introspection surface, with generated support coming from `listHistory`.
+/// The remaining drift is that `sync_history` is still connector-local rather
+/// than represented in the handwritten manifest.
 #[fcp_async_core::runtime::test]
-async fn shared_generation_overlap_exposes_current_gmail_baseline_drift() {
+async fn shared_generation_overlap_matches_canonical_gmail_metadata() {
     let service = DiscoveryServiceId::new("gmail", "v1").expect("valid gmail service id");
     let snapshot = normalize_snapshot_bytes(
         &service,
@@ -938,7 +998,7 @@ async fn shared_generation_overlap_exposes_current_gmail_baseline_drift() {
         generated_approval_name(generated_list.approval_mode),
         manifest_approval_name(manifest_list.requires_approval.clone())
     );
-    assert_eq!(introspection_list["capability"], "gmail.messages.read");
+    assert_eq!(introspection_list["capability"], "gmail.read");
     assert!(introspection_list["requires_approval"].is_null());
 
     let generated_send = generated
@@ -963,8 +1023,8 @@ async fn shared_generation_overlap_exposes_current_gmail_baseline_drift() {
         generated_approval_name(generated_send.approval_mode),
         manifest_approval_name(manifest_send.requires_approval.clone())
     );
-    assert_eq!(introspection_send["capability"], "gmail.messages.send");
-    assert!(introspection_send["requires_approval"].is_null());
+    assert_eq!(introspection_send["capability"], "gmail.send");
+    assert_eq!(introspection_send["requires_approval"], "interactive");
 
     let generated_history = generated
         .manifest_fragment

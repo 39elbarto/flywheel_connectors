@@ -1021,6 +1021,32 @@ impl Drop for ConnectionGuard<'_> {
 mod tests {
     use super::*;
 
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RestartPolicyGoldenVector {
+        policy: RestartPolicyGoldenPolicy,
+        crashes: Vec<RestartPolicyGoldenCrash>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RestartPolicyGoldenPolicy {
+        max_restarts: u32,
+        backoff_base_ms: u64,
+        backoff_max_ms: u64,
+        backoff_multiplier: f64,
+        window_seconds: u64,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RestartPolicyGoldenCrash {
+        at_ms: u64,
+        restart: bool,
+        delay_ms: Option<u64>,
+        reason: Option<String>,
+    }
+
     // ── ProcessExit ──
 
     #[test]
@@ -2492,8 +2518,7 @@ mod tests {
 
     #[test]
     fn backoff_zero_max_clamps_subsequent_to_zero() {
-        let mut backoff =
-            ExponentialBackoff::new(Duration::from_millis(100), Duration::ZERO, 2.0);
+        let mut backoff = ExponentialBackoff::new(Duration::from_millis(100), Duration::ZERO, 2.0);
         // First call returns initial (attempt 0 short-circuits before clamping).
         assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
         // Subsequent calls clamp to max (zero).
@@ -2588,7 +2613,10 @@ mod tests {
         };
         let mut tracker = RestartTracker::new(config);
         let result = tracker.evaluate_restart(&ProcessExit::with_code(1), Instant::now());
-        assert!(matches!(result, Err(RestartDenied::MaxRestartsExceeded { count: 0, .. })));
+        assert!(matches!(
+            result,
+            Err(RestartDenied::MaxRestartsExceeded { count: 0, .. })
+        ));
     }
 
     #[test]
@@ -2640,6 +2668,70 @@ mod tests {
         // Next restart should use initial backoff.
         let delay = tracker.evaluate_restart(&exit, now).unwrap();
         assert_eq!(delay, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn tracker_matches_supervisor_restart_policy_golden_vector() {
+        let vector: RestartPolicyGoldenVector = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/host/supervisor_restart_policy.json"
+        )))
+        .unwrap();
+
+        let config = SupervisorConfig {
+            restart_policy: RestartPolicy::OnCrash,
+            max_restarts: vector.policy.max_restarts,
+            restart_window: Duration::from_secs(vector.policy.window_seconds),
+            initial_backoff: Duration::from_millis(vector.policy.backoff_base_ms),
+            max_backoff: Duration::from_millis(vector.policy.backoff_max_ms),
+            backoff_multiplier: vector.policy.backoff_multiplier,
+            ..Default::default()
+        };
+        let mut tracker = RestartTracker::new(config);
+        let start = Instant::now();
+
+        for (index, crash) in vector.crashes.iter().enumerate() {
+            let now = start + Duration::from_millis(crash.at_ms);
+            let result = tracker.evaluate_restart(&ProcessExit::with_signal(11), now);
+
+            match result {
+                Ok(delay) => {
+                    assert!(
+                        crash.restart,
+                        "golden vector step {index} expected restart denial but restart was allowed"
+                    );
+                    assert_eq!(
+                        Some(delay.as_millis()),
+                        crash.delay_ms.map(u128::from),
+                        "golden vector step {index} produced unexpected restart delay"
+                    );
+                    assert_eq!(
+                        tracker.history().back().map(|event| event.timestamp),
+                        Some(now),
+                        "golden vector step {index} did not record the expected restart instant"
+                    );
+                }
+                Err(denied) => {
+                    assert!(
+                        !crash.restart,
+                        "golden vector step {index} expected restart but supervisor denied it: {denied}"
+                    );
+                    assert_eq!(
+                        crash.reason.as_deref(),
+                        Some(match denied {
+                            RestartDenied::PolicyDenied => "policy_denied",
+                            RestartDenied::MaxRestartsExceeded { .. } => {
+                                "max_restarts_exceeded"
+                            }
+                        }),
+                        "golden vector step {index} produced an unexpected denial reason"
+                    );
+                }
+            }
+        }
+
+        let allowed_restarts = vector.crashes.iter().filter(|crash| crash.restart).count();
+        assert_eq!(tracker.total_restarts(), allowed_restarts);
     }
 
     #[test]
@@ -2735,8 +2827,9 @@ mod tests {
 
     #[test]
     fn health_scheduler_max_failures_zero_always_unhealthy_after_one() {
-        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5))
-            .with_max_failures(0);
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5))
+                .with_max_failures(0);
         // zero threshold — already at limit with no failures.
         assert!(scheduler.is_unhealthy());
         // After one failure, still unhealthy.
@@ -2746,8 +2839,9 @@ mod tests {
 
     #[test]
     fn health_scheduler_one_success_clears_all_failures() {
-        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5))
-            .with_max_failures(2);
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(5))
+                .with_max_failures(2);
         let now = Instant::now();
         scheduler.record_failure(now);
         scheduler.record_failure(now);
@@ -2765,8 +2859,9 @@ mod tests {
 
     #[test]
     fn health_scheduler_consecutive_failures_saturate_at_max() {
-        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(1), Duration::from_secs(1))
-            .with_max_failures(3);
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(1), Duration::from_secs(1))
+                .with_max_failures(3);
         let now = Instant::now();
         // Record 10 failures — saturating_add should prevent overflow.
         for _ in 0..10 {
@@ -2778,7 +2873,8 @@ mod tests {
 
     #[test]
     fn health_scheduler_is_due_after_interval_passed() {
-        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(10), Duration::from_secs(5));
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(10), Duration::from_secs(5));
         let now = Instant::now();
         scheduler.record_success(now);
         // Not due immediately after.
@@ -2790,7 +2886,8 @@ mod tests {
 
     #[test]
     fn health_scheduler_timeout_unchanged_by_record_calls() {
-        let mut scheduler = HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(7));
+        let mut scheduler =
+            HealthCheckScheduler::new(Duration::from_secs(30), Duration::from_secs(7));
         let now = Instant::now();
         scheduler.record_failure(now);
         scheduler.record_success(now);

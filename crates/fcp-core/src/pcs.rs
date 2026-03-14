@@ -60,6 +60,9 @@ pub enum PcsError {
 
     #[error("stale epoch: current is {current}, requested {requested}")]
     StaleEpoch { current: u64, requested: u64 },
+
+    #[error("duplicate member: {0} already exists in group")]
+    DuplicateMember(String),
 }
 
 pub type PcsResult<T> = Result<T, PcsError>;
@@ -345,6 +348,13 @@ impl PcsGroupState {
             });
         }
 
+        // Reject duplicate node IDs to prevent member_index corruption.
+        if self.member_index.contains_key(member.node_id.as_str()) {
+            return Err(PcsError::DuplicateMember(
+                member.node_id.as_str().to_string(),
+            ));
+        }
+
         self.member_index
             .insert(member.node_id.as_str().to_string(), self.members.len());
         self.members.push(member.clone());
@@ -466,7 +476,8 @@ fn derive_epoch_zone_key(
     epoch_secret: &[u8; 32],
     epoch: u64,
 ) -> PcsResult<ZoneKey> {
-    let mut info = Vec::with_capacity(PCS_DOMAIN.len() + 9 + zone_id.as_bytes().len() + 8);
+    // PCS_DOMAIN(9) + "ZONE-KEY|"(9) + zone_id + "|"(1) + epoch(8)
+    let mut info = Vec::with_capacity(PCS_DOMAIN.len() + 9 + zone_id.as_bytes().len() + 1 + 8);
     info.extend_from_slice(PCS_DOMAIN);
     info.extend_from_slice(b"ZONE-KEY|");
     info.extend_from_slice(zone_id.as_bytes());
@@ -483,7 +494,8 @@ fn derive_epoch_zone_key_id(
     epoch_secret: &[u8; 32],
     epoch: u64,
 ) -> PcsResult<ZoneKeyId> {
-    let mut info = Vec::with_capacity(PCS_DOMAIN.len() + 12 + zone_id.as_bytes().len() + 8);
+    // PCS_DOMAIN(9) + "ZONE-KEY-ID|"(12) + zone_id + "|"(1) + epoch(8)
+    let mut info = Vec::with_capacity(PCS_DOMAIN.len() + 12 + zone_id.as_bytes().len() + 1 + 8);
     info.extend_from_slice(PCS_DOMAIN);
     info.extend_from_slice(b"ZONE-KEY-ID|");
     info.extend_from_slice(zone_id.as_bytes());
@@ -518,8 +530,8 @@ fn derive_post_removal_secret(
     removal_salt: &[u8; 32],
     next_epoch: u64,
 ) -> PcsResult<[u8; 32]> {
-    // Two-stage derivation: first mix in removal entropy, then ratchet.
-    let mut info = Vec::with_capacity(PCS_DOMAIN.len() + 16 + 8);
+    // PCS_DOMAIN(9) + "REMOVAL-REKEY|"(14) + epoch(8)
+    let mut info = Vec::with_capacity(PCS_DOMAIN.len() + 14 + 8);
     info.extend_from_slice(PCS_DOMAIN);
     info.extend_from_slice(b"REMOVAL-REKEY|");
     info.extend_from_slice(&next_epoch.to_be_bytes());
@@ -871,6 +883,17 @@ mod tests {
 
         let result = group.add_member(new_member);
         assert!(matches!(result.unwrap_err(), PcsError::GroupTooLarge { .. }));
+    }
+
+    #[test]
+    fn add_duplicate_member_fails() {
+        let mut group = make_group(3);
+        let duplicate = make_member("node-0", 99);
+        let result = group.add_member(duplicate);
+        assert!(matches!(result.unwrap_err(), PcsError::DuplicateMember(_)));
+        // Group should be unchanged.
+        assert_eq!(group.member_count(), 3);
+        assert_eq!(group.current_epoch(), 0);
     }
 
     // ── Compromise → recovery scenario ──────────────────────────────────

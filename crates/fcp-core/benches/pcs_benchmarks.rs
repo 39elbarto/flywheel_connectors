@@ -119,10 +119,11 @@ fn bench_memory_footprint(c: &mut Criterion) {
         group.bench_function(format!("n={n}_size_of"), |b| {
             let state = make_group(n);
             b.iter(|| {
-                // Measure approximate memory: struct size + member vec + epoch secret
-                let base = std::mem::size_of::<PcsGroupState>();
-                let members = state.member_count() * std::mem::size_of::<GroupMember>();
-                std::hint::black_box(base + members)
+                // Shallow stack sizes only (heap allocations for HashMap/Vec/String
+                // are additional). This captures struct layout scaling, not total RSS.
+                let base = std::mem::size_of_val(&state);
+                let per_member = std::mem::size_of::<GroupMember>();
+                std::hint::black_box(base + state.member_count() * per_member)
             });
         });
     }

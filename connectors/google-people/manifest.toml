@@ -1,0 +1,358 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:3212739e38cdad82f6c67da7d528e0a8ae4cc5fa4cd06c3fc4f85bf7b37bb373"
+
+[connector]
+id = "fcp.google-people"
+name = "Google People Connector"
+version = "0.1.0"
+description = "FCP connector for Google People/Contacts with explicit field-mask and approval semantics"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:private", "z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."people.list_connections"]
+description = "List the authenticated user's contacts"
+capability = "people.contacts.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "policy"
+idempotency = "strict"
+[provides.operations."people.list_connections".input_schema]
+type = "object"
+[provides.operations."people.list_connections".input_schema.properties.person_fields]
+type = "array"
+[provides.operations."people.list_connections".input_schema.properties.person_fields.items]
+type = "string"
+[provides.operations."people.list_connections".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."people.list_connections".input_schema.properties.page_token]
+type = "string"
+[provides.operations."people.list_connections".input_schema.properties.sort_order]
+type = "string"
+[provides.operations."people.list_connections".output_schema]
+type = "object"
+[provides.operations."people.list_connections".output_schema.properties.connections]
+type = "array"
+[provides.operations."people.list_connections".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."people.get_person"]
+description = "Get a single contact or directory person by resource name"
+capability = "people.profile.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "policy"
+idempotency = "strict"
+[provides.operations."people.get_person".input_schema]
+type = "object"
+required = ["resource_name"]
+[provides.operations."people.get_person".input_schema.properties.resource_name]
+type = "string"
+[provides.operations."people.get_person".input_schema.properties.person_fields]
+type = "array"
+[provides.operations."people.get_person".input_schema.properties.person_fields.items]
+type = "string"
+[provides.operations."people.get_person".input_schema.properties.sources]
+type = "array"
+[provides.operations."people.get_person".input_schema.properties.sources.items]
+type = "string"
+[provides.operations."people.get_person".output_schema]
+type = "object"
+[provides.operations."people.get_person".output_schema.properties.person]
+type = "object"
+[provides.operations."people.get_person".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."people.search_contacts"]
+description = "Search the authenticated user's contacts"
+capability = "people.contacts.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "policy"
+idempotency = "strict"
+[provides.operations."people.search_contacts".input_schema]
+type = "object"
+required = ["query"]
+[provides.operations."people.search_contacts".input_schema.properties.query]
+type = "string"
+[provides.operations."people.search_contacts".input_schema.properties.person_fields]
+type = "array"
+[provides.operations."people.search_contacts".input_schema.properties.person_fields.items]
+type = "string"
+[provides.operations."people.search_contacts".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."people.search_contacts".output_schema]
+type = "object"
+[provides.operations."people.search_contacts".output_schema.properties.results]
+type = "array"
+[provides.operations."people.search_contacts".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."people.list_other_contacts"]
+description = "List Google-suggested other contacts"
+capability = "people.other_contacts.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "policy"
+idempotency = "strict"
+[provides.operations."people.list_other_contacts".input_schema]
+type = "object"
+[provides.operations."people.list_other_contacts".input_schema.properties.person_fields]
+type = "array"
+[provides.operations."people.list_other_contacts".input_schema.properties.person_fields.items]
+type = "string"
+[provides.operations."people.list_other_contacts".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."people.list_other_contacts".input_schema.properties.page_token]
+type = "string"
+[provides.operations."people.list_other_contacts".output_schema]
+type = "object"
+[provides.operations."people.list_other_contacts".output_schema.properties.other_contacts]
+type = "array"
+[provides.operations."people.list_other_contacts".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."people.search_directory_people"]
+description = "Search Google Workspace directory people"
+capability = "people.directory.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "policy"
+idempotency = "strict"
+[provides.operations."people.search_directory_people".input_schema]
+type = "object"
+required = ["query"]
+[provides.operations."people.search_directory_people".input_schema.properties.query]
+type = "string"
+[provides.operations."people.search_directory_people".input_schema.properties.person_fields]
+type = "array"
+[provides.operations."people.search_directory_people".input_schema.properties.person_fields.items]
+type = "string"
+[provides.operations."people.search_directory_people".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."people.search_directory_people".input_schema.properties.sources]
+type = "array"
+[provides.operations."people.search_directory_people".input_schema.properties.sources.items]
+type = "string"
+[provides.operations."people.search_directory_people".output_schema]
+type = "object"
+[provides.operations."people.search_directory_people".output_schema.properties.results]
+type = "array"
+[provides.operations."people.search_directory_people".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."people.list_contact_groups"]
+description = "List contact groups"
+capability = "people.contact_groups.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "policy"
+idempotency = "strict"
+[provides.operations."people.list_contact_groups".input_schema]
+type = "object"
+[provides.operations."people.list_contact_groups".input_schema.properties.group_fields]
+type = "array"
+[provides.operations."people.list_contact_groups".input_schema.properties.group_fields.items]
+type = "string"
+[provides.operations."people.list_contact_groups".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."people.list_contact_groups".input_schema.properties.page_token]
+type = "string"
+[provides.operations."people.list_contact_groups".output_schema]
+type = "object"
+[provides.operations."people.list_contact_groups".output_schema.properties.contact_groups]
+type = "array"
+[provides.operations."people.list_contact_groups".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."people.create_contact"]
+description = "Create a new contact"
+capability = "people.contacts.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+[provides.operations."people.create_contact".input_schema]
+type = "object"
+required = ["person"]
+[provides.operations."people.create_contact".input_schema.properties.person]
+type = "object"
+[provides.operations."people.create_contact".output_schema]
+type = "object"
+[provides.operations."people.create_contact".output_schema.properties.person]
+type = "object"
+[provides.operations."people.create_contact".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."people.update_contact"]
+description = "Update an existing contact with explicit field-mask semantics"
+capability = "people.contacts.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+[provides.operations."people.update_contact".input_schema]
+type = "object"
+required = ["resource_name", "person"]
+[provides.operations."people.update_contact".input_schema.properties.resource_name]
+type = "string"
+[provides.operations."people.update_contact".input_schema.properties.person]
+type = "object"
+[provides.operations."people.update_contact".input_schema.properties.update_person_fields]
+type = "array"
+[provides.operations."people.update_contact".input_schema.properties.update_person_fields.items]
+type = "string"
+[provides.operations."people.update_contact".output_schema]
+type = "object"
+[provides.operations."people.update_contact".output_schema.properties.person]
+type = "object"
+[provides.operations."people.update_contact".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."people.delete_contact"]
+description = "Delete an existing contact"
+capability = "people.contacts.delete"
+risk_level = "critical"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+[provides.operations."people.delete_contact".input_schema]
+type = "object"
+required = ["resource_name"]
+[provides.operations."people.delete_contact".input_schema.properties.resource_name]
+type = "string"
+[provides.operations."people.delete_contact".output_schema]
+type = "object"
+[provides.operations."people.delete_contact".output_schema.properties.deleted]
+type = "boolean"
+[provides.operations."people.delete_contact".network_constraints]
+host_allow = ["people.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576

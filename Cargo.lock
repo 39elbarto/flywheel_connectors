@@ -2678,6 +2678,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-google-admin-reports"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-sdk",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-google-ai"
 version = "0.1.0"
 dependencies = [
@@ -2813,6 +2835,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-google-people"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-google-discovery",
+ "percent-encoding",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fcp-google-sheets"
 version = "0.1.0"
 dependencies = [
@@ -2825,6 +2865,29 @@ dependencies = [
  "fcp-manifest",
  "fcp-sdk",
  "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-google-workspace-events"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-testkit",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

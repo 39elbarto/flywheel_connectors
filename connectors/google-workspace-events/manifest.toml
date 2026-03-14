@@ -1,0 +1,254 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.workspace-events"
+name = "Google Workspace Events Connector"
+version = "0.1.0"
+description = "FCP connector for Google Workspace Events subscriptions and Pub/Sub-backed event delivery"
+archetypes = ["streaming", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["storage.state"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."workspace_events.describe_provisioning"]
+description = "Describe the embedded provisioning bundle and effective scope set"
+capability = "workspace_events.provisioning.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."workspace_events.describe_provisioning".network_constraints]
+host_allow = []
+port_allow = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 10000
+max_response_bytes = 524288
+
+[provides.operations."workspace_events.list_subscriptions"]
+description = "List Google Workspace Events subscriptions"
+capability = "workspace_events.subscriptions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."workspace_events.list_subscriptions".network_constraints]
+host_allow = ["workspaceevents.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."workspace_events.get_subscription"]
+description = "Get a Google Workspace Events subscription"
+capability = "workspace_events.subscriptions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."workspace_events.get_subscription".network_constraints]
+host_allow = ["workspaceevents.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."workspace_events.create_subscription"]
+description = "Create a Google Workspace Events subscription backed by Pub/Sub delivery"
+capability = "workspace_events.subscriptions.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."workspace_events.create_subscription".network_constraints]
+host_allow = ["workspaceevents.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."workspace_events.reactivate_subscription"]
+description = "Reactivate a suspended Google Workspace Events subscription"
+capability = "workspace_events.subscriptions.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."workspace_events.reactivate_subscription".network_constraints]
+host_allow = ["workspaceevents.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."workspace_events.delete_subscription"]
+description = "Delete a Google Workspace Events subscription"
+capability = "workspace_events.subscriptions.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."workspace_events.delete_subscription".network_constraints]
+host_allow = ["workspaceevents.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."workspace_events.pull_events"]
+description = "Pull Pub/Sub messages for a Workspace Events delivery subscription"
+capability = "workspace_events.delivery.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."workspace_events.pull_events".network_constraints]
+host_allow = ["pubsub.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."workspace_events.ack_events"]
+description = "Acknowledge Pub/Sub messages after processing"
+capability = "workspace_events.delivery.ack"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."workspace_events.ack_events".network_constraints]
+host_allow = ["pubsub.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 524288
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "workspace_events.control"
+requests = 120
+window_ms = 1000
+burst = 12
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "workspace_events.delivery"
+requests = 240
+window_ms = 1000
+burst = 24
+scope = "instance"
+
+[rate_limits.operation_pools]
+"workspace_events.list_subscriptions" = ["workspace_events.control"]
+"workspace_events.get_subscription" = ["workspace_events.control"]
+"workspace_events.create_subscription" = ["workspace_events.control"]
+"workspace_events.reactivate_subscription" = ["workspace_events.control"]
+"workspace_events.delete_subscription" = ["workspace_events.control"]
+"workspace_events.pull_events" = ["workspace_events.delivery"]
+"workspace_events.ack_events" = ["workspace_events.delivery"]

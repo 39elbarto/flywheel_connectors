@@ -25,6 +25,7 @@ mod lease;
 mod lifecycle;
 mod object;
 mod operation;
+pub mod pcs;
 mod policy;
 mod posture;
 mod protocol;

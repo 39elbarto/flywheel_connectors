@@ -21,6 +21,8 @@ use crate::{
 struct SentryConfig {
     auth: SentryAuth,
     base_url: String,
+    org_slug: Option<String>,
+    project_slug: Option<String>,
 }
 
 impl SentryConfig {
@@ -71,7 +73,26 @@ impl SentryConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
-        Ok(Self { auth, base_url })
+        let org_slug = params
+            .get("org_slug")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let project_slug = params
+            .get("project_slug")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        Ok(Self {
+            auth,
+            base_url,
+            org_slug,
+            project_slug,
+        })
     }
 }
 
@@ -158,9 +179,26 @@ impl SentryConnector {
             .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
-        self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+
+        let status = match &config.auth {
+            SentryAuth::CredentialId(_) => "configured_pending_token_materialization",
+            SentryAuth::BearerToken(_) => "configured",
+        };
+
+        let mut details = json!({
+            "base_url": config.base_url,
+            "auth_mode": config.auth.redacted_label(),
+        });
+        if let Some(org) = &config.org_slug {
+            details["org_slug"] = json!(org);
+        }
+        if let Some(project) = &config.project_slug {
+            details["project_slug"] = json!(project);
+        }
+
+        self.config = Some(config);
+        Ok(json!({ "status": status, "details": details }))
     }
 
     /// Handle the `handshake` method.
@@ -258,6 +296,81 @@ impl SentryConnector {
             },
             critical: false,
         });
+
+        // Provisioning check: auth validation via safe read-only call
+        if let (Some(client), Some(config)) = (&self.client, &self.config) {
+            if let Some(org) = config.org_slug.as_deref() {
+                match client.list_projects(org, None).await {
+                    Ok(projects) => {
+                        let count = projects.as_array().map_or(0, |a| a.len());
+                        checks.push(DoctorCheck {
+                            name: "auth_validation".into(),
+                            passed: true,
+                            message: Some(format!(
+                                "Auth token valid — {count} project(s) in org '{org}'"
+                            )),
+                            critical: true,
+                        });
+
+                        // Validate project slug if configured
+                        if let Some(project) = config.project_slug.as_deref() {
+                            let project_found = projects.as_array().map_or(false, |arr| {
+                                arr.iter().any(|p| {
+                                    p.get("slug").and_then(|s| s.as_str()) == Some(project)
+                                })
+                            });
+                            checks.push(DoctorCheck {
+                                name: "project_validation".into(),
+                                passed: project_found,
+                                message: Some(if project_found {
+                                    format!("Project '{project}' found in org '{org}'")
+                                } else {
+                                    format!("Project '{project}' NOT found in org '{org}'")
+                                }),
+                                critical: false,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        checks.push(DoctorCheck {
+                            name: "auth_validation".into(),
+                            passed: false,
+                            message: Some(format!("Auth validation failed: {e}")),
+                            critical: true,
+                        });
+                    }
+                }
+            } else {
+                checks.push(DoctorCheck {
+                    name: "auth_validation".into(),
+                    passed: false,
+                    message: Some(
+                        "Set org_slug in configure to enable auth/project validation".into(),
+                    ),
+                    critical: false,
+                });
+            }
+        }
+
+        // Provisioning check: network constraints
+        if let Some(config) = &self.config {
+            let base_ok = config.base_url.starts_with("https://")
+                || config.base_url.starts_with("http://localhost")
+                || config.base_url.starts_with("http://127.0.0.1");
+            checks.push(DoctorCheck {
+                name: "network_constraints".into(),
+                passed: base_ok,
+                message: Some(if base_ok {
+                    format!("Base URL passes policy: {}", config.base_url)
+                } else {
+                    format!(
+                        "Base URL must use HTTPS (or localhost for tests): {}",
+                        config.base_url
+                    )
+                }),
+                critical: true,
+            });
+        }
 
         let result = DoctorResult::from_checks(checks);
         Ok(serde_json::to_value(result).unwrap_or(json!({"status": "error"})))

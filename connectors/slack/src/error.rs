@@ -201,7 +201,7 @@ impl SlackError {
 
 // ── FCP3 SDK ConnectorErrorMapping trait implementation ──────────────
 
-impl fcp_sdk::ConnectorErrorMapping for SlackError {
+impl fcp_sdk::migration::ConnectorErrorMapping for SlackError {
     fn from_async_error(error: AsyncError) -> Self {
         match error {
             AsyncError::Timeout { timeout_ms } => Self::Http {
@@ -878,10 +878,15 @@ mod tests {
 
     // ── ConnectorErrorMapping trait tests ────────────────────────────
 
+    use fcp_sdk::migration::ConnectorErrorMapping as _;
+
+    fn from_async(err: AsyncError) -> SlackError {
+        <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::from_async_error(err)
+    }
+
     #[test]
     fn connector_error_mapping_timeout() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
+        let err = from_async(AsyncError::Timeout { timeout_ms: 5000 });
         assert!(matches!(
             err,
             SlackError::Http {
@@ -895,16 +900,14 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_cancelled() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::Cancelled);
+        let err = from_async(AsyncError::Cancelled);
         assert!(matches!(err, SlackError::Http { .. }));
         assert!(err.to_string().contains("cancelled"));
     }
 
     #[test]
     fn connector_error_mapping_runtime() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::Runtime {
+        let err = from_async(AsyncError::Runtime {
             message: "runtime failure".into(),
         });
         assert!(matches!(err, SlackError::Http { .. }));
@@ -913,37 +916,32 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_channel_closed() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::ChannelClosed);
+        let err = from_async(AsyncError::ChannelClosed);
         assert!(matches!(err, SlackError::Http { .. }));
     }
 
     #[test]
     fn connector_error_mapping_channel_full() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::ChannelFull);
+        let err = from_async(AsyncError::ChannelFull);
         assert!(matches!(err, SlackError::Http { .. }));
     }
 
     #[test]
     fn connector_error_mapping_trait_to_fcp_error() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::Timeout { timeout_ms: 1000 });
-        let fcp = ConnectorErrorMapping::to_fcp_error(&err);
+        let err = from_async(AsyncError::Timeout { timeout_ms: 1000 });
+        let fcp = <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::to_fcp_error(&err);
         assert!(matches!(fcp, FcpError::External { retryable: true, .. }));
     }
 
     #[test]
     fn connector_error_mapping_trait_is_retryable() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::Cancelled);
-        assert!(ConnectorErrorMapping::is_retryable(&err));
+        let err = from_async(AsyncError::Cancelled);
+        assert!(<SlackError as fcp_sdk::migration::ConnectorErrorMapping>::is_retryable(&err));
     }
 
     #[test]
     fn connector_error_mapping_trait_retry_after_none_for_transport() {
-        use fcp_sdk::ConnectorErrorMapping;
-        let err = SlackError::from_async_error(AsyncError::Timeout { timeout_ms: 100 });
-        assert!(ConnectorErrorMapping::retry_after(&err).is_none());
+        let err = from_async(AsyncError::Timeout { timeout_ms: 100 });
+        assert!(<SlackError as fcp_sdk::migration::ConnectorErrorMapping>::retry_after(&err).is_none());
     }
 }

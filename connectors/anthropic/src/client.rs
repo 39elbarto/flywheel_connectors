@@ -321,7 +321,10 @@ impl AnthropicClient {
         R: serde::de::DeserializeOwned + Send,
     {
         let url = format!("{}{endpoint}", self.base_url);
-        let ctx = ExecutionContext::request_scoped(Duration::from_secs(120));
+        // Budget must be generous enough for max_retries × max retry_after.
+        // Anthropic 529 responses suggest 60s retry_after, so with 3 retries
+        // we need at least 180s plus request time. Use 300s.
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(300));
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {

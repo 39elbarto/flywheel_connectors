@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
+use fcp_async_core::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::history::{HistoryFilter, HistoryStore};
 use crate::mcp_resources::{
@@ -1912,7 +1912,8 @@ fn example_input_from_schema(schema: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex};
+    use fcp_async_core::io::{AsupersyncIo, BufReader};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader, duplex};
 
     // ── Helpers ─────────────────────────────────────────────────────
 
@@ -2054,8 +2055,8 @@ mod tests {
         let task = tokio::spawn(async move {
             run_stdio_transport(
                 &state,
-                BufReader::new(server_input),
-                server_output,
+                BufReader::new(AsupersyncIo::new(server_input)),
+                AsupersyncIo::new(server_output),
                 callback,
             )
             .await
@@ -2067,7 +2068,7 @@ mod tests {
         task.await.unwrap();
 
         let mut output = String::new();
-        let mut reader = BufReader::new(client_output);
+        let mut reader = TokioBufReader::new(client_output);
         reader.read_to_string(&mut output).await.unwrap();
         output
     }

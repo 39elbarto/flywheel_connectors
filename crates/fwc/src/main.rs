@@ -188,6 +188,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use fcp_async_core::{io as async_io, runtime as async_runtime};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -2574,13 +2575,13 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
 
     let zone = args.zone.clone();
     let state = serve_mcp::state_from_tools(tools, config);
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = async_runtime::Builder::new_current_thread()
         .enable_io()
         .build()?;
 
     runtime.block_on(async {
-        let reader = tokio::io::BufReader::new(tokio::io::stdin());
-        let writer = tokio::io::stdout();
+        let reader = async_io::BufReader::new(async_io::stdin());
+        let writer = async_io::stdout();
         let host_context = resolved_host.clone();
         let principal = args.principal.clone();
         let auth = args.auth.clone();

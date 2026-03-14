@@ -1857,9 +1857,55 @@ pub mod task {
 
 /// Async I/O re-exports and compatibility extensions.
 pub mod io {
+    use asupersync::stream::StreamExt as _;
+    use std::io;
+
     pub use asupersync::io::{
-        AsyncBufRead, AsyncReadExt, AsyncWriteExt, BufReader, ReadLine, read_line,
+        AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadLine,
+        read_line,
     };
+    pub use asupersync_tokio_compat::io::AsupersyncIo;
+
+    /// Tokio-style line reader backed by Asupersync's stream-based implementation.
+    #[derive(Debug)]
+    pub struct Lines<R> {
+        inner: asupersync::io::Lines<R>,
+    }
+
+    impl<R> Lines<R> {
+        /// Create a line reader from an async buffered reader.
+        #[must_use]
+        pub fn new(reader: R) -> Self {
+            Self {
+                inner: asupersync::io::Lines::new(reader),
+            }
+        }
+    }
+
+    impl<R> Lines<R>
+    where
+        R: AsyncBufRead + Unpin,
+    {
+        /// Return the next available line, matching Tokio's `next_line()` shape.
+        pub async fn next_line(&mut self) -> io::Result<Option<String>> {
+            match self.inner.next().await {
+                Some(result) => result.map(Some),
+                None => Ok(None),
+            }
+        }
+    }
+
+    /// Return stdin as an async-core reader through the Tokio compatibility bridge.
+    #[must_use]
+    pub fn stdin() -> AsupersyncIo<tokio::io::Stdin> {
+        AsupersyncIo::new(tokio::io::stdin())
+    }
+
+    /// Return stdout as an async-core writer through the Tokio compatibility bridge.
+    #[must_use]
+    pub fn stdout() -> AsupersyncIo<tokio::io::Stdout> {
+        AsupersyncIo::new(tokio::io::stdout())
+    }
 
     /// Extension trait that preserves the Tokio-style `read_line` method shape.
     pub trait AsyncBufReadExt: AsyncBufRead + Unpin {
@@ -1869,6 +1915,14 @@ pub mod io {
             Self: Sized,
         {
             read_line(self, buf)
+        }
+
+        /// Return a cancel-aware line stream, matching Tokio's `lines()` ergonomics.
+        fn lines(self) -> Lines<Self>
+        where
+            Self: Sized,
+        {
+            Lines::new(self)
         }
     }
 
@@ -6356,5 +6410,18 @@ mod tests {
         let result = super::shutdown::sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
         // Either Ok or Err is valid when sender drops
         let _ = result;
+    }
+
+    #[test]
+    fn io_async_buf_read_ext_lines_streams_each_line() {
+        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let reader = io::BufReader::new(std::io::Cursor::new(b"alpha\nbeta\n".to_vec()));
+            let mut lines = io::AsyncBufReadExt::lines(reader);
+
+            assert_eq!(lines.next_line().await.unwrap().unwrap(), "alpha");
+            assert_eq!(lines.next_line().await.unwrap().unwrap(), "beta");
+            assert!(lines.next_line().await.unwrap().is_none());
+        });
     }
 }

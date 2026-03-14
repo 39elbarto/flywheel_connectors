@@ -2042,6 +2042,7 @@ name = "fcp-async-core"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "asupersync-tokio-compat",
  "fcp-async-core-macros",
  "futures-util",
  "thiserror 2.0.18",

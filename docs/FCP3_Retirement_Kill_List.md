@@ -1,0 +1,317 @@
+# FCP3 Retirement Kill List
+
+> Bead: `9syku.3.3` — [FCP3.KERNEL] Retirement plan for ExecutionContext,
+> ConnectorRuntime, Tokio compat, and exception-ledger thinking.
+>
+> Author: BeigeCave (SunnyMoose) | Date: 2026-03-14
+>
+> Purpose: Explicit kill-list for every compatibility abstraction that should
+> disappear rather than evolve, classified as **immediate delete**, **temporary
+> quarantine**, or **replace-after-pilot**.
+
+---
+
+## Executive Summary
+
+The codebase has successfully migrated from Tokio to Asupersync via the
+`fcp-async-core` abstraction layer. The infrastructure is mature and correct.
+What remains is:
+
+1. **Adopting `ConnectorRuntime`** in all 85+ connectors (currently zero use it)
+2. **Consolidating raw `asupersync::` imports** behind `fcp-async-core` wrappers
+3. **Maintaining Tokio compat bridges** until test infrastructure goes native
+4. **Fixing one `tokio::` holdout** in `fwc/src/serve_mcp.rs`
+
+There is **no ExceptionLedger abstraction** in the codebase. The "exception-ledger
+thinking" to retire is the pattern of hand-rolled, per-connector error handling
+that `ConnectorErrorMapping` replaces.
+
+---
+
+## Classification Legend
+
+| Tag | Meaning | Action |
+|-----|---------|--------|
+| **DELETE** | Remove immediately; no downstream users or easily replaced | Delete code, update imports |
+| **QUARANTINE** | Keep temporarily; active users require migration first | Isolate in adapter module, set removal trigger |
+| **REPLACE** | Keep until pilot proves replacement; then delete | Implement replacement, validate, then delete |
+
+---
+
+## 1. Abstractions to KEEP (Not on kill list)
+
+These are the FCP3 target patterns. They stay and expand:
+
+| Abstraction | Location | Why it stays |
+|---|---|---|
+| `ExecutionContext` | `fcp-async-core:485` | Core deadline/cancellation model for FCP3 |
+| `ConnectorRuntime` | `fcp-sdk/migration.rs:213` | Target pattern for all connector lifecycle |
+| `RetryLoop` | `fcp-sdk/migration.rs:388` | Replaces hand-rolled retry loops |
+| `ConnectorErrorMapping` | `fcp-sdk/migration.rs:351` | Centralizes HTTP status → FCP error mapping |
+| `CancellationToken` | `fcp-async-core:1898` | Cooperative shutdown primitive |
+| `Deadline` | `fcp-async-core:427` | Deterministic timeout enforcement |
+| `fcp-async-core` channels/sync/io | `fcp-async-core:603+` | Complete async primitive layer |
+| `#[fcp_async_core::runtime::test]` | `fcp-async-core-macros` | Standard test attribute |
+
+---
+
+## 2. IMMEDIATE DELETE
+
+### 2.1 Raw `tokio::` imports in `fwc/src/serve_mcp.rs`
+
+**File:** `crates/fwc/src/serve_mcp.rs:13`
+```rust
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+```
+
+**Classification:** DELETE
+
+**Why:** `fcp-async-core::io` re-exports equivalent traits (`AsyncBufRead`,
+`AsyncReadExt`, `AsyncWriteExt`, `BufReader`). This is the only non-test file
+that directly imports `tokio::io`.
+
+**Cutover signal:** Replace import with `use fcp_async_core::io::*` and verify
+MCP stdio server still works.
+
+**Deletion trigger:** One PR, zero risk.
+
+### 2.2 Exception-ledger thinking (hand-rolled error handling)
+
+**Pattern:** Each connector independently maps HTTP status codes, constructs
+`FcpError` variants, and implements retry logic with bespoke backoff.
+
+**Classification:** DELETE (the pattern, not the code — replace with
+`ConnectorErrorMapping` trait)
+
+**Why:** `fcp-sdk/migration.rs` provides:
+- `ConnectorErrorMapping` trait for per-connector error translation
+- `classify_http_status()` for standard HTTP → FCP mapping
+- `map_async_to_fcp_error()` for AsyncError normalization
+- `RetryLoop::execute()` for unified retry with tracing
+
+**Cutover signal:** Each connector batch migration (9syku.11.3.1/2/3) replaces
+hand-rolled error handling with the trait. When all connectors implement
+`ConnectorErrorMapping`, delete the old patterns.
+
+**Deletion trigger:** Connector archetype migration waves complete (9syku.11.3.x).
+
+---
+
+## 3. TEMPORARY QUARANTINE
+
+### 3.1 Tokio compat handle (`get_or_create_tokio_compat_handle`)
+
+**File:** `crates/fcp-async-core/src/lib.rs:106-161`
+
+**What it does:** Lazily creates a single-threaded Tokio runtime on a dedicated
+background thread. Thread-locally cached. Entered during `Runtime::block_on()`
+and `task::spawn()`.
+
+**Classification:** QUARANTINE
+
+**Why needed:** `wiremock` and `reqwest` call `tokio::runtime::Handle::current()`
+internally. Without the compat handle, these panic on asupersync threads.
+
+**Quarantine boundary:**
+- Confined to `fcp-async-core/src/lib.rs` (internal implementation detail)
+- Never exposed in public API
+- Only active when tokio-dependent code paths are used
+
+**Removal criteria:**
+1. `reqwest` replaced with asupersync-native HTTP client, OR
+2. `wiremock` replaced with asupersync-native mock server, OR
+3. Both dependencies eliminated from non-connector crates
+
+**Removal trigger:** When `tokio` can be removed from `fcp-async-core`'s
+`Cargo.toml` without any test or production code breaking.
+
+### 3.2 `TokioContextFuture` wrapper
+
+**File:** `crates/fcp-async-core/src/lib.rs:1786-1850`
+
+**What it does:** Wraps every spawned task to enter the Tokio runtime context
+before each poll. Ensures reqwest/wiremock work on asupersync worker threads.
+
+**Classification:** QUARANTINE (coupled to 3.1)
+
+**Quarantine boundary:** Internal to `task::spawn()` — caller never sees it.
+
+**Removal criteria:** Same as 3.1. When the Tokio compat handle is removed,
+this wrapper becomes a no-op and can be deleted.
+
+### 3.3 `asupersync-tokio-compat` crate dependency
+
+**File:** `crates/fcp-host/Cargo.toml:20`
+```toml
+asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat",
+                            features = ["tokio-io", "hyper-bridge"] }
+```
+
+**What it provides:**
+- `hyper_bridge::AsupersyncExecutor` — Hyper executor on asupersync
+- `io::TokioIo` — I/O adapter for hyper connections
+
+**Classification:** QUARANTINE
+
+**Why needed:** `fcp-host` runs an HTTP admin API via `hyper`. Hyper requires
+a `tokio::runtime::Handle` or a compatible executor.
+
+**Quarantine boundary:** Used only in `fcp-host/src/bin/fcp-host.rs`.
+
+**Removal criteria:**
+1. Hyper gains native asupersync support, OR
+2. fcp-host HTTP server replaced with asupersync-native HTTP framework, OR
+3. NobleDuck's 18irp migration produces a permanent bridge that is blessed
+   as production infrastructure (reclassify from quarantine to keep)
+
+**Removal trigger:** Decision on HTTP server stack in FCP3 era.
+
+### 3.4 `tokio` workspace dependency
+
+**File:** Root `Cargo.toml`
+```toml
+tokio = { version = "1", default-features = false, features = ["rt"] }
+```
+
+**Classification:** QUARANTINE
+
+**Why retained:** Required by 3.1, 3.2, and 3.3 above.
+
+**Removal criteria:** All three quarantined items above are deleted.
+
+**Removal trigger:** Last transitive consumer of tokio in workspace is removed.
+
+---
+
+## 4. REPLACE AFTER PILOT
+
+### 4.1 Raw `asupersync::` imports in non-core crates
+
+**Affected crates** (direct `asupersync::` imports instead of `fcp-async-core`):
+
+| Crate | Files | Imports |
+|-------|-------|---------|
+| `fcp-streaming` | `websocket.rs` | `asupersync::net::TcpStream`, `asupersync::tls::*`, `asupersync::net::websocket::*` |
+| `fcp-oauth` | `oauth2.rs`, `oauth1.rs` | `asupersync::net::*` |
+| `fcp-graphql` | `client.rs`, `retry.rs`, `subscription.rs` | `asupersync::net::*` |
+| `fcp-raptorq` | `decode.rs`, `encode.rs` | `asupersync::runtime::*` |
+| `fcp-tailscale` | `client.rs` | `asupersync::net::*` |
+| `fcp-telemetry` | `context.rs` | `asupersync::*` |
+
+**Classification:** REPLACE
+
+**Why:** These crates bypass the `fcp-async-core` abstraction layer. If
+asupersync APIs change, these break independently (as happened with the
+`socket.close(&Cx)` signature change in fcp-streaming).
+
+**Replacement pattern:** Replace `asupersync::net::TcpStream` with
+`fcp_async_core::net::TcpStream`, etc. For types not yet wrapped by
+fcp-async-core (like TLS, WebSocket), add thin wrappers.
+
+**Pilot:** Migrate `fcp-streaming/src/websocket.rs` first as a proof point.
+If successful, migrate remaining crates in batch.
+
+**Cutover signal:** fcp-streaming websocket module compiles and passes tests
+using only `fcp-async-core` imports.
+
+**Deletion trigger:** When zero non-test Rust files outside `fcp-async-core`
+contain `use asupersync::`.
+
+### 4.2 85+ connectors → ConnectorRuntime adoption
+
+**Current state:** Zero connectors under `connectors/` use `ConnectorRuntime`.
+All use direct constructor patterns with hand-rolled lifecycle.
+
+**Classification:** REPLACE
+
+**Target pattern** (from `fcp-sdk/migration.rs`):
+```rust
+// In configure():
+self.runtime = Some(ConnectorRuntime::new(ConnectorRuntimeConfig {
+    request_timeout: Duration::from_secs(120),
+    shutdown_timeout: Duration::from_secs(30),
+}));
+
+// In invoke():
+let ctx = self.runtime.as_ref().unwrap().request_context();
+ctx.run(async { /* operation */ }).await
+```
+
+**Migration order** (per bead 9syku.11.3.x):
+1. **Wave 1 (9syku.11.3.1):** Request-response connectors — fastest wins,
+   clearest pattern (REST/GraphQL APIs)
+2. **Wave 2 (9syku.11.3.2):** Streaming connectors — WebSocket/SSE, need
+   background context
+3. **Wave 3 (9syku.11.3.3):** Polling/webhook/stateful — most complex lifecycle
+
+**Pilot:** Pick 3 representative request-response connectors (e.g., `anthropic`,
+`openai`, `sendgrid`), migrate them, measure code deletion.
+
+**Cutover signal:** Pilot connectors pass all existing tests with
+`ConnectorRuntime`, zero hand-rolled retry/timeout code remains.
+
+**Deletion trigger:** All 85+ connectors migrated. Delete old lifecycle
+patterns from connector scaffold template (`fwc new_cmd.rs`).
+
+---
+
+## 5. NOT FOUND (Confirmed Absent)
+
+These items were searched for but do not exist:
+
+| Pattern | Search result |
+|---------|---------------|
+| `ExceptionLedger` / `exception_ledger` | Not found — no error ledger abstraction exists |
+| Direct `tokio::spawn` in production code | Not found — all use `fcp_async_core::task::spawn` |
+| `block_on` outside runtime init | Not found — hidden in macro expansions |
+| `tokio::select!` | Not found — all use `fcp_async_core::select!` |
+| Raw `&Cx` parameter patterns | Not found — abstracted by `compatibility_cx()` |
+
+---
+
+## 6. Cutover Signal Summary
+
+| # | Signal | Triggers deletion of |
+|---|--------|---------------------|
+| S1 | `serve_mcp.rs` uses `fcp_async_core::io` | Raw tokio::io import (2.1) |
+| S2 | All connectors implement `ConnectorErrorMapping` | Hand-rolled error handling (2.2) |
+| S3 | reqwest/wiremock replaced OR eliminated | Tokio compat handle (3.1, 3.2, 3.4) |
+| S4 | HTTP server stack decision made | asupersync-tokio-compat (3.3) |
+| S5 | fcp-streaming pilot succeeds | Raw asupersync imports (4.1) |
+| S6 | All 85 connectors use ConnectorRuntime | Old lifecycle patterns (4.2) |
+
+---
+
+## 7. Dependency Graph
+
+```
+18irp (ASUPERSYNC migration, NobleDuck)
+  └─> This document (9syku.3.3, kill-list)
+        └─> 9syku.11.2 (remove reqwest/Tokio/compat holdouts)
+              ├─> 9syku.11.3 (bulk connector migration)
+              │     ├─> 9syku.11.3.1 (request-response wave)
+              │     ├─> 9syku.11.3.2 (streaming wave)
+              │     └─> 9syku.11.3.3 (polling/webhook wave)
+              └─> 9syku.12 (documentation alignment)
+```
+
+---
+
+## 8. Verification Evidence
+
+### Audit methodology
+- `grep -r "ExecutionContext"` across all crates
+- `grep -r "ConnectorRuntime"` across all crates
+- `grep -r "use tokio::"` in non-connector, non-test code
+- `grep -r "exception_ledger\|ExceptionLedger"` workspace-wide
+- `grep -r "use asupersync::"` in non-fcp-async-core crates
+- `grep -r "reqwest::"` in core crates
+- Manual review of `fcp-async-core/src/lib.rs` (4000+ lines)
+- Manual review of `fcp-sdk/src/migration.rs` (connector migration framework)
+
+### Test validation
+- `cargo test -p fcp-core --lib pcs` — 50 tests pass
+- `cargo test -p fcp-mongodb` — 39 tests pass
+- `cargo test -p fcp-sendgrid` — 38 tests pass
+- `cargo check -p fcp-streaming` — compiles after `close(&Cx)` fix
+- `cargo clippy -p fcp-core --all-targets` — zero warnings

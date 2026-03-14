@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use fcp_async_core::time::sleep;
+use fcp_core::FcpError;
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{instrument, warn};
@@ -474,6 +475,91 @@ impl TelegramError {
             }
             Self::InvalidChatId(_) => false,
         }
+    }
+
+    /// Get the suggested retry delay.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Api { code, .. } if *code == 429 => Some(Duration::from_secs(30)),
+            _ => None,
+        }
+    }
+
+    /// Convert to FCP error.
+    #[must_use]
+    pub fn to_fcp_error(&self) -> FcpError {
+        match self {
+            Self::Http(e) => FcpError::External {
+                service: "telegram".into(),
+                message: e.to_string(),
+                status_code: e.status().map(|s| s.as_u16()),
+                retryable: self.is_retryable(),
+                retry_after: self.retry_after(),
+            },
+            Self::Api { code, description } => {
+                if *code == 429 {
+                    FcpError::RateLimited {
+                        retry_after_ms: 30_000,
+                        violation: None,
+                    }
+                } else if *code == 401 {
+                    FcpError::Unauthorized {
+                        code: 2001,
+                        message: description.clone(),
+                    }
+                } else if *code == 403 {
+                    FcpError::CapabilityDenied {
+                        capability: "telegram.api".into(),
+                        reason: description.clone(),
+                    }
+                } else {
+                    FcpError::External {
+                        service: "telegram".into(),
+                        message: description.clone(),
+                        status_code: Some(u16::try_from(*code).unwrap_or(0)),
+                        retryable: self.is_retryable(),
+                        retry_after: self.retry_after(),
+                    }
+                }
+            }
+            Self::InvalidChatId(msg) => FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid chat ID: {msg}"),
+            },
+        }
+    }
+}
+
+impl fcp_sdk::migration::ConnectorErrorMapping for TelegramError {
+    fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
+        use fcp_async_core::AsyncError;
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                code: 408,
+                description: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Api {
+                code: 0,
+                description: "request cancelled".into(),
+            },
+            other => Self::Api {
+                code: 0,
+                description: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
     }
 }
 
@@ -1597,5 +1683,157 @@ mod tests {
         let dbg = format!("{opts:?}");
         assert!(dbg.contains("SendMediaOptions"));
         assert!(dbg.contains("debug test"));
+    }
+
+    // ── to_fcp_error ─────────────────────────────────────────────────
+
+    #[test]
+    fn to_fcp_error_api_429() {
+        let err = TelegramError::Api {
+            code: 429,
+            description: "rate limited".into(),
+        };
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::RateLimited {
+                retry_after_ms: 30_000,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn to_fcp_error_api_401() {
+        let err = TelegramError::Api {
+            code: 401,
+            description: "bad token".into(),
+        };
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::Unauthorized { code: 2001, .. }
+        ));
+    }
+
+    #[test]
+    fn to_fcp_error_api_403() {
+        let err = TelegramError::Api {
+            code: 403,
+            description: "blocked".into(),
+        };
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::CapabilityDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn to_fcp_error_api_500() {
+        let err = TelegramError::Api {
+            code: 500,
+            description: "internal error".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert_eq!(service, "telegram");
+                assert!(retryable);
+                assert_eq!(status_code, Some(500));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_invalid_chat_id() {
+        let err = TelegramError::InvalidChatId("bad".into());
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { code: 1003, .. }
+        ));
+    }
+
+    #[test]
+    fn retry_after_429() {
+        let err = TelegramError::Api {
+            code: 429,
+            description: "too many requests".into(),
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn retry_after_non_429_is_none() {
+        let err = TelegramError::Api {
+            code: 500,
+            description: "error".into(),
+        };
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn retry_after_invalid_chat_id_is_none() {
+        assert!(TelegramError::InvalidChatId("x".into()).retry_after().is_none());
+    }
+
+    // ── ConnectorErrorMapping ────────────────────────────────────────
+
+    #[test]
+    fn connector_error_mapping_timeout() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = TelegramError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
+        assert!(matches!(err, TelegramError::Api { code: 408, .. }));
+        assert!(err.to_string().contains("5000"));
+    }
+
+    #[test]
+    fn connector_error_mapping_cancelled() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = TelegramError::from_async_error(AsyncError::Cancelled);
+        assert!(matches!(err, TelegramError::Api { code: 0, .. }));
+    }
+
+    #[test]
+    fn connector_error_mapping_channel_full() {
+        use fcp_async_core::AsyncError;
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = TelegramError::from_async_error(AsyncError::ChannelFull);
+        assert!(matches!(err, TelegramError::Api { code: 0, .. }));
+    }
+
+    #[test]
+    fn connector_error_mapping_to_fcp_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = TelegramError::InvalidChatId("bad".into());
+        let fcp = ConnectorErrorMapping::to_fcp_error(&err);
+        assert!(matches!(fcp, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn connector_error_mapping_is_retryable_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = TelegramError::Api {
+            code: 429,
+            description: "rate limited".into(),
+        };
+        assert!(ConnectorErrorMapping::is_retryable(&err));
+    }
+
+    #[test]
+    fn connector_error_mapping_retry_after_delegates() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = TelegramError::Api {
+            code: 429,
+            description: "rate limited".into(),
+        };
+        assert_eq!(
+            ConnectorErrorMapping::retry_after(&err),
+            Some(Duration::from_secs(30))
+        );
     }
 }

@@ -1,9 +1,9 @@
 name: fcp
-description: Flywheel Connector Protocol specification refinement
+description: Flywheel Connector Protocol FCP3 specification refinement
 
 documents:
   readme: README.md
-  spec: FCP_Specification_V2.md
+  spec: FCP_Specification_V3.md
   implementation: docs/fcp_model_connectors_rust.md
 
 oracle:
@@ -38,7 +38,7 @@ template_with_impl: |
 
   ---
 
-  And here is a document detailing Rust implementations for the canonical connector types that follow the specification document given below; you should also keep the implementation in mind as you think about the specification, since ultimately the specification needs to be translated into the Rust code eventually!
+  And here is a legacy Rust connector guide that captures the older V2 connector model. Use it only to mine historical assumptions, migration deltas, or stale wording that still needs cleanup; do not treat it as the canonical FCP3 target.
 
   ```
   {{IMPLEMENTATION}}

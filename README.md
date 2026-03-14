@@ -4,10 +4,11 @@
   <img src="fcp_illustration.webp" alt="FCP - Secure connectors for AI agents with zone-based isolation and capability tokens">
 </div>
 
-> **Specification note:** `FCP_Specification_V2.md` is the authoritative interoperability contract,
-> and `FCP_Specification_V3.md` captures the active re-foundation direction. This README mixes
-> current implementation notes with long-term architecture; when descriptions conflict, trust the
-> spec for protocol intent and the code for present-day behavior.
+> **Specification note:** `FCP_Specification_V3.md` is the current architectural and conformance
+> target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context
+> while the remaining docs are brought forward. This README mixes present-day implementation notes
+> with longer-term architecture; when descriptions conflict, trust V3 for intended semantics and
+> the code for current behavior.
 
 A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and eventually personal device meshes — plus a large, still-evolving workspace of connector crates and supporting infrastructure.
 
@@ -17,9 +18,9 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 **This repository currently spans three layers:**
 
-1. **FCP specifications and design direction** — the mesh-native protocol model, security invariants, and the ongoing FCP3 ownership/runtime redesign
+1. **FCP specifications and design direction** — the mesh-native protocol model, security invariants, and the current FCP3 ownership/runtime contract
 
-2. **A real host-first Rust platform** — today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses`
+2. **A real host-first Rust platform** — today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`
 
 3. **A large connector workspace** — many Rust connector crates and support crates exist already, but maturity varies by connector and subsystem
 
@@ -877,8 +878,8 @@ flywheel_connectors/
 ├── crates/fcp-conformance/tests/ # Cross-crate conformance coverage
 ├── crates/fcp-e2e/tests/         # Host-backed end-to-end scenarios
 ├── crates/fcp-host/tests/        # Host/admin integration tests
-├── FCP_Specification_V2.md       # Current authoritative protocol specification
-├── FCP_Specification_V3.md       # Active re-foundation / ownership direction
+├── FCP_Specification_V3.md       # Current architecture + conformance direction
+├── FCP_Specification_V2.md       # Historical / legacy-interoperability reference
 ├── AGENTS.md                     # AI coding agent guidelines
 └── README.md
 ```
@@ -924,14 +925,13 @@ The FCP3 re-foundation is converging on a stricter "one concept, one home" rule:
 | **Connector SDK** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery` | Connector-facing ergonomics, typed I/O helpers, streaming/polling/webhook utilities, and shared provider tooling belong in the SDK/helper layer, not in the kernel |
 | **Tooling and evidence surfaces** | `fwc`, `fcp-conformance`, `fcp-testkit`, `fcp-e2e`, `fcp-telemetry` | Operator UX, agent UX, conformance, replayable evidence, and harnesses stay outside the kernel and host so they can evolve without smearing core semantics |
 
-The main transitional or quarantine surfaces are:
+The remaining quarantine surfaces (see `docs/FCP3_Retirement_Kill_List.md` for the full classification):
 
-- `fcp-async-core` and the Tokio compatibility bridge, which exist to keep the current code running while the runtime model is being pulled toward an Asupersync-native kernel.
-- Connector/runtime patterns that still assume newline JSON-RPC over stdio or request-local execution rather than the long-term supervised application model described in `FCP_Specification_V3.md`.
+- `fcp-async-core` wraps the Asupersync runtime and retains a Tokio compatibility bridge for wiremock/reqwest test infrastructure. The bridge is quarantined with explicit removal triggers.
+- `fwc/src/serve_mcp.rs` has one remaining `tokio::io` import, quarantined until `fcp-async-core::io` gains `AsyncWrite` and `lines()` support.
+- 16 connectors have adopted `ConnectorErrorMapping`; the migration framework (`ConnectorRuntime`, `RetryLoop`) is proven across request-response, streaming, and polling archetypes.
 
-Put differently: FCP3 should keep the strong domain model and mesh/evidence work already present in
-this repository, while collapsing runtime and authority semantics into a single kernel boundary and
-keeping host, SDK, and tooling responsibilities much cleaner than they are today.
+The FCP3 runtime kernel uses Asupersync natively. All production transport code (including WebSocket in `fcp-streaming`) runs on the Asupersync runtime. No compatibility-first holdouts remain in production paths.
 
 ---
 
@@ -1033,7 +1033,7 @@ The workflow is already configured in `.apr/workflows/fcp.yaml`:
 ```yaml
 documents:
   readme: README.md
-  spec: FCP_Specification_V2.md
+  spec: FCP_Specification_V3.md
   implementation: docs/fcp_model_connectors_rust.md
 ```
 
@@ -1084,8 +1084,9 @@ After GPT Pro completes a round, integrate the feedback:
 1. **Prime Claude Code** with full context:
    ```
    Read ALL of AGENTS.md and README.md. Use your code investigation agent
-   to understand the project. Read FCP_Specification_V2.md and
-   docs/fcp_model_connectors_rust.md.
+   to understand the project. Read FCP_Specification_V3.md first, and only
+   use docs/fcp_model_connectors_rust.md when you need to reconcile legacy
+   V2-era connector assumptions.
    ```
 
 2. **Integrate feedback** from GPT Pro:
@@ -1094,7 +1095,7 @@ After GPT Pro completes a round, integrate the feedback:
    <paste apr show N output>
    ```
 
-3. **Harmonize documents**: Update README, then implementation doc
+3. **Harmonize documents**: Update README first, then any migration/legacy-reference docs, then the canonical V3 spec if the round changes architectural truth
 
 4. **Commit changes** in logical groupings with detailed messages
 
@@ -1113,8 +1114,9 @@ apr integrate 5 -c  # Copy integration prompt to clipboard
 
 | File | Purpose |
 |------|---------|
-| `FCP_Specification_V2.md` | Main protocol specification |
-| `docs/fcp_model_connectors_rust.md` | Rust implementation guide |
+| `FCP_Specification_V3.md` | Main protocol and conformance specification |
+| `FCP_Specification_V2.md` | Historical / interoperability reference only |
+| `docs/fcp_model_connectors_rust.md` | Legacy Rust connector guide used for migration deltas, not canonical FCP3 truth |
 | `docs/GOOGLE_Connector_Platform_Reference.md` | Developer/operator guide for the shared Google connector platform |
 | `.apr/workflows/fcp.yaml` | APR workflow configuration |
 | `.apr/rounds/fcp/round_N.md` | GPT Pro output for each round |

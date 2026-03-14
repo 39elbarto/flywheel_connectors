@@ -38,7 +38,8 @@ All behavior in this contract is constrained by:
 - `docs/ASUPERSYNC_Capability_Matrix.md`
 - `docs/ASUPERSYNC_Feature_Parity_Baseline.md`
 - `docs/ASUPERSYNC_Logging_Forensics_Standard.md`
-- `FCP_Specification_V2.md`
+- `FCP_Specification_V3.md`
+- `FCP_Specification_V2.md` (historical delta reference only where older parity notes still cite it)
 
 For Wave D (`235t.20`-`235t.25`), parity contracts `PAR-RAPTORQ-001`, `PAR-RAPTORQ-002`, `PAR-RAPTORQ-003`, and `PAR-RUNTIME-003` are mandatory.
 

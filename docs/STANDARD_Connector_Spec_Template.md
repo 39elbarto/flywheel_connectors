@@ -1,6 +1,6 @@
-# STANDARD: Connector Specification Template (FCP2)
+# STANDARD: Legacy Connector Specification Template (FCP2)
 
-> **Status**: NORMATIVE
+> **Status**: HISTORICAL REFERENCE
 > **Version**: 1.0.0
 > **Last Updated**: January 2026
 > **Bead Reference**: `flywheel_connectors-lszk.5`
@@ -9,9 +9,9 @@
 
 ## Purpose
 
-This document provides a canonical copy/paste template for planning **new FCP2 connectors** in Beads. Every connector plan should be mechanically consistent with FCP2 requirements and include tests/E2E from day one.
+This document preserves the older copy/paste template for planning FCP2 connectors in Beads. Keep it for historical reference and migration-gap analysis, not as the canonical template for new FCP3 connector work.
 
-**Goal**: Ensure every connector is V2-only compliant with single-zone binding, default deny, NetworkConstraints, receipts/audit, taint/approval, and comprehensive testing.
+**Goal**: Make the old FCP2 planning structure easy to inspect without confusing it for the current FCP3 connector-planning contract.
 
 ---
 
@@ -690,7 +690,8 @@ fcp.<service> (epic)
 | STANDARD_Connector_Testing.md | Connector testing requirements + quality gates |
 | STANDARD_Testing_Logging.md | Testing and logging requirements |
 | STANDARD_Requirements_Index.md | Spec-to-implementation matrix |
-| FCP_Specification_V2.md | Canonical protocol specification |
+| FCP_Specification_V3.md | Current canonical protocol specification |
+| FCP_Specification_V2.md | Historical reference |
 
 ---
 
@@ -699,7 +700,7 @@ fcp.<service> (epic)
 This standard is satisfied when:
 
 - [ ] Template enables mechanical consistency across all new connectors
-- [ ] All template sections map to FCP2 requirements
+- [ ] All template sections are clearly marked as mapping to legacy FCP2 requirements
 - [ ] Copy/paste workflow produces valid bead structure
 - [ ] New connector beads reference this template
 - [ ] Template aligns with compliance checklist and testing standards

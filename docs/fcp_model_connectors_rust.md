@@ -1,13 +1,15 @@
-# FCP Model Connectors (Rust) - V2
+# FCP Model Connectors (Rust) - Legacy V2 Reference
 
-## Canonical, Spec-Accurate Reference for FCP V2 Connectors
+## Historical Connector Model Reference (Not Canonical FCP3 Guidance)
 
-> Purpose: Provide a Rust-focused connector guide aligned exactly to FCP Specification V2.
+> Purpose: Preserve the earlier Rust-focused connector guide as historical reference while the
+> repo converges on FCP3-first execution, ownership, and documentation.
 > Version: 2.0.0
-> Status: Draft
+> Status: Historical reference
 > Last Updated: 2026-01-15
 > License: MIT
-> Canonical Spec: FCP_Specification_V2.md
+> Current Canonical Spec: FCP_Specification_V3.md
+> Legacy Reference Spec: FCP_Specification_V2.md
 
 ---
 
@@ -2939,5 +2941,6 @@ At least one corpus MUST include "decode DoS" adversarial inputs designed to max
 ## Notes
 
 - This document is V2-only; backwards compatibility with FCP1 is not a goal.
-- For mesh, symbol, audit, and trust-anchor details, refer to `FCP_Specification_V2.md`.
-- All normative structures in this document are aligned with FCP Specification V2.
+- Do not treat this document as the blessed FCP3 connector-authoring guide; use it only when reconciling legacy V2 assumptions or migration deltas.
+- For current mesh, execution, ownership, audit, and trust-anchor semantics, refer to `FCP_Specification_V3.md`.
+- When this document conflicts with current README/code/V3 guidance, treat the conflict as a documentation debt signal and follow the FCP3 surfaces.

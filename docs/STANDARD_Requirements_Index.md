@@ -1,6 +1,6 @@
-# FCP2 Requirements Index: Spec-to-Implementation Matrix (V2-only)
+# Legacy FCP2 Requirements Index: Spec-to-Implementation Matrix
 
-> **Status**: NORMATIVE
+> **Status**: HISTORICAL REFERENCE
 > **Version**: 1.0.0
 > **Last Updated**: March 2026
 > **Bead Reference**: `flywheel_connectors-1n78.1`
@@ -9,14 +9,14 @@
 
 ## Purpose
 
-This document is the **single source of truth** mapping from:
+This document preserves the earlier V2 mapping from:
 - `FCP_Specification_V2.md`
 - `README.md`
 - `docs/fcp_model_connectors_rust.md`
 
 ...to the **owning Beads** (implementation + tests).
 
-**Goal**: Engineers should be able to implement FCP2 by following the Beads graph **without rereading the spec/docs**.
+**Goal**: Engineers tracing legacy V2 work should be able to follow the historical bead graph **without rereading the old spec/docs**. For current architectural truth, prefer `FCP_Specification_V3.md`, `README.md`, and the FCP3 migration/runbook surfaces.
 
 ---
 
@@ -472,7 +472,7 @@ Below, each chapter lists:
 
 # B) README Coverage Matrix — `README.md`
 
-The README is an overview; **when it conflicts with `FCP_Specification_V2.md`, implement the Spec**.
+The README is an overview; for current-reality conflicts, follow `FCP_Specification_V3.md` and present-day code. Use this matrix only for historical V2 traceability.
 
 ---
 
@@ -708,7 +708,8 @@ This standard is satisfied when:
 
 ## References
 
-- FCP_Specification_V2.md (canonical spec)
+- FCP_Specification_V3.md (current canonical spec)
+- FCP_Specification_V2.md (historical reference)
 - README.md (overview)
 - docs/fcp_model_connectors_rust.md (connector implementation guide)
 - STANDARD_Connector_Compliance.md (compliance checklist)

@@ -1,6 +1,6 @@
-# FCP V2 Connector Compliance Checklist (NORMATIVE)
+# Legacy FCP V2 Connector Compliance Checklist
 
-> **Status**: NORMATIVE
+> **Status**: HISTORICAL REFERENCE
 > **Version**: 1.0.0
 > **Last Updated**: January 2026
 > **Bead Reference**: `flywheel_connectors-dz01`
@@ -9,9 +9,9 @@
 
 ## Purpose
 
-This checklist captures all NORMATIVE requirements from FCP Specification V2 and docs/fcp_model_connectors_rust.md that every connector MUST satisfy. Use this as a reference when creating or reviewing connector beads.
+This checklist captures the earlier V2 requirements from `FCP_Specification_V2.md` and `docs/fcp_model_connectors_rust.md`. Keep using it when auditing legacy V2 connector plans or reconciling migration deltas, not as the canonical checklist for new FCP3 work.
 
-**Goal**: Provide a single authoritative, V2-only checklist of all mechanical connector compliance requirements so new connectors can be reviewed for conformance without re-reading the spec/docs.
+**Goal**: Preserve one place to review historical V2 connector requirements without re-reading the old spec/docs. For current FCP3 connector truth, prefer `FCP_Specification_V3.md`, the README, and the active migration/playbook docs.
 
 ---
 
@@ -459,7 +459,7 @@ deny_private_ranges = true
 
 This standard is satisfied when:
 
-- [ ] Checklist is V2-only and covers all NORMATIVE connector requirements
+- [ ] Checklist is clearly marked as a legacy V2 reference rather than canonical FCP3 guidance
 - [ ] Each section enables mechanical verification without implicit assumptions
 - [ ] Checklist is synchronized with Requirements Index (flywheel_connectors-1n78.1)
 - [ ] Compliance runner validates all checklist items
@@ -469,7 +469,8 @@ This standard is satisfied when:
 
 ## References
 
-- FCP_Specification_V2.md (canonical spec)
+- FCP_Specification_V3.md (current canonical spec)
+- FCP_Specification_V2.md (historical reference)
 - docs/fcp_model_connectors_rust.md (connector implementation guide)
 - STANDARD_Connector_Testing.md (connector testing requirements)
 - STANDARD_Testing_Logging.md (testing requirements)

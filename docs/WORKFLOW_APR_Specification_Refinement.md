@@ -1,4 +1,4 @@
-# WORKFLOW: Specification Refinement with APR (V2 docs)
+# WORKFLOW: Specification Refinement with APR (FCP3 docs)
 
 > **Status**: INFORMATIONAL
 > **Version**: 1.0.0
@@ -11,7 +11,7 @@
 
 This document captures the APR-based iterative specification refinement workflow so that engineers can run refinement rounds without rereading README.md.
 
-**Goal**: Continuously harden and clarify FCP2 documentation through multi-round AI-assisted review.
+**Goal**: Continuously harden and clarify FCP3 documentation through multi-round AI-assisted review, while using V2-era materials only as historical delta references when needed.
 
 ---
 
@@ -21,8 +21,9 @@ The APR (Automated Plan Reviser Pro) + Oracle (browser automation) workflow revi
 
 | Document | Role |
 |----------|------|
-| `FCP_Specification_V2.md` | Authoritative protocol specification |
-| `docs/fcp_model_connectors_rust.md` | Connector authoring + implementation guidance |
+| `FCP_Specification_V3.md` | Canonical protocol and conformance specification |
+| `FCP_Specification_V2.md` | Historical / interoperability reference only |
+| `docs/fcp_model_connectors_rust.md` | Legacy connector authoring + implementation guide used for migration deltas |
 | `README.md` | Overview + ops/dev UX |
 
 ---
@@ -36,7 +37,7 @@ The APR (Automated Plan Reviser Pro) + Oracle (browser automation) workflow revi
 - Integrating APR feedback back into docs in a disciplined way
 
 **Out of Scope:**
-- FCP1 backwards compatibility (FCP2 is a clean cutover)
+- FCP1/FCP2 compatibility shims or reviving V2 as the blessed target
 - Node/npm tooling as a runtime platform requirement (APR/Oracle are dev tooling only)
 
 ---
@@ -72,7 +73,7 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/automated_plan_r
 npm install -g @steipete/oracle
 ```
 
-**Note**: Oracle is development tooling only; it is not part of the FCP2 runtime distribution.
+**Note**: Oracle is development tooling only; it is not part of the FCP runtime distribution.
 
 ---
 
@@ -84,7 +85,7 @@ Expected document configuration:
 ```yaml
 documents:
   readme: README.md
-  spec: FCP_Specification_V2.md
+  spec: FCP_Specification_V3.md
   implementation: docs/fcp_model_connectors_rust.md
 ```
 
@@ -152,20 +153,20 @@ When APR produces feedback for round N, follow this process:
 
 Don't assume partial memory. Read ALL context:
 - `AGENTS.md` and `README.md`
-- `FCP_Specification_V2.md`
-- `docs/fcp_model_connectors_rust.md`
+- `FCP_Specification_V3.md`
+- `docs/fcp_model_connectors_rust.md` only when reconciling legacy V2 assumptions that still appear in the repo
 
 ### Step 2: Integrate Feedback Carefully
 
 - Treat GPT output as **suggestions**; validate each claim against the spec's goals
 - Prefer "mechanical enforcement" changes over editorial prose
-- Ensure changes do not introduce FCP1 compatibility shims
+- Ensure changes do not introduce FCP1/FCP2 compatibility shims or re-bless V2-era execution models
 
 ### Step 3: Harmonize Documents (In Order)
 
-1. **Update `README.md` first** — Human-facing story
-2. **Update `docs/fcp_model_connectors_rust.md` second** — Keep connector authoring aligned
-3. **Update `FCP_Specification_V2.md` last** — Authoritative, ensure correctness
+1. **Update `README.md` first** — Human-facing story and operator truth
+2. **Update migration / legacy-reference docs second** — Keep cleanup notes honest without reintroducing stale mental models
+3. **Update `FCP_Specification_V3.md` last** — Canonical, ensure correctness
 
 ### Step 4: Commit
 
@@ -191,19 +192,20 @@ Commit in logical groupings with clear messages.
 
 | File | Purpose |
 |------|---------|
-| `FCP_Specification_V2.md` | Main protocol specification |
-| `docs/fcp_model_connectors_rust.md` | Rust implementation guide |
+| `FCP_Specification_V3.md` | Main protocol specification |
+| `FCP_Specification_V2.md` | Historical / interoperability reference only |
+| `docs/fcp_model_connectors_rust.md` | Legacy Rust implementation guide |
 | `.apr/workflows/fcp.yaml` | Workflow configuration |
 | `.apr/rounds/fcp/round_N.md` | GPT Pro output per round |
 
 ---
 
-## V2-Only Reminder
+## FCP3-Only Reminder
 
-This workflow explicitly keeps FCP2 **V2-only**:
+This workflow explicitly keeps the repository **FCP3-first**:
 - No FCP1 compatibility work
-- No hybrid translator layer
-- Clean cutover only
+- No FCP2 revival as the canonical execution model
+- No hybrid translator layer as the blessed steady state
 
 When reviewing suggestions, reject any that would introduce backwards compatibility shims.
 
@@ -214,7 +216,7 @@ When reviewing suggestions, reject any that would introduce backwards compatibil
 This workflow document is complete when:
 
 - [ ] A new contributor can run APR rounds without consulting README.md
-- [ ] The workflow notes explicitly maintain FCP2 V2-only (no FCP1 compatibility)
+- [ ] The workflow notes explicitly maintain an FCP3-first posture without compatibility shims
 - [ ] Remote mode (Oracle serve) is documented
 - [ ] Integration discipline is clearly specified
 

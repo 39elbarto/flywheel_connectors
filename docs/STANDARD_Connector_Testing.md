@@ -1,6 +1,6 @@
-# FCP2 Connector Testing Requirements and Quality Gates
+# Legacy FCP2 Connector Testing Requirements and Quality Gates
 
-> **Status**: NORMATIVE
+> **Status**: HISTORICAL REFERENCE
 > **Version**: 1.0.0
 > **Last Updated**: February 3, 2026
 > **Bead Reference**: `flywheel_connectors-h32`
@@ -9,9 +9,9 @@
 
 ## Purpose
 
-This document defines **mandatory** testing requirements and quality gates for all FCP2 connectors.
+This document defines the earlier testing requirements and quality gates for FCP2 connectors.
 It is connector-specific and **adds** to the platform-wide testing/logging requirements in
-`STANDARD_Testing_Logging.md`.
+`STANDARD_Testing_Logging.md`, but it should now be treated as legacy guidance when reconciling older connector work.
 
 **Goal**: Every connector is mechanically verifiable with mock-only unit tests and deterministic E2E
 compliance runs. Failures must be diagnosable from CI artifacts alone.
@@ -24,7 +24,7 @@ compliance runs. Failures must be diagnosable from CI artifacts alone.
 - **Connector compliance**: `STANDARD_Connector_Compliance.md` (requirements checklist).
 - **Connector planning**: `STANDARD_Connector_Spec_Template.md` (bead template and E2E structure).
 
-If any requirements conflict, this document is authoritative **for connectors**.
+If any requirements conflict while auditing legacy V2 connector work, this document is authoritative **for that legacy testing model**. For current FCP3 work, defer to `FCP_Specification_V3.md`, the README, and active migration/runbook docs.
 
 ---
 
@@ -203,4 +203,5 @@ When applicable, include:
 - `STANDARD_Testing_Logging.md` (platform testing + logging baseline)
 - `STANDARD_Connector_Compliance.md` (compliance checklist)
 - `STANDARD_Connector_Spec_Template.md` (connector bead template)
-- `FCP_Specification_V2.md` (canonical spec)
+- `FCP_Specification_V3.md` (current canonical spec)
+- `FCP_Specification_V2.md` (historical reference)

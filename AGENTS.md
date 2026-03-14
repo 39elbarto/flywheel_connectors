@@ -58,7 +58,8 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 | Crate | Purpose |
 |-------|---------|
-| `tokio` | Async runtime (full features) |
+| `asupersync` | Async runtime (FCP3 native; replaces tokio) |
+| `fcp-async-core` | Runtime abstraction layer (wraps asupersync, quarantines tokio compat) |
 | `async-trait` | Async trait support for connector interfaces |
 | `futures-util` | Async stream combinators |
 | `serde` + `serde_json` | JSON serialization for FCP protocol messages |
@@ -69,7 +70,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | `hpke` | Hybrid Public Key Encryption |
 | `coset` | COSE (CBOR Object Signing and Encryption) |
 | `reqwest` | HTTP client for request-response connectors |
-| `tokio-tungstenite` | WebSocket support for streaming connectors |
+| `asupersync` (websocket) | WebSocket support for streaming connectors (native, replaces tokio-tungstenite) |
 | `wasmtime` + `wasmtime-wasi` | WASI sandbox runtime for connector isolation |
 | `raptorq` | Fountain codes for reliable data transfer |
 | `tough` + `sigstore` | Supply-chain hardening (TUF + Sigstore verification) |

@@ -1088,8 +1088,19 @@ mod tests {
         assert!(matches!(err, fcp_async_core::AsyncError::Cancelled));
         cancel_task.await.expect("cancel task should join");
 
-        let requests = mock.received_requests().await;
-        assert_eq!(requests.len(), 1);
+        let mut observed_request = false;
+        for _ in 0..50 {
+            let requests = mock.received_requests().await;
+            if requests.len() == 1 {
+                observed_request = true;
+                break;
+            }
+            fcp_async_core::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            observed_request,
+            "delayed request should still reach wiremock before cancellation wins"
+        );
     }
 
     // ---- MockApiServer: expect_json with various content types ----

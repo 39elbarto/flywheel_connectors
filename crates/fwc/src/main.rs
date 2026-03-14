@@ -6248,6 +6248,94 @@ fn artifact_source_kind_tag(kind: fcp_host::ArtifactSourceKind) -> &'static str 
     }
 }
 
+fn live_runtime_availability_state_tag(
+    observed_state: fcp_host::ObservedRuntimeState,
+) -> &'static str {
+    match observed_state {
+        fcp_host::ObservedRuntimeState::Running => "available",
+        fcp_host::ObservedRuntimeState::Starting | fcp_host::ObservedRuntimeState::Degraded => {
+            "degraded"
+        }
+        fcp_host::ObservedRuntimeState::Stopped | fcp_host::ObservedRuntimeState::Missing => {
+            "unavailable"
+        }
+        fcp_host::ObservedRuntimeState::Unknown => "unknown",
+    }
+}
+
+fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
+    let placement_tracked = status
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.placement.as_ref())
+        .is_some();
+    let source_state = status.artifact.as_ref().map_or(Value::Null, |artifact| {
+        Value::String(artifact_source_kind_tag(artifact.provenance.source_kind.clone()).to_owned())
+    });
+
+    json!({
+        "state": live_runtime_availability_state_tag(status.observed_state),
+        "desired_state": status.desired_state,
+        "observed_state": status.observed_state,
+        "artifact_recorded": status.artifact.is_some(),
+        "placement_tracked": placement_tracked,
+        "source_state": source_state,
+        "silent_fallback": false,
+        "explanation": match status.observed_state {
+            fcp_host::ObservedRuntimeState::Running => "The host reports the connector as running. Installed artifact provenance is authoritative on this route.",
+            fcp_host::ObservedRuntimeState::Starting => "The host is still converging this connector, so availability is degraded until the runtime settles.",
+            fcp_host::ObservedRuntimeState::Degraded => "The host reports degraded runtime health, so connector work should be treated as degraded until repair succeeds.",
+            fcp_host::ObservedRuntimeState::Stopped => "The host reports the connector as stopped, so work is currently unavailable on this runtime.",
+            fcp_host::ObservedRuntimeState::Missing => "The host reports the connector artifact/runtime as missing, so work is currently unavailable.",
+            fcp_host::ObservedRuntimeState::Unknown => "The host could not prove a concrete runtime state for this connector yet.",
+        },
+    })
+}
+
+fn mesh_offline_availability_fact(zone_supported: Option<bool>) -> Value {
+    json!({
+        "state": match zone_supported {
+            Some(false) => "unavailable-for-requested-zone",
+            Some(true) | None => "offline-planning-only",
+        },
+        "authoritative_scope": "workspace-manifests",
+        "live_runtime_proven": false,
+        "silent_fallback": false,
+        "explanation": match zone_supported {
+            Some(false) => "Workspace manifests say the requested zone is not declared for this connector, so this offline plan is unavailable for that zone.",
+            Some(true) => "Workspace manifests support the requested zone, but this remains an offline planning view rather than proof of live host availability.",
+            None => "Workspace manifests can support planning, but they do not prove live install state or current mesh coverage.",
+        },
+    })
+}
+
+fn install_verify_only_availability_fact(artifact: &PreparedPackageArtifact) -> Value {
+    json!({
+        "state": "local-verification-only",
+        "authoritative_scope": match artifact.source_kind {
+            PreparedPackageSourceKind::LocalPackageMetadataFile
+            | PreparedPackageSourceKind::LocalPackagedDirectory => "local-machine-only",
+            PreparedPackageSourceKind::LocalConnectorCrate
+            | PreparedPackageSourceKind::WorkspaceConnector => "local-workspace-only",
+        },
+        "host_inventory_mutated": false,
+        "silent_fallback": false,
+        "requested_package_source": &artifact.source_description,
+        "explanation": "This result proves only that the local install candidate verified successfully. It does not prove any live host install state, mesh mirror coverage, or offline runtime readiness.",
+    })
+}
+
+fn install_unknown_live_availability_fact(artifact: &PreparedPackageArtifact) -> Value {
+    json!({
+        "state": "unknown",
+        "authoritative_scope": "live-host-post-install-status",
+        "host_inventory_mutated": true,
+        "silent_fallback": false,
+        "requested_package_source": &artifact.source_description,
+        "explanation": "The host accepted the install request, but `fwc` could not fetch post-install connector status to prove the resulting live availability state.",
+    })
+}
+
 fn mesh_live_repair_hints(
     status: &HostConnectorAdminStatus,
     connector_slug: &str,
@@ -6355,6 +6443,8 @@ fn mesh_live_source_selection_value(
         || {
             json!({
                 "state": "unknown",
+                "selection_mode": "host-artifact-provenance",
+                "silent_fallback": false,
                 "provenance_recorded": false,
                 "source_kind": Value::Null,
                 "source_uri": Value::Null,
@@ -6363,6 +6453,8 @@ fn mesh_live_source_selection_value(
         |artifact| {
             json!({
                 "state": artifact_source_kind_tag(artifact.provenance.source_kind.clone()),
+                "selection_mode": "host-artifact-provenance",
+                "silent_fallback": false,
                 "provenance_recorded": true,
                 "source_kind": artifact_source_kind_tag(artifact.provenance.source_kind.clone()),
                 "source_uri": &artifact.provenance.source_uri,
@@ -6484,6 +6576,7 @@ fn mesh_availability_dispatch(
                 "last_journal_sequence": status.last_journal_sequence,
                 "drift": &status.drift,
             },
+            "availability_fact": mesh_live_availability_fact(&status),
             "source_selection": mesh_live_source_selection_value(status.artifact.as_ref()),
             "offline_readiness": mesh_live_offline_readiness_value(status.artifact.as_ref()),
             "repair_hints": repair_hints,
@@ -6532,6 +6625,7 @@ fn mesh_availability_dispatch(
             .any(|candidate| candidate == zone)
     });
     let repair_hints = mesh_offline_repair_hints(&connector.slug, zone_supported);
+    let availability_fact = mesh_offline_availability_fact(zone_supported);
     let offline_readiness = json!({
         "state": match zone_supported {
             Some(true) => "declared-in-manifest",
@@ -6586,8 +6680,11 @@ fn mesh_availability_dispatch(
             "host_installed": Value::Null,
             "declared_operation_count": connector.detail.summary.operation_count,
         },
+        "availability_fact": availability_fact,
         "source_selection": {
             "state": "workspace-manifest",
+            "selection_mode": "workspace-manifest-planning",
+            "silent_fallback": false,
             "provenance_recorded": false,
             "source_uri": &connector.manifest_path,
         },
@@ -11950,7 +12047,7 @@ fn read_json_file(path: &PathBuf) -> Result<Value> {
     serde_json::from_str(&raw).with_context(|| format!("invalid JSON file: {}", path.display()))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum PreparedPackageSourceKind {
     LocalPackageMetadataFile,
     LocalPackagedDirectory,
@@ -11992,6 +12089,8 @@ struct PreparedPackageArtifact {
 fn package_source_selection_value(artifact: &PreparedPackageArtifact) -> Value {
     json!({
         "state": artifact.source_kind.state(),
+        "selection_mode": "explicit-input",
+        "silent_fallback": false,
         "requested_source": &artifact.requested_source,
         "source_description": &artifact.source_description,
         "resolved_input_path": artifact.resolved_input_path.display().to_string(),
@@ -12025,6 +12124,8 @@ fn package_local_offline_readiness_value(artifact: &PreparedPackageArtifact) -> 
 fn install_unknown_live_source_selection_value(artifact: &PreparedPackageArtifact) -> Value {
     json!({
         "state": "unknown",
+        "selection_mode": "post-install-status-unavailable",
+        "silent_fallback": false,
         "provenance_recorded": false,
         "source_kind": Value::Null,
         "source_uri": Value::Null,
@@ -12036,6 +12137,7 @@ fn install_unknown_live_source_selection_value(artifact: &PreparedPackageArtifac
 fn install_unknown_live_offline_readiness_value(artifact: &PreparedPackageArtifact) -> Value {
     json!({
         "state": "unknown",
+        "silent_fallback": false,
         "explanation": "The host accepted the install request, but `fwc` could not fetch post-install connector status, so offline readiness remains unknown until a later host-backed check succeeds.",
         "requested_package_source": &artifact.source_description,
     })
@@ -12080,6 +12182,7 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
             "package_source_selection": package_source_selection_value(&artifact),
             "package": package_output_json(&artifact),
             "candidate": connector_descriptor_json(&candidate, None),
+            "availability_fact": install_verify_only_availability_fact(&artifact),
             "source_selection": package_source_selection_value(&artifact),
             "offline_readiness": package_local_offline_readiness_value(&artifact),
             "verification": artifact.verification,
@@ -12167,6 +12270,10 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     }
 
     let post_install_status = client.connector_status(applied.current.id.as_str()).ok();
+    let post_install_availability_fact = post_install_status.as_ref().map_or_else(
+        || install_unknown_live_availability_fact(&artifact),
+        mesh_live_availability_fact,
+    );
     let post_install_source_selection = post_install_status.as_ref().map_or_else(
         || install_unknown_live_source_selection_value(&artifact),
         |status| mesh_live_source_selection_value(status.artifact.as_ref()),
@@ -12198,6 +12305,7 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
         "connectors_file": applied.connectors_file,
         "package": package_output_json(&artifact),
         "installed": connector_descriptor_json(&applied.current, None),
+        "availability_fact": post_install_availability_fact,
         "source_selection": post_install_source_selection,
         "offline_readiness": post_install_offline_readiness,
         "verification": artifact.verification,
@@ -22828,7 +22936,11 @@ mod tests {
         })
     }
 
-    fn mock_connector_admin_status_json() -> Value {
+    fn mock_connector_admin_status_with_artifact(
+        source_kind: &str,
+        source_uri: &str,
+        placement: Value,
+    ) -> Value {
         json!({
             "connector_id": "fcp.github:enterprise:v1",
             "desired_state": "enabled",
@@ -22838,8 +22950,8 @@ mod tests {
             "active_config_revision_id": 41,
             "artifact": {
                 "provenance": {
-                    "source_kind": "registry",
-                    "source_uri": "registry://connectors/fcp.github:enterprise:v1",
+                    "source_kind": source_kind,
+                    "source_uri": source_uri,
                     "content_hash": "b3:1234",
                     "hash_verified": true,
                     "signature_b64": "ZmFrZQ==",
@@ -22847,14 +22959,7 @@ mod tests {
                     "manifest_version": "1.2.3",
                     "size_bytes": 424242
                 },
-                "placement": {
-                    "min_nodes": 3,
-                    "max_node_fraction_bps": 5000,
-                    "preferred_devices": [],
-                    "excluded_devices": [],
-                    "target_coverage_bps": 10000,
-                    "min_source_diversity": 2
-                },
+                "placement": placement,
                 "recorded_at": "2026-03-12T00:00:00Z",
                 "recorded_by": "registry-sync"
             },
@@ -22863,6 +22968,21 @@ mod tests {
             "drift": Value::Null,
             "evaluated_at": "2026-03-12T00:00:00Z"
         })
+    }
+
+    fn mock_connector_admin_status_json() -> Value {
+        mock_connector_admin_status_with_artifact(
+            "registry",
+            "registry://connectors/fcp.github:enterprise:v1",
+            json!({
+                "min_nodes": 3,
+                "max_node_fraction_bps": 5000,
+                "preferred_devices": [],
+                "excluded_devices": [],
+                "target_coverage_bps": 10000,
+                "min_source_diversity": 2
+            }),
+        )
     }
 
     fn mock_connector_missing_status_json() -> Value {
@@ -22880,6 +23000,40 @@ mod tests {
                 "kind": "enabled_but_missing",
                 "recovery_action": "reinstall_connector",
                 "message": "Connector should be enabled but the artifact/runtime is missing."
+            },
+            "evaluated_at": "2026-03-12T00:00:00Z"
+        })
+    }
+
+    fn mock_connector_degraded_status_json() -> Value {
+        json!({
+            "connector_id": "fcp.github:enterprise:v1",
+            "desired_state": "enabled",
+            "observed_state": "degraded",
+            "lifecycle": Value::Null,
+            "pinned_version": "1.2.3",
+            "active_config_revision_id": 7,
+            "artifact": {
+                "provenance": {
+                    "source_kind": "registry",
+                    "source_uri": "registry://connectors/fcp.github:enterprise:v1",
+                    "content_hash": "b3:9999",
+                    "hash_verified": true,
+                    "signature_b64": "ZmFrZQ==",
+                    "signature_verified": true,
+                    "manifest_version": "1.2.3",
+                    "size_bytes": 424242
+                },
+                "placement": Value::Null,
+                "recorded_at": "2026-03-12T00:00:00Z",
+                "recorded_by": "registry-sync"
+            },
+            "config_revision_count": 9,
+            "last_journal_sequence": 42,
+            "drift": {
+                "kind": "enabled_but_degraded",
+                "recovery_action": "repair_connector",
+                "message": "connector health has degraded while the desired state still expects active service"
             },
             "evaluated_at": "2026-03-12T00:00:00Z"
         })
@@ -25682,7 +25836,13 @@ deny_ptrace = true
             payload["package_source_selection"]["state"],
             "local-package-output-file"
         );
+        assert_eq!(
+            payload["package_source_selection"]["silent_fallback"],
+            false
+        );
+        assert_eq!(payload["availability_fact"]["state"], "available");
         assert_eq!(payload["source_selection"]["source_kind"], "registry");
+        assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(
             payload["offline_readiness"]["state"],
             "tracked-by-placement-policy"
@@ -25690,6 +25850,117 @@ deny_ptrace = true
         assert_eq!(
             payload["installed"]["canonical_id"],
             "fcp.github:enterprise:v1"
+        );
+    }
+
+    #[test]
+    fn execute_install_surfaces_unknown_live_availability_when_status_fetch_fails() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
+        let package_output_path = package_output_path.display().to_string();
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/connectors/apply".to_owned(),
+                    mock_inventory_mutation_response_json(
+                        ConnectorInventoryMutationKind::Install,
+                        false,
+                        ManagedConnectorConfig {
+                            id: "fcp.github:enterprise:v1".to_string(),
+                            binary: "/opt/fcp/github-enterprise".to_string(),
+                            name: Some("GitHub Enterprise".to_string()),
+                            description: Some("Live installed GitHub connector".to_string()),
+                            args: Vec::new(),
+                            env: StdBTreeMap::new(),
+                            config: None,
+                            categories: vec!["code".to_string()],
+                            version: Some("1.2.4".to_string()),
+                        },
+                        None,
+                    ),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    json!({ "status": "not-a-valid-admin-status" }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "install",
+            &package_output_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["availability_fact"]["state"], "unknown");
+        assert_eq!(payload["source_selection"]["state"], "unknown");
+        assert_eq!(payload["source_selection"]["silent_fallback"], false);
+        assert_eq!(payload["offline_readiness"]["state"], "unknown");
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+    }
+
+    #[test]
+    fn execute_install_surfaces_unknown_post_install_availability_when_status_lookup_fails() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
+        let package_output_path = package_output_path.display().to_string();
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/connectors/apply".to_owned(),
+                mock_inventory_mutation_response_json(
+                    ConnectorInventoryMutationKind::Install,
+                    false,
+                    ManagedConnectorConfig {
+                        id: "fcp.github:enterprise:v1".to_string(),
+                        binary: "/opt/fcp/github-enterprise".to_string(),
+                        name: Some("GitHub Enterprise".to_string()),
+                        description: Some("Live installed GitHub connector".to_string()),
+                        args: Vec::new(),
+                        env: StdBTreeMap::new(),
+                        config: None,
+                        categories: vec!["code".to_string()],
+                        version: Some("1.2.4".to_string()),
+                    },
+                    None,
+                ),
+            )]),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "install",
+            &package_output_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["availability_fact"]["state"], "unknown");
+        assert_eq!(payload["source_selection"]["state"], "unknown");
+        assert_eq!(payload["offline_readiness"]["state"], "unknown");
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .is_some_and(|warnings| warnings.iter().any(|warning| {
+                    warning.as_str().is_some_and(|warning| {
+                        warning.contains("could not read post-install connector status")
+                    })
+                }))
         );
     }
 
@@ -26883,7 +27154,13 @@ deny_ptrace = true
         assert_eq!(payload["source"], "workspace-manifests");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(
+            payload["availability_fact"]["state"],
+            "offline-planning-only"
+        );
+        assert_eq!(payload["availability_fact"]["silent_fallback"], false);
         assert_eq!(payload["source_selection"]["state"], "workspace-manifest");
+        assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(payload["offline_readiness"]["supported_by_manifest"], true);
     }
 
@@ -26923,7 +27200,10 @@ deny_ptrace = true
             payload["connector"]["canonical_id"],
             "fcp.github:enterprise:v1"
         );
+        assert_eq!(payload["availability_fact"]["state"], "available");
+        assert_eq!(payload["availability_fact"]["silent_fallback"], false);
         assert_eq!(payload["source_selection"]["source_kind"], "registry");
+        assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(
             payload["offline_readiness"]["state"],
             "tracked-by-placement-policy"
@@ -26932,6 +27212,50 @@ deny_ptrace = true
             payload["explanation"]
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
+        );
+    }
+
+    #[test]
+    fn execute_mesh_explain_availability_with_host_surfaces_unplaced_local_artifact_truth() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    mock_connector_admin_status_with_artifact(
+                        "local_path",
+                        "/opt/fcp/cache/github-enterprise",
+                        Value::Null,
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "mesh",
+            "explain-availability",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["source_selection"]["source_kind"], "local-path");
+        assert_eq!(
+            payload["source_selection"]["source_uri"],
+            "/opt/fcp/cache/github-enterprise"
+        );
+        assert_eq!(
+            payload["offline_readiness"]["state"],
+            "artifact-recorded-without-placement-policy"
         );
     }
 
@@ -26994,12 +27318,53 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["subcommand"], "repair-hints");
         assert_eq!(payload["inventory"]["observed_state"], "missing");
+        assert_eq!(payload["availability_fact"]["state"], "unavailable");
         assert!(
             payload["repair_hints"]
                 .as_array()
                 .is_some_and(|items| items.iter().any(|item| {
                     item.as_str()
                         .is_some_and(|item| item.contains("verified runtime artifact"))
+                }))
+        );
+    }
+
+    #[test]
+    fn execute_mesh_availability_with_host_surfaces_degraded_state() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    mock_connector_degraded_status_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "mesh",
+            "availability",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["availability_fact"]["state"], "degraded");
+        assert_eq!(payload["inventory"]["observed_state"], "degraded");
+        assert!(
+            payload["repair_hints"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|item| item.contains("fwc doctor --host"))
                 }))
         );
     }
@@ -32228,6 +32593,11 @@ depends_on = ["missing"]
             payload["source_selection"]["state"],
             "local-package-output-file"
         );
+        assert_eq!(payload["source_selection"]["silent_fallback"], false);
+        assert_eq!(
+            payload["availability_fact"]["state"],
+            "local-verification-only"
+        );
         assert_eq!(
             payload["offline_readiness"]["state"],
             "local-artifact-present"
@@ -36656,6 +37026,10 @@ depends_on = ["missing"]
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["command"], "install");
         assert_eq!(payload["mode"], "verify-only");
+        assert_eq!(
+            payload["availability_fact"]["state"],
+            "local-verification-only"
+        );
         assert!(
             payload["message"]
                 .as_str()

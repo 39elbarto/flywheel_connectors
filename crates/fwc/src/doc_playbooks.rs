@@ -1903,15 +1903,21 @@ mod tests {
         let guides = get_migration_guides();
         // Verify we cover FCP 2.x -> 3.0, 3.0 -> 3.1, 3.1 -> 3.2
         let ranges: Vec<String> = guides.iter().map(|g| g.version_range()).collect();
-        assert!(ranges
-            .iter()
-            .any(|r| r.contains("2.x") && r.contains("3.0")));
-        assert!(ranges
-            .iter()
-            .any(|r| r.contains("3.0") && r.contains("3.1")));
-        assert!(ranges
-            .iter()
-            .any(|r| r.contains("3.1") && r.contains("3.2")));
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.contains("2.x") && r.contains("3.0"))
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.contains("3.0") && r.contains("3.1"))
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|r| r.contains("3.1") && r.contains("3.2"))
+        );
     }
 
     // ── PlaybookIndex tests ───────────────────────────────────────────

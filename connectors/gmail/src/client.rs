@@ -3,12 +3,19 @@
 //! Uses `fcp-google-discovery` shared auth substrate for unified credential
 //! handling (bearer tokens, credential references, OAuth refresh).
 
-use std::fmt::Write;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_google_discovery::auth::GoogleMaterializedAuth;
-use reqwest::{Client, Response, StatusCode};
+use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
+use fcp_google_discovery::executor::{
+    GoogleApiError, GoogleExecuteRequest, GoogleExecuteResponse, GoogleResponseBody,
+    GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
+};
+use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use reqwest::{Client, StatusCode, Url, header};
 use tracing::{debug, instrument, warn};
 
 use crate::{
@@ -27,9 +34,8 @@ pub const DEFAULT_BASE_URL: &str = "https://gmail.googleapis.com/gmail/v1";
 /// Auth is handled via the shared `GoogleMaterializedAuth` from
 /// `fcp-google-discovery`, which supports bearer tokens and secretless
 /// credential references.
-#[derive(Debug)]
 pub struct GmailClient {
-    client: Client,
+    executor: GoogleRestExecutor,
     auth: GoogleMaterializedAuth,
     base_url: String,
     max_retries: u32,
@@ -38,17 +44,44 @@ pub struct GmailClient {
     total_requests: AtomicU64,
 }
 
+impl fmt::Debug for GmailClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GmailClient")
+            .field("auth", &self.auth_redacted_label())
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl GmailClient {
+    /// Create a new Gmail client with a direct OAuth access token.
+    pub fn new(token: impl Into<String>) -> GmailResult<Self> {
+        Self::new_with_auth(GoogleMaterializedAuth::BearerToken {
+            access_token: token.into(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: Vec::new(),
+            quota_project_id: None,
+        })
+    }
+
     /// Create a new Gmail client with shared Google auth.
     pub fn new_with_auth(auth: GoogleMaterializedAuth) -> GmailResult<Self> {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
+
         let client = Client::builder()
+            .default_headers(headers)
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-gmail/0.1.0")
             .build()
             .map_err(GmailError::Http)?;
 
         Ok(Self {
-            client,
+            executor: GoogleRestExecutor::new().with_client(client),
             auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
@@ -95,12 +128,10 @@ impl GmailClient {
     #[must_use]
     pub fn auth_redacted_label(&self) -> String {
         match &self.auth {
-            GoogleMaterializedAuth::BearerToken { source, .. } => {
-                format!("bearer:{source}")
+            GoogleMaterializedAuth::BearerToken { source, .. } => source.to_string(),
+            GoogleMaterializedAuth::CredentialReference { credential_id, .. } => {
+                format!("credential_id:{credential_id}")
             }
-            GoogleMaterializedAuth::CredentialReference {
-                credential_id, ..
-            } => format!("credential_id:{credential_id}"),
         }
     }
 
@@ -247,7 +278,10 @@ impl GmailClient {
     // ── Internal HTTP helpers ────────────────────────────────────
 
     async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> GmailResult<T> {
-        self.get_with_params(url, &[]).await
+        let response = self
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
     }
 
     async fn get_with_params<T: serde::de::DeserializeOwned>(
@@ -269,41 +303,7 @@ impl GmailClient {
                 let _ = write!(url, "{key}={encoded}");
             }
         }
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self.apply_auth(self.client.get(&url)).send().await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(GmailError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
-                    }
-                    if let Some(err) = Self::check_api_error(&resp) {
-                        return Err(err);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
-                }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        self.get(&url).await
     }
 
     async fn post_json<T: serde::de::DeserializeOwned>(
@@ -311,92 +311,187 @@ impl GmailClient {
         url: &str,
         body: &serde_json::Value,
     ) -> GmailResult<T> {
+        let response = self
+            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
+    }
+
+    async fn execute_with_retry(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> GmailResult<GoogleExecuteResponse> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
-        let mut attempt = 0;
+        let mut last_err = None;
         let mut delay = Duration::from_millis(self.initial_delay_ms);
 
-        loop {
-            attempt += 1;
-            let response = self
-                .apply_auth(self.client.post(url))
-                .json(body)
-                .send()
-                .await;
+        for attempt in 0..=self.max_retries {
+            if attempt > 0 {
+                let wait = last_err
+                    .as_ref()
+                    .and_then(GmailError::retry_after)
+                    .unwrap_or(delay);
+                warn!(attempt, delay_ms = wait.as_millis(), "retrying request");
+                fcp_async_core::time::sleep(wait).await;
+                delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+            }
 
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(GmailError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
-                    }
-                    if let Some(err) = Self::check_api_error(&resp) {
-                        return Err(err);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
+            let redacted_url = redact_url(url);
+            debug!(url = %redacted_url, method = http_method, "request");
+
+            match self
+                .execute_once(http_method, url, body, response_mode)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) if error.is_retryable() && attempt < self.max_retries => {
+                    warn!(attempt, error = %error, "retryable error");
+                    last_err = Some(error);
                 }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
+                Err(error) => return Err(error),
             }
         }
+
+        Err(last_err.unwrap_or(GmailError::Api {
+            code: 500,
+            message: "Max retries exceeded".into(),
+        }))
     }
 
-    #[allow(clippy::option_option)]
-    fn check_rate_limit(response: &Response) -> Option<Option<Duration>> {
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(Duration::from_secs);
-            Some(retry_after)
-        } else {
-            None
+    async fn execute_once(
+        &self,
+        http_method: &'static str,
+        raw_url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> GmailResult<GoogleExecuteResponse> {
+        let parsed_url = Url::parse(raw_url).map_err(|error| GmailError::Api {
+            code: 400,
+            message: format!("invalid request url `{raw_url}`: {error}"),
+        })?;
+
+        let mut parameters: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (name, value) in parsed_url.query_pairs() {
+            parameters
+                .entry(name.into_owned())
+                .or_default()
+                .push(value.into_owned());
         }
+
+        let method_parameters = parameters
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    DiscoveryParameter {
+                        location: Some("query".to_string()),
+                        required: false,
+                        repeated: true,
+                        type_name: Some("string".to_string()),
+                        format: None,
+                        description: None,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let path = parsed_url.path().trim_start_matches('/').to_string();
+        let method = DiscoveryMethod {
+            key: format!("gmail.transport.{}", http_method.to_ascii_lowercase()),
+            id: format!("gmail.transport.{}", http_method.to_ascii_lowercase()),
+            http_method: http_method.to_string(),
+            path: path.clone(),
+            flat_path: None,
+            canonical_path: path,
+            resource_path: Vec::new(),
+            description: None,
+            scopes: Vec::new(),
+            request_ref: None,
+            response_ref: None,
+            parameters: method_parameters,
+            supports_media_download: http_method == "GET",
+            supports_media_upload: false,
+            media_upload: None,
+        };
+
+        let schemas = BTreeMap::new();
+        let mut base_url = parsed_url.origin().ascii_serialization();
+        if !base_url.ends_with('/') {
+            base_url.push('/');
+        }
+
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, &base_url);
+        request.parameters = parameters;
+        request.body = body.cloned();
+        request.response_mode = response_mode;
+        request.auth = Some(&self.auth);
+
+        self.executor
+            .execute(&request)
+            .await
+            .map_err(map_rest_error)
     }
+}
 
-    fn check_api_error(response: &Response) -> Option<GmailError> {
-        let status = response.status();
-        if status.is_success() {
-            return None;
+fn decode_json_response<T: serde::de::DeserializeOwned>(
+    response: GoogleExecuteResponse,
+) -> GmailResult<T> {
+    match response.body {
+        GoogleResponseBody::Json(value) => serde_json::from_value(value).map_err(GmailError::Json),
+        GoogleResponseBody::Binary(bytes) => {
+            serde_json::from_slice(&bytes).map_err(GmailError::Json)
         }
-
-        if status == StatusCode::UNAUTHORIZED {
-            return Some(GmailError::Unauthorized);
-        }
-
-        debug!(status = %status, "Gmail API returned error status");
-        None
+        GoogleResponseBody::Empty => Err(GmailError::Api {
+            code: response.status_code.into(),
+            message: "expected json response body".to_string(),
+        }),
     }
+}
 
-    /// Apply authentication headers to a request using the shared Google auth.
-    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.auth {
-            GoogleMaterializedAuth::BearerToken { access_token, .. } => {
-                builder.bearer_auth(access_token)
+fn map_rest_error(error: GoogleRestError) -> GmailError {
+    match error {
+        GoogleRestError::Http { source } => GmailError::Http(source),
+        GoogleRestError::JsonDecode { source } => GmailError::Json(source),
+        GoogleRestError::Api { error, .. } => map_google_api_error(error),
+        other => GmailError::Api {
+            code: 500,
+            message: other.to_string(),
+        },
+    }
+}
+
+fn map_google_api_error(error: GoogleApiError) -> GmailError {
+    match error.status_code {
+        code if code == StatusCode::UNAUTHORIZED.as_u16() => GmailError::Unauthorized,
+        code if code == StatusCode::TOO_MANY_REQUESTS.as_u16() => GmailError::RateLimited {
+            retry_after_secs: 60,
+        },
+        code => GmailError::Api {
+            code: u32::from(code),
+            message: error.message,
+        },
+    }
+}
+
+fn redact_url(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+
+    let pairs = parsed
+        .query_pairs()
+        .map(|(name, value)| {
+            if name.eq_ignore_ascii_case("key") {
+                (name.into_owned(), "redacted".to_string())
+            } else {
+                (name.into_owned(), value.into_owned())
             }
-            GoogleMaterializedAuth::CredentialReference {
-                credential_id,
-                quota_project_id,
-            } => {
-                let mut b = builder.header("X-FCP-Credential-ID", credential_id.to_string());
-                if let Some(project) = quota_project_id {
-                    b = b.header("x-goog-user-project", project.as_str());
-                }
-                b
-            }
-        }
-    }
+        })
+        .collect::<Vec<_>>();
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    parsed.to_string()
 }

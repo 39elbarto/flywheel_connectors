@@ -12,8 +12,14 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
+use fcp_core::ApprovalMode;
 use fcp_core::{CapabilityToken, FcpError};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_google_discovery::{
+    DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,
+    normalize_snapshot_bytes, policy::GooglePolicyCatalog,
+};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -735,6 +741,8 @@ async fn oauth_refresh_mode_self_check_ok_with_mocked_endpoints() {
         .and(path("/oauth/token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "ya29.integration-oauth-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
             "scope": "https://www.googleapis.com/auth/gmail.readonly"
         })))
         .mount(&mock_server)
@@ -856,4 +864,127 @@ async fn invoke_sync_history_persists_and_resumes_cursor() {
     assert_eq!(resumed["latest_history_id"], "501");
     assert_eq!(resumed["history_count"], 0);
     assert_eq!(resumed["used_persisted_cursor"], true);
+}
+
+fn generated_approval_name(mode: Option<ApprovalMode>) -> &'static str {
+    match mode {
+        None => "none",
+        Some(ApprovalMode::None) => "none",
+        Some(ApprovalMode::Policy) => "policy",
+        Some(ApprovalMode::Interactive) => "interactive",
+        Some(ApprovalMode::ElevationToken) => "elevation_token",
+    }
+}
+
+fn manifest_approval_name(mode: ManifestApprovalMode) -> &'static str {
+    match mode {
+        ManifestApprovalMode::None => "none",
+        ManifestApprovalMode::Policy => "policy",
+        ManifestApprovalMode::Interactive => "interactive",
+        ManifestApprovalMode::ElevationToken => "elevation_token",
+    }
+}
+
+/// Shared Gmail generation can be compared against the current handwritten baseline.
+///
+/// This intentionally captures the current overlap and the remaining drift:
+/// generated + manifest agree on the list/send capability + approval shape,
+/// while handwritten introspection still uses connector-local capability IDs and
+/// omits approval metadata. `sync_history` exists only in the handwritten
+/// introspection surface, with generated support coming from `listHistory`.
+#[fcp_async_core::runtime::test]
+async fn shared_generation_overlap_exposes_current_gmail_baseline_drift() {
+    let service = DiscoveryServiceId::new("gmail", "v1").expect("valid gmail service id");
+    let snapshot = normalize_snapshot_bytes(
+        &service,
+        include_str!("../../../crates/fcp-google-discovery/data/fixtures/gmail_discovery.v1.json")
+            .as_bytes(),
+        DiscoveryEndpointKind::Standard,
+        "https://example.test/discovery/gmail",
+    )
+    .expect("gmail discovery fixture should normalize")
+    .snapshot;
+    let policy = GooglePolicyCatalog::load_default().expect("google policy catalog");
+    let generated = generate_google_service_artifacts(&snapshot, &policy)
+        .expect("gmail generation should succeed");
+    let manifest =
+        ConnectorManifest::parse_str(include_str!("../manifest.toml")).expect("gmail manifest");
+
+    let connector = GmailConnector::new();
+    let introspection = connector.handle_introspect().await.unwrap();
+    let introspection_ops = introspection["operations"]
+        .as_array()
+        .expect("introspection operations array");
+
+    let generated_list = generated
+        .manifest_fragment
+        .operations
+        .iter()
+        .find(|op| op.operation_id == "gmail.users.messages.list")
+        .expect("generated list op");
+    let manifest_list = manifest
+        .provides
+        .operations
+        .get("gmail.list_messages")
+        .expect("manifest list op");
+    let introspection_list = introspection_ops
+        .iter()
+        .find(|op| op["id"] == "gmail.list_messages")
+        .expect("introspection list op");
+
+    assert_eq!(generated_list.capability, "gmail.read");
+    assert_eq!(manifest_list.capability.as_str(), generated_list.capability);
+    assert_eq!(
+        generated_approval_name(generated_list.approval_mode),
+        manifest_approval_name(manifest_list.requires_approval.clone())
+    );
+    assert_eq!(introspection_list["capability"], "gmail.messages.read");
+    assert!(introspection_list["requires_approval"].is_null());
+
+    let generated_send = generated
+        .manifest_fragment
+        .operations
+        .iter()
+        .find(|op| op.operation_id == "gmail.users.messages.send")
+        .expect("generated send op");
+    let manifest_send = manifest
+        .provides
+        .operations
+        .get("gmail.send_message")
+        .expect("manifest send op");
+    let introspection_send = introspection_ops
+        .iter()
+        .find(|op| op["id"] == "gmail.send_message")
+        .expect("introspection send op");
+
+    assert_eq!(generated_send.capability, "gmail.send");
+    assert_eq!(manifest_send.capability.as_str(), generated_send.capability);
+    assert_eq!(
+        generated_approval_name(generated_send.approval_mode),
+        manifest_approval_name(manifest_send.requires_approval.clone())
+    );
+    assert_eq!(introspection_send["capability"], "gmail.messages.send");
+    assert!(introspection_send["requires_approval"].is_null());
+
+    let generated_history = generated
+        .manifest_fragment
+        .operations
+        .iter()
+        .find(|op| op.operation_id == "gmail.users.messages.list_history")
+        .expect("generated history op");
+    let introspection_history = introspection_ops
+        .iter()
+        .find(|op| op["id"] == "gmail.sync_history")
+        .expect("introspection history op");
+
+    assert_eq!(generated_history.capability, "gmail.history.read");
+    assert_eq!(introspection_history["capability"], "gmail.history.read");
+    assert!(introspection_history["requires_approval"].is_null());
+    assert!(
+        !manifest
+            .provides
+            .operations
+            .contains_key("gmail.sync_history"),
+        "manifest still lacks the sync_history overlap row"
+    );
 }

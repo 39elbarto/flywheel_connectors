@@ -13,12 +13,19 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
+use fcp_google_discovery::{
+    auth::{GoogleAuthError, GoogleAuthSelection, GoogleAuthSourceKind, GoogleMaterializedAuth},
+    provisioning::load_default_google_provisioning_bundle,
+};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::GmailClient, error::GmailError};
+use crate::{
+    client::{DEFAULT_BASE_URL, GmailClient},
+    error::GmailError,
+};
 
 const DEFAULT_HISTORY_CURSOR_FILE: &str = "fcp-gmail-history-cursor.json";
 
@@ -110,17 +117,23 @@ impl GmailConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let base_url = parse_base_url(&params)?;
-        let required_scopes = parse_required_scopes(&params)?;
+        let required_scopes = resolve_gmail_required_scopes(&params)?;
         let history_cursor_path = parse_history_cursor_path(&params)?;
+        let mut auth_params = params.clone();
+        let auth_object = auth_params
+            .as_object_mut()
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "configure params must be a JSON object".into(),
+            })?;
+        auth_object.insert(
+            "required_scopes".to_string(),
+            json!(required_scopes.clone()),
+        );
 
         // Use shared Google auth substrate for credential resolution.
         let selection =
-            GoogleAuthSelection::from_connector_config(&params).map_err(|error| {
-                FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Invalid Google auth configuration: {error}"),
-                }
-            })?;
+            GoogleAuthSelection::from_connector_config(&auth_params).map_err(map_auth_error)?;
 
         let materialized =
             selection
@@ -131,12 +144,7 @@ impl GmailConnector {
                     message: format!("Failed to materialize Google auth: {error}"),
                 })?;
 
-        let granted_scopes = match &materialized {
-            GoogleMaterializedAuth::BearerToken {
-                granted_scopes, ..
-            } => granted_scopes.clone(),
-            GoogleMaterializedAuth::CredentialReference { .. } => Vec::new(),
-        };
+        let granted_scopes = materialized.granted_scopes().to_vec();
 
         let status = match &materialized {
             GoogleMaterializedAuth::CredentialReference { .. } => {
@@ -155,10 +163,7 @@ impl GmailConnector {
             details["granted_scopes"] = json!(granted_scopes);
         }
 
-        if let GoogleMaterializedAuth::CredentialReference {
-            credential_id, ..
-        } = &materialized
-        {
+        if let GoogleMaterializedAuth::CredentialReference { credential_id, .. } = &materialized {
             details["credential_id"] = json!(credential_id.to_string());
             details["note"] = json!(
                 "credential_id configured; live calls require egress proxy token materialization"
@@ -181,10 +186,10 @@ impl GmailConnector {
         self.client = Some(client);
         self.base.set_configured(true);
 
-        let auth_label = self
-            .client
-            .as_ref()
-            .map_or_else(|| "unknown".to_string(), GmailClient::auth_redacted_label);
+        let auth_label = self.config.as_ref().map_or_else(
+            || "unknown".to_string(),
+            |config| auth_label_for_materialized(&config.auth),
+        );
         info!(auth = %auth_label, status, "Gmail connector configured");
 
         Ok(json!({ "status": status, "details": details }))
@@ -250,20 +255,21 @@ impl GmailConnector {
     /// Returns [`FcpError`] if the health status cannot be determined.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let metrics = self.base.metrics();
-        let status = if self.client.is_some() {
-            "healthy"
-        } else if self.config.is_some() {
-            "degraded_pending_credential_materialization"
-        } else {
-            "not_configured"
+        let status = match self.config.as_ref() {
+            Some(GmailConfig {
+                auth: GoogleMaterializedAuth::CredentialReference { .. },
+                ..
+            }) => "degraded_pending_credential_materialization",
+            Some(_) => "healthy",
+            None => "not_configured",
         };
-        let auth_mode = self
-            .config
-            .as_ref()
-            .map_or("unconfigured", |config| config.auth_mode.label());
+        let auth_label = self.config.as_ref().map_or_else(
+            || "unconfigured".to_string(),
+            |config| auth_label_for_materialized(&config.auth),
+        );
         Ok(json!({
             "status": status,
-            "auth_mode": auth_mode,
+            "auth_mode": auth_label,
             "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
             "history_cursor_path": self.config.as_ref().map(|config| config.history_cursor_path.to_string_lossy().to_string()),
             "required_scopes": self.config.as_ref().map(|config| config.required_scopes.clone()).unwrap_or_default(),
@@ -304,7 +310,7 @@ impl GmailConnector {
         checks.push(DoctorCheck {
             name: "auth_mode".into(),
             passed: true,
-            message: format!("Auth mode: {}", config.auth_mode.label()),
+            message: format!("Auth mode: {}", auth_label_for_materialized(&config.auth)),
             critical: false,
         });
 
@@ -322,13 +328,13 @@ impl GmailConnector {
             critical: true,
         });
 
-        match (&config.auth_mode, &self.client) {
-            (GmailAuthMode::CredentialId(id), _) => {
+        match (&config.auth, &self.client) {
+            (GoogleMaterializedAuth::CredentialReference { credential_id, .. }, _) => {
                 checks.push(DoctorCheck {
                     name: "credential_materialization".into(),
                     passed: false,
                     message: format!(
-                        "credential_id {id} configured; token materialization required by egress proxy"
+                        "credential_id {credential_id} configured; token materialization required by egress proxy"
                     ),
                     critical: false,
                 });
@@ -339,7 +345,7 @@ impl GmailConnector {
                     critical: false,
                 });
             }
-            (GmailAuthMode::AccessToken | GmailAuthMode::OAuthRefresh { .. }, Some(client)) => {
+            (GoogleMaterializedAuth::BearerToken { .. }, Some(client)) => {
                 checks.push(DoctorCheck {
                     name: "credential_materialization".into(),
                     passed: true,
@@ -373,23 +379,46 @@ impl GmailConnector {
         }
 
         if !config.required_scopes.is_empty() {
-            let granted: BTreeSet<&str> =
-                config.granted_scopes.iter().map(String::as_str).collect();
-            let missing: Vec<String> = config
-                .required_scopes
-                .iter()
-                .filter(|scope| !granted.contains(scope.as_str()))
-                .cloned()
-                .collect();
+            let (passed, message, critical) = match &config.auth {
+                GoogleMaterializedAuth::BearerToken {
+                    source: GoogleAuthSourceKind::OAuthRefresh,
+                    ..
+                } => {
+                    let granted: BTreeSet<&str> =
+                        config.granted_scopes.iter().map(String::as_str).collect();
+                    let missing: Vec<String> = config
+                        .required_scopes
+                        .iter()
+                        .filter(|scope| !granted.contains(scope.as_str()))
+                        .cloned()
+                        .collect();
+                    if missing.is_empty() {
+                        (true, "All required scopes are present".into(), true)
+                    } else {
+                        (
+                            false,
+                            format!("Missing required scopes: {}", missing.join(", ")),
+                            true,
+                        )
+                    }
+                }
+                GoogleMaterializedAuth::CredentialReference { .. } => (
+                    true,
+                    "Scope validation deferred to credential_id materialization".into(),
+                    false,
+                ),
+                GoogleMaterializedAuth::BearerToken { .. } => (
+                    true,
+                    "Direct access token mode; required scopes cannot be introspected post-configure"
+                        .into(),
+                    false,
+                ),
+            };
             checks.push(DoctorCheck {
                 name: "scope_validation".into(),
-                passed: missing.is_empty(),
-                message: if missing.is_empty() {
-                    "All required scopes are present".into()
-                } else {
-                    format!("Missing required scopes: {}", missing.join(", "))
-                },
-                critical: true,
+                passed,
+                message,
+                critical,
             });
         }
 
@@ -405,13 +434,16 @@ impl GmailConnector {
             });
         };
 
-        if matches!(config.auth_mode, GmailAuthMode::CredentialId(_)) {
+        if matches!(
+            config.auth,
+            GoogleMaterializedAuth::CredentialReference { .. }
+        ) {
             let mut report = SelfCheckReport::degraded(
                 "credential_injection_required",
                 "Configured with credential_id; readiness depends on egress proxy token injection",
             );
             report.details = Some(json!({
-                "auth_mode": config.auth_mode.summary(),
+                "auth_mode": auth_label_for_materialized(&config.auth),
                 "base_url": config.base_url,
             }));
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
@@ -440,7 +472,7 @@ impl GmailConnector {
             }
         };
         report.details = Some(json!({
-            "auth_mode": config.auth_mode.summary(),
+            "auth_mode": auth_label_for_materialized(&config.auth),
             "base_url": config.base_url,
             "history_cursor_path": config.history_cursor_path.to_string_lossy().to_string(),
             "required_scopes": config.required_scopes,
@@ -813,9 +845,13 @@ impl GmailConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1161,6 +1197,87 @@ fn parse_required_scopes(params: &serde_json::Value) -> FcpResult<Vec<String>> {
     Ok(normalized)
 }
 
+fn parse_string_array_field(
+    params: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<Vec<String>>> {
+    let Some(value) = params.get(field) else {
+        return Ok(None);
+    };
+
+    let values = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("`{field}` must be an array of non-empty strings"),
+    })?;
+    if values.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must not be empty"),
+        });
+    }
+
+    let mut normalized = Vec::new();
+    for value in values {
+        let item = value.as_str().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must contain only strings"),
+        })?;
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("`{field}` entries must not be empty"),
+            });
+        }
+        normalized.push(trimmed.to_string());
+    }
+
+    Ok(Some(normalized))
+}
+
+fn resolve_gmail_required_scopes(params: &serde_json::Value) -> FcpResult<Vec<String>> {
+    let explicit_scopes = parse_required_scopes(params)?;
+    let scope_triggers = parse_string_array_field(params, "scope_triggers")?.unwrap_or_default();
+    if !explicit_scopes.is_empty() && !scope_triggers.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Provide either `required_scopes` or `scope_triggers`, not both".into(),
+        });
+    }
+    if !explicit_scopes.is_empty() {
+        return Ok(explicit_scopes);
+    }
+
+    let bundle =
+        load_default_google_provisioning_bundle("gmail").map_err(|error| FcpError::Internal {
+            message: format!("Failed to load embedded Gmail provisioning bundle: {error}"),
+        })?;
+    bundle
+        .scopes_for_triggers(scope_triggers)
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid Gmail scope trigger selection: {error}"),
+        })
+}
+
+#[allow(clippy::needless_pass_by_value)] // required by map_err(fn) signature
+fn map_auth_error(error: GoogleAuthError) -> FcpError {
+    match &error {
+        GoogleAuthError::ExactlyOneSourceRequired { count: 0 } => FcpError::InvalidRequest {
+            code: 1003,
+            message: "Provide exactly one auth source: none supplied".into(),
+        },
+        GoogleAuthError::ExactlyOneSourceRequired { .. } => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Provide exactly one auth source: {error}"),
+        },
+        _ => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid Google auth configuration: {error}"),
+        },
+    }
+}
+
 fn parse_history_cursor_path(params: &serde_json::Value) -> FcpResult<PathBuf> {
     if let Some(path) = params.get("history_cursor_path") {
         let raw = path.as_str().ok_or(FcpError::InvalidRequest {
@@ -1242,162 +1359,18 @@ fn parse_history_types(input: &serde_json::Value) -> FcpResult<Option<Vec<String
     Ok(Some(normalized))
 }
 
-fn parse_access_token(params: &serde_json::Value) -> Option<String> {
-    params
-        .get("token")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn parse_credential_id(params: &serde_json::Value) -> FcpResult<Option<CredentialId>> {
-    match params.get("credential_id") {
-        None => Ok(None),
-        Some(value) => {
-            let raw = value.as_str().ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "credential_id must be a string".into(),
-            })?;
-            let credential_id = CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
-                code: 1003,
-                message: "credential_id must be a valid UUID".into(),
-            })?;
-            Ok(Some(credential_id))
+/// Produce a redacted auth label from materialized auth for diagnostics.
+fn auth_label_for_materialized(auth: &GoogleMaterializedAuth) -> String {
+    match auth {
+        GoogleMaterializedAuth::BearerToken { source, .. } => source.to_string(),
+        GoogleMaterializedAuth::CredentialReference { credential_id, .. } => {
+            format!("credential_id:{credential_id}")
         }
     }
-}
-
-fn parse_oauth_refresh(
-    params: &serde_json::Value,
-) -> FcpResult<Option<GmailOAuthRefreshCredentials>> {
-    let Some(value) = params.get("oauth_refresh") else {
-        return Ok(None);
-    };
-    let obj = value.as_object().ok_or(FcpError::InvalidRequest {
-        code: 1003,
-        message: "oauth_refresh must be an object".into(),
-    })?;
-
-    let required_string = |key: &str| -> FcpResult<String> {
-        let value = obj
-            .get(key)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("oauth_refresh.{key} is required"),
-            })?;
-        Ok(value.to_string())
-    };
-
-    let token_url = obj
-        .get("token_url")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_OAUTH_TOKEN_URL);
-    let parsed_token_url = Url::parse(token_url).map_err(|error| FcpError::InvalidRequest {
-        code: 1003,
-        message: format!("oauth_refresh.token_url is invalid: {error}"),
-    })?;
-    if parsed_token_url.scheme() != "https"
-        && !parsed_token_url.host_str().is_some_and(is_local_test_host)
-    {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "oauth_refresh.token_url must use https unless targeting localhost for tests"
-                .into(),
-        });
-    }
-
-    Ok(Some(GmailOAuthRefreshCredentials {
-        client_id: required_string("client_id")?,
-        client_secret: required_string("client_secret")?,
-        refresh_token: required_string("refresh_token")?,
-        token_url: token_url.to_string(),
-    }))
-}
-
-async fn exchange_refresh_token(
-    oauth: &GmailOAuthRefreshCredentials,
-    required_scopes: &[String],
-) -> FcpResult<(String, Vec<String>)> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .user_agent("fcp-gmail/0.1.0")
-        .build()
-        .map_err(|error| FcpError::Internal {
-            message: format!("Failed to initialize OAuth HTTP client: {error}"),
-        })?;
-
-    let mut form = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("client_id", oauth.client_id.clone()),
-        ("client_secret", oauth.client_secret.clone()),
-        ("refresh_token", oauth.refresh_token.clone()),
-    ];
-    if !required_scopes.is_empty() {
-        form.push(("scope", required_scopes.join(" ")));
-    }
-
-    let response = client
-        .post(&oauth.token_url)
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded",
-        )
-        .body(encode_form_body(&form))
-        .send()
-        .await
-        .map_err(|error| FcpError::External {
-            service: "gmail_oauth".into(),
-            message: error.to_string(),
-            status_code: error.status().map(|status| status.as_u16()),
-            retryable: error.is_timeout() || error.is_connect(),
-            retry_after: None,
-        })?;
-
-    if !response.status().is_success() {
-        return Err(FcpError::Unauthorized {
-            code: 2001,
-            message: format!(
-                "OAuth token refresh failed with status {}",
-                response.status()
-            ),
-        });
-    }
-
-    let payload: GmailOAuthTokenResponse =
-        response.json().await.map_err(|error| FcpError::Internal {
-            message: format!("Failed to parse OAuth token response: {error}"),
-        })?;
-    let granted_scopes = parse_scope_string(payload.scope.as_deref().unwrap_or_default());
-
-    if !required_scopes.is_empty() {
-        let granted: BTreeSet<&str> = granted_scopes.iter().map(String::as_str).collect();
-        let missing: Vec<String> = required_scopes
-            .iter()
-            .filter(|scope| !granted.contains(scope.as_str()))
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            return Err(FcpError::Unauthorized {
-                code: 2001,
-                message: format!(
-                    "OAuth token is missing required scopes: {}",
-                    missing.join(", ")
-                ),
-            });
-        }
-    }
-
-    Ok((payload.access_token, granted_scopes))
 }
 
 fn endpoint_allowed_by_policy(endpoint: &str) -> bool {
-    let Ok(parsed) = Url::parse(endpoint) else {
+    let Ok(parsed) = reqwest::Url::parse(endpoint) else {
         return false;
     };
     if parsed.scheme() == "https" {
@@ -1408,41 +1381,6 @@ fn endpoint_allowed_by_policy(endpoint: &str) -> bool {
 
 fn is_local_test_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
-}
-
-fn parse_scope_string(scope: &str) -> Vec<String> {
-    scope
-        .split_whitespace()
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn encode_form_body(params: &[(&str, String)]) -> String {
-    let mut body = String::new();
-    for (index, (key, value)) in params.iter().enumerate() {
-        if index > 0 {
-            body.push('&');
-        }
-        append_form_component(&mut body, key);
-        body.push('=');
-        append_form_component(&mut body, value);
-    }
-    body
-}
-
-fn append_form_component(target: &mut String, value: &str) {
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                target.push(byte as char);
-            }
-            b' ' => target.push('+'),
-            _ => {
-                let _ = std::fmt::Write::write_fmt(target, format_args!("%{byte:02X}"));
-            }
-        }
-    }
 }
 
 fn determine_effective_start_history_id(
@@ -1591,6 +1529,7 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use fcp_core::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::{
@@ -1601,7 +1540,9 @@ mod tests {
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
             "gmail.send_message" | "gmail.send_draft" => "gmail.messages.send",
-            "gmail.get_message" | "gmail.list_messages" | "gmail.get_draft" => "gmail.messages.read",
+            "gmail.get_message" | "gmail.list_messages" | "gmail.get_draft" => {
+                "gmail.messages.read"
+            }
             "gmail.sync_history" => "gmail.history.read",
             "gmail.modify_message" | "gmail.trash_message" => "gmail.messages.modify",
             "gmail.get_thread" => "gmail.threads.read",
@@ -1621,50 +1562,31 @@ mod tests {
         CapabilityToken { raw: cose }
     }
 
-    // ── GmailAuthMode ──────────────────────────────────────────────
+    // ── GoogleMaterializedAuth label ─────────────────────────────────
 
     #[test]
-    fn auth_mode_access_token_label() {
-        assert_eq!(GmailAuthMode::AccessToken.label(), "access_token");
-    }
-
-    #[test]
-    fn auth_mode_credential_id_label() {
-        let id = CredentialId::new();
-        assert_eq!(GmailAuthMode::CredentialId(id).label(), "credential_id");
-    }
-
-    #[test]
-    fn auth_mode_oauth_refresh_label() {
-        let mode = GmailAuthMode::OAuthRefresh {
-            client_id: "cid".into(),
-            token_url: "https://example.com/token".into(),
+    fn auth_label_bearer_token() {
+        use fcp_google_discovery::auth::GoogleAuthSourceKind;
+        let auth = GoogleMaterializedAuth::BearerToken {
+            access_token: "ya29.test".into(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: vec![],
+            quota_project_id: None,
         };
-        assert_eq!(mode.label(), "oauth_refresh");
+        let label = auth_label_for_materialized(&auth);
+        assert_eq!(label, "access_token");
     }
 
     #[test]
-    fn auth_mode_access_token_summary() {
-        assert_eq!(GmailAuthMode::AccessToken.summary(), "access_token");
-    }
-
-    #[test]
-    fn auth_mode_credential_id_summary() {
-        let id = CredentialId::new();
-        let summary = GmailAuthMode::CredentialId(id).summary();
-        assert!(summary.starts_with("credential_id:"));
-        assert!(summary.contains(&id.to_string()));
-    }
-
-    #[test]
-    fn auth_mode_oauth_refresh_summary() {
-        let mode = GmailAuthMode::OAuthRefresh {
-            client_id: "my-client".into(),
-            token_url: "https://oauth.example.com/token".into(),
+    fn auth_label_credential_ref() {
+        let id = fcp_core::CredentialId::new();
+        let auth = GoogleMaterializedAuth::CredentialReference {
+            credential_id: id,
+            quota_project_id: None,
         };
-        let summary = mode.summary();
-        assert!(summary.contains("my-client"));
-        assert!(summary.contains("oauth.example.com"));
+        let label = auth_label_for_materialized(&auth);
+        assert!(label.starts_with("credential_id:"));
+        assert!(label.contains(&id.to_string()));
     }
 
     // ── DoctorResult ───────────────────────────────────────────────
@@ -1780,65 +1702,6 @@ mod tests {
         assert!(result.contains("gmail.googleapis.com"));
     }
 
-    // ── parse_access_token ─────────────────────────────────────────
-
-    #[test]
-    fn parse_access_token_present() {
-        let result = parse_access_token(&json!({"token": "ya29.test-token"}));
-        assert_eq!(result.as_deref(), Some("ya29.test-token"));
-    }
-
-    #[test]
-    fn parse_access_token_missing() {
-        let result = parse_access_token(&json!({}));
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn parse_access_token_empty() {
-        let result = parse_access_token(&json!({"token": ""}));
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn parse_access_token_whitespace() {
-        let result = parse_access_token(&json!({"token": "  "}));
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn parse_access_token_trims() {
-        let result = parse_access_token(&json!({"token": "  ya29.tok  "}));
-        assert_eq!(result.as_deref(), Some("ya29.tok"));
-    }
-
-    // ── parse_credential_id ────────────────────────────────────────
-
-    #[test]
-    fn parse_credential_id_valid() {
-        let id = CredentialId::new();
-        let result = parse_credential_id(&json!({"credential_id": id.to_string()})).unwrap();
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn parse_credential_id_missing() {
-        let result = parse_credential_id(&json!({})).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn parse_credential_id_invalid_uuid() {
-        let result = parse_credential_id(&json!({"credential_id": "not-a-uuid"}));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_credential_id_non_string() {
-        let result = parse_credential_id(&json!({"credential_id": 42}));
-        assert!(result.is_err());
-    }
-
     // ── parse_required_scopes ──────────────────────────────────────
 
     #[test]
@@ -1865,6 +1728,34 @@ mod tests {
     fn parse_required_scopes_trims_whitespace() {
         let result = parse_required_scopes(&json!({"required_scopes": ["  scope1  "]})).unwrap();
         assert_eq!(result[0], "scope1");
+    }
+
+    #[test]
+    fn resolve_gmail_required_scopes_defaults_to_readonly_bundle() {
+        let result = resolve_gmail_required_scopes(&json!({})).unwrap();
+        assert_eq!(
+            result,
+            vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_gmail_required_scopes_applies_scope_triggers() {
+        let result = resolve_gmail_required_scopes(&json!({
+            "scope_triggers": ["User enables outbound send or draft-send workflows."]
+        }))
+        .unwrap();
+        assert!(result.contains(&"https://www.googleapis.com/auth/gmail.readonly".to_string()));
+        assert!(result.contains(&"https://www.googleapis.com/auth/gmail.send".to_string()));
+    }
+
+    #[test]
+    fn resolve_gmail_required_scopes_rejects_mixed_inputs() {
+        let result = resolve_gmail_required_scopes(&json!({
+            "required_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+            "scope_triggers": ["User enables outbound send or draft-send workflows."]
+        }));
+        assert!(result.is_err());
     }
 
     // ── parse_history_cursor_path ──────────────────────────────────
@@ -1967,8 +1858,9 @@ mod tests {
 
     #[test]
     fn parse_history_types_valid() {
-        let result = parse_history_types(&json!({"history_types": ["messageAdded", "labelRemoved"]}))
-            .unwrap();
+        let result =
+            parse_history_types(&json!({"history_types": ["messageAdded", "labelRemoved"]}))
+                .unwrap();
         let types = result.unwrap();
         assert_eq!(types.len(), 2);
         assert!(types.contains(&"messageAdded".to_string()));
@@ -1990,84 +1882,6 @@ mod tests {
     fn parse_history_types_trims() {
         let result = parse_history_types(&json!({"history_types": ["  messageAdded  "]})).unwrap();
         assert_eq!(result.unwrap()[0], "messageAdded");
-    }
-
-    // ── parse_oauth_refresh ────────────────────────────────────────
-
-    #[test]
-    fn parse_oauth_refresh_absent() {
-        let result = parse_oauth_refresh(&json!({})).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn parse_oauth_refresh_valid() {
-        let result = parse_oauth_refresh(&json!({
-            "oauth_refresh": {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtoken",
-                "token_url": "https://oauth.example.com/token"
-            }
-        }))
-        .unwrap();
-        let creds = result.unwrap();
-        assert_eq!(creds.client_id, "cid");
-        assert_eq!(creds.client_secret, "csecret");
-        assert_eq!(creds.refresh_token, "rtoken");
-        assert_eq!(creds.token_url, "https://oauth.example.com/token");
-    }
-
-    #[test]
-    fn parse_oauth_refresh_default_token_url() {
-        let result = parse_oauth_refresh(&json!({
-            "oauth_refresh": {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtoken"
-            }
-        }))
-        .unwrap();
-        let creds = result.unwrap();
-        assert!(creds.token_url.contains("googleapis.com"));
-    }
-
-    #[test]
-    fn parse_oauth_refresh_missing_client_id() {
-        let result = parse_oauth_refresh(&json!({
-            "oauth_refresh": {
-                "client_secret": "csecret",
-                "refresh_token": "rtoken"
-            }
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_oauth_refresh_rejects_http_token_url() {
-        let result = parse_oauth_refresh(&json!({
-            "oauth_refresh": {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtoken",
-                "token_url": "http://remote.example.com/token"
-            }
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_oauth_refresh_allows_http_localhost() {
-        let result = parse_oauth_refresh(&json!({
-            "oauth_refresh": {
-                "client_id": "cid",
-                "client_secret": "csecret",
-                "refresh_token": "rtoken",
-                "token_url": "http://localhost:8080/token"
-            }
-        }))
-        .unwrap();
-        assert!(result.is_some());
     }
 
     // ── endpoint_allowed_by_policy ─────────────────────────────────
@@ -2122,57 +1936,6 @@ mod tests {
     fn is_local_test_host_remote() {
         assert!(!is_local_test_host("example.com"));
         assert!(!is_local_test_host("192.168.1.1"));
-    }
-
-    // ── encode_form_body ───────────────────────────────────────────
-
-    #[test]
-    fn encode_form_body_basic() {
-        let params = [("key", "value".to_string()), ("foo", "bar".to_string())];
-        let encoded = encode_form_body(&params);
-        assert_eq!(encoded, "key=value&foo=bar");
-    }
-
-    #[test]
-    fn encode_form_body_special_chars() {
-        let params = [("key", "a&b=c".to_string())];
-        let encoded = encode_form_body(&params);
-        assert!(encoded.contains("%26")); // & encoded
-        assert!(encoded.contains("%3D")); // = encoded
-    }
-
-    #[test]
-    fn encode_form_body_spaces_as_plus() {
-        let params = [("key", "hello world".to_string())];
-        let encoded = encode_form_body(&params);
-        assert_eq!(encoded, "key=hello+world");
-    }
-
-    #[test]
-    fn encode_form_body_empty() {
-        let params: &[(&str, String)] = &[];
-        let encoded = encode_form_body(params);
-        assert!(encoded.is_empty());
-    }
-
-    // ── parse_scope_string ─────────────────────────────────────────
-
-    #[test]
-    fn parse_scope_string_multiple() {
-        let scopes = parse_scope_string("https://scope1 https://scope2 https://scope3");
-        assert_eq!(scopes.len(), 3);
-    }
-
-    #[test]
-    fn parse_scope_string_empty() {
-        let scopes = parse_scope_string("");
-        assert!(scopes.is_empty());
-    }
-
-    #[test]
-    fn parse_scope_string_extra_whitespace() {
-        let scopes = parse_scope_string("  scope1   scope2  ");
-        assert_eq!(scopes, vec!["scope1", "scope2"]);
     }
 
     // ── require_str ────────────────────────────────────────────────
@@ -2454,9 +2217,14 @@ mod tests {
     async fn invoke_unknown_op_returns_not_granted() {
         let mut connector = GmailConnector::new();
         connector.client = Some(
-            GmailClient::new("fake_key")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
+            GmailClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "fake_key".into(),
+                source: fcp_google_discovery::auth::GoogleAuthSourceKind::AccessToken,
+                granted_scopes: vec![],
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url("http://localhost:9999"),
         );
 
         let signing_key = Ed25519SigningKey::generate();
@@ -2521,9 +2289,14 @@ mod tests {
     async fn invoke_without_handshake_returns_not_configured() {
         let mut connector = GmailConnector::new();
         connector.client = Some(
-            GmailClient::new("fake_key")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
+            GmailClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "fake_key".into(),
+                source: fcp_google_discovery::auth::GoogleAuthSourceKind::AccessToken,
+                granted_scopes: vec![],
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url("http://localhost:9999"),
         );
 
         let signing_key = Ed25519SigningKey::generate();
@@ -2743,7 +2516,14 @@ mod tests {
             health["status"],
             "degraded_pending_credential_materialization"
         );
-        assert_eq!(health["auth_mode"], "credential_id");
+        assert!(
+            health["auth_mode"]
+                .as_str()
+                .unwrap()
+                .starts_with("credential_id:"),
+            "expected auth_mode starting with 'credential_id:', got {:?}",
+            health["auth_mode"]
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2775,6 +2555,8 @@ mod tests {
             .and(path("/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "access_token": "ya29.oauth-access-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
                 "scope": "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.labels"
             })))
             .mount(&mock_server)
@@ -2854,9 +2636,14 @@ mod tests {
     async fn test_invoke_missing_field() {
         let mut connector = GmailConnector::new();
         connector.client = Some(
-            GmailClient::new("fake_key")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
+            GmailClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "fake_key".into(),
+                source: fcp_google_discovery::auth::GoogleAuthSourceKind::AccessToken,
+                granted_scopes: vec![],
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url("http://localhost:9999"),
         );
 
         let signing_key = Ed25519SigningKey::generate();

@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Notion API error.
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +113,37 @@ impl NotionError {
                 message: message.clone(),
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for NotionError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+            },
+            AsyncError::Cancelled => Self::Api {
+                message: "request cancelled".into(),
+                status_code: None,
+            },
+            other => Self::Api {
+                message: other.to_string(),
+                status_code: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
     }
 }
 

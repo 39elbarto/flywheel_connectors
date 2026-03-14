@@ -922,7 +922,7 @@ fn wasi_runtime_load_invalid_component() {
     assert!(result.is_err());
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[fcp_async_core::runtime::test]
 async fn wasi_runtime_invokes_minimal_component() {
     let config = WasiConfig {
         max_fuel: 10_000,
@@ -939,7 +939,7 @@ async fn wasi_runtime_invokes_minimal_component() {
     assert!(result.fuel_consumed.is_some());
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[fcp_async_core::runtime::test]
 async fn wasi_runtime_reports_missing_export() {
     let runtime = WasiRuntime::new(WasiConfig::default()).unwrap();
     let component = runtime.load_component(minimal_command_component()).unwrap();
@@ -954,7 +954,7 @@ async fn wasi_runtime_reports_missing_export() {
     assert!(message.contains("failed to resolve"));
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[fcp_async_core::runtime::test]
 async fn wasi_runtime_hostcalls_enforce_preopened_filesystem_permissions() {
     let readonly_dir = unique_temp_dir("fcp-sandbox-wasi-readonly");
     let writable_dir = unique_temp_dir("fcp-sandbox-wasi-writable");
@@ -1041,7 +1041,7 @@ fn wasi_runtime_deterministic_hostcalls_are_stable_across_stores() {
     assert_eq!(seed, (42, 42));
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[fcp_async_core::runtime::test]
 async fn wasi_runtime_network_policy_controls_preview2_socket_hostcalls() {
     let default_runtime = WasiRuntime::new(WasiConfig::default()).unwrap();
     let mut default_store = default_runtime.create_store().unwrap();

@@ -5,12 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use fcp_async_core::time::sleep;
+use fcp_async_core::ExecutionContext;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     error::{AnthropicError, AnthropicResult},
@@ -66,9 +67,7 @@ pub struct AnthropicClient {
     client: Client,
     auth: AnthropicAuth,
     base_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    retry_config: HttpRetryConfig,
     // Cost tracking
     total_input_tokens: AtomicU64,
     total_output_tokens: AtomicU64,
@@ -79,7 +78,7 @@ impl fmt::Debug for AnthropicClient {
         f.debug_struct("AnthropicClient")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
-            .field("max_retries", &self.max_retries)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -109,9 +108,7 @@ impl AnthropicClient {
             client,
             auth,
             base_url: DEFAULT_BASE_URL.into(),
-            max_retries: 3,
-            initial_delay_ms: 500,
-            max_delay_ms: 30_000,
+            retry_config: HttpRetryConfig::default(),
             total_input_tokens: AtomicU64::new(0),
             total_output_tokens: AtomicU64::new(0),
         })
@@ -126,15 +123,18 @@ impl AnthropicClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub const fn with_retry_config(
+    pub fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,
         max_delay_ms: u64,
     ) -> Self {
-        self.max_retries = max_retries;
-        self.initial_delay_ms = initial_delay_ms;
-        self.max_delay_ms = max_delay_ms;
+        self.retry_config = HttpRetryConfig {
+            max_retries,
+            initial_delay_ms,
+            max_delay_ms,
+            ..HttpRetryConfig::default()
+        };
         self
     }
 

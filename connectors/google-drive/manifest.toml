@@ -1,0 +1,40 @@
+[connector]
+name = "google-drive"
+version = "0.1.0"
+description = "Google Drive API v3 connector for file management"
+archetype = "request-response"
+
+[connector.zones]
+allowed = ["z:owner", "z:private", "z:work", "z:project:*"]
+
+[connector.capabilities]
+required = ["drive.read"]
+optional = ["drive.write"]
+
+[provides.operations.drive.list_files]
+summary = "List files and folders in Google Drive"
+capability = "drive.read"
+
+[provides.operations.drive.get_file]
+summary = "Get file metadata by ID"
+capability = "drive.read"
+
+[provides.operations.drive.download_file]
+summary = "Download file content"
+capability = "drive.read"
+
+[provides.operations.drive.create_folder]
+summary = "Create a new folder"
+capability = "drive.write"
+
+[provides.operations.drive.upload_file]
+summary = "Upload a file"
+capability = "drive.write"
+
+[provides.operations.drive.trash_file]
+summary = "Move a file to trash"
+capability = "drive.write"
+
+[provides.operations.drive.share_file]
+summary = "Share a file with a user"
+capability = "drive.write"

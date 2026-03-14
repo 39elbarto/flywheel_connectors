@@ -1,0 +1,41 @@
+[package]
+name = "fcp-google-sheets"
+description = "Google Sheets connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_google_sheets"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-google-sheets"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-core = { path = "../../crates/fcp-core" }
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-sdk = { path = "../../crates/fcp-sdk" }
+fcp-google-discovery = { path = "../../crates/fcp-google-discovery" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
+fcp-testkit = { path = "../../crates/fcp-testkit" }

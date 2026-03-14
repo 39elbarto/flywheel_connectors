@@ -2731,6 +2731,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-google-chat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-sdk",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-google-discovery"
 version = "0.1.0"
 dependencies = [
@@ -2743,6 +2765,72 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-google-docs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-sdk",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-google-drive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-sdk",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-google-sheets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-sdk",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

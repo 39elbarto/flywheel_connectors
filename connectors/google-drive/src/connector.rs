@@ -1,0 +1,706 @@
+//! FCP Google Drive Connector implementation.
+
+use std::sync::Arc;
+
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SessionId, SimulateRequest, SimulateResponse,
+};
+use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
+use serde_json::json;
+use tracing::{info, instrument};
+
+use crate::{
+    client::{DriveClient, DEFAULT_BASE_URL},
+    error::DriveError,
+};
+
+/// FCP Google Drive Connector.
+pub struct DriveConnector {
+    base: Arc<BaseConnector>,
+    client: Option<DriveClient>,
+    verifier: Option<CapabilityVerifier>,
+    session_id: Option<SessionId>,
+}
+
+impl DriveConnector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("google-drive"))),
+            client: None,
+            verifier: None,
+            session_id: None,
+        }
+    }
+
+    #[instrument(skip(self, params))]
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let selection =
+            GoogleAuthSelection::from_connector_config(&params).map_err(|error| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid Google auth configuration: {error}"),
+                }
+            })?;
+
+        let materialized =
+            selection
+                .materialize()
+                .await
+                .map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Failed to materialize Google auth: {error}"),
+                })?;
+
+        let status = match &materialized {
+            GoogleMaterializedAuth::CredentialReference { .. } => {
+                "configured_pending_token_materialization"
+            }
+            GoogleMaterializedAuth::BearerToken { .. } => "configured",
+        };
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_BASE_URL);
+
+        let client = DriveClient::new_with_auth(materialized)
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?
+            .with_base_url(base_url);
+
+        let auth_label = client.auth_redacted_label();
+        self.client = Some(client);
+        self.base.set_configured(true);
+        info!(auth = %auth_label, status, "Drive connector configured");
+
+        Ok(json!({ "status": status }))
+    }
+
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid handshake request: {e}"),
+            })?;
+
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
+        self.base.set_handshaken(true);
+
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .into_iter()
+            .map(|cap| CapabilityGrant {
+                capability: cap,
+                operation: None,
+            })
+            .collect();
+
+        let response = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id,
+            manifest_hash: "sha256:google-drive-connector-v1".into(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 100,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        };
+
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
+        let status = if self.client.is_some() {
+            "healthy"
+        } else {
+            "not_configured"
+        };
+        let metrics = self.base.metrics();
+        Ok(json!({
+            "status": status,
+            "metrics": {
+                "requests_total": metrics.requests_total,
+                "requests_error": metrics.requests_error,
+            }
+        }))
+    }
+
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: vec![
+                op_info(
+                    "drive.list_files",
+                    "List files and folders in Google Drive",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string", "description": "Drive search query (q parameter)" },
+                            "max_results": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                            "page_token": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "files": { "type": "array" },
+                            "next_page_token": { "type": "string" }
+                        }
+                    }),
+                    "drive.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List files in Google Drive. Use query parameter for search.".into(),
+                        common_mistakes: vec![
+                            "Drive query syntax uses specific operators like 'name contains' and 'mimeType ='".into(),
+                        ],
+                        examples: vec![
+                            r#"{"query": "name contains 'report' and mimeType = 'application/pdf'"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("drive.get_file")],
+                    },
+                ),
+                op_info(
+                    "drive.get_file",
+                    "Get file metadata by ID",
+                    json!({
+                        "type": "object",
+                        "required": ["file_id"],
+                        "properties": {
+                            "file_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "file": { "type": "object" }
+                        }
+                    }),
+                    "drive.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get metadata for a specific file or folder.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}"#.into()],
+                        related: vec![CapabilityId::from_static("drive.list_files")],
+                    },
+                ),
+                op_info(
+                    "drive.download_file",
+                    "Download file content (returned as base64)",
+                    json!({
+                        "type": "object",
+                        "required": ["file_id"],
+                        "properties": {
+                            "file_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "content_base64": { "type": "string" },
+                            "file_id": { "type": "string" }
+                        }
+                    }),
+                    "drive.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Download the binary content of a file.".into(),
+                        common_mistakes: vec![
+                            "Google Docs/Sheets/Slides cannot be downloaded directly - export them first".into(),
+                        ],
+                        examples: vec![r#"{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}"#.into()],
+                        related: vec![CapabilityId::from_static("drive.get_file")],
+                    },
+                ),
+                op_info(
+                    "drive.create_folder",
+                    "Create a new folder in Google Drive",
+                    json!({
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "parent_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "folder": { "type": "object" }
+                        }
+                    }),
+                    "drive.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Create a folder to organize files.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"name": "Project Files", "parent_id": "root"}"#.into()],
+                        related: vec![CapabilityId::from_static("drive.upload_file")],
+                    },
+                ),
+                op_info(
+                    "drive.upload_file",
+                    "Upload a file to Google Drive",
+                    json!({
+                        "type": "object",
+                        "required": ["name", "mime_type", "content_base64"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "mime_type": { "type": "string" },
+                            "content_base64": { "type": "string" },
+                            "parent_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "file": { "type": "object" }
+                        }
+                    }),
+                    "drive.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Upload a file to Google Drive.".into(),
+                        common_mistakes: vec![
+                            "Large files should use resumable upload (not yet supported)".into(),
+                        ],
+                        examples: vec![
+                            r#"{"name":"report.txt","mime_type":"text/plain","content_base64":"SGVsbG8="}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("drive.create_folder")],
+                    },
+                ),
+                op_info(
+                    "drive.trash_file",
+                    "Move a file to trash",
+                    json!({
+                        "type": "object",
+                        "required": ["file_id"],
+                        "properties": {
+                            "file_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "file": { "type": "object" }
+                        }
+                    }),
+                    "drive.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Move a file to the trash (can be recovered within 30 days).".into(),
+                        common_mistakes: vec![
+                            "This does NOT permanently delete - use empty trash for permanent deletion".into(),
+                        ],
+                        examples: vec![r#"{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}"#.into()],
+                        related: vec![CapabilityId::from_static("drive.get_file")],
+                    },
+                ),
+                op_info(
+                    "drive.share_file",
+                    "Share a file with a user",
+                    json!({
+                        "type": "object",
+                        "required": ["file_id", "email", "role"],
+                        "properties": {
+                            "file_id": { "type": "string" },
+                            "email": { "type": "string" },
+                            "role": { "type": "string", "enum": ["reader", "commenter", "writer", "organizer"] }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "permission": { "type": "object" }
+                        }
+                    }),
+                    "drive.write",
+                    RiskLevel::Critical,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Share a file or folder with another user.".into(),
+                        common_mistakes: vec![
+                            "Sharing is a sensitive operation - always confirm with the user first".into(),
+                        ],
+                        examples: vec![
+                            r#"{"file_id":"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs","email":"user@example.com","role":"reader"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("drive.get_file")],
+                    },
+                ),
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
+    }
+
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid simulate request: {e}"),
+            })?;
+        let response = SimulateResponse::allowed(req.id);
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let operation =
+            params
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing operation".into(),
+                })?;
+        let input = params.get("input").cloned().unwrap_or(json!({}));
+
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing capability_token".into(),
+            })?;
+        let token: CapabilityToken =
+            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation ID format".into(),
+        })?;
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
+        })?;
+
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(&token, &cap_id, &op_id, &[])?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
+
+        match operation {
+            "drive.list_files" => self.invoke_list_files(input).await,
+            "drive.get_file" => self.invoke_get_file(input).await,
+            "drive.download_file" => self.invoke_download_file(input).await,
+            "drive.create_folder" => self.invoke_create_folder(input).await,
+            "drive.upload_file" => self.invoke_upload_file(input).await,
+            "drive.trash_file" => self.invoke_trash_file(input).await,
+            "drive.share_file" => self.invoke_share_file(input).await,
+            _ => Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            }),
+        }
+    }
+
+    async fn invoke_list_files(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let query = input.get("query").and_then(|v| v.as_str());
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
+        let page_token = input.get("page_token").and_then(|v| v.as_str());
+
+        let result = client
+            .list_files(query, max_results, page_token)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "files": result.files,
+            "next_page_token": result.next_page_token
+        }))
+    }
+
+    async fn invoke_get_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+
+        let file = client
+            .get_file(file_id)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+
+        Ok(json!({ "file": file }))
+    }
+
+    async fn invoke_download_file(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+
+        let content = client
+            .download_file(file_id)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "file_id": file_id,
+            "content_base64": content
+        }))
+    }
+
+    async fn invoke_create_folder(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let name = require_str(&input, "name")?;
+        let parent_id = input.get("parent_id").and_then(|v| v.as_str());
+
+        let folder = client
+            .create_folder(name, parent_id)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+
+        Ok(json!({ "folder": folder }))
+    }
+
+    async fn invoke_upload_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let name = require_str(&input, "name")?;
+        let mime_type = require_str(&input, "mime_type")?;
+        let content = require_str(&input, "content_base64")?;
+        let parent_id = input.get("parent_id").and_then(|v| v.as_str());
+
+        let file = client
+            .upload_file(name, mime_type, parent_id, content)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+
+        Ok(json!({ "file": file }))
+    }
+
+    async fn invoke_trash_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+
+        let file = client
+            .trash_file(file_id)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+
+        Ok(json!({ "file": file }))
+    }
+
+    async fn invoke_share_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+        let email = require_str(&input, "email")?;
+        let role = require_str(&input, "role")?;
+
+        let permission = client
+            .share_file(file_id, email, role)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+
+        Ok(json!({ "permission": permission }))
+    }
+
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        info!("Drive connector shutting down");
+        Ok(json!({ "status": "shutdown" }))
+    }
+}
+
+impl Default for DriveConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    input
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing required field: {field}"),
+        })
+}
+
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_has_all_operations() {
+        let connector = DriveConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+
+        assert!(op_ids.contains(&"drive.list_files"));
+        assert!(op_ids.contains(&"drive.get_file"));
+        assert!(op_ids.contains(&"drive.download_file"));
+        assert!(op_ids.contains(&"drive.create_folder"));
+        assert!(op_ids.contains(&"drive.upload_file"));
+        assert!(op_ids.contains(&"drive.trash_file"));
+        assert!(op_ids.contains(&"drive.share_file"));
+        assert_eq!(ops.len(), 7);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_with_access_token() {
+        let mut connector = DriveConnector::new();
+        let result = connector
+            .handle_configure(json!({ "access_token": "ya29.test" }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_with_credential_id() {
+        let mut connector = DriveConnector::new();
+        let cred_id = fcp_core::CredentialId::new();
+        let result = connector
+            .handle_configure(json!({ "credential_id": cred_id.to_string() }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured_pending_token_materialization");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_no_auth_fails() {
+        let mut connector = DriveConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_unconfigured() {
+        let connector = DriveConnector::new();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_configured() {
+        let mut connector = DriveConnector::new();
+        connector
+            .handle_configure(json!({ "access_token": "ya29.test" }))
+            .await
+            .unwrap();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_succeeds() {
+        let connector = DriveConnector::new();
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(result["status"], "shutdown");
+    }
+
+    #[test]
+    fn default_impl() {
+        let _connector = DriveConnector::default();
+    }
+}

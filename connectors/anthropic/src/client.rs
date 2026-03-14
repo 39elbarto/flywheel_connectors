@@ -314,63 +314,46 @@ impl AnthropicClient {
         Ok(parse_sse_stream(response))
     }
 
-    /// Make a POST request.
+    /// Make a POST request with automatic retry via [`RetryLoop`].
     async fn post<T, R>(&self, endpoint: &str, body: &T) -> AnthropicResult<R>
     where
         T: serde::Serialize + Sync,
         R: serde::de::DeserializeOwned + Send,
     {
         let url = format!("{}{endpoint}", self.base_url);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(120));
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, endpoint, "Making Anthropic API request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(attempt, endpoint, "Making Anthropic API request");
 
-            let request = self
-                .client
-                .post(&url)
-                .header("anthropic-version", API_VERSION)
-                .header("content-type", "application/json");
-            let request = self.apply_auth(request);
-            let result = request.json(body).send().await;
+                let request = self
+                    .client
+                    .post(url.as_str())
+                    .header("anthropic-version", API_VERSION)
+                    .header("content-type", "application/json");
+                let request = self.apply_auth(request);
 
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying Anthropic API request"
-                        );
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if e.is_timeout() || e.is_connect() => {
-                    if attempts < self.max_retries {
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying after connection error"
-                        );
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    } else {
-                        return Err(AnthropicError::Http(e));
-                    }
+                match request.json(body).send().await {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: AnthropicError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(AnthropicError::Http(e)),
                 }
-                Err(e) => return Err(AnthropicError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// Make a streaming POST request.

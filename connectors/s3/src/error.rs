@@ -3,6 +3,8 @@
 use std::time::Duration;
 
 use fcp_core::FcpError;
+use fcp_async_core::AsyncError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// S3-specific errors.
@@ -130,6 +132,41 @@ impl S3Error {
 
 /// Result type for S3 operations.
 pub type S3Result<T> = Result<T, S3Error>;
+
+
+impl ConnectorErrorMapping for S3Error {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                code: "Timeout".into(),
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+            },
+            AsyncError::Cancelled => Self::Api {
+                code: "Cancelled".into(),
+                message: "request cancelled".into(),
+                status_code: None,
+            },
+            other => Self::Api {
+                code: "AsyncError".into(),
+                message: other.to_string(),
+                status_code: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
+    }
+}
 
 #[cfg(test)]
 mod tests {

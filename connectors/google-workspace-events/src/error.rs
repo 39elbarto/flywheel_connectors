@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Google Workspace Events-specific errors.
@@ -114,6 +116,37 @@ impl WorkspaceEventsError {
                 message: format!("Invalid event payload: {message}"),
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for WorkspaceEventsError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                status_code: 408,
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Api {
+                status_code: 0,
+                message: "request cancelled".into(),
+            },
+            other => Self::Api {
+                status_code: 0,
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
     }
 }
 

@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use fcp_core::FcpError;
 use thiserror::Error;
+use fcp_async_core::AsyncError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Result alias for Mailchimp operations.
 pub type MailchimpResult<T> = Result<T, MailchimpError>;
@@ -112,6 +114,37 @@ impl MailchimpError {
                 retry_after: None,
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for MailchimpError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                status_code: 408,
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Api {
+                status_code: 0,
+                message: "request cancelled".into(),
+            },
+            other => Self::Api {
+                status_code: 0,
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
     }
 }
 

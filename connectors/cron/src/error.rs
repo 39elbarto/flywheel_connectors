@@ -1,6 +1,10 @@
 //! Cron connector error types.
 
+use std::time::Duration;
+
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Result alias for cron operations.
@@ -45,6 +49,34 @@ impl CronError {
                 message: message.clone(),
             },
         }
+    }
+}
+
+impl ConnectorErrorMapping for CronError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Internal {
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Internal {
+                message: "request cancelled".into(),
+            },
+            other => Self::Internal {
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        false
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        None
     }
 }
 

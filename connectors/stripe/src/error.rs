@@ -3,6 +3,8 @@
 use std::time::Duration;
 
 use fcp_core::FcpError;
+use fcp_async_core::AsyncError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Stripe API error.
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +105,41 @@ impl StripeError {
                 resource: resource.clone(),
             },
         }
+    }
+}
+
+
+impl ConnectorErrorMapping for StripeError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+                error_type: None,
+            },
+            AsyncError::Cancelled => Self::Api {
+                message: "request cancelled".into(),
+                status_code: None,
+                error_type: None,
+            },
+            other => Self::Api {
+                message: other.to_string(),
+                status_code: None,
+                error_type: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
     }
 }
 

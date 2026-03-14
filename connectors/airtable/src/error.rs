@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Airtable-specific errors.
@@ -161,6 +163,40 @@ impl AirtableError {
 
 /// Result type for Airtable operations.
 pub type AirtableResult<T> = Result<T, AirtableError>;
+
+impl ConnectorErrorMapping for AirtableError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                error_type: "TIMEOUT".into(),
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+            },
+            AsyncError::Cancelled => Self::Api {
+                error_type: "CANCELLED".into(),
+                message: "request cancelled".into(),
+                status_code: None,
+            },
+            other => Self::Api {
+                error_type: "ASYNC_ERROR".into(),
+                message: other.to_string(),
+                status_code: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        Self::to_fcp_error(self)
+    }
+
+    fn is_retryable(&self) -> bool {
+        Self::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        Self::retry_after(self)
+    }
+}
 
 #[cfg(test)]
 mod tests {

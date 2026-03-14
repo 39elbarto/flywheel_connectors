@@ -1,6 +1,10 @@
 //! LLM Router error types.
 
+use std::time::Duration;
+
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// LLM Router errors.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +65,58 @@ impl From<RouterError> for FcpError {
 
 /// Convenience Result type for router operations.
 pub type RouterResult<T> = Result<T, RouterError>;
+
+impl ConnectorErrorMapping for RouterError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::AllProvidersFailed {
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::AllProvidersFailed {
+                message: "request cancelled".into(),
+            },
+            other => Self::AllProvidersFailed {
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        match self {
+            Self::NoProviders => FcpError::InvalidRequest {
+                code: 1003,
+                message: self.to_string(),
+            },
+            Self::NoProviderAvailable { .. } => FcpError::InvalidRequest {
+                code: 1004,
+                message: self.to_string(),
+            },
+            Self::BudgetExceeded { .. } => FcpError::CapabilityDenied {
+                capability: "llm-router.route".into(),
+                reason: self.to_string(),
+            },
+            Self::ProviderError { .. } | Self::AllProvidersFailed { .. } => FcpError::Internal {
+                message: self.to_string(),
+            },
+            Self::InvalidStrategy(_) => FcpError::InvalidRequest {
+                code: 1003,
+                message: self.to_string(),
+            },
+            Self::CapabilityNotAvailable(_) => FcpError::InvalidRequest {
+                code: 1004,
+                message: self.to_string(),
+            },
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::ProviderError { .. } | Self::AllProvidersFailed { .. })
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        None
+    }
+}
 
 #[cfg(test)]
 mod tests {

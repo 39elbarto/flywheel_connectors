@@ -574,7 +574,7 @@ impl WorkspaceEventsConnector {
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
-        let result: FcpResult<serde_json::Value> = match operation {
+        match operation {
             "workspace_events.describe_provisioning" => {
                 let scope_triggers =
                     parse_string_array_field(&input, "scope_triggers")?.unwrap_or_default();

@@ -570,7 +570,7 @@ fn repair_planner_cycle_improves_zone_slo() {
         "repair_planner_cycle_improves_zone_slo",
         "integration",
         "repair_plan",
-        5,
+        7,
         || async {
             let config = test_raptorq_config();
             let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
@@ -685,6 +685,12 @@ fn repair_planner_cycle_improves_zone_slo() {
                 after_plan.object_count_below_target,
             );
             assert!(
+                after_plan.slo_metrics.coverage_p50_bps > before_plan.slo_metrics.coverage_p50_bps,
+                "planner cycle should improve median coverage: {} -> {}",
+                before_plan.slo_metrics.coverage_p50_bps,
+                after_plan.slo_metrics.coverage_p50_bps,
+            );
+            assert!(
                 after_plan.budget_used.repairs <= before_plan.budget.max_repairs,
                 "budget accounting should stay within configured cycle cap",
             );
@@ -692,8 +698,40 @@ fn repair_planner_cycle_improves_zone_slo() {
             StoreLogData {
                 symbol_count: Some(before_plan.object_count_tracked as u32),
                 details: Some(json!({
+                    "zone_id": before_plan.zone_id.to_string(),
+                    "cycle_ids": {
+                        "before": before_plan.cycle_id,
+                        "after": after_plan.cycle_id
+                    },
                     "before_below_target": before_plan.object_count_below_target,
                     "after_below_target": after_plan.object_count_below_target,
+                    "policy_targets": {
+                        "target_coverage_bps": before_plan.policy_targets.target_coverage_bps,
+                        "min_source_diversity": before_plan.policy_targets.min_source_diversity,
+                        "max_node_fraction_bps": before_plan.policy_targets.max_node_fraction_bps
+                    },
+                    "budget": {
+                        "max_repairs": before_plan.budget.max_repairs,
+                        "max_bytes": before_plan.budget.max_bytes,
+                        "max_decode_ms": before_plan.budget.max_decode_ms
+                    },
+                    "before_slo_metrics": {
+                        "coverage_p50_bps": before_plan.slo_metrics.coverage_p50_bps,
+                        "coverage_p90_bps": before_plan.slo_metrics.coverage_p90_bps,
+                        "coverage_p99_bps": before_plan.slo_metrics.coverage_p99_bps,
+                        "hot_object_access_bps": before_plan.slo_metrics.hot_object_access_bps
+                    },
+                    "after_slo_metrics": {
+                        "coverage_p50_bps": after_plan.slo_metrics.coverage_p50_bps,
+                        "coverage_p90_bps": after_plan.slo_metrics.coverage_p90_bps,
+                        "coverage_p99_bps": after_plan.slo_metrics.coverage_p99_bps,
+                        "hot_object_access_bps": after_plan.slo_metrics.hot_object_access_bps
+                    },
+                    "budget_used": {
+                        "repairs": before_plan.budget_used.repairs,
+                        "bytes": before_plan.budget_used.bytes,
+                        "decode_ms": before_plan.budget_used.decode_ms
+                    },
                     "planned_actions": before_plan.actions.iter().map(|action| {
                         json!({
                             "object_id": action.object_id.to_string(),

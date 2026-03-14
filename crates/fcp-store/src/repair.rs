@@ -193,6 +193,72 @@ impl Default for RepairPolicyTargets {
     }
 }
 
+/// Deterministic zone-level SLO summary derived during a planning cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairSloMetrics {
+    /// Median coverage across tracked objects using nearest-rank percentiles.
+    pub coverage_p50_bps: u32,
+    /// 90th percentile coverage across tracked objects using nearest-rank percentiles.
+    pub coverage_p90_bps: u32,
+    /// 99th percentile coverage across tracked objects using nearest-rank percentiles.
+    pub coverage_p99_bps: u32,
+    /// Ratio of hot objects that are currently reconstructable.
+    pub hot_object_access_bps: u32,
+}
+
+impl Default for RepairSloMetrics {
+    fn default() -> Self {
+        Self {
+            coverage_p50_bps: 0,
+            coverage_p90_bps: 0,
+            coverage_p99_bps: 0,
+            hot_object_access_bps: 0,
+        }
+    }
+}
+
+impl RepairSloMetrics {
+    fn from_coverages(
+        coverage_samples: &mut [u32],
+        hot_object_count: usize,
+        hot_object_available_count: usize,
+    ) -> Self {
+        coverage_samples.sort_unstable();
+
+        Self {
+            coverage_p50_bps: percentile_bps(coverage_samples, 50),
+            coverage_p90_bps: percentile_bps(coverage_samples, 90),
+            coverage_p99_bps: percentile_bps(coverage_samples, 99),
+            hot_object_access_bps: basis_points_ratio(hot_object_available_count, hot_object_count),
+        }
+    }
+}
+
+fn percentile_bps(sorted_samples: &[u32], percentile: usize) -> u32 {
+    if sorted_samples.is_empty() {
+        return 0;
+    }
+
+    let rank = sorted_samples
+        .len()
+        .saturating_mul(percentile)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(sorted_samples.len() - 1);
+    sorted_samples[rank]
+}
+
+fn basis_points_ratio(numerator: usize, denominator: usize) -> u32 {
+    if denominator == 0 {
+        return 0;
+    }
+
+    let numerator = u64::try_from(numerator).unwrap_or(u64::MAX);
+    let denominator = u64::try_from(denominator).unwrap_or(u64::MAX);
+    let ratio = numerator.saturating_mul(10_000) / denominator.max(1);
+    u32::try_from(ratio).unwrap_or(u32::MAX)
+}
+
 /// Additional knobs that influence a single deterministic repair planning cycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepairPlanningOptions {
@@ -254,6 +320,8 @@ pub struct RepairPlan {
     pub object_count_tracked: usize,
     /// Number of objects that were below target or selected for pre-staging.
     pub object_count_below_target: usize,
+    /// Zone-level SLO summary derived from the tracked objects in this cycle.
+    pub slo_metrics: RepairSloMetrics,
     /// Planner budget limits for the cycle.
     pub budget: RepairCycleBudget,
     /// Budget actually consumed by `actions`.
@@ -628,6 +696,9 @@ impl RepairController {
         let mut policy_targets = RepairPolicyTargets::default();
         let mut object_count_tracked = 0usize;
         let mut object_count_below_target = 0usize;
+        let mut coverage_samples = Vec::new();
+        let mut hot_object_count = 0usize;
+        let mut hot_object_available_count = 0usize;
         let mut candidates = Vec::new();
 
         for object_id in object_ids {
@@ -653,10 +724,17 @@ impl RepairController {
                 .min(policy.max_node_fraction_bps);
 
             let coverage = CoverageEvaluation::from_distribution(object_id, &dist);
+            coverage_samples.push(coverage.coverage_bps);
             let is_hot_object = options
                 .hot_objects
                 .iter()
                 .any(|candidate| candidate == &object_id);
+            if is_hot_object {
+                hot_object_count += 1;
+                if coverage.is_available {
+                    hot_object_available_count += 1;
+                }
+            }
             let Some(reason_code) =
                 self.plan_reason_code(&coverage, &policy, is_hot_object, options)
             else {
@@ -674,6 +752,12 @@ impl RepairController {
             ));
         }
 
+        let slo_metrics = RepairSloMetrics::from_coverages(
+            &mut coverage_samples,
+            hot_object_count,
+            hot_object_available_count,
+        );
+
         candidates.sort_by(|left, right| {
             right
                 .priority
@@ -689,6 +773,7 @@ impl RepairController {
             policy_targets,
             object_count_tracked,
             object_count_below_target,
+            slo_metrics,
             budget: options.budget,
             budget_used: RepairCycleUsage::default(),
             actions: Vec::new(),
@@ -3402,6 +3487,85 @@ mod tests {
     }
 
     #[test]
+    fn planner_cost_estimates_are_monotonic_and_capped() {
+        let object_id = ObjectId::from_bytes([0x60; 32]);
+        let object_meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: test_zone_id(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 64 * 16,
+                symbol_size: 64,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 8,
+            },
+            source_symbols: 16,
+            first_symbol_at: 1_000_000,
+        };
+        let controller = RepairController::new(RepairControllerConfig {
+            min_deficit_bps: 100,
+            max_symbols_per_repair: 6,
+            ..Default::default()
+        });
+        let policy = test_policy();
+        let baseline_options = planner_options(10);
+        let penalized_options = RepairPlanningOptions {
+            derp_penalty_bps: 5_000,
+            ..baseline_options.clone()
+        };
+
+        let mildly_degraded = CoverageEvaluation {
+            distinct_nodes: 2,
+            max_node_fraction_bps: 5_000,
+            ..test_coverage(12, 16)
+        };
+        let badly_degraded = CoverageEvaluation {
+            distinct_nodes: 1,
+            ..test_coverage(4, 16)
+        };
+
+        let mild_action = controller.estimate_plan_action(
+            object_id,
+            &mildly_degraded,
+            &policy,
+            &object_meta,
+            RepairReasonCode::PolicySloDeficit,
+            &baseline_options,
+        );
+        let severe_action = controller.estimate_plan_action(
+            object_id,
+            &badly_degraded,
+            &policy,
+            &object_meta,
+            RepairReasonCode::PolicySloDeficit,
+            &baseline_options,
+        );
+        let penalized_action = controller.estimate_plan_action(
+            object_id,
+            &mildly_degraded,
+            &policy,
+            &object_meta,
+            RepairReasonCode::PolicySloDeficit,
+            &penalized_options,
+        );
+
+        assert_eq!(mild_action.estimated_symbols, 4);
+        assert_eq!(severe_action.estimated_symbols, 6);
+        assert!(
+            severe_action.estimated_symbols <= controller.config.max_symbols_per_repair,
+            "estimated symbols must stay capped per repair",
+        );
+        assert!(severe_action.estimated_symbols > mild_action.estimated_symbols);
+        assert!(severe_action.estimated_bytes > mild_action.estimated_bytes);
+        assert!(severe_action.estimated_decode_ms > mild_action.estimated_decode_ms);
+        assert!(penalized_action.estimated_bytes > mild_action.estimated_bytes);
+        assert_eq!(
+            penalized_action.estimated_decode_ms, mild_action.estimated_decode_ms,
+            "DERP penalty should inflate transport cost but not decode cost",
+        );
+    }
+
+    #[test]
     fn planner_detects_concentration_only_violation() {
         run_store_test(
             "planner_detects_concentration_only_violation",
@@ -3445,6 +3609,72 @@ mod tests {
                         "cycle_id": plan.cycle_id,
                         "reason_codes": plan.actions.iter().map(|a| a.reason_code.as_str()).collect::<Vec<_>>(),
                         "max_node_fraction_bps": plan.policy_targets.max_node_fraction_bps,
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn planner_reports_zone_slo_percentiles_and_hot_access_ratio() {
+        run_store_test(
+            "planner_reports_zone_slo_percentiles_and_hot_access_ratio",
+            "verify",
+            "repair_plan",
+            7,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 8,
+                    ..Default::default()
+                });
+                let zone_id = test_zone_id();
+
+                let unavailable_hot = ObjectId::from_bytes([0x71; 32]);
+                let healthy_hot = ObjectId::from_bytes([0x72; 32]);
+                let degraded_cold = ObjectId::from_bytes([0x73; 32]);
+                let healthy_cold = ObjectId::from_bytes([0x74; 32]);
+
+                seed_planner_object(&store, unavailable_hot, 4, 3, 64, &[1]).await;
+                seed_planner_object(&store, healthy_hot, 4, 4, 64, &[1, 2]).await;
+                seed_planner_object(&store, degraded_cold, 4, 2, 64, &[1]).await;
+                seed_planner_object(&store, healthy_cold, 4, 4, 64, &[1, 2, 3]).await;
+
+                let policies = HashMap::from([
+                    (unavailable_hot, test_policy()),
+                    (healthy_hot, test_policy()),
+                    (degraded_cold, test_policy()),
+                    (healthy_cold, test_policy()),
+                ]);
+
+                let mut options = planner_options(11);
+                options.hot_objects = vec![unavailable_hot, healthy_hot];
+
+                let plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &options)
+                    .await;
+
+                assert_eq!(plan.object_count_tracked, 4);
+                assert_eq!(plan.slo_metrics.coverage_p50_bps, 7_500);
+                assert_eq!(plan.slo_metrics.coverage_p90_bps, 10_000);
+                assert_eq!(plan.slo_metrics.coverage_p99_bps, 10_000);
+                assert_eq!(plan.slo_metrics.hot_object_access_bps, 5_000);
+
+                StoreLogData {
+                    symbol_count: Some(plan.object_count_tracked as u32),
+                    details: Some(json!({
+                        "cycle_id": plan.cycle_id,
+                        "coverage_percentiles_bps": {
+                            "p50": plan.slo_metrics.coverage_p50_bps,
+                            "p90": plan.slo_metrics.coverage_p90_bps,
+                            "p99": plan.slo_metrics.coverage_p99_bps
+                        },
+                        "hot_object_access_bps": plan.slo_metrics.hot_object_access_bps,
                     })),
                     ..StoreLogData::default()
                 }
@@ -3689,6 +3919,28 @@ mod tests {
         assert_eq!(rt.max_node_fraction_bps, 5000);
     }
 
+    #[test]
+    fn repair_slo_metrics_default() {
+        let metrics = RepairSloMetrics::default();
+        assert_eq!(metrics.coverage_p50_bps, 0);
+        assert_eq!(metrics.coverage_p90_bps, 0);
+        assert_eq!(metrics.coverage_p99_bps, 0);
+        assert_eq!(metrics.hot_object_access_bps, 0);
+    }
+
+    #[test]
+    fn repair_slo_metrics_serde_roundtrip() {
+        let metrics = RepairSloMetrics {
+            coverage_p50_bps: 7500,
+            coverage_p90_bps: 10_000,
+            coverage_p99_bps: 12_000,
+            hot_object_access_bps: 5000,
+        };
+        let json = serde_json::to_string(&metrics).unwrap();
+        let rt: RepairSloMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, metrics);
+    }
+
     // --- RepairPlanningOptions tests ---
 
     #[test]
@@ -3866,6 +4118,7 @@ mod tests {
             policy_targets: RepairPolicyTargets::default(),
             object_count_tracked: 10,
             object_count_below_target: 3,
+            slo_metrics: RepairSloMetrics::default(),
             budget: RepairCycleBudget::default(),
             budget_used: RepairCycleUsage::default(),
             actions: vec![],

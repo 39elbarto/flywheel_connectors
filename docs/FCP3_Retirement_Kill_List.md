@@ -261,6 +261,45 @@ ctx.run(async { /* operation */ }).await
 **Deletion trigger:** All 85+ connectors migrated. Delete old lifecycle
 patterns from connector scaffold template (`fwc new_cmd.rs`).
 
+#### Current migration snapshot (2026-03-14)
+
+Repository scan after the first two archetype batches:
+
+- `ConnectorRuntime::new` appears in **2** connector call sites.
+- `RetryLoop::execute` appears in **4** connector call sites.
+- `impl ConnectorErrorMapping` exists in **11** connector error modules.
+- Manifest-declared archetypes already cluster the fleet into a small number of
+  repeatable migration families instead of 80+ one-off plans.
+
+That means the current work is still in the pattern-proving phase, not the
+"mass migration complete" phase. The goal of bead `9syku.11.3` is therefore to
+keep the next batches explicit: which family moves next, what proof is required,
+and which compatibility seams should disappear immediately afterward.
+
+#### Connector-family wave matrix (operational plan for `9syku.11.3`)
+
+| Wave | Status | Proven batch / repo evidence | Next connector families to pull forward | Proof required before expanding the batch | Deletions unlocked |
+|---|---|---|---|---|---|
+| **1. Request-response / operational-heavy** | **Closed (pattern proven)** | `9syku.11.3.1` closed with `anthropic`, `openai`, and `sendgrid`; the repo now has real `ConnectorRuntime`, `RetryLoop`, and `ConnectorErrorMapping` examples instead of only framework helpers. | Pure operational or operational+knowledge connectors that do not own long-lived sessions: `mailchimp`, `segment`, `zapier`, `llm-router`, `browser`, `make`, `retool`, `pulumi`, `n8n`, plus similar REST/GraphQL APIs. | Unit coverage for success/retry/terminal/deadline/cancel, host-backed integration, and replayable E2E or transcript evidence that the new path matches the previous connector contract. | Delete hand-rolled retry loops, bespoke timeout bookkeeping, and per-connector `AsyncError` conversion code as each connector lands. |
+| **2. Streaming / bidirectional / long-lived transport** | **In progress** | `9syku.11.3.2` is the active wave. Declared streaming families already visible in manifests include `slack`, `discord`, `github`, `linear`, `stripe`, and `google-calendar`; hybrid operational+streaming connectors such as `anthropic` also constrain the shared pattern. | Start with the smallest transport surface that still proves reconnect/backpressure/drain, then expand to `slack`, `discord`, `github`, and `linear`; only then pull in the more hybrid streaming surfaces. | Every migrated connector must prove backpressure, cancellation, reconnect, drain, restart, and recovery behavior with detailed logs and replay instructions. "It compiles" is not enough for this wave. | Delete bespoke websocket/SSE loops, detached task ownership, and connector-local reconnect glue once the shared FCP3 transport pattern is proven. |
+| **3. Polling / webhook / singleton-writer stateful** | **Closed as initial batch; more families remain** | `9syku.11.3.3` closed after the `notion` and `sentry` batch, proving the first reusable stateful migration slice. This does **not** mean every cursor/webhook connector is done; it means the batch-level pattern now exists. | Remaining cursor, lease, and webhook-heavy connectors should follow the same pattern: `gmail`, `telegram`, `webhook-receiver`, `cron`, `homeassistant`, and other connectors with explicit background state or delivery lifecycles. | Durable-state, failover, drain, retry, idempotency, and receipt behavior must be demonstrated under host-backed tests and replayable scenarios before each family batch is declared done. | Delete ad-hoc polling supervisors, file-based lifecycle glue, and webhook-specific retry plumbing after each family migrates onto the shared runtime/evidence model. |
+
+#### Batch expansion rules
+
+1. A wave closes when the reusable migration pattern is proven, not only when a
+   single connector compiles.
+2. Closing a wave does **not** imply every connector in that family is already
+   migrated; it means later connectors in the family should now reuse the same
+   proof and deletion checklist.
+3. No later wave should expand while its predecessor still lacks a stable
+   evidence contract. Request-response proves `ConnectorRuntime` and retry/error
+   mapping; streaming proves long-lived transport semantics; stateful proves
+   durable-state and lease behavior.
+4. Every batch must name the compatibility code it expects to delete. If the
+   batch cannot say what dies when it lands, the migration scope is too vague.
+5. Documentation and operator playbooks must track the same wave status so the
+   repo never teaches a "mixed forever" connector story.
+
 ---
 
 ## 5. NOT FOUND (Confirmed Absent)

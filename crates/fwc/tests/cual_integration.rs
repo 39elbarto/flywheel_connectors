@@ -421,6 +421,60 @@ fn mock_introspection_response_json(connector: &Value, tools: &[Value]) -> Value
     })
 }
 
+fn mock_connector_admin_status_json(
+    source_kind: &str,
+    source_uri: &str,
+    placement: Value,
+) -> Value {
+    json!({
+        "connector_id": "fcp.github:enterprise:v1",
+        "desired_state": "enabled",
+        "observed_state": "running",
+        "lifecycle": Value::Null,
+        "pinned_version": Value::Null,
+        "active_config_revision_id": 41,
+        "artifact": {
+            "provenance": {
+                "source_kind": source_kind,
+                "source_uri": source_uri,
+                "content_hash": "b3:1234",
+                "hash_verified": true,
+                "signature_b64": "ZmFrZQ==",
+                "signature_verified": true,
+                "manifest_version": "1.2.3",
+                "size_bytes": 424242
+            },
+            "placement": placement,
+            "recorded_at": "2026-03-12T00:00:00Z",
+            "recorded_by": "registry-sync"
+        },
+        "config_revision_count": 1,
+        "last_journal_sequence": 9,
+        "drift": Value::Null,
+        "evaluated_at": "2026-03-12T00:00:00Z"
+    })
+}
+
+fn mock_connector_missing_status_json() -> Value {
+    json!({
+        "connector_id": "fcp.github:enterprise:v1",
+        "desired_state": "enabled",
+        "observed_state": "missing",
+        "lifecycle": Value::Null,
+        "pinned_version": Value::Null,
+        "active_config_revision_id": Value::Null,
+        "artifact": Value::Null,
+        "config_revision_count": 0,
+        "last_journal_sequence": 11,
+        "drift": {
+            "kind": "enabled_but_missing",
+            "recovery_action": "reinstall_connector",
+            "message": "Connector should be enabled but the artifact/runtime is missing."
+        },
+        "evaluated_at": "2026-03-12T00:00:00Z"
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn mock_tool_descriptor_json(
     name: &str,
@@ -3155,4 +3209,122 @@ fn workflow_history_persistence_and_status_filtering() {
         .expect("denied filtered entries");
     assert_eq!(denied_entries.len(), 1, "One denied entry expected");
     assert_eq!(denied_entries[0]["status"], "denied");
+}
+
+#[test]
+fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
+    let offline_payload = run_json_ok(&[
+        "--json",
+        "mesh",
+        "availability",
+        "github",
+        "--zone",
+        "z:work",
+    ]);
+    assert_eq!(offline_payload["command"], "mesh");
+    assert_eq!(offline_payload["subcommand"], "availability");
+    assert_eq!(offline_payload["source"], "workspace-manifests");
+    assert_eq!(
+        offline_payload["source_selection"]["state"],
+        "workspace-manifest"
+    );
+    assert_eq!(
+        offline_payload["offline_readiness"]["state"],
+        "declared-in-manifest"
+    );
+
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+
+    let (host_live, server_live) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            mock_connector_admin_status_json(
+                "local_path",
+                "/opt/fcp/cache/github-enterprise",
+                Value::Null,
+            ),
+        ),
+    ]);
+    let live_payload = run_json_ok(&[
+        "--json",
+        "--host",
+        &host_live,
+        "mesh",
+        "explain-availability",
+        "github",
+    ]);
+    server_live
+        .join()
+        .expect("mock host thread should complete");
+    assert_eq!(live_payload["source"], "host-admin-api");
+    assert_eq!(
+        live_payload["source_selection"]["source_kind"],
+        "local-path"
+    );
+    assert_eq!(
+        live_payload["offline_readiness"]["state"],
+        "artifact-recorded-without-placement-policy"
+    );
+
+    let (host_hints, server_hints) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector.clone()]),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            mock_connector_missing_status_json(),
+        ),
+    ]);
+    let repair_payload = run_json_ok(&[
+        "--json",
+        "--host",
+        &host_hints,
+        "mesh",
+        "repair-hints",
+        "github",
+    ]);
+    server_hints
+        .join()
+        .expect("mock host thread should complete");
+    assert_eq!(repair_payload["subcommand"], "repair-hints");
+    assert!(
+        repair_payload["repair_hints"]
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|hint| {
+                hint.as_str()
+                    .is_some_and(|hint| hint.contains("verified runtime artifact"))
+            }))
+    );
+
+    let (host_zone, server_zone) = spawn_mock_host_sequence(vec![(
+        "POST /rpc/discover".to_owned(),
+        mock_discovery_response_json(&[github_connector]),
+    )]);
+    let (exit_code, zone_payload, _stderr) = run_json(&[
+        "--json",
+        "--host",
+        &host_zone,
+        "mesh",
+        "availability",
+        "github",
+        "--zone",
+        "z:work",
+    ]);
+    server_zone
+        .join()
+        .expect("mock host thread should complete");
+    assert_ne!(
+        exit_code, 0,
+        "live zone-scoped availability must fail closed"
+    );
+    assert_eq!(
+        zone_payload["error"]["type"],
+        "unsupported-live-zone-filter"
+    );
 }

@@ -1131,7 +1131,10 @@ mod tests {
         let mut observed_cancelled = false;
         for _ in 0..50 {
             let requests = mock.received_requests().await;
-            if requests.iter().any(|request| request.url.path() == "/api/cancelled") {
+            if requests
+                .iter()
+                .any(|request| request.url.path() == "/api/cancelled")
+            {
                 observed_cancelled = true;
                 break;
             }

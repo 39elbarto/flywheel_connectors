@@ -15,14 +15,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fcp_async_core::{AsyncError, ExecutionContext};
+use fcp_sdk::FcpError;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, RetryLoop,
 };
 use fcp_sdk::retry::RetryPolicy;
-use fcp_sdk::FcpError;
 use tracing::Level;
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test error type (mirrors migration.rs internal TestError for integration use)
@@ -112,7 +112,12 @@ struct CaptureLayer {
 impl CaptureLayer {
     fn new() -> (Self, Arc<Mutex<Vec<CapturedEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        (Self { events: events.clone() }, events)
+        (
+            Self {
+                events: events.clone(),
+            },
+            events,
+        )
     }
 }
 
@@ -123,7 +128,7 @@ struct FieldVisitor {
 }
 
 impl FieldVisitor {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             fields: Vec::new(),
             message: String::new(),
@@ -341,22 +346,18 @@ fn terminal_error_emits_no_retry_warning() {
     assert!(result.unwrap().is_err());
 
     // Should NOT have any retry warning events (terminal errors don't retry)
-    let retry_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.message.contains("retrying after transient error"))
-        .collect();
     assert!(
-        retry_events.is_empty(),
-        "terminal error should not emit retry warnings, got {retry_events:?}"
+        !events
+            .iter()
+            .any(|e| e.message.contains("retrying after transient error")),
+        "terminal error should not emit retry warnings"
     );
 
     // Should still have the initial attempt debug event
-    let attempt_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.message.contains("executing retry attempt"))
-        .collect();
     assert!(
-        !attempt_events.is_empty(),
+        events
+            .iter()
+            .any(|e| e.message.contains("executing retry attempt")),
         "should still emit attempt debug event"
     );
 }
@@ -445,7 +446,10 @@ fn retry_with_explicit_retry_after_emits_delay() {
         .unwrap()
         .parse()
         .expect("delay_ms should be u64");
-    assert_eq!(delay_ms, 50, "delay_ms should match retry_after hint of 50ms");
+    assert_eq!(
+        delay_ms, 50,
+        "delay_ms should match retry_after hint of 50ms"
+    );
 
     // error should mention the rate limit
     let error_field = retry_events[0].field("error").unwrap();
@@ -481,22 +485,18 @@ fn cancellation_emits_no_retry_warning() {
     assert!(result.unwrap().is_err());
 
     // Cancelled before first attempt: no retry warnings
-    let retry_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.message.contains("retrying after transient error"))
-        .collect();
     assert!(
-        retry_events.is_empty(),
+        !events
+            .iter()
+            .any(|e| e.message.contains("retrying after transient error")),
         "cancelled context should not emit retry warnings"
     );
 
     // No attempt events either (cancellation checked before attempt)
-    let attempt_events: Vec<_> = events
-        .iter()
-        .filter(|e| e.message.contains("executing retry attempt"))
-        .collect();
     assert!(
-        attempt_events.is_empty(),
+        !events
+            .iter()
+            .any(|e| e.message.contains("executing retry attempt")),
         "cancelled context should not emit attempt events"
     );
 }

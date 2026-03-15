@@ -200,63 +200,407 @@ pub fn default_policy(subsystem: SubsystemClass) -> SubsystemCoveragePolicy {
     let s = subsystem;
     let rules = match subsystem {
         SubsystemClass::Kernel => vec![
-            rule(s, CoverageCategory::PositivePath, "happy-path context creation", true, 3, false, false),
-            rule(s, CoverageCategory::NegativePath, "invalid budget / correlation inputs", true, 3, false, false),
-            rule(s, CoverageCategory::Cancellation, "drain and abort during context ops", true, 2, false, false),
-            rule(s, CoverageCategory::Recovery, "self-heal after partial context failure", true, 2, false, false),
-            rule(s, CoverageCategory::PropertyBased, "budget invariant properties", false, 1, false, true),
-            rule(s, CoverageCategory::FailureInjection, "fault injection in runtime context", false, 1, true, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "happy-path context creation",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "invalid budget / correlation inputs",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Cancellation,
+                "drain and abort during context ops",
+                true,
+                2,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Recovery,
+                "self-heal after partial context failure",
+                true,
+                2,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::PropertyBased,
+                "budget invariant properties",
+                false,
+                1,
+                false,
+                true,
+            ),
+            rule(
+                s,
+                CoverageCategory::FailureInjection,
+                "fault injection in runtime context",
+                false,
+                1,
+                true,
+                false,
+            ),
         ],
         SubsystemClass::Host => vec![
-            rule(s, CoverageCategory::PositivePath, "supervisor lifecycle happy path", true, 3, true, false),
-            rule(s, CoverageCategory::NegativePath, "invalid enforcement pipeline inputs", true, 3, false, false),
-            rule(s, CoverageCategory::Restart, "cold restart and warm resume", true, 2, true, false),
-            rule(s, CoverageCategory::Failover, "fallback and degraded mode transitions", true, 2, true, false),
-            rule(s, CoverageCategory::Cancellation, "drain in-flight operations", true, 2, true, false),
-            rule(s, CoverageCategory::Recovery, "health check repair cycle", true, 2, true, false),
-            rule(s, CoverageCategory::Adversarial, "malformed output capture", false, 1, false, true),
-            rule(s, CoverageCategory::FailureInjection, "chaos in supervisor pipeline", false, 1, true, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "supervisor lifecycle happy path",
+                true,
+                3,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "invalid enforcement pipeline inputs",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Restart,
+                "cold restart and warm resume",
+                true,
+                2,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Failover,
+                "fallback and degraded mode transitions",
+                true,
+                2,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Cancellation,
+                "drain in-flight operations",
+                true,
+                2,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Recovery,
+                "health check repair cycle",
+                true,
+                2,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Adversarial,
+                "malformed output capture",
+                false,
+                1,
+                false,
+                true,
+            ),
+            rule(
+                s,
+                CoverageCategory::FailureInjection,
+                "chaos in supervisor pipeline",
+                false,
+                1,
+                true,
+                false,
+            ),
         ],
         SubsystemClass::Abi => vec![
-            rule(s, CoverageCategory::PositivePath, "well-formed frame round-trip", true, 3, false, false),
-            rule(s, CoverageCategory::NegativePath, "truncated / oversized frames", true, 3, false, false),
-            rule(s, CoverageCategory::Adversarial, "malformed CBOR, injection, overflow", true, 3, false, true),
-            rule(s, CoverageCategory::PropertyBased, "codec encode/decode round-trip properties", true, 2, false, true),
-            rule(s, CoverageCategory::Cancellation, "mid-frame abort", false, 1, false, false),
-            rule(s, CoverageCategory::FailureInjection, "transport fault injection", false, 1, false, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "well-formed frame round-trip",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "truncated / oversized frames",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Adversarial,
+                "malformed CBOR, injection, overflow",
+                true,
+                3,
+                false,
+                true,
+            ),
+            rule(
+                s,
+                CoverageCategory::PropertyBased,
+                "codec encode/decode round-trip properties",
+                true,
+                2,
+                false,
+                true,
+            ),
+            rule(
+                s,
+                CoverageCategory::Cancellation,
+                "mid-frame abort",
+                false,
+                1,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::FailureInjection,
+                "transport fault injection",
+                false,
+                1,
+                false,
+                false,
+            ),
         ],
         SubsystemClass::Sdk => vec![
-            rule(s, CoverageCategory::PositivePath, "harness adapter happy path", true, 3, false, false),
-            rule(s, CoverageCategory::NegativePath, "invalid SDK calls", true, 3, false, false),
-            rule(s, CoverageCategory::Cancellation, "harness shutdown during SDK call", false, 1, false, false),
-            rule(s, CoverageCategory::Recovery, "retry after transient SDK error", false, 1, false, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "harness adapter happy path",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "invalid SDK calls",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Cancellation,
+                "harness shutdown during SDK call",
+                false,
+                1,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Recovery,
+                "retry after transient SDK error",
+                false,
+                1,
+                false,
+                false,
+            ),
         ],
         SubsystemClass::Manifest => vec![
-            rule(s, CoverageCategory::PositivePath, "valid schema + version acceptance", true, 3, false, false),
-            rule(s, CoverageCategory::NegativePath, "invalid schema, version mismatch", true, 3, false, false),
-            rule(s, CoverageCategory::PropertyBased, "schema validation invariants", false, 1, false, true),
-            rule(s, CoverageCategory::Adversarial, "oversized manifest payloads", false, 1, false, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "valid schema + version acceptance",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "invalid schema, version mismatch",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::PropertyBased,
+                "schema validation invariants",
+                false,
+                1,
+                false,
+                true,
+            ),
+            rule(
+                s,
+                CoverageCategory::Adversarial,
+                "oversized manifest payloads",
+                false,
+                1,
+                false,
+                false,
+            ),
         ],
         SubsystemClass::Policy => vec![
-            rule(s, CoverageCategory::PositivePath, "capability grant happy path", true, 3, false, false),
-            rule(s, CoverageCategory::NegativePath, "invalid CUAL / capability format", true, 3, false, false),
-            rule(s, CoverageCategory::Denial, "capability denied, policy block", true, 3, false, false),
-            rule(s, CoverageCategory::Adversarial, "credential injection attempts", false, 2, false, true),
-            rule(s, CoverageCategory::Recovery, "credential rotation recovery", false, 1, false, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "capability grant happy path",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "invalid CUAL / capability format",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Denial,
+                "capability denied, policy block",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Adversarial,
+                "credential injection attempts",
+                false,
+                2,
+                false,
+                true,
+            ),
+            rule(
+                s,
+                CoverageCategory::Recovery,
+                "credential rotation recovery",
+                false,
+                1,
+                false,
+                false,
+            ),
         ],
         SubsystemClass::Placement => vec![
-            rule(s, CoverageCategory::PositivePath, "WASI instantiation happy path", true, 3, true, false),
-            rule(s, CoverageCategory::NegativePath, "invalid placement target", true, 3, false, false),
-            rule(s, CoverageCategory::Failover, "failover to secondary placement", true, 2, true, false),
-            rule(s, CoverageCategory::Cancellation, "mid-placement abort", false, 1, true, false),
-            rule(s, CoverageCategory::FailureInjection, "remote placement fault inject", false, 1, true, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "WASI instantiation happy path",
+                true,
+                3,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "invalid placement target",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Failover,
+                "failover to secondary placement",
+                true,
+                2,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Cancellation,
+                "mid-placement abort",
+                false,
+                1,
+                true,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::FailureInjection,
+                "remote placement fault inject",
+                false,
+                1,
+                true,
+                false,
+            ),
         ],
         SubsystemClass::Provisioning => vec![
-            rule(s, CoverageCategory::PositivePath, "bootstrap injection happy path", true, 3, false, false),
-            rule(s, CoverageCategory::NegativePath, "invalid bootstrap payload", true, 3, false, false),
-            rule(s, CoverageCategory::Recovery, "credential rotation recovery", true, 2, false, false),
-            rule(s, CoverageCategory::Cancellation, "abort during injection", false, 1, false, false),
-            rule(s, CoverageCategory::FailureInjection, "fault inject in rotation pipeline", false, 1, false, false),
+            rule(
+                s,
+                CoverageCategory::PositivePath,
+                "bootstrap injection happy path",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::NegativePath,
+                "invalid bootstrap payload",
+                true,
+                3,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Recovery,
+                "credential rotation recovery",
+                true,
+                2,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::Cancellation,
+                "abort during injection",
+                false,
+                1,
+                false,
+                false,
+            ),
+            rule(
+                s,
+                CoverageCategory::FailureInjection,
+                "fault inject in rotation pipeline",
+                false,
+                1,
+                false,
+                false,
+            ),
         ],
     };
 
@@ -282,10 +626,7 @@ pub fn minimum_credible_coverage(subsystem: &SubsystemClass) -> Vec<CoverageCate
 /// integration tests).
 #[must_use]
 pub const fn requires_host_integration(subsystem: &SubsystemClass) -> bool {
-    matches!(
-        subsystem,
-        SubsystemClass::Host | SubsystemClass::Placement
-    )
+    matches!(subsystem, SubsystemClass::Host | SubsystemClass::Placement)
 }
 
 /// Whether adversarial/fuzz testing is required for this subsystem.
@@ -422,12 +763,12 @@ mod tests {
         // Provide only PositivePath — should flag NegativePath and Denial
         let actual = [CoverageCategory::PositivePath];
         let missing = validate_coverage(&policy, &actual);
-        assert!(
-            !missing.is_empty(),
-            "Should report missing categories",
-        );
+        assert!(!missing.is_empty(), "Should report missing categories",);
         let joined = missing.join("\n");
-        assert!(joined.contains("NegativePath"), "Should mention NegativePath: {joined}");
+        assert!(
+            joined.contains("NegativePath"),
+            "Should mention NegativePath: {joined}"
+        );
         assert!(joined.contains("Denial"), "Should mention Denial: {joined}");
     }
 
@@ -566,7 +907,7 @@ mod tests {
     fn subsystem_class_clone_copy() {
         let a = SubsystemClass::Abi;
         let b = a; // Copy
-        let c = a.clone(); // Clone
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -575,7 +916,7 @@ mod tests {
     fn coverage_category_clone_copy() {
         let a = CoverageCategory::Denial;
         let b = a; // Copy
-        let c = a.clone(); // Clone
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -591,12 +932,14 @@ mod tests {
             false,
             false,
         );
-        let cloned = r.clone();
-        assert_eq!(cloned.subsystem, SubsystemClass::Kernel);
-        assert_eq!(cloned.category, CoverageCategory::PositivePath);
-        assert_eq!(cloned.description, "test rule");
-        assert!(cloned.required);
-        assert_eq!(cloned.min_cases, 5);
+        let cloned = Clone::clone(&r);
+        assert_eq!(cloned.subsystem, r.subsystem);
+        assert_eq!(cloned.category, r.category);
+        assert_eq!(cloned.description, r.description);
+        assert_eq!(cloned.required, r.required);
+        assert_eq!(cloned.min_cases, r.min_cases);
+        assert_eq!(cloned.requires_host, r.requires_host);
+        assert_eq!(cloned.requires_fuzz, r.requires_fuzz);
     }
 
     #[test]
@@ -612,7 +955,11 @@ mod tests {
         let policy = default_policy(SubsystemClass::Host);
         let missing = validate_coverage(&policy, &[]);
         // Host has multiple mandatory categories
-        assert!(missing.len() >= 3, "Expected at least 3 missing, got {}", missing.len());
+        assert!(
+            missing.len() >= 3,
+            "Expected at least 3 missing, got {}",
+            missing.len()
+        );
     }
 
     #[test]
@@ -623,7 +970,10 @@ mod tests {
         cats.push(CoverageCategory::Adversarial);
         cats.push(CoverageCategory::FailureInjection);
         let missing = validate_coverage(&policy, &cats);
-        assert!(missing.is_empty(), "Extra categories should not cause failures: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "Extra categories should not cause failures: {missing:?}"
+        );
     }
 
     #[test]
@@ -639,9 +989,8 @@ mod tests {
     #[test]
     fn abi_policy_has_fuzz_rules() {
         let policy = default_policy(SubsystemClass::Abi);
-        let fuzz_rules: Vec<_> = policy.rules.iter().filter(|r| r.requires_fuzz).collect();
         assert!(
-            !fuzz_rules.is_empty(),
+            policy.rules.iter().any(|rule| rule.requires_fuzz),
             "Abi policy should have rules requiring fuzz infrastructure",
         );
     }
@@ -649,9 +998,8 @@ mod tests {
     #[test]
     fn host_policy_has_host_integration_rules() {
         let policy = default_policy(SubsystemClass::Host);
-        let host_rules: Vec<_> = policy.rules.iter().filter(|r| r.requires_host).collect();
         assert!(
-            !host_rules.is_empty(),
+            policy.rules.iter().any(|rule| rule.requires_host),
             "Host policy should have rules requiring host integration",
         );
     }
@@ -662,7 +1010,11 @@ mod tests {
         let cats = policy.categories();
         let mut deduped = cats.clone();
         deduped.dedup();
-        assert_eq!(cats.len(), deduped.len(), "categories() should return unique entries");
+        assert_eq!(
+            cats.len(),
+            deduped.len(),
+            "categories() should return unique entries"
+        );
     }
 
     #[test]

@@ -1912,8 +1912,7 @@ fn example_input_from_schema(schema: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_async_core::io::{AsupersyncIo, BufReader};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader, duplex};
+    use fcp_async_core::io::{AsupersyncIo, AsyncReadExt, AsyncWriteExt, BufReader};
 
     // ── Helpers ─────────────────────────────────────────────────────
 
@@ -2049,8 +2048,9 @@ mod tests {
     where
         F: FnMut(&McpToolDefinition, Value, Value) -> JsonRpcResponse + Send + 'static,
     {
-        let (mut client_input, server_input) = duplex(4096);
-        let (server_output, client_output) = duplex(4096);
+        let (client_input, server_input) = tokio::io::duplex(4096);
+        let (server_output, client_output) = tokio::io::duplex(4096);
+        let mut client_input = AsupersyncIo::new(client_input);
 
         let task = tokio::spawn(async move {
             run_stdio_transport(
@@ -2068,7 +2068,7 @@ mod tests {
         task.await.unwrap();
 
         let mut output = String::new();
-        let mut reader = TokioBufReader::new(client_output);
+        let mut reader = BufReader::new(AsupersyncIo::new(client_output));
         reader.read_to_string(&mut output).await.unwrap();
         output
     }

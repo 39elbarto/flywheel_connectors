@@ -1958,8 +1958,13 @@ pub mod tls {
 pub mod websocket {
     pub use asupersync::net::websocket::{
         ClientHandshake, CloseCode, CloseConfig, CloseReason, HttpResponse, Message, WebSocket,
-        WebSocketConfig, WsError, WsUrl,
+        WebSocketConfig, WsConnectError, WsError, WsUrl,
     };
+
+    /// Client-focused re-exports mirroring asupersync's websocket client surface.
+    pub mod client {
+        pub use super::{Message, WebSocket, WebSocketConfig, WsConnectError};
+    }
 }
 
 /// HTTP/1.1 client re-exports from asupersync.
@@ -2235,9 +2240,13 @@ mod tests {
         assert_type::<websocket::Message>();
         assert_type::<websocket::WebSocket<super::net::TcpStream>>();
         assert_type::<websocket::WebSocketConfig>();
-        assert_type::<websocket::WebSocketConfig>();
+        assert_type::<websocket::WsConnectError>();
         assert_type::<websocket::WsError>();
         assert_type::<websocket::WsUrl>();
+        assert_type::<websocket::client::Message>();
+        assert_type::<websocket::client::WebSocket<super::net::TcpStream>>();
+        assert_type::<websocket::client::WebSocketConfig>();
+        assert_type::<websocket::client::WsConnectError>();
     }
 
     #[runtime::test]

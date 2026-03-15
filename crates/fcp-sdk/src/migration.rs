@@ -504,7 +504,7 @@ impl RetryLoop {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct HttpRetryConfig {
-    /// Maximum retry attempts.
+    /// Maximum retry attempts after the initial request.
     pub max_retries: u32,
     /// Initial backoff delay in milliseconds.
     pub initial_delay_ms: u64,
@@ -533,7 +533,7 @@ impl HttpRetryConfig {
             .with_base_backoff_ms(self.initial_delay_ms)
             .with_max_backoff_ms(self.max_delay_ms)
             .with_jitter_enabled(self.jitter_enabled)
-            .with_max_attempts(Some(self.max_retries))
+            .with_max_attempts(Some(self.max_retries.saturating_add(1)))
     }
 }
 
@@ -649,7 +649,7 @@ mod tests {
             jitter_enabled: false,
         };
         let policy = config.to_retry_policy();
-        assert_eq!(policy.max_attempts, Some(5));
+        assert_eq!(policy.max_attempts, Some(6));
         assert_eq!(policy.base_backoff_ms, 1000);
         assert_eq!(policy.max_backoff_ms, 60_000);
         assert!(!policy.jitter_enabled);
@@ -1330,8 +1330,8 @@ mod tests {
             jitter_enabled: false,
         };
         let policy = config.to_retry_policy();
-        assert_eq!(policy.max_attempts, Some(0));
-        // With 0 max attempts, no delay should be produced
+        assert_eq!(policy.max_attempts, Some(1));
+        // With 0 retries, the initial request still runs but no retry delay is produced.
         assert!(policy.next_delay(0, RetryDecision::Backoff, None).is_none());
     }
 
@@ -1344,7 +1344,7 @@ mod tests {
             jitter_enabled: false,
         };
         let policy = config.to_retry_policy();
-        assert_eq!(policy.max_attempts, Some(1));
+        assert_eq!(policy.max_attempts, Some(2));
         assert!(policy.next_delay(0, RetryDecision::Backoff, None).is_some());
         assert!(policy.next_delay(1, RetryDecision::Backoff, None).is_none());
     }

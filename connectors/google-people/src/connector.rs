@@ -15,7 +15,6 @@ use fcp_google_discovery::{
     policy::{GooglePolicyCatalog, PolicyApprovalMode, PolicyRiskLevel, PolicySafetyTier},
     provisioning::load_default_google_provisioning_bundle,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{info, instrument};
@@ -246,7 +245,6 @@ pub struct GooglePeopleConnector {
     base: Arc<BaseConnector>,
     config: Option<GooglePeopleConfig>,
     client: Option<GooglePeopleClient>,
-    runtime: Option<ConnectorRuntime>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
 }
@@ -260,7 +258,6 @@ impl GooglePeopleConnector {
             ))),
             config: None,
             client: None,
-            runtime: None,
             verifier: None,
             session_id: None,
         }
@@ -284,10 +281,6 @@ impl GooglePeopleConnector {
 
         self.config = Some(config);
         self.client = Some(client);
-        let runtime = ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.base.set_configured(true);
 
         let config = self.config.as_ref().expect("config stored after configure");
@@ -1070,9 +1063,6 @@ impl GooglePeopleConnector {
     pub async fn handle_shutdown(&self, _params: Value) -> FcpResult<Value> {
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         info!("Google People connector shutting down");
         Ok(json!({ "status": "shutdown" }))

@@ -16,7 +16,6 @@ use fcp_core::{
     OperationInfo, Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse,
     ThreadInfo, TrustLevel, ZoneId,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,7 +51,6 @@ pub struct SlackConnector {
     socket_mode_token: Option<String>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    runtime: Option<ConnectorRuntime>,
     socket_mode_running: Arc<RwLock<bool>>,
     socket_mode_task: Option<fcp_async_core::task::JoinHandle<()>>,
     socket_mode_shutdown_tx: Option<watch::Sender<bool>>,
@@ -72,7 +70,6 @@ impl SlackConnector {
             socket_mode_token: None,
             verifier: None,
             session_id: None,
-            runtime: None,
             socket_mode_running: Arc::new(RwLock::new(false)),
             socket_mode_task: None,
             socket_mode_shutdown_tx: None,
@@ -120,10 +117,6 @@ impl SlackConnector {
             client = client.with_base_url(url);
         }
 
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.client = Some(client);
         self.socket_mode_token = Some(socket_mode_token);
         *self.subscribed_topics.write().await = Vec::new();
@@ -1165,9 +1158,6 @@ impl SlackConnector {
         self.stop_socket_mode().await;
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         info!("Slack connector shutting down");
         Ok(json!({ "status": "shutdown" }))

@@ -164,9 +164,6 @@ pub struct TwitterConnector {
     /// API client (created after configure)
     client: Option<Arc<TwitterApiClient>>,
 
-    /// Connector runtime
-    runtime: Option<fcp_sdk::migration::ConnectorRuntime>,
-
     /// Authenticated user info
     authenticated_user: Option<User>,
 
@@ -203,7 +200,6 @@ impl TwitterConnector {
             config: None,
             fcp_config: None,
             client: None,
-            runtime: None,
             authenticated_user: None,
             verifier: None,
             session_id: None,
@@ -259,10 +255,6 @@ impl TwitterConnector {
 
         info!(auth = %fcp_cfg.auth.redacted_label(), "Twitter connector configured");
 
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.config = Some(legacy_config);
         self.fcp_config = Some(fcp_cfg);
         self.client = Some(Arc::new(client));
@@ -926,9 +918,6 @@ impl TwitterConnector {
 
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.base.set_handshaken(false);
 

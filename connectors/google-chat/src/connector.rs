@@ -8,7 +8,6 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
-use fcp_sdk::migration::ConnectorRuntime;
 use serde_json::json;
 use tracing::info;
 
@@ -20,7 +19,6 @@ pub struct ChatConnector {
     client: Option<ChatClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<fcp_core::SessionId>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl ChatConnector {
@@ -31,7 +29,6 @@ impl ChatConnector {
             client: None,
             verifier: None,
             session_id: None,
-            runtime: None,
         }
     }
 
@@ -69,10 +66,6 @@ impl ChatConnector {
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.base.configured.store(true, std::sync::atomic::Ordering::Relaxed);
         info!(auth = %auth_label, status, "Google Chat connector configured");
 
@@ -452,9 +445,6 @@ impl ChatConnector {
     pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.client = None;
         info!("Google Chat connector shutting down");

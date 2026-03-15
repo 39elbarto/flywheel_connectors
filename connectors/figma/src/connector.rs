@@ -12,8 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use fcp_sdk::migration::ConnectorRuntime;
-
 use crate::client::{DEFAULT_BASE_URL, FigmaAuth, FigmaClient};
 use crate::error::FigmaError;
 use crate::types::{
@@ -94,7 +92,6 @@ pub struct FigmaConnector {
     config: Option<FigmaConfig>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl FigmaConnector {
@@ -107,7 +104,6 @@ impl FigmaConnector {
             config: None,
             verifier: None,
             session_id: None,
-            runtime: None,
         }
     }
 
@@ -130,7 +126,6 @@ impl FigmaConnector {
 
         self.client = Some(client);
         self.config = Some(cfg);
-        self.runtime = Some(ConnectorRuntime::new(Default::default()));
         self.base.set_configured(true);
         info!("Figma connector configured");
 
@@ -1786,9 +1781,6 @@ impl FigmaConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Figma connector shutting down");
-        if let Some(rt) = &self.runtime {
-            rt.shutdown();
-        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

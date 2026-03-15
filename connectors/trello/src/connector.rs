@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use fcp_sdk::migration::ConnectorRuntime;
-
 use crate::{
     client::{DEFAULT_BASE_URL, TrelloAuth, TrelloClient},
     error::TrelloError,
@@ -172,7 +170,6 @@ pub struct TrelloConnector {
     base: Arc<BaseConnector>,
     config: Option<TrelloConfig>,
     client: Option<Arc<TrelloClient>>,
-    runtime: Option<ConnectorRuntime>,
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -185,7 +182,6 @@ impl TrelloConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("trello"))),
             config: None,
             client: None,
-            runtime: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -211,10 +207,6 @@ impl TrelloConnector {
         let client = TrelloClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
 
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
@@ -455,9 +447,6 @@ impl TrelloConnector {
         info!("Trello connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.client = None;
         self.config = None;

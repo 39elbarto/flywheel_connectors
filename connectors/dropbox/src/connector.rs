@@ -14,8 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use fcp_sdk::migration::ConnectorRuntime;
-
 use crate::{
     client::{DEFAULT_BASE_URL, DEFAULT_CONTENT_URL, DropboxAuth, DropboxClient},
     error::DropboxError,
@@ -168,7 +166,6 @@ pub struct DropboxConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl DropboxConnector {
@@ -181,7 +178,6 @@ impl DropboxConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
-            runtime: None,
         }
     }
 }
@@ -210,7 +206,6 @@ impl DropboxConnector {
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
-        self.runtime = Some(ConnectorRuntime::new(Default::default()));
         self.base.set_configured(true);
         Ok(json!({}))
     }
@@ -427,9 +422,6 @@ impl DropboxConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Dropbox connector shutting down");
-        if let Some(rt) = self.runtime.take() {
-            rt.shutdown();
-        }
         self.client = None;
         self.config = None;
         self.base.set_configured(false);

@@ -10,7 +10,6 @@ use fcp_core::{
     IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
     ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -173,7 +172,6 @@ pub struct PostHogConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl PostHogConnector {
@@ -186,7 +184,6 @@ impl PostHogConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
-            runtime: None,
         }
     }
 }
@@ -218,9 +215,6 @@ impl PostHogConnector {
         )
         .map_err(|e| e.to_fcp_error())?;
 
-        self.runtime = Some(ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        ));
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
@@ -434,9 +428,6 @@ impl PostHogConnector {
         info!("PostHog connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.client = None;
         self.config = None;

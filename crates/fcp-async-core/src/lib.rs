@@ -1949,11 +1949,12 @@ pub mod net {
     pub use asupersync::net::{TcpListener, TcpStream};
 }
 
+/// TLS connector and stream re-exports from asupersync.
+pub mod tls {
+    pub use asupersync::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
+}
+
 /// WebSocket client and protocol re-exports from asupersync.
-///
-/// NOTE: TLS re-exports are omitted because the `tls` feature is not enabled
-/// on the asupersync dependency. Crates needing TLS should depend on
-/// asupersync directly with the `tls` or `tls-native-roots` feature.
 pub mod websocket {
     pub use asupersync::net::websocket::{
         ClientHandshake, CloseCode, CloseConfig, CloseReason, HttpResponse, Message, WebSocket,
@@ -6496,6 +6497,51 @@ mod tests {
 
             assert_eq!(lines.next_line().await.unwrap().unwrap(), "alpha");
             assert_eq!(lines.next_line().await.unwrap().unwrap(), "beta");
+            assert!(lines.next_line().await.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn io_async_write_trait_is_exported() {
+        fn assert_async_write<W: io::AsyncWrite>() {}
+
+        assert_async_write::<io::AsupersyncIo<tokio::io::Stdout>>();
+    }
+
+    #[test]
+    fn io_async_buf_read_ext_lines_returns_none_for_empty_reader() {
+        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let reader = io::BufReader::new(std::io::Cursor::new(Vec::<u8>::new()));
+            let mut lines = io::AsyncBufReadExt::lines(reader);
+
+            assert!(lines.next_line().await.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn io_async_buf_read_ext_lines_strips_crlf_endings() {
+        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let reader = io::BufReader::new(std::io::Cursor::new(b"alpha\r\nbeta\r\n".to_vec()));
+            let mut lines = io::AsyncBufReadExt::lines(reader);
+
+            assert_eq!(lines.next_line().await.unwrap().unwrap(), "alpha");
+            assert_eq!(lines.next_line().await.unwrap().unwrap(), "beta");
+            assert!(lines.next_line().await.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn io_async_buf_read_ext_lines_returns_final_line_without_newline() {
+        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            use crate::io::AsyncBufReadExt as _;
+
+            let reader = io::BufReader::new(std::io::Cursor::new(b"tail".to_vec()));
+            let mut lines = reader.lines();
+
+            assert_eq!(lines.next_line().await.unwrap().unwrap(), "tail");
             assert!(lines.next_line().await.unwrap().is_none());
         });
     }

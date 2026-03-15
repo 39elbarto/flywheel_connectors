@@ -14,7 +14,6 @@ use fcp_async_core::sync::RwLock;
 use fcp_core::*;
 use fcp_sdk::{
     ErrorClass, FormatMode, Formatter, Limits, classify_error_message,
-    migration::ConnectorRuntime,
     runtime::{PollResult, PollingCursor, PollingSupervisor, SupervisorConfig},
     validate_input_with_limits, validate_output_with_limits,
 };
@@ -468,7 +467,6 @@ pub struct TelegramConnector {
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     zone_dir: Option<PathBuf>,
-    runtime: Option<ConnectorRuntime>,
     // instance_id: InstanceId, // Remove
 
     // Polling state
@@ -536,7 +534,6 @@ impl TelegramConnector {
             verifier: None,
             session_id: None,
             zone_dir: None,
-            runtime: None,
             // instance_id: InstanceId::new(), // Remove
             poll_running: Arc::new(RwLock::new(false)),
             poll_task: None,
@@ -620,9 +617,6 @@ impl TelegramConnector {
         }
 
         self.config = Some(config);
-        self.runtime = Some(ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        ));
         self.base.set_configured(true);
 
         info!(auth_mode = ?auth_mode, "Telegram connector configured");
@@ -1732,9 +1726,6 @@ impl TelegramConnector {
 
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
 
         Ok(json!({ "status": "shutdown" }))

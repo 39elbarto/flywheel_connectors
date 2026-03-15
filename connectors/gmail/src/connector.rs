@@ -18,7 +18,6 @@ use fcp_google_discovery::{
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleAuthSourceKind, GoogleMaterializedAuth},
     provisioning::load_default_google_provisioning_bundle,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -89,7 +88,6 @@ pub struct GmailConnector {
     base: Arc<BaseConnector>,
     config: Option<GmailConfig>,
     client: Option<GmailClient>,
-    runtime: Option<ConnectorRuntime>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
 }
@@ -102,7 +100,6 @@ impl GmailConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("gmail"))),
             config: None,
             client: None,
-            runtime: None,
             verifier: None,
             session_id: None,
         }
@@ -188,10 +185,6 @@ impl GmailConnector {
             history_cursor_path,
         });
         self.client = Some(client);
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.base.set_configured(true);
 
         let auth_label = self.config.as_ref().map_or_else(
@@ -1169,9 +1162,6 @@ impl GmailConnector {
         info!("Gmail connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         Ok(json!({ "status": "shutdown" }))
     }

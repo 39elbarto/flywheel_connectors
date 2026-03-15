@@ -19,7 +19,6 @@ use fcp_core::{
 };
 use fcp_sdk::{
     Limits,
-    migration::{ConnectorRuntime, ConnectorRuntimeConfig},
     runtime::{
         InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
         SupervisorConfig,
@@ -48,7 +47,6 @@ pub struct DiscordConnector {
     config: Option<DiscordConfig>,
     api_client: Option<Arc<DiscordApiClient>>,
     gateway: Option<Arc<GatewayConnection>>,
-    runtime: Option<ConnectorRuntime>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     zone_dir: Option<PathBuf>,
@@ -261,7 +259,6 @@ impl DiscordConnector {
             config: None,
             api_client: None,
             gateway: None,
-            runtime: None,
             verifier: None,
             session_id: None,
             zone_dir: None,
@@ -335,7 +332,6 @@ impl DiscordConnector {
         self.api_client = Some(api_client.clone());
         self.gateway = Some(Arc::new(GatewayConnection::new(config.clone(), api_client)));
         self.config = Some(config);
-        self.runtime = Some(ConnectorRuntime::new(ConnectorRuntimeConfig::default()));
         self.base.set_configured(true);
 
         Ok(json!({
@@ -1687,10 +1683,6 @@ impl DiscordConnector {
             && let Err(err) = lease.release()
         {
             warn!(error = %err, "Failed to release Discord gateway lease");
-        }
-
-        if let Some(rt) = &self.runtime {
-            rt.shutdown();
         }
 
         Ok(json!({ "status": "shutdown" }))

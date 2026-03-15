@@ -8,7 +8,6 @@ use fcp_core::{
     IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
     ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -165,7 +164,6 @@ pub struct MongoDbConnector {
     base: Arc<BaseConnector>,
     config: Option<MongoDbConfig>,
     client: Option<Arc<MongoDbClient>>,
-    runtime: Option<ConnectorRuntime>,
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -178,7 +176,6 @@ impl MongoDbConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("mongodb"))),
             config: None,
             client: None,
-            runtime: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -204,10 +201,6 @@ impl MongoDbConnector {
         let client = MongoDbClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
 
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
@@ -438,9 +431,6 @@ impl MongoDbConnector {
         info!("MongoDB connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.client = None;
         self.config = None;

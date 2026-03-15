@@ -14,7 +14,6 @@ use fcp_google_discovery::{
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
     provisioning::load_default_google_provisioning_bundle,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -224,7 +223,6 @@ pub struct GoogleCalendarConnector {
     client: Option<GoogleCalendarClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl GoogleCalendarConnector {
@@ -239,7 +237,6 @@ impl GoogleCalendarConnector {
             client: None,
             verifier: None,
             session_id: None,
-            runtime: None,
         }
     }
 
@@ -253,8 +250,6 @@ impl GoogleCalendarConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = GoogleCalendarConfig::from_params(&params).await?;
-
-        let runtime = ConnectorRuntime::new(Default::default());
 
         let client = GoogleCalendarClient::new_with_auth(config.auth.clone())
             .map_err(|e| FcpError::Internal {
@@ -270,7 +265,6 @@ impl GoogleCalendarConnector {
 
         self.config = Some(config);
         self.client = Some(client);
-        self.runtime = Some(runtime);
         self.base.set_configured(true);
 
         let config = self.config.as_ref().expect("config stored after configure");
@@ -1309,9 +1303,6 @@ impl GoogleCalendarConnector {
         info!("Google Calendar connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(rt) = self.runtime.take() {
-            rt.shutdown();
         }
         Ok(json!({ "status": "shutdown" }))
     }

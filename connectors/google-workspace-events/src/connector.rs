@@ -13,7 +13,6 @@ use fcp_google_discovery::{
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
     provisioning::load_default_google_provisioning_bundle,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use serde_json::json;
 use tracing::info;
 
@@ -159,7 +158,6 @@ pub struct WorkspaceEventsConnector {
     verifier: Option<CapabilityVerifier>,
     session_id: Option<fcp_core::SessionId>,
     required_scopes: Vec<String>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl WorkspaceEventsConnector {
@@ -173,7 +171,6 @@ impl WorkspaceEventsConnector {
             verifier: None,
             session_id: None,
             required_scopes: Vec::new(),
-            runtime: None,
         }
     }
 
@@ -197,10 +194,6 @@ impl WorkspaceEventsConnector {
         let auth_label = client.auth_redacted_label();
         self.required_scopes.clone_from(&config.required_scopes);
         self.client = Some(client);
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.base
             .configured
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -761,9 +754,6 @@ impl WorkspaceEventsConnector {
     ) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.client = None;
         info!("Google Workspace Events connector shutting down");

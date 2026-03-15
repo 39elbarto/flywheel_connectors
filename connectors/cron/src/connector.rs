@@ -16,7 +16,6 @@ use serde_json::json;
 use tracing::{info, instrument};
 use uuid::Uuid;
 
-use fcp_sdk::migration::ConnectorRuntime;
 
 use crate::error::CronError;
 use crate::types::{Execution, Schedule, validate_cron_expression};
@@ -225,7 +224,6 @@ pub struct CronConnector {
     executions: Vec<Execution>,
     request_count: AtomicU64,
     error_count: AtomicU64,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl CronConnector {
@@ -240,7 +238,6 @@ impl CronConnector {
             executions: Vec::new(),
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
-            runtime: None,
         }
     }
 }
@@ -271,7 +268,6 @@ impl CronConnector {
         info!("Configuring Cron connector (local meta-connector, no external auth)");
         self.provisioning = provisioning;
         self.configured = true;
-        self.runtime = Some(ConnectorRuntime::new(Default::default()));
         self.base.set_configured(true);
         Ok(json!({
             "status": "configured",
@@ -499,9 +495,6 @@ impl CronConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Cron connector shutting down");
-        if let Some(rt) = self.runtime.take() {
-            rt.shutdown();
-        }
         self.configured = false;
         self.session_id = None;
         self.base.set_configured(false);

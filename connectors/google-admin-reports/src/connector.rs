@@ -15,7 +15,6 @@ use fcp_google_discovery::{
     policy::{GooglePolicyCatalog, PolicyApprovalMode, PolicyRiskLevel, PolicySafetyTier},
     provisioning::load_default_google_provisioning_bundle,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{info, instrument};
@@ -214,7 +213,6 @@ pub struct AdminReportsConnector {
     base: Arc<BaseConnector>,
     config: Option<AdminReportsConfig>,
     client: Option<AdminReportsClient>,
-    runtime: Option<ConnectorRuntime>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
 }
@@ -228,7 +226,6 @@ impl AdminReportsConnector {
             ))),
             config: None,
             client: None,
-            runtime: None,
             verifier: None,
             session_id: None,
         }
@@ -252,10 +249,6 @@ impl AdminReportsConnector {
 
         self.config = Some(config);
         self.client = Some(client);
-        let runtime = ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.base.set_configured(true);
 
         let config = self.config.as_ref().expect("config stored after configure");
@@ -858,9 +851,6 @@ impl AdminReportsConnector {
     ) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         info!("Admin Reports connector shutting down");
         Ok(json!({ "status": "shutdown" }))

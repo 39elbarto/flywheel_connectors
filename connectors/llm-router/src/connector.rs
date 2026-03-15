@@ -9,7 +9,6 @@ use fcp_core::{
     ConnectorId, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use serde_json::json;
 use tracing::{info, instrument};
 
@@ -37,7 +36,6 @@ pub struct LlmRouterConnector {
     total_cost: AtomicU64,
     provider_usage: HashMap<String, ProviderUsage>,
     provider_status: Vec<(String, ProviderStatus, u64)>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl LlmRouterConnector {
@@ -52,7 +50,6 @@ impl LlmRouterConnector {
             total_cost: AtomicU64::new(0),
             provider_usage: HashMap::new(),
             provider_status: Vec::new(),
-            runtime: None,
         }
     }
 
@@ -269,9 +266,6 @@ impl LlmRouterConnector {
             );
         }
 
-        self.runtime = Some(ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        ));
         self.config = Some(RouterConfig {
             providers,
             default_strategy,
@@ -757,9 +751,6 @@ impl LlmRouterConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("LLM Router shutting down");
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
-        }
         Ok(json!({
             "status": "shutdown",
             "total_cost_usd": self.total_cost(),

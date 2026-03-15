@@ -123,7 +123,6 @@ pub struct ZendeskConnector {
     base: Arc<BaseConnector>,
     config: Option<ZendeskConfig>,
     client: Option<ZendeskClient>,
-    runtime: Option<fcp_sdk::migration::ConnectorRuntime>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
 }
@@ -136,7 +135,6 @@ impl ZendeskConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("zendesk"))),
             config: None,
             client: None,
-            runtime: None,
             verifier: None,
             session_id: None,
         }
@@ -166,10 +164,6 @@ impl ZendeskConnector {
             "Zendesk connector configured"
         );
 
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.client = Some(client);
         self.config = Some(config);
         self.base.set_configured(true);
@@ -1139,9 +1133,6 @@ impl ZendeskConnector {
     ) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         info!("Zendesk connector shutting down");
         Ok(json!({ "status": "shutdown" }))

@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use fcp_sdk::migration::ConnectorRuntime;
 
 use crate::{
     client::{BrowserAuth, BrowserClient, DEFAULT_BROWSER_URL},
@@ -178,7 +177,6 @@ pub struct BrowserConnector {
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     session_store: Mutex<BrowserSessionMeshStore>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl BrowserConnector {
@@ -192,7 +190,6 @@ impl BrowserConnector {
             verifier: None,
             session_id: None,
             session_store: Mutex::new(BrowserSessionMeshStore::default()),
-            runtime: None,
         }
     }
 
@@ -214,7 +211,6 @@ impl BrowserConnector {
 
         self.config = Some(config);
         self.client = Some(client);
-        self.runtime = Some(ConnectorRuntime::new(Default::default()));
         self.base.set_configured(true);
 
         Ok(json!({ "status": "configured" }))
@@ -1767,9 +1763,6 @@ impl BrowserConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Browser connector shutting down");
-        if let Some(rt) = &self.runtime {
-            rt.shutdown();
-        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

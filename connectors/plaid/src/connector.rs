@@ -8,7 +8,6 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
     SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -219,7 +218,6 @@ pub struct PlaidConnector {
     client: Option<PlaidClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl PlaidConnector {
@@ -232,7 +230,6 @@ impl PlaidConnector {
             client: None,
             verifier: None,
             session_id: None,
-            runtime: None,
         }
     }
 
@@ -268,9 +265,6 @@ impl PlaidConnector {
                 None
             }
         };
-        self.runtime = Some(ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        ));
         self.config = Some(config);
         self.base.set_configured(true);
         info!(
@@ -1125,9 +1119,6 @@ impl PlaidConnector {
         info!("Plaid connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         Ok(json!({ "status": "shutdown" }))
     }

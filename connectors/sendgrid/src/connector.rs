@@ -9,7 +9,6 @@ use fcp_core::{
     ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
     StepId,
 };
-use fcp_sdk::migration::ConnectorRuntime;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -156,7 +155,6 @@ pub struct SendGridConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl SendGridConnector {
@@ -169,7 +167,6 @@ impl SendGridConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
-            runtime: None,
         }
     }
 }
@@ -570,9 +567,6 @@ impl SendGridConnector {
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
-        self.runtime = Some(ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        ));
         self.base.set_configured(true);
         Ok(json!({}))
     }
@@ -797,9 +791,6 @@ impl SendGridConnector {
         info!("SendGrid connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.client = None;
         self.config = None;

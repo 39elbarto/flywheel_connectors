@@ -8,7 +8,6 @@ use fcp_core::{
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
-use fcp_sdk::migration::ConnectorRuntime;
 use serde_json::json;
 use tracing::info;
 
@@ -20,7 +19,6 @@ pub struct DocsConnector {
     client: Option<DocsClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<fcp_core::SessionId>,
-    runtime: Option<ConnectorRuntime>,
 }
 
 impl DocsConnector {
@@ -31,7 +29,6 @@ impl DocsConnector {
             client: None,
             verifier: None,
             session_id: None,
-            runtime: None,
         }
     }
 
@@ -72,10 +69,6 @@ impl DocsConnector {
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
-        self.runtime = Some(runtime);
         self.base
             .configured
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -400,9 +393,6 @@ impl DocsConnector {
     ) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
         }
         self.client = None;
         info!("Google Docs connector shutting down");

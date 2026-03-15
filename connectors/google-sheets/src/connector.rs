@@ -354,13 +354,7 @@ impl SheetsConnector {
 
         match operation {
             "sheets.get_spreadsheet" => {
-                let spreadsheet_id = input
-                    .get("spreadsheet_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1001,
-                        message: "Missing 'spreadsheet_id'".into(),
-                    })?;
+                let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
                 let ss = client
                     .get_spreadsheet(spreadsheet_id)
                     .await

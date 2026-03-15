@@ -806,7 +806,6 @@ impl RepairController {
     }
 
     fn select_plan_actions(
-        &self,
         options: &RepairPlanningOptions,
         plan: &mut RepairPlan,
         candidates: Vec<RepairPlanAction>,
@@ -887,7 +886,7 @@ impl RepairController {
             deferred: Vec::new(),
         };
 
-        self.select_plan_actions(options, &mut plan, candidates);
+        Self::select_plan_actions(options, &mut plan, candidates);
         plan
     }
 
@@ -4205,6 +4204,9 @@ mod tests {
             hot_objects: vec![ObjectId::from_bytes([1; 32])],
             hot_object_min_coverage_bps: 8000,
             power_saver: true,
+            mains_power: true,
+            metered_network: true,
+            bandwidth_estimate_kbps: 25_000,
             derp_penalty_bps: 500,
         };
         let json = serde_json::to_string(&opts).unwrap();

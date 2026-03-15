@@ -27,12 +27,14 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod error;
+pub mod health;
 mod reconnect;
 mod sse;
 mod stream;
 mod websocket;
 
 pub use error::*;
+pub use health::{StreamHealthConfig, StreamHealthSnapshot, StreamHealthState, StreamHealthTracker};
 pub use reconnect::*;
 pub use sse::*;
 pub use stream::*;

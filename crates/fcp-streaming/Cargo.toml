@@ -29,6 +29,9 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# Time
+chrono.workspace = true
+
 # Utilities
 bytes.workspace = true
 pin-project-lite = "0.2"

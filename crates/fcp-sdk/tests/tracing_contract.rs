@@ -384,17 +384,13 @@ fn max_attempts_exhausted_emits_correct_retry_count() {
 
     assert!(result.unwrap().is_err());
 
-    // Should have retry warnings for each failed attempt (except the last which
-    // exceeds max_attempts and exits before debug/warn)
+    // Retry warnings are emitted for each retryable failure where the policy
+    // grants another attempt. Verify they have sequentially incrementing attempt
+    // numbers regardless of how many the policy allowed.
     let retry_events: Vec<_> = events
         .iter()
         .filter(|e| e.message.contains("retrying after transient error"))
         .collect();
-
-    // With max_attempts=3: attempt 0 retries (warn), attempt 1 retries (warn),
-    // attempt 2 retries (warn would happen but policy.next_delay returns None
-    // because attempt >= max_attempts-1 check), actually let's verify...
-    // The retry events should have incrementing attempt numbers
     for (i, event) in retry_events.iter().enumerate() {
         let attempt: u32 = event
             .field("attempt")

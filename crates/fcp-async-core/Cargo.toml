@@ -12,7 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-asupersync = { path = "/dp/asupersync", default-features = false, features = ["tracing-integration"] }
+asupersync = { path = "/dp/asupersync", default-features = false, features = ["tracing-integration", "tls", "tls-native-roots"] }
 asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat", features = ["tokio-io"] }
 fcp-async-core-macros = { path = "../fcp-async-core-macros" }
 futures-util.workspace = true

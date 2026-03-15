@@ -2200,7 +2200,7 @@ mod tests {
 
     use super::{
         AsyncError, CancellationToken, ContextScope, ExecutionContext, Instrumentation, TaskGroup,
-        channel, runtime, task, time, tls, websocket,
+        channel, io, runtime, task, time, tls, websocket,
     };
 
     #[test]
@@ -2235,7 +2235,7 @@ mod tests {
         assert_type::<websocket::Message>();
         assert_type::<websocket::WebSocket<super::net::TcpStream>>();
         assert_type::<websocket::WebSocketConfig>();
-        assert_type::<websocket::WsConfig>();
+        assert_type::<websocket::WebSocketConfig>();
         assert_type::<websocket::WsError>();
         assert_type::<websocket::WsUrl>();
     }

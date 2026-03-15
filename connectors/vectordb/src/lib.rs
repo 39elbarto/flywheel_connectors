@@ -29,7 +29,6 @@
 pub mod config;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::Utc;
 use fcp_core::{
@@ -37,7 +36,7 @@ use fcp_core::{
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use serde_json::json;
 use tracing::{info, instrument, warn};
 
@@ -49,7 +48,6 @@ pub struct VectorDbConnector {
     config: Option<VectorDbConfig>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    runtime: Option<ConnectorRuntime>,
     #[allow(dead_code)] // Retained for future retry-loop integration
     retry_config: HttpRetryConfig,
 }
@@ -69,7 +67,6 @@ impl VectorDbConnector {
             config: None,
             verifier: None,
             session_id: None,
-            runtime: None,
             retry_config: HttpRetryConfig {
                 max_retries: 2,
                 ..HttpRetryConfig::default()
@@ -118,10 +115,6 @@ impl VectorDbConnector {
         );
 
         self.config = Some(config);
-        self.runtime = Some(ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_secs(30)),
-        ));
         self.base.set_configured(true);
 
         Ok(json!({ "status": "configured" }))
@@ -184,11 +177,9 @@ impl VectorDbConnector {
         })
     }
 
-    /// Gracefully shut down the connector runtime.
-    pub fn shutdown(&mut self) {
-        if let Some(rt) = self.runtime.take() {
-            rt.shutdown();
-        }
+    /// Gracefully shut down the connector.
+    pub fn shutdown(&self) {
+        // VectorDB has no persistent client to shut down.
     }
 
     /// Handle health check.

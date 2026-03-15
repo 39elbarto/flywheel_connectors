@@ -412,8 +412,8 @@ async fn discover_all_returns_all_connectors() {
 
     let response = endpoint.discover(None).await;
     assert_eq!(response.connectors.len(), 3);
-    assert!(response.supports_streaming);
-    assert!(response.supports_batching);
+    assert_eq!(response.supports_streaming, None);
+    assert_eq!(response.supports_batching, None);
     assert_eq!(response.registry_version, 3);
 }
 
@@ -502,7 +502,7 @@ async fn introspect_reader_produces_correct_tool_descriptors() {
         assert_eq!(tool.idempotency, IdempotencyClass::Strict);
         assert!(tool.idempotent); // Strict → idempotent
         assert!(!tool.requires_confirmation); // No approval required
-        assert!(!tool.supports_simulate);
+        assert_eq!(tool.supports_simulate, None);
         assert!(tool.approval_mode.is_none());
     }
 }
@@ -1786,8 +1786,8 @@ async fn discovery_response_metadata_correct() {
     assert_eq!(response.registry_version, 3);
 
     // Streaming and batching support
-    assert!(response.supports_streaming);
-    assert!(response.supports_batching);
+    assert_eq!(response.supports_streaming, None);
+    assert_eq!(response.supports_batching, None);
 
     // Serde roundtrip
     let json = serde_json::to_string(&response).unwrap();
@@ -2212,8 +2212,8 @@ fn discovery_response_new_defaults() {
 
     assert!(resp.connectors.is_empty());
     assert_eq!(resp.registry_version, 42);
-    assert!(resp.supports_streaming);
-    assert!(resp.supports_batching);
+    assert_eq!(resp.supports_streaming, None);
+    assert_eq!(resp.supports_batching, None);
     assert!(resp.timestamp >= before);
     assert!(resp.timestamp <= after);
 }
@@ -2224,8 +2224,8 @@ fn discovery_response_serde_roundtrip() {
     let json = serde_json::to_string(&resp).unwrap();
     let parsed: fcp_host::DiscoveryResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.registry_version, 7);
-    assert!(parsed.supports_streaming);
-    assert!(parsed.supports_batching);
+    assert_eq!(parsed.supports_streaming, None);
+    assert_eq!(parsed.supports_batching, None);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2431,9 +2431,9 @@ fn tool_descriptor_supports_simulate_across_tiers() {
         let op = make_op("op", RiskLevel::Low, tier, IdempotencyClass::Strict, None);
         let tool = ToolDescriptor::from(&op);
         // Tier alone does not prove live simulate support.
-        assert!(
-            !tool.supports_simulate,
-            "supports_simulate should remain false without explicit host evidence for tier {tier:?}"
+        assert_eq!(
+            tool.supports_simulate, None,
+            "supports_simulate should remain unknown without explicit host evidence for tier {tier:?}"
         );
     }
 }

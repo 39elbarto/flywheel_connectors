@@ -226,10 +226,18 @@ pub struct DiscoveryResponse {
     pub registry_version: u64,
 
     /// Whether the host supports streaming events.
-    pub supports_streaming: bool,
+    ///
+    /// `None` means discovery does not yet have authoritative host-capability
+    /// evidence for this surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
 
     /// Whether the host supports batch invoke.
-    pub supports_batching: bool,
+    ///
+    /// `None` means discovery does not yet have authoritative host-capability
+    /// evidence for this surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_batching: Option<bool>,
 
     /// Server timestamp.
     pub timestamp: DateTime<Utc>,
@@ -250,12 +258,24 @@ impl DiscoveryResponse {
         Self {
             connectors,
             registry_version,
-            supports_streaming: true,
-            supports_batching: true,
+            supports_streaming: None,
+            supports_batching: None,
             timestamp: Utc::now(),
             cache: None,
             meta: None,
         }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_host_capabilities(
+        mut self,
+        supports_streaming: Option<bool>,
+        supports_batching: Option<bool>,
+    ) -> Self {
+        self.supports_streaming = supports_streaming;
+        self.supports_batching = supports_batching;
+        self
     }
 
     #[must_use]
@@ -449,7 +469,11 @@ pub struct ToolDescriptor {
     pub idempotent: bool,
 
     /// Whether this tool supports simulate.
-    pub supports_simulate: bool,
+    ///
+    /// `None` means the host cannot yet prove live simulate support for this
+    /// operation from authoritative evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_simulate: Option<bool>,
 
     /// Latency hint.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -486,7 +510,7 @@ impl From<&OperationInfo> for ToolDescriptor {
                 fcp_core::IdempotencyClass::Strict | fcp_core::IdempotencyClass::BestEffort
             ),
             // OperationInfo alone does not prove live simulate support.
-            supports_simulate: false,
+            supports_simulate: None,
             latency_hint: None,
             rate_limits: op.rate_limit.as_ref().map_or_else(Vec::new, |rl| {
                 rl.pool_name
@@ -1539,8 +1563,8 @@ mod tests {
 
         assert_eq!(resp.connectors.len(), 1);
         assert_eq!(resp.registry_version, 42);
-        assert!(resp.supports_streaming);
-        assert!(resp.supports_batching);
+        assert_eq!(resp.supports_streaming, None);
+        assert_eq!(resp.supports_batching, None);
     }
 
     // Test serialization roundtrips
@@ -1594,7 +1618,7 @@ mod tests {
             approval_mode: Some(ApprovalMode::Interactive),
             requires_confirmation: true,
             idempotent: false,
-            supports_simulate: true,
+            supports_simulate: Some(true),
             latency_hint: Some(LatencyHint::Fast),
             rate_limits: vec!["discord_api".to_string()],
             examples: vec![],
@@ -1612,6 +1636,15 @@ mod tests {
         assert_eq!(parsed.name, tool.name);
         assert_eq!(parsed.safety_tier, tool.safety_tier);
         assert_eq!(parsed.latency_hint, tool.latency_hint);
+        assert_eq!(parsed.supports_simulate, Some(true));
+    }
+
+    #[test]
+    fn tool_descriptor_serialization_omits_unknown_simulate_support() {
+        let tool = ToolDescriptor::from(&make_operation("send_message", Some("Send a message")));
+        let json = serde_json::to_value(&tool).unwrap();
+        let object = json.as_object().unwrap();
+        assert!(!object.contains_key("supports_simulate"));
     }
 
     #[test]
@@ -2805,7 +2838,7 @@ mod tests {
         assert_eq!(tool.idempotency, IdempotencyClass::Strict);
         assert!(tool.requires_confirmation);
         assert!(tool.idempotent); // Strict => idempotent
-        assert!(!tool.supports_simulate);
+        assert_eq!(tool.supports_simulate, None);
         assert!(tool.ai_hints.is_some());
     }
 
@@ -3013,8 +3046,8 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: DiscoveryResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.registry_version, 99);
-        assert!(parsed.supports_streaming);
-        assert!(parsed.supports_batching);
+        assert_eq!(parsed.supports_streaming, None);
+        assert_eq!(parsed.supports_batching, None);
         assert_eq!(parsed.connectors.len(), 1);
     }
 
@@ -3657,8 +3690,8 @@ mod tests {
         let resp = DiscoveryResponse::new(vec![], 1);
         assert!(resp.connectors.is_empty());
         assert_eq!(resp.registry_version, 1);
-        assert!(resp.supports_streaming);
-        assert!(resp.supports_batching);
+        assert_eq!(resp.supports_streaming, None);
+        assert_eq!(resp.supports_batching, None);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4141,10 +4174,26 @@ mod tests {
         let resp = DiscoveryResponse::new(vec![], 0);
         assert!(resp.connectors.is_empty());
         assert_eq!(resp.registry_version, 0);
-        assert!(resp.supports_streaming);
-        assert!(resp.supports_batching);
+        assert_eq!(resp.supports_streaming, None);
+        assert_eq!(resp.supports_batching, None);
         assert!(resp.cache.is_none());
         assert!(resp.meta.is_none());
+    }
+
+    #[test]
+    fn discovery_response_with_host_capabilities_preserves_known_values() {
+        let resp = DiscoveryResponse::new(vec![], 5).with_host_capabilities(Some(true), Some(false));
+        assert_eq!(resp.supports_streaming, Some(true));
+        assert_eq!(resp.supports_batching, Some(false));
+    }
+
+    #[test]
+    fn discovery_response_serialization_omits_unknown_host_capabilities() {
+        let resp = DiscoveryResponse::new(vec![], 5);
+        let json = serde_json::to_value(&resp).unwrap();
+        let object = json.as_object().unwrap();
+        assert!(!object.contains_key("supports_streaming"));
+        assert!(!object.contains_key("supports_batching"));
     }
 
     #[test]
@@ -4409,7 +4458,7 @@ mod tests {
             approval_mode: None,
             requires_confirmation: false,
             idempotent: true,
-            supports_simulate: false,
+            supports_simulate: Some(false),
             latency_hint: None,
             rate_limits: vec![],
             examples: vec![],
@@ -4435,7 +4484,7 @@ mod tests {
             approval_mode: Some(ApprovalMode::Interactive),
             requires_confirmation: true,
             idempotent: false,
-            supports_simulate: true,
+            supports_simulate: Some(true),
             latency_hint: Some(LatencyHint::VerySlow),
             rate_limits: vec!["pool1".into()],
             examples: vec![],

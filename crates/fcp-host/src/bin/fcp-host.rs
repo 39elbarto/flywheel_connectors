@@ -514,8 +514,8 @@ impl ConnectorRegistry for SubprocessRegistry {
 
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_core::RateLimitDeclarations> {
         let state = self.state.read().await;
-        state.connectors.get(id)?;
-        Some(fcp_core::RateLimitDeclarations::default())
+        let entry = state.connectors.get(id)?;
+        configured_subprocess_rate_limits(&entry.config)
     }
 
     async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
@@ -545,9 +545,16 @@ fn configured_subprocess_archetype(config: &ConnectorConfig) -> ConnectorArchety
         Some("polling") => ConnectorArchetype::Polling,
         Some("webhook") => ConnectorArchetype::Webhook,
         Some("unknown") => ConnectorArchetype::Unknown,
-        Some("request_response") | None => ConnectorArchetype::RequestResponse,
+        Some("request_response") => ConnectorArchetype::RequestResponse,
+        None => ConnectorArchetype::Unknown,
         Some(_) => ConnectorArchetype::Unknown,
     }
+}
+
+fn configured_subprocess_rate_limits(
+    _config: &ConnectorConfig,
+) -> Option<fcp_core::RateLimitDeclarations> {
+    None
 }
 
 struct ConnectorProcessRunner {
@@ -5265,6 +5272,41 @@ mod tests {
         let config: ConnectorConfig = serde_json::from_str(json).expect("parse");
         assert!(config.version.is_none());
         // When version is None, SubprocessConnector::spawn defaults to 1.0.0
+    }
+
+    #[test]
+    fn configured_subprocess_archetype_defaults_to_unknown_when_unset() {
+        let config = subprocess_test_connector_config("fcp.test.truth.archetype:utility:1.0.0");
+        assert_eq!(
+            configured_subprocess_archetype(&config),
+            ConnectorArchetype::Unknown
+        );
+    }
+
+    #[test]
+    fn configured_subprocess_archetype_preserves_explicit_request_response() {
+        let mut config =
+            subprocess_test_connector_config("fcp.test.truth.explicit-archetype:utility:1.0.0");
+        config.env.insert(
+            "FCP_TEST_CONNECTOR_ARCHETYPE".to_string(),
+            "request_response".to_string(),
+        );
+        assert_eq!(
+            configured_subprocess_archetype(&config),
+            ConnectorArchetype::RequestResponse
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_registry_rate_limits_remain_unknown_without_declarations() {
+        let connector_id = ConnectorId::from_static("fcp.test.truth.rate-limits:utility:1.0.0");
+        let registry = SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
+            connector_id.as_str(),
+        )])
+        .await
+        .expect("registry should load");
+
+        assert_eq!(registry.get_rate_limits(&connector_id).await, None);
     }
 
     #[test]

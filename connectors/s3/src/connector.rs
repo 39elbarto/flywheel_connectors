@@ -10,6 +10,7 @@ use fcp_core::{
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
     SimulateResponse,
 };
+use fcp_sdk::migration::ConnectorRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -135,6 +136,7 @@ pub struct S3Connector {
     pub(crate) client: Option<S3Client>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl S3Connector {
@@ -147,6 +149,7 @@ impl S3Connector {
             client: None,
             verifier: None,
             session_id: None,
+            runtime: None,
         }
     }
 
@@ -166,6 +169,9 @@ impl S3Connector {
 
         info!(auth = %config.auth.redacted_label(), "S3 connector configured");
 
+        self.runtime = Some(fcp_sdk::migration::ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        ));
         self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
@@ -1044,6 +1050,12 @@ impl S3Connector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("S3 connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

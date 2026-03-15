@@ -7,6 +7,7 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError,
     FcpResult, IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
+use fcp_sdk::migration::ConnectorRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -144,6 +145,7 @@ pub struct SentryConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl SentryConnector {
@@ -156,6 +158,7 @@ impl SentryConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
+            runtime: None,
         }
     }
 }
@@ -198,6 +201,9 @@ impl SentryConnector {
         }
 
         self.config = Some(config);
+        self.runtime = Some(ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        ));
         Ok(json!({ "status": status, "details": details }))
     }
 
@@ -486,6 +492,12 @@ impl SentryConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Sentry connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         self.client = None;
         self.config = None;
         self.base.set_configured(false);

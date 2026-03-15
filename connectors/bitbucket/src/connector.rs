@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
+use fcp_sdk::migration::ConnectorRuntime;
+
 use crate::{
     client::{BitbucketAuth, BitbucketClient, DEFAULT_BASE_URL},
     error::BitbucketError,
@@ -199,6 +201,7 @@ pub struct BitbucketConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl BitbucketConnector {
@@ -211,6 +214,7 @@ impl BitbucketConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
+            runtime: None,
         }
     }
 }
@@ -233,8 +237,13 @@ impl BitbucketConnector {
         let client = BitbucketClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
 
+        let runtime = ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        );
+
         self.client = Some(Arc::new(client));
         self.config = Some(config);
+        self.runtime = Some(runtime);
         self.base.set_configured(true);
         Ok(json!({}))
     }
@@ -458,8 +467,15 @@ impl BitbucketConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Bitbucket connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         self.client = None;
         self.config = None;
+        self.runtime = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))

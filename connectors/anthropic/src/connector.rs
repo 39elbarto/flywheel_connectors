@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
+use fcp_sdk::migration::ConnectorRuntime;
+
 use crate::{
     client::{AnthropicAuth, AnthropicClient, DEFAULT_BASE_URL},
     error::AnthropicError,
@@ -137,6 +139,7 @@ pub struct AnthropicConnector {
     total_cost: AtomicU64, // Store as fixed-point (cost * 1_000_000_000)
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl AnthropicConnector {
@@ -150,6 +153,7 @@ impl AnthropicConnector {
             total_cost: AtomicU64::new(0),
             verifier: None,
             session_id: None,
+            runtime: None,
         }
     }
 
@@ -198,9 +202,14 @@ impl AnthropicConnector {
         })?;
         let client = client.with_base_url(&config.base_url);
 
+        let runtime = ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        );
+
         let auth_label = config.auth.redacted_label();
         self.client = Some(client);
         self.config = Some(config);
+        self.runtime = Some(runtime);
         self.base.set_configured(true);
         info!(auth = %auth_label, "Anthropic connector configured");
 
@@ -1263,6 +1272,12 @@ impl AnthropicConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Anthropic connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

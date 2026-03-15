@@ -1320,6 +1320,9 @@ impl GoogleAiConnector {
         &self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         info!("Google AI connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }

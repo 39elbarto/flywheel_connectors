@@ -599,6 +599,9 @@ impl IntercomConnector {
         &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         info!("Intercom connector shutting down");
         self.client = None;
         self.config = None;

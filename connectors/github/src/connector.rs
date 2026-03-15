@@ -793,9 +793,13 @@ impl GitHubConnector {
         })?;
 
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1206,6 +1210,9 @@ impl GitHubConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("GitHub connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

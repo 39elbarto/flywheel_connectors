@@ -8,6 +8,7 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use fcp_sdk::migration::ConnectorRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -115,6 +116,7 @@ pub struct PineconeConnector {
     client: Option<PineconeClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl PineconeConnector {
@@ -127,6 +129,7 @@ impl PineconeConnector {
             client: None,
             verifier: None,
             session_id: None,
+            runtime: None,
         }
     }
 
@@ -150,6 +153,9 @@ impl PineconeConnector {
 
         info!(auth = %config.auth.redacted_label(), "Pinecone connector configured");
 
+        self.runtime = Some(fcp_sdk::migration::ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        ));
         self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
@@ -970,6 +976,12 @@ impl PineconeConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Pinecone connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

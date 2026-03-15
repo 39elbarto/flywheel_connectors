@@ -1512,9 +1512,13 @@ impl JiraConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -2636,6 +2640,9 @@ impl JiraConnector {
         &self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         info!("Jira connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -3471,12 +3478,21 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "jira.delete_issue" | "jira.worklog.delete" | "jira.automation.rule.delete" => "jira.delete",
-            "jira.create_issue" | "jira.update_issue" | "jira.transition_issue"
-            | "jira.move_to_sprint" | "jira.add_comment" | "jira.worklog.add"
-            | "jira.worklog.update" | "jira.add_attachment"
-            | "jira.automation.rule.create" | "jira.automation.rule.update"
-            | "jira.automation.rule.enable" | "jira.automation.rule.disable"
+            "jira.delete_issue" | "jira.worklog.delete" | "jira.automation.rule.delete" => {
+                "jira.delete"
+            }
+            "jira.create_issue"
+            | "jira.update_issue"
+            | "jira.transition_issue"
+            | "jira.move_to_sprint"
+            | "jira.add_comment"
+            | "jira.worklog.add"
+            | "jira.worklog.update"
+            | "jira.add_attachment"
+            | "jira.automation.rule.create"
+            | "jira.automation.rule.update"
+            | "jira.automation.rule.enable"
+            | "jira.automation.rule.disable"
             | "jira.sync.push_bead" => "jira.write",
             _ => "jira.read",
         };

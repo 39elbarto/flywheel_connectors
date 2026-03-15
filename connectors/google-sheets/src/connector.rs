@@ -13,8 +13,6 @@ use tracing::info;
 
 use crate::client::SheetsClient;
 
-const DEFAULT_BASE_URL: &str = "https://sheets.googleapis.com/v4";
-
 /// FCP Google Sheets Connector.
 pub struct SheetsConnector {
     base: Arc<BaseConnector>,
@@ -135,6 +133,45 @@ impl SheetsConnector {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
+        }))
+    }
+
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let configured = self.client.is_some();
+        let checks = vec![
+            json!({
+                "name": "configuration",
+                "passed": configured,
+                "message": if configured { "Connector is configured" } else { "Not configured - run configure first" },
+                "critical": true,
+            }),
+            json!({
+                "name": "client_initialized",
+                "passed": configured,
+                "message": if configured { "HTTP client is ready" } else { "HTTP client is not initialized" },
+                "critical": true,
+            }),
+        ];
+        let status = if checks.iter().all(|c| c["passed"].as_bool().unwrap_or(false)) {
+            "healthy"
+        } else {
+            "unhealthy"
+        };
+        Ok(json!({ "status": status, "checks": checks }))
+    }
+
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        if self.client.is_none() {
+            return Ok(json!({
+                "status": "fail",
+                "check": "not_configured",
+                "message": "Connector is not configured yet"
+            }));
+        }
+        Ok(json!({
+            "status": "pass",
+            "check": "configured",
+            "message": "Connector is operational"
         }))
     }
 
@@ -407,6 +444,9 @@ impl SheetsConnector {
     }
 
     pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         self.client = None;
         info!("Google Sheets connector shutting down");
         Ok(json!({ "status": "shutdown" }))

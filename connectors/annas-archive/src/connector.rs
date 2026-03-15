@@ -8,6 +8,8 @@ use fcp_core::{
 use serde_json::json;
 use tracing::{info, instrument};
 
+use fcp_sdk::migration::ConnectorRuntime;
+
 use crate::{
     client::{AnnasArchiveClient, DEFAULT_BASE_URL},
     error::AnnasArchiveError,
@@ -21,6 +23,7 @@ pub struct AnnasArchiveConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl AnnasArchiveConnector {
@@ -34,6 +37,7 @@ impl AnnasArchiveConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
+            runtime: None,
         }
     }
 }
@@ -57,10 +61,15 @@ impl AnnasArchiveConnector {
 
         let client = AnnasArchiveClient::new(Some(&base_url)).map_err(|e| e.to_fcp_error())?;
 
+        let runtime = ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        );
+
         info!(base_url = %base_url, "Configuring Anna's Archive connector");
 
         self.client = Some(Arc::new(client));
         self.base_url = base_url;
+        self.runtime = Some(runtime);
         self.base.set_configured(true);
         Ok(json!({}))
     }
@@ -214,7 +223,14 @@ impl AnnasArchiveConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Anna's Archive connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         self.client = None;
+        self.runtime = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))

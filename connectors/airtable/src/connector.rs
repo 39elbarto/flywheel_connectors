@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
+use fcp_sdk::migration::ConnectorRuntime;
+
 use crate::{
     client::{AirtableAuth, AirtableClient, DEFAULT_BASE_URL},
     error::AirtableError,
@@ -159,6 +161,7 @@ pub struct AirtableConnector {
     session_id: Option<SessionId>,
     zone_id: Option<ZoneId>,
     schema_cache: Arc<fcp_async_core::sync::Mutex<HashMap<String, CachedSchema>>>,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl AirtableConnector {
@@ -173,6 +176,7 @@ impl AirtableConnector {
             session_id: None,
             zone_id: None,
             schema_cache: Arc::new(fcp_async_core::sync::Mutex::new(HashMap::new())),
+            runtime: None,
         }
     }
 
@@ -193,10 +197,15 @@ impl AirtableConnector {
             })?
             .with_base_url(&config.base_url);
 
+        let runtime = ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        );
+
         info!(auth = %config.auth.redacted_label(), "Airtable connector configured");
 
         self.config = Some(config);
         self.client = Some(client);
+        self.runtime = Some(runtime);
         self.schema_cache.lock().await.clear();
         self.base.set_configured(true);
 
@@ -2369,6 +2378,12 @@ impl AirtableConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Airtable connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

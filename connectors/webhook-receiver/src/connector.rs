@@ -138,6 +138,7 @@ pub struct WebhookReceiverConnector {
     base: Arc<BaseConnector>,
     config: Option<WebhookReceiverConfig>,
     store: WebhookStore,
+    runtime: Option<fcp_sdk::migration::ConnectorRuntime>,
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -152,6 +153,7 @@ impl WebhookReceiverConnector {
             ))),
             config: None,
             store: WebhookStore::new(),
+            runtime: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -176,6 +178,10 @@ impl WebhookReceiverConnector {
     ) -> FcpResult<serde_json::Value> {
         let config = WebhookReceiverConfig::from_params(&params);
         info!(public_base_url = %config.public_base_url, "Configuring Webhook Receiver connector");
+        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        );
+        self.runtime = Some(runtime);
         self.store.set_public_base_url(&config.public_base_url);
         self.config = Some(config);
         self.base.set_configured(true);
@@ -424,6 +430,9 @@ impl WebhookReceiverConnector {
         &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         info!("Webhook Receiver connector shutting down");
         self.store.clear();
         self.config = None;

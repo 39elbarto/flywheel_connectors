@@ -8,6 +8,7 @@ use fcp_core::{
     IdempotencyClass, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
     ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
+use fcp_sdk::migration::ConnectorRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -121,6 +122,7 @@ pub struct SalesforceConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl SalesforceConnector {
@@ -133,6 +135,7 @@ impl SalesforceConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
+            runtime: None,
         }
     }
 }
@@ -154,6 +157,9 @@ impl SalesforceConnector {
             .map_err(|e| e.to_fcp_error())?;
         self.client = Some(Arc::new(client));
         self.config = Some(config);
+        self.runtime = Some(ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        ));
         self.base.set_configured(true);
         Ok(json!({}))
     }
@@ -355,6 +361,12 @@ impl SalesforceConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Salesforce connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         self.client = None;
         self.config = None;
         self.base.set_configured(false);

@@ -892,9 +892,13 @@ impl NotionConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1236,6 +1240,9 @@ impl NotionConnector {
         &self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         info!("Notion connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -1592,7 +1599,8 @@ mod tests {
         }
 
         // Missing title
-        let token2 = generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token2 =
+            generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
         let result2 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",
@@ -1609,7 +1617,8 @@ mod tests {
         }
 
         // Missing properties
-        let token3 = generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token3 =
+            generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
         let result3 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",

@@ -373,6 +373,9 @@ impl GrafanaConnector {
         &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         info!("Grafana connector shutting down");
         self.client = None;
         self.config = None;

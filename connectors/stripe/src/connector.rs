@@ -985,9 +985,13 @@ impl StripeConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1586,6 +1590,9 @@ impl StripeConnector {
         &self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         info!("Stripe connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -1772,7 +1779,11 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str, operations: &[&str]) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
@@ -1861,7 +1872,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "stripe.payment", &["stripe.create_payment_intent"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "stripe.payment",
+            &["stripe.create_payment_intent"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.create_payment_intent",
@@ -2057,7 +2072,11 @@ mod tests {
 
         let payload = r#"{"id":"evt_123","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
         let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
-        let token = generate_valid_token(&signing_key, "stripe.webhook", &["stripe.ingest_webhook_event"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "stripe.webhook",
+            &["stripe.ingest_webhook_event"],
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -2105,7 +2124,11 @@ mod tests {
 
         let payload = r#"{"id":"evt_replay","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
         let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
-        let token = generate_valid_token(&signing_key, "stripe.webhook", &["stripe.ingest_webhook_event"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "stripe.webhook",
+            &["stripe.ingest_webhook_event"],
+        );
         let invoke = json!({
             "operation": "stripe.ingest_webhook_event",
             "input": {
@@ -2146,7 +2169,11 @@ mod tests {
             .unwrap();
 
         let payload = r#"{"id":"evt_bad","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
-        let token = generate_valid_token(&signing_key, "stripe.webhook", &["stripe.ingest_webhook_event"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "stripe.webhook",
+            &["stripe.ingest_webhook_event"],
+        );
         let err = connector
             .handle_invoke(json!({
                 "operation": "stripe.ingest_webhook_event",
@@ -2362,7 +2389,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "stripe.payment", &["stripe.confirm_payment_intent"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "stripe.payment",
+            &["stripe.confirm_payment_intent"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.confirm_payment_intent",
@@ -2402,7 +2433,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "stripe.payment", &["stripe.capture_payment_intent"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "stripe.payment",
+            &["stripe.capture_payment_intent"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.capture_payment_intent",
@@ -2442,7 +2477,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "stripe.payment", &["stripe.cancel_payment_intent"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "stripe.payment",
+            &["stripe.cancel_payment_intent"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.cancel_payment_intent",

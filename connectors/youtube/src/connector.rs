@@ -156,6 +156,7 @@ pub struct YouTubeConnector {
     base: Arc<BaseConnector>,
     config: Option<YouTubeConfig>,
     client: Option<YouTubeClient>,
+    runtime: Option<fcp_sdk::migration::ConnectorRuntime>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
 }
@@ -168,6 +169,7 @@ impl YouTubeConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("youtube"))),
             config: None,
             client: None,
+            runtime: None,
             verifier: None,
             session_id: None,
         }
@@ -192,6 +194,10 @@ impl YouTubeConnector {
 
         info!(auth = %config.auth.redacted_label(), "YouTube connector configured");
 
+        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        );
+        self.runtime = Some(runtime);
         self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
@@ -1242,6 +1248,12 @@ impl YouTubeConnector {
         &self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         info!("YouTube connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }

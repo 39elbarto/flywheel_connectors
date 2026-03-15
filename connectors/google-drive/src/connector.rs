@@ -577,6 +577,9 @@ impl DriveConnector {
         &self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         info!("Drive connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }

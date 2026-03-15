@@ -9,6 +9,7 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
     SimulateRequest, SimulateResponse,
 };
+use fcp_sdk::migration::ConnectorRuntime;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -168,6 +169,7 @@ pub struct QdrantConnector {
     client: Option<QdrantClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl QdrantConnector {
@@ -180,6 +182,7 @@ impl QdrantConnector {
             client: None,
             verifier: None,
             session_id: None,
+            runtime: None,
         }
     }
 
@@ -215,6 +218,9 @@ impl QdrantConnector {
             }
         };
         let redacted_auth = config.redacted_auth_label();
+        self.runtime = Some(fcp_sdk::migration::ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        ));
         self.config = Some(config);
         self.base.set_configured(true);
         info!(
@@ -1216,6 +1222,12 @@ impl QdrantConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Qdrant connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

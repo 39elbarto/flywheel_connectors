@@ -20,6 +20,7 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use fcp_sdk::migration::ConnectorRuntime;
 use quick_xml::{Reader, escape::unescape, events::Event};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -558,6 +559,7 @@ pub struct M365Connector {
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     zone_dir: Option<PathBuf>,
+    runtime: Option<ConnectorRuntime>,
 }
 
 impl M365Connector {
@@ -573,6 +575,7 @@ impl M365Connector {
             verifier: None,
             session_id: None,
             zone_dir: None,
+            runtime: None,
         }
     }
 
@@ -671,6 +674,9 @@ impl M365Connector {
         })?;
         client = client.with_api_url(&api_url);
 
+        self.runtime = Some(ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        ));
         self.config = Some(M365Config {
             auth_mode,
             api_url: api_url.clone(),
@@ -2071,6 +2077,12 @@ impl M365Connector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Microsoft 365 connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }

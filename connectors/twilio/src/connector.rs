@@ -102,6 +102,7 @@ pub struct TwilioConnector {
     base: Arc<BaseConnector>,
     pub(crate) client: Option<TwilioClient>,
     config: Option<TwilioConfig>,
+    runtime: Option<fcp_sdk::migration::ConnectorRuntime>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
 }
@@ -114,6 +115,7 @@ impl TwilioConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("twilio"))),
             client: None,
             config: None,
+            runtime: None,
             verifier: None,
             session_id: None,
         }
@@ -133,6 +135,10 @@ impl TwilioConnector {
             })?;
         let client = client.with_base_url(&cfg.base_url);
 
+        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
+            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
+        );
+        self.runtime = Some(runtime);
         self.client = Some(client);
         self.config = Some(cfg);
         self.base.set_configured(true);
@@ -2882,6 +2888,12 @@ impl TwilioConnector {
         &self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
         info!("Twilio connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }

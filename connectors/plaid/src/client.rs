@@ -5,9 +5,10 @@
 
 use std::time::Duration;
 
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode};
-use tracing::{debug, warn};
 
 use crate::{
     error::{PlaidError, PlaidResult},
@@ -70,6 +71,10 @@ impl PlaidClient {
     #[must_use]
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
+        self.retry_config = HttpRetryConfig {
+            max_retries,
+            ..self.retry_config
+        };
         self
     }
 
@@ -309,113 +314,118 @@ impl PlaidClient {
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> PlaidResult<serde_json::Value> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let req = build_request();
+            async move {
+                match req.send().await {
+                    Ok(response) => {
+                        let status = response.status();
 
-            let result = build_request().send().await;
-
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<PlaidApiError> = serde_json::from_str(&body).ok();
-                        let message = api_err
-                            .as_ref()
-                            .and_then(|e| e.error_message.clone())
-                            .unwrap_or_else(|| format!("Authentication failed: HTTP {status}"));
-                        return Err(PlaidError::Api {
-                            message,
-                            status_code: Some(status.as_u16()),
-                            error_type: api_err.as_ref().and_then(|e| e.error_type.clone()),
-                            error_code: api_err.as_ref().and_then(|e| e.error_code.clone()),
-                        });
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .map_or(60_000, |s| s * 1000);
-
-                        let err = PlaidError::RateLimit {
-                            retry_after_ms: retry_after,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, "rate limited, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                            let body = response.text().await.unwrap_or_default();
+                            let api_err: Option<PlaidApiError> =
+                                serde_json::from_str(&body).ok();
+                            let message = api_err
+                                .as_ref()
+                                .and_then(|e| e.error_message.clone())
+                                .unwrap_or_else(|| {
+                                    format!("Authentication failed: HTTP {status}")
+                                });
+                            return AttemptOutcome::Terminal(PlaidError::Api {
+                                message,
+                                status_code: Some(status.as_u16()),
+                                error_type: api_err
+                                    .as_ref()
+                                    .and_then(|e| e.error_type.clone()),
+                                error_code: api_err
+                                    .as_ref()
+                                    .and_then(|e| e.error_code.clone()),
+                            });
                         }
-                        return Err(err);
-                    }
 
-                    if status.is_server_error() {
-                        let body = response.text().await.unwrap_or_default();
-                        let err = PlaidError::Api {
-                            message: format!("Server error {status}: {body}"),
-                            status_code: Some(status.as_u16()),
-                            error_type: None,
-                            error_code: None,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, status = %status, "server error, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .map_or(60_000, |s| s * 1000);
+
+                            let err = PlaidError::RateLimit {
+                                retry_after_ms: retry_after,
+                            };
+                            return AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            };
                         }
-                        return Err(err);
-                    }
 
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<PlaidApiError> = serde_json::from_str(&body).ok();
-                        let (message, error_type, error_code) = api_err
-                            .as_ref()
-                            .map(|e| {
-                                (
-                                    e.error_message.clone().unwrap_or(format!("HTTP {status}")),
-                                    e.error_type.clone(),
-                                    e.error_code.clone(),
-                                )
-                            })
-                            .unwrap_or((format!("HTTP {status}: {body}"), None, None));
-                        return Err(PlaidError::Api {
-                            message,
-                            status_code: Some(status.as_u16()),
-                            error_type,
-                            error_code,
-                        });
-                    }
+                        if status.is_server_error() {
+                            let body = response.text().await.unwrap_or_default();
+                            let err = PlaidError::Api {
+                                message: format!("Server error {status}: {body}"),
+                                status_code: Some(status.as_u16()),
+                                error_type: None,
+                                error_code: None,
+                            };
+                            return AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: err,
+                            };
+                        }
 
-                    let body = response.text().await.map_err(PlaidError::Http)?;
-                    let data: serde_json::Value = serde_json::from_str(&body)?;
-                    return Ok(data);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(PlaidError::Http(e));
-                        continue;
+                        if !status.is_success() {
+                            let body = response.text().await.unwrap_or_default();
+                            let api_err: Option<PlaidApiError> =
+                                serde_json::from_str(&body).ok();
+                            let (message, error_type, error_code) = api_err
+                                .as_ref()
+                                .map(|e| {
+                                    (
+                                        e.error_message
+                                            .clone()
+                                            .unwrap_or(format!("HTTP {status}")),
+                                        e.error_type.clone(),
+                                        e.error_code.clone(),
+                                    )
+                                })
+                                .unwrap_or((format!("HTTP {status}: {body}"), None, None));
+                            return AttemptOutcome::Terminal(PlaidError::Api {
+                                message,
+                                status_code: Some(status.as_u16()),
+                                error_type,
+                                error_code,
+                            });
+                        }
+
+                        match response.text().await {
+                            Ok(body) => match serde_json::from_str(&body) {
+                                Ok(data) => AttemptOutcome::Success(data),
+                                Err(e) => {
+                                    AttemptOutcome::Terminal(PlaidError::Serialization(e))
+                                }
+                            },
+                            Err(e) => AttemptOutcome::Terminal(PlaidError::Http(e)),
+                        }
                     }
-                    return Err(PlaidError::Http(e));
+                    Err(e) => {
+                        let err = PlaidError::Http(e);
+                        if err.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: err,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(err)
+                        }
+                    }
                 }
             }
-        }
-
-        Err(last_err.unwrap_or(PlaidError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_type: None,
-            error_code: None,
-        }))
+        })
+        .await
     }
 }
 

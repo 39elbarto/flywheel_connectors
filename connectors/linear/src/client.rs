@@ -147,6 +147,14 @@ impl LinearClient {
         }
     }
 
+    fn parse_retry_after(headers: &header::HeaderMap) -> Option<Duration> {
+        headers
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+    }
+
     // ── API Methods ──────────────────────────────────────────────
 
     /// Create a new issue.
@@ -433,10 +441,12 @@ impl LinearClient {
             variables,
         };
         let ctx = self.runtime.request_context();
+        let retry_ctx = ctx.clone();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let request = &request;
+            let retry_ctx = retry_ctx.clone();
             async move {
                 debug!(attempt, api_url = %self.api_url, "GraphQL request");
 
@@ -455,11 +465,27 @@ impl LinearClient {
                         }
 
                         if status == StatusCode::TOO_MANY_REQUESTS {
-                            return AttemptOutcome::Retryable {
-                                error: LinearError::RateLimited {
-                                    retry_after_ms: 60_000,
-                                },
-                                retry_after: Some(Duration::from_secs(60)),
+                            let retry_after = Self::parse_retry_after(response.headers())
+                                .unwrap_or_else(|| {
+                                    Duration::from_millis(self.retry_config.max_delay_ms)
+                                });
+                            let error = LinearError::RateLimited {
+                                retry_after_ms: u64::try_from(retry_after.as_millis())
+                                    .unwrap_or(u64::MAX),
+                            };
+                            let within_retry_budget = attempt < self.retry_config.max_retries;
+                            let within_time_budget = match retry_ctx.remaining_budget() {
+                                Some(budget) => retry_after <= budget,
+                                None => true,
+                            };
+
+                            return if within_retry_budget && within_time_budget {
+                                AttemptOutcome::Retryable {
+                                    error,
+                                    retry_after: Some(retry_after),
+                                }
+                            } else {
+                                AttemptOutcome::Terminal(error)
                             };
                         }
 
@@ -763,6 +789,31 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             LinearError::RateLimited { .. }
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_rate_limited_retry_after_beyond_request_budget_is_terminal() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
+            .mount(&mock_server)
+            .await;
+
+        let client = LinearClient::new("test-key")
+            .unwrap()
+            .with_api_url(&format!("{}/graphql", mock_server.uri()))
+            .with_retry_config(1);
+
+        let result = client.list_teams().await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            LinearError::RateLimited {
+                retry_after_ms: 60_000
+            }
         ));
     }
 

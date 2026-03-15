@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode, header};
-use tracing::{debug, warn};
+// tracing macros handled by RetryLoop internals
 
 use crate::{
     error::{TwilioError, TwilioResult},
@@ -959,69 +961,55 @@ impl TwilioClient {
     }
 
     async fn get_bytes(&self, url: &str) -> TwilioResult<Vec<u8>> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
+        RetryLoop::execute(&ctx, &policy, |_attempt| async {
             let result = self.http.get(url).send().await;
 
             match result {
                 Ok(response) => {
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempt < self.max_retries {
-                            let wait = retry_result
-                                .unwrap_or(Duration::from_millis(500 * u64::from(attempt + 1)));
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(TwilioError::RateLimited {
-                            retry_after_ms: retry_result.map_or(60_000, |d| d.as_millis() as u64),
-                        });
+                        let retry_after =
+                            retry_result.or(Some(Duration::from_secs(1)));
+                        return AttemptOutcome::Retryable {
+                            error: TwilioError::RateLimited {
+                                retry_after_ms: retry_after.map_or(60_000, |d| d.as_millis() as u64),
+                            },
+                            retry_after,
+                        };
                     }
 
                     let status = response.status();
                     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(TwilioError::Unauthorized);
+                        return AttemptOutcome::Terminal(TwilioError::Unauthorized);
                     }
                     if status == StatusCode::NOT_FOUND {
-                        return Err(TwilioError::NotFound {
+                        return AttemptOutcome::Terminal(TwilioError::NotFound {
                             resource: url.to_string(),
                         });
                     }
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        return Err(TwilioError::Api {
+                        return AttemptOutcome::Terminal(TwilioError::Api {
                             message: format!("HTTP {status}: {body}"),
                             status_code: Some(status.as_u16()),
                             error_code: None,
                         });
                     }
 
-                    let bytes = response.bytes().await.map_err(TwilioError::Http)?;
-                    return Ok(bytes.to_vec());
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(TwilioError::Http(e));
-                        continue;
+                    match response.bytes().await {
+                        Ok(bytes) => AttemptOutcome::Success(bytes.to_vec()),
+                        Err(e) => AttemptOutcome::Terminal(TwilioError::Http(e)),
                     }
-                    return Err(TwilioError::Http(e));
                 }
+                Err(e) => AttemptOutcome::Retryable {
+                    retry_after: None,
+                    error: TwilioError::Http(e),
+                },
             }
-        }
-
-        Err(last_err.unwrap_or(TwilioError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_code: None,
-        }))
+        })
+        .await
     }
 
     async fn post_json(
@@ -1044,56 +1032,46 @@ impl TwilioClient {
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> TwilioResult<serde_json::Value> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
+        RetryLoop::execute(&ctx, &policy, |_attempt| async {
             let result = build_request().send().await;
 
             match result {
                 Ok(response) => {
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempt < self.max_retries {
-                            let wait = retry_result
-                                .unwrap_or(Duration::from_millis(500 * u64::from(attempt + 1)));
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(TwilioError::RateLimited {
-                            retry_after_ms: retry_result.map_or(60_000, |d| d.as_millis() as u64),
-                        });
+                        let retry_after =
+                            retry_result.or(Some(Duration::from_secs(1)));
+                        return AttemptOutcome::Retryable {
+                            error: TwilioError::RateLimited {
+                                retry_after_ms: retry_after.map_or(60_000, |d| d.as_millis() as u64),
+                            },
+                            retry_after,
+                        };
                     }
 
                     let status = response.status();
 
                     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(TwilioError::Unauthorized);
+                        return AttemptOutcome::Terminal(TwilioError::Unauthorized);
                     }
 
                     if status == StatusCode::NOT_FOUND {
                         let body = response.text().await.unwrap_or_default();
-                        return Err(TwilioError::NotFound { resource: body });
+                        return AttemptOutcome::Terminal(TwilioError::NotFound { resource: body });
                     }
 
                     if status.is_server_error() {
                         let body = response.text().await.unwrap_or_default();
-                        let err = TwilioError::Api {
-                            message: format!("Server error {status}: {body}"),
-                            status_code: Some(status.as_u16()),
-                            error_code: None,
+                        return AttemptOutcome::Retryable {
+                            error: TwilioError::Api {
+                                message: format!("Server error {status}: {body}"),
+                                status_code: Some(status.as_u16()),
+                                error_code: None,
+                            },
+                            retry_after: None,
                         };
-                        if attempt < self.max_retries {
-                            warn!(attempt, status = %status, "server error, will retry");
-                            last_err = Some(err);
-                            continue;
-                        }
-                        return Err(err);
                     }
 
                     if !status.is_success() {
@@ -1108,33 +1086,28 @@ impl TwilioClient {
                                 )
                             })
                             .unwrap_or((format!("HTTP {status}: {body}"), None));
-                        return Err(TwilioError::Api {
+                        return AttemptOutcome::Terminal(TwilioError::Api {
                             message,
                             status_code: Some(status.as_u16()),
                             error_code,
                         });
                     }
 
-                    let body = response.text().await.map_err(TwilioError::Http)?;
-                    let data: serde_json::Value = serde_json::from_str(&body)?;
-                    return Ok(data);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(TwilioError::Http(e));
-                        continue;
+                    match response.text().await {
+                        Ok(body) => match serde_json::from_str(&body) {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) => AttemptOutcome::Terminal(TwilioError::from(e)),
+                        },
+                        Err(e) => AttemptOutcome::Terminal(TwilioError::Http(e)),
                     }
-                    return Err(TwilioError::Http(e));
                 }
+                Err(e) => AttemptOutcome::Retryable {
+                    retry_after: None,
+                    error: TwilioError::Http(e),
+                },
             }
-        }
-
-        Err(last_err.unwrap_or(TwilioError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_code: None,
-        }))
+        })
+        .await
     }
 
     #[allow(clippy::option_option)]

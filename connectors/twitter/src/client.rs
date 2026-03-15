@@ -2,12 +2,13 @@
 
 use std::time::Duration;
 
-use fcp_async_core::time::sleep;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 /// Characters that must be percent-encoded in URL query strings.
 /// See RFC 3986 Section 2.2: <https://www.rfc-editor.org/rfc/rfc3986#section-2.2>
@@ -248,86 +249,73 @@ impl TwitterApiClient {
         params: &[(String, String)],
     ) -> TwitterResult<T> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
 
-        loop {
-            attempts += 1;
-            debug!(
-                attempt = attempts,
-                method, endpoint, "Making Twitter API request"
-            );
+        // Build the full URL with query params for signing (URL-encode values)
+        let full_url = if params.is_empty() {
+            url.clone()
+        } else {
+            let query = params
+                .iter()
+                .map(|(k, v)| {
+                    let encoded_v = utf8_percent_encode(v, QUERY_ENCODE_SET);
+                    format!("{k}={encoded_v}")
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("{url}?{query}")
+        };
 
-            // Build the full URL with query params for signing (URL-encode values)
-            let full_url = if params.is_empty() {
-                url.clone()
-            } else {
-                let query = params
-                    .iter()
-                    .map(|(k, v)| {
-                        let encoded_v = utf8_percent_encode(v, QUERY_ENCODE_SET);
-                        format!("{k}={encoded_v}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join("&");
-                format!("{url}?{query}")
-            };
+        // Pre-sign outside the retry closure (OAuth signing is infallible once configured)
+        let auth_header = if let Some(ref signer) = self.oauth_signer {
+            Some(signer.sign(method, &url, params)?)
+        } else {
+            None
+        };
 
-            let mut req = match method {
-                "GET" => self.client.get(&full_url),
-                "POST" => self.client.post(&url),
-                "DELETE" => self.client.delete(&url),
-                "PUT" => self.client.put(&url),
-                _ => self.client.get(&full_url),
-            };
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-            // Apply OAuth signature if signer is present (not in secretless mode)
-            if let Some(ref signer) = self.oauth_signer {
-                let auth_header = signer.sign(method, &url, params)?;
-                req = req.header("Authorization", &auth_header);
-            }
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let url = &url;
+            let full_url = &full_url;
+            let auth_header = &auth_header;
+            async move {
+                debug!(method, endpoint, "Making Twitter API request");
 
-            if let Some(b) = body {
-                req = req.json(b);
-            }
+                let mut req = match method {
+                    "GET" => self.client.get(full_url.as_str()),
+                    "POST" => self.client.post(url.as_str()),
+                    "DELETE" => self.client.delete(url.as_str()),
+                    "PUT" => self.client.put(url.as_str()),
+                    _ => self.client.get(full_url.as_str()),
+                };
 
-            let result = req.send().await;
-
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying Twitter API request"
-                        );
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if e.is_timeout() || e.is_connect() => {
-                    if attempts < self.max_retries {
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying after connection error"
-                        );
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    } else {
-                        return Err(TwitterError::Http(e));
-                    }
+                if let Some(header) = auth_header {
+                    req = req.header("Authorization", header);
                 }
-                Err(e) => return Err(TwitterError::Http(e)),
+
+                if let Some(b) = body {
+                    req = req.json(b);
+                }
+
+                match req.send().await {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        retry_after: None,
+                        error: TwitterError::Http(e),
+                    },
+                    Err(e) => AttemptOutcome::Terminal(TwitterError::Http(e)),
+                }
             }
-        }
+        })
+        .await
     }
 
     async fn request_bearer<T: DeserializeOwned, B: serde::Serialize>(
@@ -338,66 +326,47 @@ impl TwitterApiClient {
         bearer: &str,
     ) -> TwitterResult<T> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let bearer_header = format!("Bearer {bearer}");
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(
-                attempt = attempts,
-                method, endpoint, "Making Twitter API request (bearer auth)"
-            );
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let url = &url;
+            let bearer_header = &bearer_header;
+            async move {
+                debug!(method, endpoint, "Making Twitter API request (bearer auth)");
 
-            let mut req = match method {
-                "GET" => self.client.get(&url),
-                "POST" => self.client.post(&url),
-                "DELETE" => self.client.delete(&url),
-                _ => self.client.get(&url),
-            };
+                let mut req = match method {
+                    "GET" => self.client.get(url.as_str()),
+                    "POST" => self.client.post(url.as_str()),
+                    "DELETE" => self.client.delete(url.as_str()),
+                    _ => self.client.get(url.as_str()),
+                };
 
-            req = req.header("Authorization", format!("Bearer {bearer}"));
+                req = req.header("Authorization", bearer_header.as_str());
 
-            if let Some(b) = body {
-                req = req.json(b);
-            }
-
-            let result = req.send().await;
-
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying Twitter API request"
-                        );
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if e.is_timeout() || e.is_connect() => {
-                    if attempts < self.max_retries {
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying after connection error"
-                        );
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    } else {
-                        return Err(TwitterError::Http(e));
-                    }
+                if let Some(b) = body {
+                    req = req.json(b);
                 }
-                Err(e) => return Err(TwitterError::Http(e)),
+
+                match req.send().await {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        retry_after: None,
+                        error: TwitterError::Http(e),
+                    },
+                    Err(e) => AttemptOutcome::Terminal(TwitterError::Http(e)),
+                }
             }
-        }
+        })
+        .await
     }
 
     async fn handle_response<T: DeserializeOwned>(&self, response: Response) -> TwitterResult<T> {

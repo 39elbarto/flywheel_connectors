@@ -11,9 +11,11 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, Url, header};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{YouTubeError, YouTubeResult},
@@ -509,14 +511,11 @@ impl YouTubeClient {
             .await?;
 
         // Parse the video resource from the response.
-        let value = match response.body {
-            GoogleResponseBody::Json(v) => v,
-            _ => {
-                return Err(YouTubeError::Api {
-                    message: "expected JSON response from upload".into(),
-                    status_code: Some(response.status_code),
-                });
-            }
+        let GoogleResponseBody::Json(value) = response.body else {
+            return Err(YouTubeError::Api {
+                message: "expected JSON response from upload".into(),
+                status_code: Some(response.status_code),
+            });
         };
 
         let video_id = value
@@ -616,35 +615,23 @@ impl YouTubeClient {
         body: Option<&serde_json::Value>,
         response_mode: GoogleResponseMode,
     ) -> YouTubeResult<GoogleExecuteResponse> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
+        RetryLoop::execute(&ctx, &policy, |_attempt| async move {
             let redacted_url = redact_key(url);
             debug!(url = %redacted_url, method = http_method, "request");
 
-            let response = self
-                .execute_once(http_method, url, body, response_mode)
-                .await;
-            match response {
-                Ok(response) => return Ok(response),
-                Err(error) if error.is_retryable() && attempt < self.max_retries => {
-                    warn!(attempt, error = %error, "retryable error");
-                    last_err = Some(error);
-                }
-                Err(error) => return Err(error),
+            match self.execute_once(http_method, url, body, response_mode).await {
+                Ok(response) => AttemptOutcome::Success(response),
+                Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                    retry_after: e.retry_after(),
+                    error: e,
+                },
+                Err(e) => AttemptOutcome::Terminal(e),
             }
-        }
-
-        Err(last_err.unwrap_or(YouTubeError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-        }))
+        })
+        .await
     }
 
     async fn execute_once(

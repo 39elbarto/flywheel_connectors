@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use fcp_core::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, header};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{
     error::{M365Error, M365Result},
@@ -871,191 +873,152 @@ impl M365Client {
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> M365Result<serde_json::Value> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let build_request = &build_request;
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
             let result = build_request().send().await;
 
             match result {
                 Ok(response) => {
                     let status = response.status();
                     match self.handle_error_status(status, &response, attempt).await {
-                        ErrorAction::Return(err) => return Err(err),
+                        ErrorAction::Return(err) => return AttemptOutcome::Terminal(err),
                         ErrorAction::Retry(err) => {
-                            last_err = Some(err);
-                            continue;
+                            return AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            }
                         }
                         ErrorAction::Success => {}
                     }
 
-                    let body = response.text().await.map_err(M365Error::Http)?;
-                    let data: serde_json::Value = serde_json::from_str(&body)?;
-                    return Ok(data);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(M365Error::Http(e));
-                        continue;
+                    match response.text().await {
+                        Ok(body) => match serde_json::from_str(&body) {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) => AttemptOutcome::Terminal(M365Error::from(e)),
+                        },
+                        Err(e) => AttemptOutcome::Terminal(M365Error::Http(e)),
                     }
-                    return Err(M365Error::Http(e));
                 }
+                Err(e) => AttemptOutcome::Retryable {
+                    retry_after: None,
+                    error: M365Error::Http(e),
+                },
             }
-        }
-
-        Err(last_err.unwrap_or(M365Error::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_code: None,
-        }))
+        })
+        .await
     }
 
     async fn execute_bytes(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> M365Result<Vec<u8>> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let build_request = &build_request;
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
             let result = build_request().send().await;
 
             match result {
                 Ok(response) => {
                     let status = response.status();
                     match self.handle_error_status(status, &response, attempt).await {
-                        ErrorAction::Return(err) => return Err(err),
+                        ErrorAction::Return(err) => return AttemptOutcome::Terminal(err),
                         ErrorAction::Retry(err) => {
-                            last_err = Some(err);
-                            continue;
+                            return AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            }
                         }
                         ErrorAction::Success => {}
                     }
 
-                    let bytes = response.bytes().await.map_err(M365Error::Http)?;
-                    return Ok(bytes.to_vec());
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(M365Error::Http(e));
-                        continue;
+                    match response.bytes().await {
+                        Ok(bytes) => AttemptOutcome::Success(bytes.to_vec()),
+                        Err(e) => AttemptOutcome::Terminal(M365Error::Http(e)),
                     }
-                    return Err(M365Error::Http(e));
                 }
+                Err(e) => AttemptOutcome::Retryable {
+                    retry_after: None,
+                    error: M365Error::Http(e),
+                },
             }
-        }
-
-        Err(last_err.unwrap_or(M365Error::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_code: None,
-        }))
+        })
+        .await
     }
 
     async fn execute_text(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> M365Result<String> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let build_request = &build_request;
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
             let result = build_request().send().await;
 
             match result {
                 Ok(response) => {
                     let status = response.status();
                     match self.handle_error_status(status, &response, attempt).await {
-                        ErrorAction::Return(err) => return Err(err),
+                        ErrorAction::Return(err) => return AttemptOutcome::Terminal(err),
                         ErrorAction::Retry(err) => {
-                            last_err = Some(err);
-                            continue;
+                            return AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            }
                         }
                         ErrorAction::Success => {}
                     }
 
-                    let body = response.text().await.map_err(M365Error::Http)?;
-                    return Ok(body);
-                }
-                Err(error) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %error, "request failed, will retry");
-                        last_err = Some(M365Error::Http(error));
-                        continue;
+                    match response.text().await {
+                        Ok(body) => AttemptOutcome::Success(body),
+                        Err(e) => AttemptOutcome::Terminal(M365Error::Http(e)),
                     }
-                    return Err(M365Error::Http(error));
                 }
+                Err(e) => AttemptOutcome::Retryable {
+                    retry_after: None,
+                    error: M365Error::Http(e),
+                },
             }
-        }
-
-        Err(last_err.unwrap_or(M365Error::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_code: None,
-        }))
+        })
+        .await
     }
 
     async fn execute_no_content(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> M365Result<()> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let build_request = &build_request;
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
             let result = build_request().send().await;
 
             match result {
                 Ok(response) => {
                     let status = response.status();
                     match self.handle_error_status(status, &response, attempt).await {
-                        ErrorAction::Return(err) => return Err(err),
-                        ErrorAction::Retry(err) => {
-                            last_err = Some(err);
-                            continue;
-                        }
-                        ErrorAction::Success => {}
+                        ErrorAction::Return(err) => AttemptOutcome::Terminal(err),
+                        ErrorAction::Retry(err) => AttemptOutcome::Retryable {
+                            retry_after: err.retry_after(),
+                            error: err,
+                        },
+                        ErrorAction::Success => AttemptOutcome::Success(()),
                     }
-                    return Ok(());
                 }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(M365Error::Http(e));
-                        continue;
-                    }
-                    return Err(M365Error::Http(e));
-                }
+                Err(e) => AttemptOutcome::Retryable {
+                    retry_after: None,
+                    error: M365Error::Http(e),
+                },
             }
-        }
-
-        Err(last_err.unwrap_or(M365Error::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_code: None,
-        }))
+        })
+        .await
     }
 
     async fn handle_error_status(

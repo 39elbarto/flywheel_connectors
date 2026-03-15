@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode, Url, header, redirect::Policy};
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use crate::{
     error::{AirtableError, AirtableResult},
@@ -144,6 +146,12 @@ impl AirtableClient {
         self.max_retries = max_retries;
         self.initial_delay_ms = initial_delay_ms;
         self.max_delay_ms = max_delay_ms;
+        self.retry_config = HttpRetryConfig {
+            max_retries,
+            initial_delay_ms,
+            max_delay_ms,
+            jitter_enabled: self.retry_config.jitter_enabled,
+        };
         self
     }
 
@@ -585,44 +593,14 @@ impl AirtableClient {
 
     async fn get_raw_url<T: serde::de::DeserializeOwned>(&self, url: &str) -> AirtableResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self.apply_auth(self.client.get(url)).send().await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(url, attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(AirtableError::RateLimited {
-                            retry_after_secs: retry_result.map_or(30, |d| d.as_secs()),
-                        });
-                    }
-                    let status = resp.status();
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AirtableError::Unauthorized);
-                    }
-                    if !status.is_success() {
-                        return Err(Self::parse_error_response(resp).await);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
-                }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(url, attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let req = self.apply_auth(self.client.get(url));
+            async move { Self::execute_once(req).await }
+        })
+        .await
     }
 
     async fn get_with_params<T: serde::de::DeserializeOwned>(
@@ -645,44 +623,14 @@ impl AirtableClient {
             }
         }
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self.apply_auth(self.client.get(&url)).send().await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(path, attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(AirtableError::RateLimited {
-                            retry_after_secs: retry_result.map_or(30, |d| d.as_secs()),
-                        });
-                    }
-                    let status = resp.status();
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AirtableError::Unauthorized);
-                    }
-                    if !status.is_success() {
-                        return Err(Self::parse_error_response(resp).await);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
-                }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(path, attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let req = self.apply_auth(self.client.get(&url));
+            async move { Self::execute_once(req).await }
+        })
+        .await
     }
 
     async fn post_json<T: serde::de::DeserializeOwned>(
@@ -741,48 +689,18 @@ impl AirtableClient {
 
     async fn delete_with_url<T: serde::de::DeserializeOwned>(
         &self,
-        path: &str,
+        _path: &str,
         url: &str,
     ) -> AirtableResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self.apply_auth(self.client.delete(url)).send().await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(path, attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(AirtableError::RateLimited {
-                            retry_after_secs: retry_result.map_or(30, |d| d.as_secs()),
-                        });
-                    }
-                    let status = resp.status();
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AirtableError::Unauthorized);
-                    }
-                    if !status.is_success() {
-                        return Err(Self::parse_error_response(resp).await);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
-                }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(path, attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let req = self.apply_auth(self.client.delete(url));
+            async move { Self::execute_once(req).await }
+        })
+        .await
     }
 
     async fn request_with_body<T: serde::de::DeserializeOwned>(
@@ -793,46 +711,54 @@ impl AirtableClient {
     ) -> AirtableResult<T> {
         let url = format!("{}{path}", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let req = self
                 .apply_auth(self.client.request(method.clone(), &url))
-                .json(body)
-                .send()
-                .await;
+                .json(body);
+            async move { Self::execute_once(req).await }
+        })
+        .await
+    }
 
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(path, attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(AirtableError::RateLimited {
-                            retry_after_secs: retry_result.map_or(30, |d| d.as_secs()),
-                        });
-                    }
-                    let status = resp.status();
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(AirtableError::Unauthorized);
-                    }
-                    if !status.is_success() {
-                        return Err(Self::parse_error_response(resp).await);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
+    async fn execute_once<T: serde::de::DeserializeOwned>(
+        req: reqwest::RequestBuilder,
+    ) -> AttemptOutcome<T, AirtableError> {
+        match req.send().await {
+            Ok(resp) => {
+                if let Some(retry_result) = Self::check_rate_limit(&resp) {
+                    let err = AirtableError::RateLimited {
+                        retry_after_secs: retry_result.map_or(30, |d| d.as_secs()),
+                    };
+                    return AttemptOutcome::Retryable {
+                        retry_after: retry_result,
+                        error: err,
+                    };
                 }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(path, attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                let status = resp.status();
+                if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                    return AttemptOutcome::Terminal(AirtableError::Unauthorized);
                 }
-                Err(e) => return Err(e.into()),
+                if !status.is_success() {
+                    return AttemptOutcome::Terminal(Self::parse_error_response(resp).await);
+                }
+                match resp.json::<T>().await {
+                    Ok(data) => AttemptOutcome::Success(data),
+                    Err(e) => AttemptOutcome::Terminal(e.into()),
+                }
+            }
+            Err(e) => {
+                let err: AirtableError = e.into();
+                if err.is_retryable() {
+                    AttemptOutcome::Retryable {
+                        retry_after: None,
+                        error: err,
+                    }
+                } else {
+                    AttemptOutcome::Terminal(err)
+                }
             }
         }
     }

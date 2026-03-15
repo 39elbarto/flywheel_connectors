@@ -5,12 +5,13 @@
 
 use std::time::Duration;
 
-use fcp_async_core::time::sleep;
 use fcp_core::FcpError;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use crate::types::*;
 
@@ -80,98 +81,98 @@ impl TelegramClient {
         B: Serialize + ?Sized,
     {
         let url = self.api_url(endpoint);
-        let mut attempts = 0;
-        let max_retries = self.retry_config.max_retries;
-        let mut delay = Duration::from_millis(self.retry_config.initial_delay_ms);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            let mut req = match method {
-                "POST" => self.client.post(&url),
-                _ => self.client.get(&url),
-            };
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let url = &url;
+            async move {
+                let mut req = match method {
+                    "POST" => self.client.post(url.as_str()),
+                    _ => self.client.get(url.as_str()),
+                };
 
-            if let Some(b) = body {
-                req = req.json(b);
-            }
+                if let Some(b) = body {
+                    req = req.json(b);
+                }
 
-            if let Some(t) = timeout {
-                req = req.timeout(t);
-            }
+                if let Some(t) = timeout {
+                    req = req.timeout(t);
+                }
 
-            let result = req.send().await;
+                let result = req.send().await;
 
-            match result {
-                Ok(response) => {
-                    let status = response.status();
+                match result {
+                    Ok(response) => {
+                        let status = response.status();
 
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(5);
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after_secs = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(5);
 
-                        if attempts < max_retries {
-                            let wait = Duration::from_secs(retry_after);
-                            warn!(
-                                attempt = attempts,
-                                wait_secs = retry_after,
-                                "Rate limited, retrying"
-                            );
-                            sleep(wait).await;
-                            continue;
+                            return AttemptOutcome::Retryable {
+                                error: TelegramError::Api {
+                                    code: 429,
+                                    description: "Too Many Requests".into(),
+                                },
+                                retry_after: Some(Duration::from_secs(retry_after_secs)),
+                            };
+                        }
+
+                        if status.is_server_error() {
+                            return AttemptOutcome::Retryable {
+                                error: TelegramError::Api {
+                                    code: i32::from(status.as_u16()),
+                                    description: format!("Server error: {status}"),
+                                },
+                                retry_after: None,
+                            };
+                        }
+
+                        // Parse the Telegram response wrapper
+                        let tg_response: TelegramResponse<T> = match response.json().await {
+                            Ok(r) => r,
+                            Err(e) => return AttemptOutcome::Terminal(TelegramError::Http(e)),
+                        };
+
+                        if tg_response.ok {
+                            return match tg_response.result {
+                                Some(data) => AttemptOutcome::Success(data),
+                                None => AttemptOutcome::Terminal(TelegramError::Api {
+                                    code: 0,
+                                    description: "Empty result".into(),
+                                }),
+                            };
+                        }
+
+                        // Handle logical API errors
+                        let err = TelegramError::Api {
+                            code: tg_response.error_code.unwrap_or(0),
+                            description: tg_response.description.clone().unwrap_or_default(),
+                        };
+
+                        if err.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(err)
                         }
                     }
-
-                    // Telegram returns 200 even for logical errors, but check for HTTP errors anyway
-                    if status.is_server_error() {
-                        if attempts < max_retries {
-                            warn!(attempt = attempts, status = %status, "Server error, retrying");
-                            sleep(delay).await;
-                            delay *= 2;
-                            continue;
-                        }
-                    }
-
-                    // Parse the Telegram response wrapper
-                    let tg_response: TelegramResponse<T> = response.json().await?;
-
-                    if tg_response.ok {
-                        return tg_response.result.ok_or_else(|| TelegramError::Api {
-                            code: 0,
-                            description: "Empty result".into(),
-                        });
-                    }
-
-                    // Handle logical API errors
-                    let err = TelegramError::Api {
-                        code: tg_response.error_code.unwrap_or(0),
-                        description: tg_response.description.clone().unwrap_or_default(),
-                    };
-
-                    // Retry on 429 or 5xx equivalents in logical errors if applicable
-                    if err.is_retryable() && attempts < max_retries {
-                        warn!(attempt = attempts, error = %err, "Retryable API error");
-                        sleep(delay).await;
-                        delay *= 2;
-                        continue;
-                    }
-
-                    return Err(err);
-                }
-                Err(e) => {
-                    if (e.is_timeout() || e.is_connect()) && attempts < max_retries {
-                        warn!(attempt = attempts, error = %e, "Connection error, retrying");
-                        sleep(delay).await;
-                        delay *= 2;
-                        continue;
-                    }
-                    return Err(TelegramError::Http(e));
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        retry_after: None,
+                        error: TelegramError::Http(e),
+                    },
+                    Err(e) => AttemptOutcome::Terminal(TelegramError::Http(e)),
                 }
             }
-        }
+        })
+        .await
     }
 
     /// Get bot information.

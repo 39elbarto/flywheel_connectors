@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, header};
-use tracing::{debug, warn};
 
 use crate::error::{ZendeskError, ZendeskResult};
 use crate::types::ApiErrorResponse;
@@ -182,6 +183,10 @@ impl ZendeskClient {
     #[must_use]
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
+        self.retry_config = HttpRetryConfig {
+            max_retries,
+            ..self.retry_config
+        };
         self
     }
 
@@ -416,112 +421,112 @@ impl ZendeskClient {
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> ZendeskResult<serde_json::Value> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
+        RetryLoop::execute(&ctx, &policy, |_attempt| {
+            let req = build_request();
+            async move {
+                match req.send().await {
+                    Ok(response) => {
+                        let status = response.status();
 
-            let result = build_request().send().await;
-
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(ZendeskError::Api {
-                            message: format!("Authentication failed: {body}"),
-                            status_code: Some(status.as_u16()),
-                        });
-                    }
-
-                    if status == StatusCode::NOT_FOUND {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(ZendeskError::Api {
-                            message: format!("Not found: {body}"),
-                            status_code: Some(404),
-                        });
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .map_or(60_000, |s| s * 1000);
-
-                        let err = ZendeskError::RateLimit {
-                            retry_after_ms: retry_after,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, "rate limited, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Terminal(ZendeskError::Api {
+                                message: format!("Authentication failed: {body}"),
+                                status_code: Some(status.as_u16()),
+                            });
                         }
-                        return Err(err);
-                    }
 
-                    if status.is_server_error() {
-                        let body = response.text().await.unwrap_or_default();
-                        let err = ZendeskError::Api {
-                            message: format!("Server error {status}: {body}"),
-                            status_code: Some(status.as_u16()),
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, status = %status, "server error, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::NOT_FOUND {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Terminal(ZendeskError::Api {
+                                message: format!("Not found: {body}"),
+                                status_code: Some(404),
+                            });
                         }
-                        return Err(err);
-                    }
 
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
-                        let message = api_err
-                            .as_ref()
-                            .and_then(|e| {
-                                e.message
-                                    .clone()
-                                    .or(e.description.clone())
-                                    .or(e.error.clone())
-                            })
-                            .unwrap_or(format!("HTTP {status}: {body}"));
-                        return Err(ZendeskError::Api {
-                            message,
-                            status_code: Some(status.as_u16()),
-                        });
-                    }
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .map_or(60_000, |s| s * 1000);
 
-                    // For DELETE with 204 No Content, return empty object
-                    if status == StatusCode::NO_CONTENT {
-                        return Ok(serde_json::json!({ "deleted": true }));
-                    }
+                            let err = ZendeskError::RateLimit {
+                                retry_after_ms: retry_after,
+                            };
+                            return AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            };
+                        }
 
-                    let body = response.text().await.map_err(ZendeskError::Http)?;
-                    let data: serde_json::Value = serde_json::from_str(&body)?;
-                    return Ok(data);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(ZendeskError::Http(e));
-                        continue;
+                        if status.is_server_error() {
+                            let body = response.text().await.unwrap_or_default();
+                            let err = ZendeskError::Api {
+                                message: format!("Server error {status}: {body}"),
+                                status_code: Some(status.as_u16()),
+                            };
+                            return AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: err,
+                            };
+                        }
+
+                        if !status.is_success() {
+                            let body = response.text().await.unwrap_or_default();
+                            let api_err: Option<ApiErrorResponse> =
+                                serde_json::from_str(&body).ok();
+                            let message = api_err
+                                .as_ref()
+                                .and_then(|e| {
+                                    e.message
+                                        .clone()
+                                        .or(e.description.clone())
+                                        .or(e.error.clone())
+                                })
+                                .unwrap_or(format!("HTTP {status}: {body}"));
+                            return AttemptOutcome::Terminal(ZendeskError::Api {
+                                message,
+                                status_code: Some(status.as_u16()),
+                            });
+                        }
+
+                        // For DELETE with 204 No Content, return empty object
+                        if status == StatusCode::NO_CONTENT {
+                            return AttemptOutcome::Success(
+                                serde_json::json!({ "deleted": true }),
+                            );
+                        }
+
+                        match response.text().await {
+                            Ok(body) => match serde_json::from_str(&body) {
+                                Ok(data) => AttemptOutcome::Success(data),
+                                Err(e) => {
+                                    AttemptOutcome::Terminal(ZendeskError::Serialization(e))
+                                }
+                            },
+                            Err(e) => AttemptOutcome::Terminal(ZendeskError::Http(e)),
+                        }
                     }
-                    return Err(ZendeskError::Http(e));
+                    Err(e) => {
+                        let err = ZendeskError::Http(e);
+                        if err.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: err,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(err)
+                        }
+                    }
                 }
             }
-        }
-
-        Err(last_err.unwrap_or(ZendeskError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-        }))
+        })
+        .await
     }
 }
 

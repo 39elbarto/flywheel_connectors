@@ -360,12 +360,12 @@ impl ConnectorRegistry for SubprocessRegistry {
 
     async fn get_archetype(&self, id: &ConnectorId) -> Option<ConnectorArchetype> {
         self.connectors.get(id)?;
-        Some(ConnectorArchetype::RequestResponse)
+        Some(ConnectorArchetype::Unknown)
     }
 
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_core::RateLimitDeclarations> {
         self.connectors.get(id)?;
-        Some(fcp_core::RateLimitDeclarations::default())
+        None
     }
 
     async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
@@ -535,6 +535,15 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
     }));
 
     let introspection_a = endpoint.introspect(&connector_a_id).await?;
+    assert_eq!(
+        introspection_a.archetype,
+        ConnectorArchetype::Unknown,
+        "subprocess integration registry must preserve unknown archetype metadata"
+    );
+    assert!(
+        introspection_a.rate_limits.is_none(),
+        "subprocess integration registry must preserve unknown rate-limit declarations"
+    );
     assert!(
         introspection_a
             .introspection
@@ -549,6 +558,15 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
     }));
 
     let introspection_b = endpoint.introspect(&connector_b_id).await?;
+    assert_eq!(
+        introspection_b.archetype,
+        ConnectorArchetype::Unknown,
+        "subprocess integration registry must preserve unknown archetype metadata"
+    );
+    assert!(
+        introspection_b.rate_limits.is_none(),
+        "subprocess integration registry must preserve unknown rate-limit declarations"
+    );
     assert!(
         introspection_b
             .introspection

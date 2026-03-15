@@ -1645,7 +1645,6 @@ fn connector_rate_limits_content(
             "source": "serve-mcp-tool-inventory",
             "surface_state": inventory["surface_state"].clone(),
             "inventory": inventory,
-            "pools": [],
             "message": "Live rate-limit telemetry is not yet attached to serve_mcp state.",
         }),
     )
@@ -3012,6 +3011,29 @@ mod tests {
         assert_eq!(payload["status"], "unknown");
         assert_eq!(payload["inventory"]["source"], "live_host_inventory");
         assert_eq!(payload["inventory"]["surface_state"], "live_serving");
+    }
+
+    #[test]
+    fn handle_resources_read_rate_limits_omit_unknown_pool_data_without_live_telemetry() {
+        let state = state_from_tools([sample_live_tool()], McpServerConfig::default());
+        let req = make_request(
+            "resources/read",
+            Some(json!({"uri": "resource://connector/github/rate-limits"})),
+        );
+        let resp = handle_request(&state, &req);
+        let text = resp.result().unwrap()["contents"][0]["text"]
+            .as_str()
+            .expect("resource text should exist");
+        let payload: Value =
+            serde_json::from_str(text).expect("rate-limit payload should be valid");
+
+        assert_eq!(payload["status"], "unknown");
+        assert_eq!(payload["inventory"]["source"], "live_host_inventory");
+        assert_eq!(payload["inventory"]["surface_state"], "live_serving");
+        assert!(
+            payload.get("pools").is_none(),
+            "unknown rate-limit state must not fabricate an empty pools list"
+        );
     }
 
     #[test]

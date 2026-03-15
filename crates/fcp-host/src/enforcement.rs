@@ -2454,7 +2454,7 @@ mod tests {
         let config = EnforcementConfig::new().with_checkpoint_max_age_ms(100);
         let pipeline = EnforcementPipeline::with_config(config);
         assert_eq!(pipeline.config().checkpoint_max_age_ms, 100);
-        assert_eq!(pipeline.check_count(), 9);
+        assert_eq!(pipeline.check_count(), 10);
     }
 
     #[test]
@@ -2479,7 +2479,7 @@ mod tests {
     #[test]
     fn pipeline_default_trait() {
         let pipeline = EnforcementPipeline::default();
-        assert_eq!(pipeline.check_count(), 9);
+        assert_eq!(pipeline.check_count(), 10);
     }
 
     // ── Custom check implementation ──

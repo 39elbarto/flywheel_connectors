@@ -3352,6 +3352,98 @@ async fn fcp_host_binary_sigterm_shutdown_exits_cleanly_and_stops_serving_http()
     Ok(())
 }
 
+#[cfg(unix)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_sigterm_shutdown_aborts_in_flight_http_invoke_without_hanging()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.shutdown-in-flight-http:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let mut host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Shutdown In Flight Echo",
+            &["test", "shutdown"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let (mut invoke_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    invoke_request.input = json!({
+        "message": "shutdown-mid-flight",
+        "delay_ms": 1_000_u64,
+    });
+    let operation_id = invoke_request.id.to_string();
+
+    let invoke_task = fcp_async_core::task::spawn({
+        let client = host.client.clone();
+        let invoke_url = url("/rpc/invoke");
+        async move {
+            http_post_json::<_, InvokeResponse>(client, invoke_url, invoke_request)
+                .await
+                .map_err(|err| err.to_string())
+        }
+    });
+
+    let logs = wait_for_log_events(&host.stderr_logs, &["invoke_request"]).await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_request")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+    }));
+
+    fcp_async_core::time::sleep(Duration::from_millis(50)).await;
+    send_sigterm(&host.child)?;
+
+    let status =
+        wait_for_host_exit(&mut host.child, Duration::from_secs(2), &host.stderr_logs).await?;
+    assert!(
+        status.success(),
+        "expected graceful shutdown exit, got {status}"
+    );
+
+    let invoke_result = fcp_async_core::time::timeout(Duration::from_secs(1), async {
+        invoke_task
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(std::io::Error::other)
+    })
+    .await
+    .expect("in-flight invoke should not hang after shutdown");
+    let invoke_err = invoke_result.expect_err("in-flight invoke should fail after SIGTERM");
+    let invoke_err = invoke_err.to_string();
+    assert!(
+        invoke_err.contains("connection")
+            || invoke_err.contains("refused")
+            || invoke_err.contains("closed")
+            || invoke_err.contains("error sending request"),
+        "unexpected in-flight reqwest error after SIGTERM: {invoke_err}"
+    );
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "invoke_request",
+            "sigterm_received",
+            "shutdown_signal",
+            "host_shutdown_complete",
+        ],
+    )
+    .await?;
+    assert!(!logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_response")
+            && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+    }));
+
+    Ok(())
+}
+
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_rollout_routes_schedule_and_promote_canary()
 -> Result<(), Box<dyn std::error::Error>> {

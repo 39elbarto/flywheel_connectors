@@ -26,13 +26,18 @@ use fcp_linear::{client::LinearClient, connector::LinearConnector, error::Linear
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
+    let capability = match operation {
+        "linear.create_issue" | "linear.update_issue" | "linear.add_comment" => "linear.write",
+        "linear.process_webhook" => "linear.process_webhook",
+        _ => "linear.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
-        .capability_id(cap)
+        .capability_id(capability)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -695,6 +700,57 @@ async fn invoke_create_issue_through_connector() {
         .unwrap();
 
     assert_eq!(result["issue"]["identifier"], "LIN-100");
+}
+
+/// Invoke `linear.plan_sync` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_plan_sync_through_connector() {
+    let mut connector = LinearConnector::new();
+    let signing_key = setup_handshake(&mut connector, &["linear.plan_sync"]).await;
+    let token = generate_valid_token(&signing_key, "linear.plan_sync");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "linear.plan_sync",
+            "input": {
+                "planned_at": "2026-03-15T00:00:00Z",
+                "policy": "prefer_freshest",
+                "bead": {
+                    "bead_id": "br-123",
+                    "linear_issue_id": "lin-1",
+                    "title": "New bead title",
+                    "description": "Body",
+                    "status": "open",
+                    "priority": 1,
+                    "updated_at": "2026-03-15T00:00:00Z"
+                },
+                "linear": {
+                    "issue_id": "lin-1",
+                    "identifier": "LIN-123",
+                    "bead_id": "br-123",
+                    "title": "Old linear title",
+                    "description": "Body",
+                    "status": "open",
+                    "priority": 1,
+                    "updated_at": "2026-03-14T23:00:00Z"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["intent"]["operation"], "update_linear");
+    assert_eq!(
+        result["intent"]["plan"]["update_linear_fields"],
+        json!(["title"])
+    );
+    assert!(
+        result["intent"]["idempotency_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("fcp2:linear-sync:update_linear:")
+    );
 }
 
 /// Invoke `linear.add_comment` through the connector.

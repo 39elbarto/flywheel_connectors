@@ -15,6 +15,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_API_URL, LinearAuth, LinearClient},
     error::LinearError,
+    types::{BeadSyncSnapshot, LinearSyncSnapshot, SyncConflictPolicy, SyncOperationIntent},
 };
 
 /// Parsed and validated Linear connector configuration.
@@ -595,6 +596,58 @@ impl LinearConnector {
                     },
                 ),
                 op_info(
+                    "linear.plan_sync",
+                    "Plan a deterministic Beads ↔ Linear sync action without side effects",
+                    json!({
+                        "type": "object",
+                        "required": ["planned_at"],
+                        "properties": {
+                            "bead": {
+                                "type": "object",
+                                "description": "Optional Beads-side snapshot to compare"
+                            },
+                            "linear": {
+                                "type": "object",
+                                "description": "Optional Linear-side snapshot to compare"
+                            },
+                            "policy": {
+                                "type": "string",
+                                "enum": ["prefer_freshest", "prefer_bead", "prefer_linear", "manual"]
+                            },
+                            "planned_at": {
+                                "type": "string",
+                                "description": "RFC3339 timestamp recorded in the sync intent"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "intent": { "type": "object" }
+                        }
+                    }),
+                    "linear.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Preview the exact Beads ↔ Linear sync action before any write."
+                            .into(),
+                        common_mistakes: vec![
+                            "planned_at is required so the audit artifact stays explicit".into(),
+                            "Provide at least one of bead or linear; both missing is not a meaningful sync plan"
+                                .into(),
+                        ],
+                        examples: vec![
+                            r#"{"planned_at":"2026-03-15T00:00:00Z","policy":"prefer_freshest","bead":{"bead_id":"br-123","title":"New title","description":"Body","status":"open","priority":1,"updated_at":"2026-03-15T00:00:00Z"},"linear":{"issue_id":"lin-1","identifier":"LIN-123","title":"Old title","description":"Body","status":"open","priority":1,"updated_at":"2026-03-14T23:00:00Z"}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("linear.get_issue"),
+                            CapabilityId::from_static("linear.process_webhook"),
+                        ],
+                    },
+                ),
+                op_info(
                     "linear.process_webhook",
                     "Process an inbound Linear webhook payload forwarded by fcp-host",
                     json!({
@@ -907,6 +960,7 @@ impl LinearConnector {
             "linear.list_cycles" => self.invoke_list_cycles(input).await,
             "linear.add_comment" => self.invoke_add_comment(input).await,
             "linear.list_projects" => self.invoke_list_projects().await,
+            "linear.plan_sync" => self.invoke_plan_sync(input).await,
             "linear.process_webhook" => self.invoke_process_webhook(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -1014,6 +1068,50 @@ impl LinearConnector {
             .map_err(|e: LinearError| e.to_fcp_error())?;
 
         Ok(json!({ "projects": projects }))
+    }
+
+    async fn invoke_plan_sync(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let bead = input
+            .get("bead")
+            .cloned()
+            .map(serde_json::from_value::<BeadSyncSnapshot>)
+            .transpose()
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid bead snapshot: {e}"),
+            })?;
+        let linear = input
+            .get("linear")
+            .cloned()
+            .map(serde_json::from_value::<LinearSyncSnapshot>)
+            .transpose()
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid linear snapshot: {e}"),
+            })?;
+
+        if bead.is_none() && linear.is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "At least one of bead or linear must be provided".into(),
+            });
+        }
+
+        let policy = input
+            .get("policy")
+            .cloned()
+            .map(serde_json::from_value::<SyncConflictPolicy>)
+            .transpose()
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid sync policy: {e}"),
+            })?
+            .unwrap_or(SyncConflictPolicy::PreferFreshest);
+        let planned_at = require_str(&input, "planned_at")?;
+        let intent =
+            SyncOperationIntent::from_snapshots(bead.as_ref(), linear.as_ref(), policy, planned_at);
+
+        Ok(json!({ "intent": intent }))
     }
 
     async fn invoke_process_webhook(
@@ -1263,6 +1361,40 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_plan_sync_requires_at_least_one_snapshot() {
+        let mut connector = LinearConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["linear.plan_sync"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "linear.plan_sync");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "linear.plan_sync",
+                "input": { "planned_at": "2026-03-15T00:00:00Z" },
+                "capability_token": token
+            }))
+            .await;
+
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("At least one of bead or linear"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_introspect_has_all_operations() {
         let connector = LinearConnector::new();
         let result = connector.handle_introspect().await.unwrap();
@@ -1278,8 +1410,9 @@ mod tests {
         assert!(op_ids.contains(&"linear.list_cycles"));
         assert!(op_ids.contains(&"linear.add_comment"));
         assert!(op_ids.contains(&"linear.list_projects"));
+        assert!(op_ids.contains(&"linear.plan_sync"));
         assert!(op_ids.contains(&"linear.process_webhook"));
-        assert_eq!(ops.len(), 9);
+        assert_eq!(ops.len(), 10);
 
         // Verify event descriptors are present
         let events = result["events"].as_array().unwrap();

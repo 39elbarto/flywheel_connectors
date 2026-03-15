@@ -747,6 +747,219 @@ fn repair_planner_cycle_improves_zone_slo() {
     );
 }
 
+/// Planner behavior adapts to mains power and metered-network constraints.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn repair_planner_adapts_to_power_and_network_conditions() {
+    run_store_test(
+        "repair_planner_adapts_to_power_and_network_conditions",
+        "integration",
+        "repair_plan",
+        17,
+        || async {
+            let config = test_raptorq_config();
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                max_bytes: 2 * 1024 * 1024,
+                local_node_id: 1,
+            });
+            let controller = RepairController::new(RepairControllerConfig {
+                min_deficit_bps: 100,
+                max_symbols_per_repair: 8,
+                ..Default::default()
+            });
+
+            let critical_object = ObjectId::from_bytes([0xD1; 32]);
+            let degraded_object = ObjectId::from_bytes([0xD2; 32]);
+            let hot_object = ObjectId::from_bytes([0xD3; 32]);
+
+            for (object_id, payload_len, mode) in [
+                (critical_object, 640usize, "partial"),
+                (degraded_object, 704usize, "source_only"),
+                (hot_object, 768usize, "source_only"),
+            ] {
+                let payload = make_payload(payload_len);
+                let (symbols, oti, source_k) = encode_payload(&payload, &config);
+                let source_only: Vec<_> = symbols
+                    .iter()
+                    .filter(|(esi, _)| *esi < source_k)
+                    .cloned()
+                    .collect();
+                let symbols_to_store = if mode == "partial" {
+                    source_only
+                        .iter()
+                        .take((source_k as usize / 2).max(1))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    source_only
+                };
+                store_symbols(&store, object_id, oti, source_k, &symbols_to_store, 1).await;
+            }
+
+            let base_policy = ObjectPlacementPolicy {
+                min_nodes: 1,
+                max_node_fraction_bps: 10_000,
+                preferred_devices: vec![],
+                excluded_devices: vec![],
+                target_coverage_bps: 12_000,
+                min_source_diversity: 0,
+            };
+            let degraded_policy = base_policy.clone();
+            let hot_policy = ObjectPlacementPolicy {
+                target_coverage_bps: 9_000,
+                ..base_policy.clone()
+            };
+
+            let policies = HashMap::from([
+                (
+                    critical_object,
+                    ObjectPlacementPolicy {
+                        target_coverage_bps: 10_000,
+                        ..degraded_policy.clone()
+                    },
+                ),
+                (degraded_object, degraded_policy),
+                (hot_object, hot_policy),
+            ]);
+
+            let baseline_options = RepairPlanningOptions {
+                cycle_id: 51,
+                budget: RepairCycleBudget {
+                    max_repairs: 1,
+                    max_bytes: 2_048,
+                    max_decode_ms: 64,
+                },
+                hot_objects: vec![hot_object],
+                hot_object_min_coverage_bps: 15_000,
+                ..Default::default()
+            };
+
+            let baseline_plan = controller
+                .plan_zone(&test_zone(), &store, &policies, &baseline_options)
+                .await;
+            assert_eq!(baseline_plan.budget.max_repairs, 1);
+            assert_eq!(baseline_plan.actions.len(), 1);
+            assert_eq!(baseline_plan.actions[0].object_id, critical_object);
+            assert_eq!(
+                baseline_plan.actions[0].reason_code,
+                RepairReasonCode::PolicySloDeficit
+            );
+
+            let aggressive_plan = controller
+                .plan_zone(
+                    &test_zone(),
+                    &store,
+                    &policies,
+                    &RepairPlanningOptions {
+                        cycle_id: 52,
+                        mains_power: true,
+                        bandwidth_estimate_kbps: 100_000,
+                        ..baseline_options.clone()
+                    },
+                )
+                .await;
+            assert_eq!(aggressive_plan.budget.max_repairs, 2);
+            assert_eq!(aggressive_plan.budget.max_bytes, 4_096);
+            assert_eq!(aggressive_plan.budget.max_decode_ms, 128);
+            assert_eq!(aggressive_plan.actions.len(), 2);
+            assert!(
+                aggressive_plan.actions.len() > baseline_plan.actions.len(),
+                "mains power + bandwidth should increase actionable repair budget",
+            );
+            assert!(
+                aggressive_plan
+                    .actions
+                    .iter()
+                    .any(|action| action.object_id == hot_object),
+                "aggressive plan should include the hot-object pre-stage candidate",
+            );
+
+            let metered_plan = controller
+                .plan_zone(
+                    &test_zone(),
+                    &store,
+                    &policies,
+                    &RepairPlanningOptions {
+                        cycle_id: 53,
+                        budget: RepairCycleBudget {
+                            max_repairs: 3,
+                            max_bytes: 8_192,
+                            max_decode_ms: 256,
+                        },
+                        hot_objects: vec![hot_object],
+                        hot_object_min_coverage_bps: 15_000,
+                        metered_network: true,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            assert_eq!(metered_plan.actions.len(), 1);
+            assert_eq!(metered_plan.actions[0].object_id, critical_object);
+            assert_eq!(metered_plan.deferred.len(), 2);
+            assert!(
+                metered_plan
+                    .deferred
+                    .iter()
+                    .all(|action| action.reason_code == RepairReasonCode::DeferredPowerBudget),
+                "metered network should defer non-critical repairs with an explainable reason",
+            );
+            assert!(
+                metered_plan
+                    .deferred
+                    .iter()
+                    .any(|action| action.object_id == degraded_object),
+                "metered network should defer the non-critical policy-deficit object",
+            );
+            assert!(
+                metered_plan
+                    .deferred
+                    .iter()
+                    .any(|action| action.object_id == hot_object),
+                "metered network should defer the hot-object pre-stage candidate",
+            );
+
+            StoreLogData {
+                symbol_count: Some(metered_plan.object_count_tracked as u32),
+                details: Some(json!({
+                    "baseline": {
+                        "budget": {
+                            "max_repairs": baseline_plan.budget.max_repairs,
+                            "max_bytes": baseline_plan.budget.max_bytes,
+                            "max_decode_ms": baseline_plan.budget.max_decode_ms
+                        },
+                        "actions": baseline_plan.actions.iter().map(|action| json!({
+                            "object_id": action.object_id.to_string(),
+                            "reason_code": action.reason_code.as_str()
+                        })).collect::<Vec<_>>()
+                    },
+                    "aggressive": {
+                        "budget": {
+                            "max_repairs": aggressive_plan.budget.max_repairs,
+                            "max_bytes": aggressive_plan.budget.max_bytes,
+                            "max_decode_ms": aggressive_plan.budget.max_decode_ms
+                        },
+                        "actions": aggressive_plan.actions.iter().map(|action| json!({
+                            "object_id": action.object_id.to_string(),
+                            "reason_code": action.reason_code.as_str()
+                        })).collect::<Vec<_>>()
+                    },
+                    "metered": {
+                        "actions": metered_plan.actions.iter().map(|action| json!({
+                            "object_id": action.object_id.to_string(),
+                            "reason_code": action.reason_code.as_str()
+                        })).collect::<Vec<_>>(),
+                        "deferred": metered_plan.deferred.iter().map(|action| json!({
+                            "object_id": action.object_id.to_string(),
+                            "reason_code": action.reason_code.as_str()
+                        })).collect::<Vec<_>>()
+                    }
+                })),
+                ..StoreLogData::default()
+            }
+        },
+    );
+}
+
 /// Object store and symbol store work together: store a complete object and
 /// its symbols, verify both are accessible and coverage is healthy.
 #[test]

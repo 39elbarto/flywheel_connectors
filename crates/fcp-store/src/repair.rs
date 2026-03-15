@@ -273,6 +273,12 @@ pub struct RepairPlanningOptions {
     pub hot_object_min_coverage_bps: u32,
     /// Whether the planner should defer non-critical work due to power constraints.
     pub power_saver: bool,
+    /// Whether the device is on mains power and can spend extra repair budget.
+    pub mains_power: bool,
+    /// Whether the current network is metered and should avoid non-critical repairs.
+    pub metered_network: bool,
+    /// Estimated repair bandwidth available to the planner, in kilobits per second.
+    pub bandwidth_estimate_kbps: u32,
     /// Extra cost multiplier, in basis points, for DERP-only or otherwise expensive links.
     pub derp_penalty_bps: u32,
 }
@@ -285,6 +291,9 @@ impl Default for RepairPlanningOptions {
             hot_objects: Vec::new(),
             hot_object_min_coverage_bps: 10_000,
             power_saver: false,
+            mains_power: false,
+            metered_network: false,
+            bandwidth_estimate_kbps: 0,
             derp_penalty_bps: 0,
         }
     }
@@ -682,6 +691,40 @@ impl RepairController {
         }
     }
 
+    fn effective_budget(
+        &self,
+        policy_targets: RepairPolicyTargets,
+        slo_metrics: RepairSloMetrics,
+        candidates: &[RepairPlanAction],
+        options: &RepairPlanningOptions,
+    ) -> RepairCycleBudget {
+        const AGGRESSIVE_REPAIR_BANDWIDTH_KBPS: u32 = 50_000;
+
+        let mut budget = options.budget;
+        let has_policy_slo_deficit = candidates
+            .iter()
+            .any(|action| action.reason_code == RepairReasonCode::PolicySloDeficit);
+        let severe_zone_deficit = policy_targets.target_coverage_bps > 0
+            && policy_targets
+                .target_coverage_bps
+                .saturating_sub(slo_metrics.coverage_p50_bps)
+                >= self.config.min_deficit_bps;
+
+        if has_policy_slo_deficit
+            && severe_zone_deficit
+            && options.mains_power
+            && !options.power_saver
+            && !options.metered_network
+            && options.bandwidth_estimate_kbps >= AGGRESSIVE_REPAIR_BANDWIDTH_KBPS
+        {
+            budget.max_repairs = budget.max_repairs.saturating_mul(2);
+            budget.max_bytes = budget.max_bytes.saturating_mul(2);
+            budget.max_decode_ms = budget.max_decode_ms.saturating_mul(2);
+        }
+
+        budget
+    }
+
     /// Build a deterministic, explainable repair plan for one zone evaluation cycle.
     pub async fn plan_zone(
         &self,
@@ -757,6 +800,8 @@ impl RepairController {
             hot_object_count,
             hot_object_available_count,
         );
+        let effective_budget =
+            self.effective_budget(policy_targets, slo_metrics, &candidates, options);
 
         candidates.sort_by(|left, right| {
             right
@@ -774,16 +819,20 @@ impl RepairController {
             object_count_tracked,
             object_count_below_target,
             slo_metrics,
-            budget: options.budget,
+            budget: effective_budget,
             budget_used: RepairCycleUsage::default(),
             actions: Vec::new(),
             deferred: Vec::new(),
         };
 
         for action in candidates {
-            let should_defer_for_power = options.power_saver
-                && matches!(action.reason_code, RepairReasonCode::PolicySloDeficit)
-                && action.priority < 1000;
+            let is_noncritical_policy_deficit =
+                matches!(action.reason_code, RepairReasonCode::PolicySloDeficit)
+                    && action.priority < 1000;
+            let is_noncritical_hot_prestage =
+                action.reason_code == RepairReasonCode::HotObjectPreStage;
+            let should_defer_for_power = (options.power_saver || options.metered_network)
+                && (is_noncritical_policy_deficit || is_noncritical_hot_prestage);
 
             if should_defer_for_power {
                 let mut deferred = action;
@@ -792,10 +841,10 @@ impl RepairController {
                 continue;
             }
 
-            if plan.budget_used.can_fit(&options.budget, &action) {
+            if plan.budget_used.can_fit(&plan.budget, &action) {
                 plan.budget_used.record(&action);
                 plan.actions.push(action);
-            } else if options.power_saver {
+            } else if options.power_saver || options.metered_network {
                 let mut deferred = action;
                 deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
                 plan.deferred.push(deferred);
@@ -3487,6 +3536,160 @@ mod tests {
     }
 
     #[test]
+    fn planner_expands_budget_when_on_mains_with_high_bandwidth() {
+        run_store_test(
+            "planner_expands_budget_when_on_mains_with_high_bandwidth",
+            "verify",
+            "repair_plan",
+            7,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 8,
+                    ..Default::default()
+                });
+                let zone_id = test_zone_id();
+
+                let first_object = ObjectId::from_bytes([0x53; 32]);
+                let second_object = ObjectId::from_bytes([0x54; 32]);
+                let third_object = ObjectId::from_bytes([0x55; 32]);
+
+                seed_planner_object(&store, first_object, 8, 3, 128, &[1]).await;
+                seed_planner_object(&store, second_object, 8, 3, 128, &[1]).await;
+                seed_planner_object(&store, third_object, 8, 3, 128, &[1]).await;
+
+                let policies = HashMap::from([
+                    (first_object, test_policy()),
+                    (second_object, test_policy()),
+                    (third_object, test_policy()),
+                ]);
+
+                let mut baseline = planner_options(12);
+                baseline.budget = RepairCycleBudget {
+                    max_repairs: 1,
+                    max_bytes: 2_048,
+                    max_decode_ms: 64,
+                };
+                let baseline_plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &baseline)
+                    .await;
+
+                let mut aggressive = baseline.clone();
+                aggressive.cycle_id = 13;
+                aggressive.mains_power = true;
+                aggressive.bandwidth_estimate_kbps = 100_000;
+                let aggressive_plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &aggressive)
+                    .await;
+
+                assert_eq!(baseline_plan.actions.len(), 1);
+                assert_eq!(baseline_plan.budget.max_repairs, 1);
+                assert_eq!(aggressive_plan.budget.max_repairs, 2);
+                assert_eq!(aggressive_plan.budget.max_bytes, 4_096);
+                assert_eq!(aggressive_plan.budget.max_decode_ms, 128);
+                assert!(
+                    aggressive_plan.actions.len() > baseline_plan.actions.len(),
+                    "mains+bandwidth should allow a more aggressive cycle budget",
+                );
+                assert!(
+                    aggressive_plan.object_count_below_target >= aggressive_plan.actions.len(),
+                    "aggressive planning should still stay bounded by the tracked deficit set",
+                );
+
+                StoreLogData {
+                    symbol_count: Some(aggressive_plan.object_count_tracked as u32),
+                    details: Some(json!({
+                        "baseline_budget": {
+                            "max_repairs": baseline_plan.budget.max_repairs,
+                            "max_bytes": baseline_plan.budget.max_bytes,
+                            "max_decode_ms": baseline_plan.budget.max_decode_ms
+                        },
+                        "aggressive_budget": {
+                            "max_repairs": aggressive_plan.budget.max_repairs,
+                            "max_bytes": aggressive_plan.budget.max_bytes,
+                            "max_decode_ms": aggressive_plan.budget.max_decode_ms
+                        },
+                        "baseline_actions": baseline_plan.actions.len(),
+                        "aggressive_actions": aggressive_plan.actions.len()
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn planner_defers_hot_object_prestage_on_metered_network() {
+        run_store_test(
+            "planner_defers_hot_object_prestage_on_metered_network",
+            "verify",
+            "repair_plan",
+            6,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 8,
+                    ..Default::default()
+                });
+                let zone_id = test_zone_id();
+
+                let unavailable_object = ObjectId::from_bytes([0x56; 32]);
+                let hot_object = ObjectId::from_bytes([0x57; 32]);
+
+                seed_planner_object(&store, unavailable_object, 8, 3, 64, &[1]).await;
+                seed_planner_object(&store, hot_object, 10, 10, 64, &[1, 2, 3]).await;
+
+                let mut hot_policy = test_policy();
+                hot_policy.target_coverage_bps = 9_000;
+                let policies = HashMap::from([
+                    (unavailable_object, test_policy()),
+                    (hot_object, hot_policy),
+                ]);
+
+                let mut options = planner_options(14);
+                options.hot_objects = vec![hot_object];
+                options.hot_object_min_coverage_bps = 15_000;
+                options.metered_network = true;
+
+                let plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &options)
+                    .await;
+
+                assert_eq!(plan.actions.len(), 1);
+                assert_eq!(plan.actions[0].object_id, unavailable_object);
+                assert_eq!(
+                    plan.actions[0].reason_code,
+                    RepairReasonCode::PolicySloDeficit
+                );
+                assert_eq!(plan.deferred.len(), 1);
+                assert_eq!(plan.deferred[0].object_id, hot_object);
+                assert_eq!(
+                    plan.deferred[0].reason_code,
+                    RepairReasonCode::DeferredPowerBudget
+                );
+
+                StoreLogData {
+                    symbol_count: Some(plan.object_count_tracked as u32),
+                    details: Some(json!({
+                        "selected": plan.actions.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
+                        "deferred": plan.deferred.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
+                        "deferred_reason_codes": plan.deferred.iter().map(|action| action.reason_code.as_str()).collect::<Vec<_>>()
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
     fn planner_cost_estimates_are_monotonic_and_capped() {
         let object_id = ObjectId::from_bytes([0x60; 32]);
         let object_meta = ObjectSymbolMeta {
@@ -4264,6 +4467,9 @@ mod tests {
         assert_eq!(opts.cycle_id, 0);
         assert!(opts.hot_objects.is_empty());
         assert!(!opts.power_saver);
+        assert!(!opts.mains_power);
+        assert!(!opts.metered_network);
+        assert_eq!(opts.bandwidth_estimate_kbps, 0);
         assert_eq!(opts.derp_penalty_bps, 0);
     }
 
@@ -4275,12 +4481,18 @@ mod tests {
             hot_objects: vec![ObjectId::from_bytes([1; 32])],
             hot_object_min_coverage_bps: 20_000,
             power_saver: true,
+            mains_power: true,
+            metered_network: true,
+            bandwidth_estimate_kbps: 25_000,
             derp_penalty_bps: 500,
         };
         let json = serde_json::to_string(&opts).unwrap();
         let rt: RepairPlanningOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(rt.cycle_id, 42);
         assert!(rt.power_saver);
+        assert!(rt.mains_power);
+        assert!(rt.metered_network);
+        assert_eq!(rt.bandwidth_estimate_kbps, 25_000);
         assert_eq!(rt.derp_penalty_bps, 500);
         assert_eq!(rt.hot_objects.len(), 1);
     }

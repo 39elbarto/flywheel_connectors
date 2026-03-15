@@ -16,8 +16,8 @@ use std::time::Duration;
 use crate::error::{TailscaleError, TailscaleResult};
 use crate::identity::NodeId;
 use crate::tag::TailscaleTag;
-use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method};
-use fcp_async_core::{sync::RwLock, time};
+use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
+use fcp_async_core::{compatibility_cx, sync::RwLock, time};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -260,7 +260,7 @@ impl LocalApiClient {
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> TailscaleResult<T> {
         let url = format!("{}{path}", self.base_url);
 
-        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
+        let cx = compatibility_cx();
         let response = match time::timeout(
             self.request_timeout,
             self.client

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use asupersync::raptorq::decoder::{
+use fcp_async_core::raptorq::decoder::{
     DecodeError as AsupersyncDecodeError, InactivationDecoder, ReceivedSymbol,
 };
 use fcp_async_core::{AsyncError, Deadline, ExecutionContext};

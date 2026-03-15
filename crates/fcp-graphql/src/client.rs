@@ -1,6 +1,5 @@
 //! GraphQL HTTP client implementation.
 
-use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
@@ -9,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
 use fcp_async_core::{AsyncError, sync::Mutex, time};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use serde::Serialize;
@@ -525,7 +525,7 @@ impl GraphqlClient {
     }
 
     async fn send_once(&self, body_bytes: &[u8]) -> Result<Vec<u8>, GraphqlClientError> {
-        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
+        let cx = fcp_async_core::compatibility_cx();
         let response = match time::timeout(
             self.config.timeout,
             self.http.request(

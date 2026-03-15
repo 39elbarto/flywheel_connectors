@@ -9,25 +9,25 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use asupersync::bytes::Bytes;
-use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
-use asupersync::net::websocket::{
-    ClientHandshake, CloseCode, CloseConfig, CloseReason, HttpResponse, Message, WebSocket,
-    WebSocketConfig, WsError, WsUrl,
-};
-use asupersync::tls::{TlsConnectorBuilder, TlsStream};
 use fcp_async_core::{
     AsyncError,
+    bytes::Bytes,
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
     time::{Sleep, sleep, timeout},
+    tls::{TlsConnector, TlsConnectorBuilder, TlsStream},
+    websocket::{
+        ClientHandshake, CloseCode, CloseConfig, CloseReason, HttpResponse, Message, WebSocket,
+        WebSocketConfig, WsError, WsUrl,
+    },
 };
 use futures_util::stream::Stream;
 
 use crate::reconnect::ReconnectHandler;
 use crate::{StreamError, StreamResult};
 
-fn websocket_cx() -> asupersync::Cx {
-    asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
+fn websocket_cx() -> fcp_async_core::Cx {
+    fcp_async_core::compatibility_cx()
 }
 
 fn websocket_config(config: &WsConfig) -> WebSocketConfig {
@@ -152,7 +152,7 @@ where
     Ok(WebSocket::from_upgraded(io, websocket_config(config)))
 }
 
-fn build_tls_connector() -> StreamResult<asupersync::tls::TlsConnector> {
+fn build_tls_connector() -> StreamResult<TlsConnector> {
     TlsConnectorBuilder::new()
         .with_native_roots()
         .map_err(|err| connection_failed(err.to_string()))?

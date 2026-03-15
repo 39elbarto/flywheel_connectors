@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use asupersync::http::h1::ClientError as HttpClientError;
+use fcp_async_core::http::HttpClientError;
 use fcp_async_core::AsyncError;
 
 /// OAuth errors.

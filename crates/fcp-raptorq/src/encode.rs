@@ -3,7 +3,7 @@
 // Allow truncation casts - symbol counts are bounded by protocol
 #![allow(clippy::cast_possible_truncation)]
 
-use asupersync::raptorq::systematic::SystematicEncoder;
+use fcp_async_core::raptorq::systematic::SystematicEncoder;
 
 use crate::chunk::{ChunkedObjectManifest, RawChunk};
 use crate::config::RaptorQConfig;

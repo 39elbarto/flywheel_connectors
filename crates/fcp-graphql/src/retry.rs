@@ -98,7 +98,7 @@ impl RetryPolicy {
 mod tests {
     use super::*;
     use crate::error::{GraphqlClientError, HttpErrorInfo};
-    use asupersync::http::h1::StatusCode;
+    use fcp_async_core::http::StatusCode;
 
     fn retryable_error() -> GraphqlClientError {
         GraphqlClientError::Http(HttpErrorInfo {

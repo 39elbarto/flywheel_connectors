@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use asupersync::http::h1::StatusCode;
+use fcp_async_core::http::StatusCode;
 use fcp_core::FcpError;
 use fcp_graphql::{
     CursorPage, CursorPageInfo, GraphqlBatchItem, GraphqlClient, GraphqlClientBuilder,

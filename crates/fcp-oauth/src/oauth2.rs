@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method, Response as HttpResponse};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use fcp_async_core::http::{HttpClient, HttpClientBuilder, HttpResponse, Method};
 use fcp_async_core::time;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -482,7 +482,7 @@ impl OAuth2Client {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> OAuthResult<HttpResponse> {
-        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
+        let cx = fcp_async_core::compatibility_cx();
         match time::timeout(
             self.config.timeout,
             self.http_client.request(&cx, method, url, headers, body),

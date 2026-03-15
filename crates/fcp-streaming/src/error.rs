@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use asupersync::http::h1::{ClientError as HttpClientError, HttpError};
+use fcp_async_core::http::{HttpClientError, HttpError};
 
 /// Streaming errors.
 #[derive(Debug, thiserror::Error)]

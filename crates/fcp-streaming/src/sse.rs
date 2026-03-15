@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
-use asupersync::bytes::Buf as _;
-use asupersync::http::body::Body as _;
-use asupersync::http::h1::http_client::ClientIo;
-use asupersync::http::h1::{ClientIncomingBody, HttpClient, HttpClientBuilder, Method};
 use bytes::{Buf, Bytes, BytesMut};
+use fcp_async_core::bytes::Buf as _;
+use fcp_async_core::http::body::Body as _;
+use fcp_async_core::http::client_io::ClientIo;
+use fcp_async_core::http::{ClientIncomingBody, HttpClient, HttpClientBuilder, Method};
 use fcp_async_core::time;
 use futures_util::stream::Stream;
 use pin_project_lite::pin_project;
@@ -372,7 +372,7 @@ impl SseClient {
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
 
-        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
+        let cx = fcp_async_core::compatibility_cx();
         let request =
             self.http_client
                 .request_streaming(&cx, Method::Get, &self.url, headers, Vec::new());

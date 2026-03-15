@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+pub use asupersync::Cx;
 pub use fcp_async_core_macros::{main, test};
 
 #[doc(hidden)]
@@ -103,7 +104,12 @@ pub struct NoopInstrumentation;
 
 impl Instrumentation for NoopInstrumentation {}
 
-fn compatibility_cx() -> asupersync::Cx {
+/// Return the current `asupersync::Cx` or a testing fallback.
+///
+/// Downstream crates should call this instead of importing `asupersync::Cx`
+/// directly, keeping the raw runtime dependency encapsulated.
+#[must_use]
+pub fn compatibility_cx() -> asupersync::Cx {
     asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
 }
 
@@ -1861,8 +1867,8 @@ pub mod io {
     use std::io;
 
     pub use asupersync::io::{
-        AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadLine,
-        read_line,
+        AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+        ReadLine, read_line,
     };
     pub use asupersync_tokio_compat::io::AsupersyncIo;
 
@@ -1941,6 +1947,56 @@ pub mod net {
     #[cfg(unix)]
     pub use asupersync::net::UnixStream;
     pub use asupersync::net::{TcpListener, TcpStream};
+}
+
+/// TLS connector and stream re-exports from asupersync.
+pub mod tls {
+    pub use asupersync::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
+}
+
+/// WebSocket client and protocol re-exports from asupersync.
+pub mod websocket {
+    pub use asupersync::net::websocket::{
+        ClientHandshake, CloseCode, CloseConfig, CloseReason, HttpResponse, Message, WebSocket,
+        WebSocketConfig, WsConfig, WsError, WsUrl, client::*,
+    };
+}
+
+/// HTTP/1.1 client re-exports from asupersync.
+pub mod http {
+    pub use asupersync::http::h1::{
+        ClientError as HttpClientError, ClientIncomingBody, HttpClient, HttpClientBuilder,
+        HttpError, Method, Response as HttpResponse, StatusCode,
+    };
+
+    /// HTTP body trait re-exports.
+    pub mod body {
+        pub use asupersync::http::body::Body;
+    }
+
+    /// HTTP client internals re-exports.
+    pub mod client_io {
+        pub use asupersync::http::h1::http_client::ClientIo;
+    }
+}
+
+/// `RaptorQ` codec re-exports from asupersync.
+pub mod raptorq {
+    /// Decoder types for `RaptorQ` symbol reconstruction.
+    pub mod decoder {
+        pub use asupersync::raptorq::decoder::{
+            DecodeError, InactivationDecoder, ReceivedSymbol,
+        };
+    }
+    /// Systematic encoder for `RaptorQ` symbol generation.
+    pub mod systematic {
+        pub use asupersync::raptorq::systematic::SystematicEncoder;
+    }
+}
+
+/// Byte buffer re-exports from asupersync.
+pub mod bytes {
+    pub use asupersync::bytes::{Buf, BufMut, Bytes, BytesMut};
 }
 
 #[derive(Debug)]
@@ -2144,7 +2200,7 @@ mod tests {
 
     use super::{
         AsyncError, CancellationToken, ContextScope, ExecutionContext, Instrumentation, TaskGroup,
-        channel, runtime, task, time,
+        channel, runtime, task, time, tls, websocket,
     };
 
     #[test]
@@ -2162,6 +2218,26 @@ mod tests {
             drop(listener);
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tls_and_websocket_reexports_resolve() {
+        fn assert_type<T>() {}
+
+        assert_type::<tls::TlsConnector>();
+        assert_type::<tls::TlsConnectorBuilder>();
+        assert_type::<tls::TlsStream<super::net::TcpStream>>();
+        assert_type::<websocket::ClientHandshake>();
+        assert_type::<websocket::CloseCode>();
+        assert_type::<websocket::CloseConfig>();
+        assert_type::<websocket::CloseReason>();
+        assert_type::<websocket::HttpResponse>();
+        assert_type::<websocket::Message>();
+        assert_type::<websocket::WebSocket<super::net::TcpStream>>();
+        assert_type::<websocket::WebSocketConfig>();
+        assert_type::<websocket::WsConfig>();
+        assert_type::<websocket::WsError>();
+        assert_type::<websocket::WsUrl>();
     }
 
     #[runtime::test]

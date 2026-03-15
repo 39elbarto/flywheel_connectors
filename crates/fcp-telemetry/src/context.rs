@@ -27,7 +27,7 @@ fn context_stacks() -> &'static Mutex<HashMap<String, Vec<Arc<TelemetryContext>>
 }
 
 fn context_slot_key() -> String {
-    asupersync::Cx::current().map_or_else(
+    fcp_async_core::Cx::current().map_or_else(
         || format!("thread:{:?}", std::thread::current().id()),
         |cx| format!("task:{:?}", cx.task_id()),
     )

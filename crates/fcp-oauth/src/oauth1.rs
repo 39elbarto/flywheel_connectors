@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method, Response as HttpResponse};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use fcp_async_core::http::{HttpClient, HttpClientBuilder, HttpResponse, Method};
 use fcp_async_core::time;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
@@ -362,7 +362,7 @@ impl OAuth1Client {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> OAuthResult<HttpResponse> {
-        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
+        let cx = fcp_async_core::compatibility_cx();
         match time::timeout(
             OAUTH1_REQUEST_TIMEOUT,
             self.http_client.request(&cx, method, url, headers, body),

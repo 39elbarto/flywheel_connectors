@@ -23,6 +23,7 @@ use serde_json::json;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FixtureArchetype {
+    Unknown,
     RequestResponse,
     Streaming,
     Bidirectional,
@@ -31,21 +32,31 @@ enum FixtureArchetype {
 }
 
 impl FixtureArchetype {
-    fn from_env() -> Self {
-        match std::env::var("FCP_TEST_CONNECTOR_ARCHETYPE")
-            .ok()
-            .as_deref()
-        {
+    fn from_env_value(value: Option<&str>) -> Self {
+        match value {
+            Some("unknown") => Self::Unknown,
+            Some("request_response") | Some("request-response") | Some("requestresponse") => {
+                Self::RequestResponse
+            }
             Some("streaming") => Self::Streaming,
             Some("bidirectional") => Self::Bidirectional,
             Some("polling") => Self::Polling,
             Some("webhook") => Self::Webhook,
-            _ => Self::RequestResponse,
+            _ => Self::Unknown,
         }
+    }
+
+    fn from_env() -> Self {
+        Self::from_env_value(
+            std::env::var("FCP_TEST_CONNECTOR_ARCHETYPE")
+                .ok()
+                .as_deref(),
+        )
     }
 
     const fn as_env(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::RequestResponse => "request_response",
             Self::Streaming => "streaming",
             Self::Bidirectional => "bidirectional",
@@ -56,6 +67,7 @@ impl FixtureArchetype {
 
     const fn connector_archetype(self) -> ConnectorArchetype {
         match self {
+            Self::Unknown => ConnectorArchetype::Unknown,
             Self::RequestResponse => ConnectorArchetype::RequestResponse,
             Self::Streaming => ConnectorArchetype::Streaming,
             Self::Bidirectional => ConnectorArchetype::Bidirectional,
@@ -66,7 +78,7 @@ impl FixtureArchetype {
 
     const fn operation_id(self) -> &'static str {
         match self {
-            Self::RequestResponse => "test.echo",
+            Self::Unknown | Self::RequestResponse => "test.echo",
             Self::Streaming => "test.subscribe",
             Self::Bidirectional => "test.send",
             Self::Polling => "test.poll",
@@ -76,7 +88,7 @@ impl FixtureArchetype {
 
     const fn capability_id(self) -> &'static str {
         match self {
-            Self::RequestResponse => "cap.test.echo",
+            Self::Unknown | Self::RequestResponse => "cap.test.echo",
             Self::Streaming => "cap.test.subscribe",
             Self::Bidirectional => "cap.test.send",
             Self::Polling => "cap.test.poll",
@@ -86,6 +98,7 @@ impl FixtureArchetype {
 
     const fn summary(self) -> &'static str {
         match self {
+            Self::Unknown => "Exercise generic connector behavior",
             Self::RequestResponse => "Echo request payloads",
             Self::Streaming => "Subscribe to a live event feed",
             Self::Bidirectional => "Send a chat-style message",
@@ -96,6 +109,7 @@ impl FixtureArchetype {
 
     const fn description(self) -> &'static str {
         match self {
+            Self::Unknown => "Generic subprocess fixture with unspecified archetype metadata.",
             Self::RequestResponse => "Returns the input payload as output.",
             Self::Streaming => "Represents a long-lived streaming subscription fixture.",
             Self::Bidirectional => "Represents a bidirectional chat-style connector fixture.",
@@ -118,7 +132,7 @@ impl FixtureArchetype {
                 min_buffer_events: 16,
                 requires_ack: true,
             }),
-            Self::Polling | Self::Webhook | Self::RequestResponse => None,
+            Self::Unknown | Self::Polling | Self::Webhook | Self::RequestResponse => None,
         }
     }
 }
@@ -671,4 +685,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connector = TestConnector::new(connector_id);
     run_loop(connector)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_archetype_env_defaults_to_unknown() {
+        assert_eq!(
+            FixtureArchetype::from_env_value(None),
+            FixtureArchetype::Unknown
+        );
+    }
+
+    #[test]
+    fn request_response_env_remains_explicit() {
+        assert_eq!(
+            FixtureArchetype::from_env_value(Some("request_response")),
+            FixtureArchetype::RequestResponse
+        );
+    }
+
+    #[test]
+    fn unknown_archetype_preserves_generic_echo_operation_metadata() {
+        let profile = TestConnectorProfile {
+            archetype: FixtureArchetype::Unknown,
+            auth_mode: FixtureAuthMode::None,
+            health_mode: FixtureHealthMode::Ready,
+            operation_mode: FixtureOperationMode::Reversible,
+            simulate_mode: FixtureSimulateMode::Allowed,
+            artifact_policy: FixtureArtifactPolicy::Echo,
+        };
+        let operation = profile
+            .operation_info()
+            .expect("operation info should build");
+
+        assert_eq!(
+            profile.archetype.connector_archetype(),
+            ConnectorArchetype::Unknown
+        );
+        assert_eq!(profile.archetype.as_env(), "unknown");
+        assert_eq!(operation.id.as_str(), "test.echo");
+        assert_eq!(operation.capability.as_str(), "cap.test.echo");
+        assert_eq!(operation.summary, "Exercise generic connector behavior");
+        assert!(profile.archetype.event_caps().is_none());
+    }
 }

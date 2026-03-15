@@ -3726,6 +3726,18 @@ mod tests {
     }
 
     #[runtime::test]
+    async fn spawned_task_inherits_tokio_compat_context() {
+        let handle = task::spawn(async {
+            let tokio_handle =
+                tokio::runtime::Handle::try_current().expect("tokio compat handle missing");
+            let nested = tokio_handle.spawn(async { 7_u32 });
+            nested.await.expect("nested tokio task should complete")
+        });
+        let result = handle.await.expect("spawned task should join");
+        assert_eq!(result, 7);
+    }
+
+    #[runtime::test]
     async fn spawn_and_abort() {
         let handle = task::spawn(async {
             super::time::sleep(Duration::from_secs(60)).await;
@@ -6426,6 +6438,17 @@ mod tests {
             let (tx, rx) = channel::watch::channel(0_u32);
             tx.send(99).unwrap();
             assert_eq!(*rx.borrow(), 99);
+        });
+    }
+
+    #[test]
+    fn runtime_block_on_enters_tokio_compat_context() {
+        let rt = runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tokio_handle =
+                tokio::runtime::Handle::try_current().expect("tokio compat handle missing");
+            let nested = tokio_handle.spawn(async { 11_u32 });
+            assert_eq!(nested.await.expect("nested tokio task should complete"), 11);
         });
     }
 

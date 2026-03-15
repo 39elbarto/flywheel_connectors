@@ -81,7 +81,14 @@ fn run_fix(args: &FixArgs) -> Result<()> {
         manifest.manifest.interface_hash = expected;
     }
 
-    let validation_error = manifest.validate().err().map(|err| err.to_string());
+    let (validation_error, capability_id_lint) = match manifest.validate() {
+        Ok(()) => (None, None),
+        Err(err) => {
+            let lint = err.capability_id_lint_message();
+            let display = lint.clone().unwrap_or_else(|| err.to_string());
+            (Some(display), lint)
+        }
+    };
 
     let wrote = if args.write && changed {
         let rendered = toml::to_string_pretty(&manifest).context("failed to render manifest")?;
@@ -109,7 +116,7 @@ fn run_fix(args: &FixArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        print_human_report(&report, check_only);
+        print_human_report_with_lint(&report, check_only, capability_id_lint.as_deref());
     }
 
     if check_only {
@@ -124,6 +131,14 @@ fn run_fix(args: &FixArgs) -> Result<()> {
 }
 
 fn print_human_report(report: &ManifestFixReport, check_only: bool) {
+    print_human_report_with_lint(report, check_only, None);
+}
+
+fn print_human_report_with_lint(
+    report: &ManifestFixReport,
+    check_only: bool,
+    capability_id_lint: Option<&str>,
+) {
     println!();
     println!("Manifest: {}", report.path);
     if report.changed {
@@ -139,6 +154,12 @@ fn print_human_report(report: &ManifestFixReport, check_only: bool) {
         println!("Validation: {error}");
     } else {
         println!("Validation: ok");
+    }
+
+    match capability_id_lint {
+        Some(message) => println!("Capability ID lint: {message}"),
+        None if report.validation_error.is_none() => println!("Capability ID lint: ok"),
+        None => {}
     }
 
     if check_only {
@@ -1802,5 +1823,29 @@ mod tests {
         };
         let result = run(args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn print_human_report_with_lint_accepts_capability_guidance() {
+        let report = sample_report(
+            false,
+            false,
+            Some("capability id `https://api.example.com` contains URL scheme `https:`"),
+        );
+        print_human_report_with_lint(
+            &report,
+            true,
+            Some(
+                "capability id `https://api.example.com` contains URL scheme `https:` \
+                 (field: capabilities.required). Move hostnames/ports into network_constraints \
+                 and keep capability IDs abstract.",
+            ),
+        );
+    }
+
+    #[test]
+    fn print_human_report_with_lint_ok_path() {
+        let report = sample_report(false, false, None);
+        print_human_report_with_lint(&report, true, None);
     }
 }

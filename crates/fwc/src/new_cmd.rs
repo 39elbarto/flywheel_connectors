@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use fcp_core::validate_canonical_id;
-use fcp_manifest::{ConnectorManifest, ManifestError};
+use fcp_manifest::ConnectorManifest;
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2488,7 +2488,7 @@ fn run_prechecks(
                     message: Some(e.to_string()),
                     severity: CheckSeverity::Error,
                 });
-                if let Some(message) = capability_id_lint_message(&e) {
+                if let Some(message) = e.capability_id_lint_message() {
                     checks.push(PrecheckItem {
                         id: "manifest.capability_id_lint".to_string(),
                         description: "Capability IDs do not embed hostnames/ports/URLs".to_string(),
@@ -2642,18 +2642,6 @@ fn run_prechecks(
     PrecheckResults::passed(checks)
 }
 
-fn capability_id_lint_message(error: &ManifestError) -> Option<String> {
-    match error {
-        ManifestError::Invalid { field, message } if message.contains("network_constraints") => {
-            Some(format!(
-                "{message} (field: {field}). \
-                 Move hostnames/ports into network_constraints and keep capability IDs abstract."
-            ))
-        }
-        _ => None,
-    }
-}
-
 /// Check an existing connector directory for compliance.
 #[allow(clippy::too_many_lines)]
 fn check_connector(path: &Path) -> Result<CheckResult> {
@@ -2692,7 +2680,7 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
                     message: Some(e.to_string()),
                     severity: CheckSeverity::Error,
                 });
-                if let Some(message) = capability_id_lint_message(&e) {
+                if let Some(message) = e.capability_id_lint_message() {
                     checks.push(PrecheckItem {
                         id: "manifest.capability_id_lint".to_string(),
                         description: "Capability IDs do not embed hostnames/ports/URLs".to_string(),

@@ -350,6 +350,26 @@ pub enum ManifestError {
     RateLimitDeclaration(#[from] RateLimitDeclarationError),
 }
 
+impl ManifestError {
+    /// Return actionable guidance when this error is the capability-ID
+    /// lint that rejects embedded hostnames, ports, URLs, or IP addresses.
+    #[must_use]
+    pub fn capability_id_lint_message(&self) -> Option<String> {
+        match self {
+            Self::Invalid { field, message }
+                if message.contains("capability id")
+                    && message.contains("network_constraints") =>
+            {
+                Some(format!(
+                    "{message} (field: {field}). \
+                     Move hostnames/ports into network_constraints and keep capability IDs abstract."
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// `[manifest]` section (NORMATIVE).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -8758,5 +8778,28 @@ schema_version = "2.1"
         let reparsed: RateLimit = serde_json::from_str(&json).unwrap();
         assert_eq!(reparsed.as_inner().max, rl.as_inner().max);
         assert_eq!(reparsed.as_inner().per_ms, rl.as_inner().per_ms);
+    }
+
+    #[test]
+    fn manifest_error_capability_id_lint_message_returns_guidance() {
+        let err = ManifestError::Invalid {
+            field: "capabilities.required",
+            message: "capability id `https://api.example.com` contains URL scheme `https:`; network addressing belongs in `network_constraints`".to_string(),
+        };
+        let guidance = err
+            .capability_id_lint_message()
+            .expect("capability lint guidance");
+        assert!(guidance.contains("network_constraints"));
+        assert!(guidance.contains("capabilities.required"));
+        assert!(guidance.contains("keep capability IDs abstract"));
+    }
+
+    #[test]
+    fn manifest_error_non_lint_has_no_capability_guidance() {
+        let err = ManifestError::Invalid {
+            field: "zones.home",
+            message: "must be present".to_string(),
+        };
+        assert!(err.capability_id_lint_message().is_none());
     }
 }

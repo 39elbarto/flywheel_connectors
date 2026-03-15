@@ -1949,16 +1949,15 @@ pub mod net {
     pub use asupersync::net::{TcpListener, TcpStream};
 }
 
-/// TLS connector and stream re-exports from asupersync.
-pub mod tls {
-    pub use asupersync::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
-}
-
 /// WebSocket client and protocol re-exports from asupersync.
+///
+/// NOTE: TLS re-exports are omitted because the `tls` feature is not enabled
+/// on the asupersync dependency. Crates needing TLS should depend on
+/// asupersync directly with the `tls` or `tls-native-roots` feature.
 pub mod websocket {
     pub use asupersync::net::websocket::{
         ClientHandshake, CloseCode, CloseConfig, CloseReason, HttpResponse, Message, WebSocket,
-        WebSocketConfig, WsConfig, WsError, WsUrl, client::*,
+        WebSocketConfig, WsError, WsUrl,
     };
 }
 

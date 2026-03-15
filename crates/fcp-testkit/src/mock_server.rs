@@ -1073,20 +1073,14 @@ mod tests {
 
         let context =
             fcp_async_core::ExecutionContext::request_scoped(std::time::Duration::from_secs(5));
-        let cancel_context = context.clone();
-        let cancel_task = fcp_async_core::task::spawn(async move {
-            fcp_async_core::time::sleep(std::time::Duration::from_millis(25)).await;
-            cancel_context.cancel();
-        });
-
+        let request_context = context.clone();
         let client = reqwest::Client::new();
         let url = format!("{}/api/cancelled", mock.base_url());
-        let err = context
-            .run(async move { client.get(url).send().await })
-            .await
-            .expect_err("context cancellation should win over delayed response");
-        assert!(matches!(err, fcp_async_core::AsyncError::Cancelled));
-        cancel_task.await.expect("cancel task should join");
+        let request_task = fcp_async_core::task::spawn(async move {
+            request_context
+                .run(async move { client.get(url).send().await })
+                .await
+        });
 
         let mut observed_request = false;
         for _ in 0..50 {
@@ -1100,6 +1094,94 @@ mod tests {
         assert!(
             observed_request,
             "delayed request should still reach wiremock before cancellation wins"
+        );
+
+        context.cancel();
+        let err = request_task
+            .await
+            .expect("request task should join")
+            .expect_err("context cancellation should win over delayed response");
+        assert!(matches!(err, fcp_async_core::AsyncError::Cancelled));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_reqwest_follow_up_request_succeeds_after_cancellation() {
+        let mock = MockApiServer::start().await;
+        mock.expect_delayed(
+            "/api/cancelled",
+            std::time::Duration::from_millis(250),
+            serde_json::json!({"delayed": true}),
+        )
+        .await;
+        mock.expect_get("/api/recovered", serde_json::json!({"recovered": true}))
+            .await;
+
+        let context =
+            fcp_async_core::ExecutionContext::request_scoped(std::time::Duration::from_secs(5));
+        let request_context = context.clone();
+        let client = reqwest::Client::new();
+        let cancelled_client = client.clone();
+        let cancelled_url = format!("{}/api/cancelled", mock.base_url());
+        let request_task = fcp_async_core::task::spawn(async move {
+            request_context
+                .run(async move { cancelled_client.get(cancelled_url).send().await })
+                .await
+        });
+
+        let mut observed_cancelled = false;
+        for _ in 0..50 {
+            let requests = mock.received_requests().await;
+            if requests.iter().any(|request| request.url.path() == "/api/cancelled") {
+                observed_cancelled = true;
+                break;
+            }
+            fcp_async_core::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            observed_cancelled,
+            "cancelled request should reach wiremock before cancellation is triggered"
+        );
+
+        context.cancel();
+        let err = request_task
+            .await
+            .expect("request task should join")
+            .expect_err("context cancellation should win over delayed response");
+        assert!(matches!(err, fcp_async_core::AsyncError::Cancelled));
+
+        let recovery_body: serde_json::Value = client
+            .get(format!("{}/api/recovered", mock.base_url()))
+            .send()
+            .await
+            .expect("follow-up request should succeed after cancellation")
+            .json()
+            .await
+            .expect("follow-up response should decode");
+        assert_eq!(recovery_body["recovered"], true);
+
+        let mut observed_paths = Vec::new();
+        for _ in 0..50 {
+            observed_paths = mock
+                .received_requests()
+                .await
+                .into_iter()
+                .map(|request| request.url.path().to_owned())
+                .collect();
+            if observed_paths.iter().any(|path| path == "/api/cancelled")
+                && observed_paths.iter().any(|path| path == "/api/recovered")
+            {
+                break;
+            }
+            fcp_async_core::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            observed_paths.iter().any(|path| path == "/api/cancelled"),
+            "expected the cancelled request to be recorded"
+        );
+        assert!(
+            observed_paths.iter().any(|path| path == "/api/recovered"),
+            "expected a follow-up request to succeed after cancellation"
         );
     }
 

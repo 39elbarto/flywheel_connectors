@@ -1396,8 +1396,11 @@ fn truth_matrix_auth_enforcement_denies_without_capability_token() {
 }
 
 /// Verify that the `supports_simulate` field on tool descriptors is honestly
-/// propagated through show/ops introspection — a tool that declares
-/// `supports_simulate: true` must be surfaced as such, and vice versa.
+/// propagated through show/ops introspection.
+///
+/// `supports_simulate: true` must surface as a known true capability, while a
+/// raw `false` from host introspection must remain unknown instead of being
+/// silently treated as an authoritative negative.
 #[test]
 fn truth_matrix_simulate_support_honestly_reported() {
     let github_connector =
@@ -1467,18 +1470,17 @@ fn truth_matrix_simulate_support_honestly_reported() {
         .iter()
         .find(|op| op["canonical_id"] == "github.create_issue")
         .expect("create_issue should be in the operations list");
-    assert_eq!(
-        create_issue["supports_simulate"], true,
-        "Tool with supports_simulate=true must be honestly reported"
-    );
+    assert_eq!(create_issue["supports_simulate"]["status"], "known");
+    assert_eq!(create_issue["supports_simulate"]["value"], true);
 
     let list_issues = operations
         .iter()
         .find(|op| op["canonical_id"] == "github.list_issues")
         .expect("list_issues should be in the operations list");
-    assert_eq!(
-        list_issues["supports_simulate"], false,
-        "Tool with supports_simulate=false must NOT be fabricated as true"
+    assert_eq!(list_issues["supports_simulate"]["status"], "unknown");
+    assert!(
+        list_issues["supports_simulate"].get("value").is_none(),
+        "Tool with supports_simulate=false must stay unknown unless the host can prove an explicit negative"
     );
 }
 

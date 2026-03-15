@@ -1417,8 +1417,8 @@ pub struct ConnectorSummary {
     pub operation_count: usize,
     /// Highest risk level across all operations.
     pub max_risk: String,
-    /// Whether the connector supports events/streaming.
-    pub has_events: bool,
+    /// Whether the connector supports events/streaming, with explicit truth state.
+    pub has_events: MetadataField<bool>,
 }
 
 /// Lifecycle state as reported by the host.
@@ -1473,8 +1473,8 @@ pub struct OperationSummary {
     pub idempotency: String,
     /// Whether approval is required.
     pub requires_approval: bool,
-    /// Whether simulate is supported.
-    pub supports_simulate: bool,
+    /// Whether simulate support is known, unknown, or unavailable.
+    pub supports_simulate: MetadataField<bool>,
 }
 
 /// Health summary for display.
@@ -1745,7 +1745,7 @@ impl DiscoveredConnector {
             state: ConnectorState::Unknown,
             operation_count: operations.len(),
             max_risk,
-            has_events,
+            has_events: MetadataField::Known(has_events),
         };
         let operation_summaries = operations
             .iter()
@@ -2097,7 +2097,7 @@ impl DiscoveredOperation {
                     ManifestApprovalMode::None
                 ),
                 // Offline manifest metadata cannot prove host-backed simulate support.
-                supports_simulate: false,
+                supports_simulate: MetadataField::Unknown,
             },
             input_schema: operation.input_schema.clone(),
             output_schema: operation.output_schema.clone(),
@@ -2280,7 +2280,7 @@ fn discovered_connector_from_toml(
         state: ConnectorState::Unknown,
         operation_count: operations.len(),
         max_risk,
-        has_events,
+        has_events: MetadataField::Known(has_events),
     };
     let operation_summaries = operations
         .iter()
@@ -2472,7 +2472,7 @@ fn discovered_operation_from_toml(
             idempotency,
             requires_approval: !approval_mode.is_empty() && approval_mode != "none",
             // Raw manifest fallback must not invent simulate capability.
-            supports_simulate: false,
+            supports_simulate: MetadataField::Unknown,
         },
         input_schema,
         output_schema,
@@ -5011,7 +5011,7 @@ mod tests {
             state: ConnectorState::Ready,
             operation_count: 12,
             max_risk: "high".to_owned(),
-            has_events: true,
+            has_events: MetadataField::Known(true),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -5034,7 +5034,7 @@ mod tests {
             safety_tier: "risky".to_owned(),
             idempotency: "none".to_owned(),
             requires_approval: false,
-            supports_simulate: true,
+            supports_simulate: MetadataField::Known(true),
         };
 
         let json = serde_json::to_value(&op).unwrap();
@@ -5198,7 +5198,7 @@ mod tests {
                 state: ConnectorState::Ready,
                 operation_count: 1,
                 max_risk: "low".to_owned(),
-                has_events: false,
+                has_events: MetadataField::Known(false),
             },
             operations: vec![OperationSummary {
                 id: "test.ping".to_owned(),
@@ -5208,7 +5208,7 @@ mod tests {
                 safety_tier: "safe".to_owned(),
                 idempotency: "strict".to_owned(),
                 requires_approval: false,
-                supports_simulate: true,
+                supports_simulate: MetadataField::Known(true),
             }],
             config_schema: MetadataField::Known(json!({"type": "object", "properties": {}})),
             health: MetadataField::Known(HealthSummary {
@@ -5870,7 +5870,7 @@ mod tests {
             state: ConnectorState::Degraded,
             operation_count: 42,
             max_risk: "critical".to_owned(),
-            has_events: true,
+            has_events: MetadataField::Known(true),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -5883,7 +5883,8 @@ mod tests {
         assert_eq!(json["state"], "degraded");
         assert_eq!(json["operation_count"], 42);
         assert_eq!(json["max_risk"], "critical");
-        assert_eq!(json["has_events"], true);
+        assert_eq!(json["has_events"]["status"], "known");
+        assert_eq!(json["has_events"]["value"], true);
     }
 
     #[test]
@@ -5897,12 +5898,12 @@ mod tests {
             "state": "unconfigured",
             "operation_count": 0,
             "max_risk": "low",
-            "has_events": false
+            "has_events": { "status": "known", "value": false }
         });
         let summary: ConnectorSummary = serde_json::from_value(json).unwrap();
         assert_eq!(summary.state, ConnectorState::Unconfigured);
         assert!(summary.archetypes.is_known());
-        assert!(!summary.has_events);
+        assert_eq!(summary.has_events.as_known(), Some(&false));
     }
 
     // ── ConnectorDetail: with None health and empty rate_limits ───────
@@ -5919,7 +5920,7 @@ mod tests {
                 state: ConnectorState::Unconfigured,
                 operation_count: 0,
                 max_risk: "low".to_owned(),
-                has_events: false,
+                has_events: MetadataField::Known(false),
             },
             operations: vec![],
             config_schema: MetadataField::Unknown,
@@ -5953,7 +5954,7 @@ mod tests {
                 state: ConnectorState::Ready,
                 operation_count: 2,
                 max_risk: "high".to_owned(),
-                has_events: true,
+                has_events: MetadataField::Known(true),
             },
             operations: vec![
                 OperationSummary {
@@ -5964,7 +5965,7 @@ mod tests {
                     safety_tier: "dangerous".to_owned(),
                     idempotency: "none".to_owned(),
                     requires_approval: true,
-                    supports_simulate: false,
+                    supports_simulate: MetadataField::Unknown,
                 },
                 OperationSummary {
                     id: "a.list".to_owned(),
@@ -5974,7 +5975,7 @@ mod tests {
                     safety_tier: "safe".to_owned(),
                     idempotency: "strict".to_owned(),
                     requires_approval: false,
-                    supports_simulate: true,
+                    supports_simulate: MetadataField::Known(true),
                 },
             ],
             config_schema: MetadataField::Known(json!({
@@ -6034,7 +6035,7 @@ mod tests {
             safety_tier: "forbidden".to_owned(),
             idempotency: "none".to_owned(),
             requires_approval: true,
-            supports_simulate: false,
+            supports_simulate: MetadataField::Unknown,
         };
 
         let json_str = serde_json::to_string(&op).unwrap();
@@ -6043,7 +6044,7 @@ mod tests {
         assert_eq!(back.id, "repos.delete");
         assert_eq!(back.safety_tier, "forbidden");
         assert!(back.requires_approval);
-        assert!(!back.supports_simulate);
+        assert!(!back.supports_simulate.is_known());
     }
 
     #[test]
@@ -6056,7 +6057,7 @@ mod tests {
             safety_tier: "safe".to_owned(),
             idempotency: "best-effort".to_owned(),
             requires_approval: false,
-            supports_simulate: true,
+            supports_simulate: MetadataField::Known(true),
         };
 
         let v = serde_json::to_value(&op).unwrap();
@@ -7384,7 +7385,7 @@ output_schema = { type = "object" }
         )
         .expect("discovery fallback should parse operation");
 
-        assert!(!discovered.summary.supports_simulate);
+        assert!(!discovered.summary.supports_simulate.is_known());
     }
 
     #[test]
@@ -7831,7 +7832,7 @@ output_schema = { type = "object" }
                 state: ConnectorState::Unknown,
                 operation_count: 0,
                 max_risk: "low".to_owned(),
-                has_events: false,
+                has_events: MetadataField::Unknown,
             },
             operations: vec![],
             config_schema: MetadataField::Unknown,
@@ -7845,6 +7846,7 @@ output_schema = { type = "object" }
         assert_eq!(json["health"]["status"], "not-applicable");
         assert_eq!(json["rate_limits"]["status"], "unsupported");
         assert_eq!(json["summary"]["archetypes"]["status"], "unknown");
+        assert_eq!(json["summary"]["has_events"]["status"], "unknown");
     }
 
     #[test]
@@ -7858,7 +7860,7 @@ output_schema = { type = "object" }
             state: ConnectorState::Unknown,
             operation_count: 5,
             max_risk: "low".to_owned(),
-            has_events: false,
+            has_events: MetadataField::Unknown,
         };
         let json = serde_json::to_value(&summary).unwrap();
         // The archetypes field must show "unknown", NOT an empty array
@@ -7877,7 +7879,7 @@ output_schema = { type = "object" }
             state: ConnectorState::Unknown,
             operation_count: 5,
             max_risk: "low".to_owned(),
-            has_events: false,
+            has_events: MetadataField::Known(false),
         };
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["archetypes"]["status"], "known");

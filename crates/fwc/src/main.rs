@@ -4490,6 +4490,14 @@ fn host_connector_rate_limits(
     }
 }
 
+fn host_live_boolean_field(value: bool) -> MetadataField<bool> {
+    if value {
+        MetadataField::Known(true)
+    } else {
+        MetadataField::Unknown
+    }
+}
+
 fn host_operation_rate_limits(
     tool: &HostToolDescriptor,
     declarations: Option<&fcp_core::RateLimitDeclarations>,
@@ -4519,7 +4527,7 @@ fn host_tool_summary_entry(tool: &HostToolDescriptor) -> Value {
         "safety_tier": safety_tier_label(tool.safety_tier),
         "idempotency": idempotency_label(tool.idempotency),
         "requires_approval": tool.approval_mode.is_some(),
-        "supports_simulate": tool.supports_simulate,
+        "supports_simulate": host_live_boolean_field(tool.supports_simulate),
         "example_count": tool.examples.len(),
         "rate_limits": tool.rate_limits.clone(),
     })
@@ -4540,7 +4548,7 @@ fn host_connector_list_entry(connector: &HostConnectorRecord) -> Value {
         "archetypes": Value::Null,
         "operation_count": connector.summary.tool_count,
         "max_risk": safety_tier_label(connector.summary.max_safety_tier),
-        "has_events": Value::Null,
+        "has_events": MetadataField::<bool>::Unknown,
         "next_actions": [
             format!("fwc show {}", connector.slug),
             format!("fwc ops {}", connector.slug),
@@ -4690,7 +4698,7 @@ fn host_discovered_operation(
             safety_tier: safety_tier_label(tool.safety_tier).to_owned(),
             idempotency: idempotency_label(tool.idempotency).to_owned(),
             requires_approval: tool.approval_mode.is_some(),
-            supports_simulate: tool.supports_simulate,
+            supports_simulate: host_live_boolean_field(tool.supports_simulate),
         },
         input_schema: tool.input_schema.clone(),
         output_schema: tool.output_schema.clone(),
@@ -4724,8 +4732,10 @@ fn host_discovered_connector(
         .max_by_key(|risk| risk_rank(risk))
         .unwrap_or("low")
         .to_owned();
-    let has_events = introspection.introspection.event_caps.is_some()
-        || !introspection.introspection.events.is_empty();
+    let has_events = host_live_boolean_field(
+        introspection.introspection.event_caps.is_some()
+            || !introspection.introspection.events.is_empty(),
+    );
     let archetypes = host_connector_archetypes(introspection);
     let categories = connector.summary.categories.clone();
     let slug = connector.slug.clone();
@@ -4822,7 +4832,7 @@ fn host_connector_schema_glossary(
             { "field": "tools[].safety_tier", "type": "safety-tier", "description": "Safety tier surfaced to agents and policy UX." },
             { "field": "tools[].idempotency", "type": "idempotency-class", "description": "Retry semantics for the operation." },
             { "field": "tools[].approval_mode", "type": "approval-mode|null", "description": "Approval requirement when the host requires explicit authorization." },
-            { "field": "tools[].supports_simulate", "type": "bool", "description": "Whether the operation supports host-backed simulate flows." },
+            { "field": "tools[].supports_simulate", "type": "metadata-field<bool>", "description": "Truthful simulate-support state for the operation. Unknown stays unknown until the host provides authoritative evidence." },
             { "field": "tools[].rate_limits", "type": "string[]", "description": "Rate-limit pools attached to the operation descriptor." },
             { "field": "tools[].examples", "type": "tool-example[]", "description": "Example inputs surfaced for `fwc examples`." },
             { "field": "tools[].ai_hints", "type": "agent-hint|null", "description": "Agent guidance including when-to-use, mistakes, and related operations." }
@@ -5148,7 +5158,10 @@ fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
             "archetype": introspection.archetype,
             "operation_count": introspection.tools.len(),
             "max_risk": safety_tier_label(inventory.connector.max_safety_tier),
-            "has_events": introspection.introspection.event_caps.is_some() || !introspection.introspection.events.is_empty(),
+            "has_events": host_live_boolean_field(
+                introspection.introspection.event_caps.is_some()
+                    || !introspection.introspection.events.is_empty()
+            ),
             "manifest_path": Value::Null,
         },
         "rate_limits": introspection.rate_limits,
@@ -5326,7 +5339,7 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
                 "safety_tier": safety_tier_label(operation.safety_tier),
                 "idempotency": idempotency_label(operation.idempotency),
                 "approval_mode": &operation.approval_mode,
-                "supports_simulate": operation.supports_simulate,
+                "supports_simulate": &operation.supports_simulate,
             },
             "input_schema": &operation.input_schema,
             "output_schema": &operation.output_schema,
@@ -8605,7 +8618,7 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
             "archetypes": summary.archetypes.as_known().cloned(),
             "operation_count": summary.operation_count,
             "max_risk": &summary.max_risk,
-            "has_events": summary.has_events,
+            "has_events": &summary.has_events,
             "manifest_path": &connector.manifest_path,
         },
         "zones": connector.zones.clone(),
@@ -14726,7 +14739,7 @@ fn preflight_dispatch_host(
             "risk_level": risk_level_label(operation.risk_level),
             "safety_tier": safety_tier_label(operation.safety_tier),
             "approval_mode": &operation.approval_mode,
-            "supports_simulate": operation.supports_simulate,
+            "supports_simulate": host_live_boolean_field(operation.supports_simulate),
             "idempotency": format!("{:?}", operation.idempotency).to_lowercase(),
             "side_effects": !operation.idempotent,
         },
@@ -15011,7 +15024,7 @@ fn invoke_dispatch_host(
             "risk_level": risk_level_label(operation.risk_level),
             "safety_tier": safety_tier_label(operation.safety_tier),
             "approval_mode": &operation.approval_mode,
-            "supports_simulate": operation.supports_simulate,
+            "supports_simulate": host_live_boolean_field(operation.supports_simulate),
         },
         "request": {
             "zone": &zone,
@@ -20267,7 +20280,7 @@ fn connector_list_entry(connector: &DiscoveredConnector) -> Value {
         "home_zone": connector.zones.get("home").cloned().unwrap_or(Value::Null),
         "operation_count": connector.detail.summary.operation_count,
         "max_risk": &connector.detail.summary.max_risk,
-        "has_events": connector.detail.summary.has_events,
+        "has_events": &connector.detail.summary.has_events,
         "next_actions": [
             format!("fwc show {}", connector.slug),
             format!("fwc ops {}", connector.slug),
@@ -20287,7 +20300,7 @@ fn operation_summary_entry(operation: &DiscoveredOperation) -> Value {
         "safety_tier": &operation.summary.safety_tier,
         "idempotency": &operation.summary.idempotency,
         "requires_approval": operation.summary.requires_approval,
-        "supports_simulate": operation.summary.supports_simulate,
+        "supports_simulate": &operation.summary.supports_simulate,
         "example_count": operation.examples.len(),
         "rate_limits": operation.rate_limits.clone(),
     })
@@ -21364,16 +21377,14 @@ fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, Pre
 
     // Bare `fwc` with no subcommand: show the quickstart guide instead of clap help.
     // Let --help, -h, --version, -V pass through to clap for their standard behavior.
-    let has_help_or_version = normalized.args.iter().skip(1).any(|a| {
-        matches!(a.as_str(), "--help" | "-h" | "--version" | "-V")
-    });
+    let has_help_or_version = normalized
+        .args
+        .iter()
+        .skip(1)
+        .any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V"));
     if !has_help_or_version
         && (normalized.args.len() <= 1
-            || normalized
-                .args
-                .iter()
-                .skip(1)
-                .all(|a| a.starts_with('-')))
+            || normalized.args.iter().skip(1).all(|a| a.starts_with('-')))
     {
         return Err(PrepareCliError::PlainText(quickstart_text()));
     }
@@ -31427,7 +31438,8 @@ depends_on = ["missing"]
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["operation"]["risk_level"], "medium");
         assert_eq!(payload["operation"]["safety_tier"], "risky");
-        assert_eq!(payload["operation"]["supports_simulate"], true);
+        assert_eq!(payload["operation"]["supports_simulate"]["status"], "known");
+        assert_eq!(payload["operation"]["supports_simulate"]["value"], true);
         assert_eq!(payload["preflight"]["allowed"], true);
         assert!(
             payload["approval_artifact"]["artifact_id"]

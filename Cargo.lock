@@ -2948,7 +2948,6 @@ dependencies = [
 name = "fcp-graphql"
 version = "0.1.0"
 dependencies = [
- "asupersync",
  "asupersync-tokio-compat",
  "chrono",
  "fcp-async-core",
@@ -3447,7 +3446,6 @@ dependencies = [
 name = "fcp-oauth"
 version = "0.1.0"
 dependencies = [
- "asupersync",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -4102,7 +4100,6 @@ dependencies = [
 name = "fcp-streaming"
 version = "0.1.0"
 dependencies = [
- "asupersync",
  "async-trait",
  "bytes",
  "fcp-async-core",

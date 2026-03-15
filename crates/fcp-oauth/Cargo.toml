@@ -18,9 +18,6 @@ fcp-core = { path = "../fcp-core" }
 fcp-async-core = { path = "../fcp-async-core" }
 async-trait.workspace = true
 
-# HTTP client
-asupersync = { path = "/dp/asupersync", default-features = false, features = ["tls", "tls-native-roots"] }
-
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

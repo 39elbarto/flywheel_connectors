@@ -14,7 +14,6 @@ workspace = true
 [dependencies]
 fcp-core = { path = "../fcp-core" }
 fcp-async-core = { path = "../fcp-async-core" }
-asupersync = { path = "/dp/asupersync", default-features = false, features = ["tls", "tls-native-roots"] }
 
 # Async runtime
 async-trait.workspace = true

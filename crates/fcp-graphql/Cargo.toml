@@ -15,7 +15,6 @@ fcp-streaming = { workspace = true }
 futures-util = { workspace = true }
 jsonschema = { workspace = true }
 rand = { workspace = true }
-asupersync = { path = "/dp/asupersync", default-features = false, features = ["tls", "tls-native-roots"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

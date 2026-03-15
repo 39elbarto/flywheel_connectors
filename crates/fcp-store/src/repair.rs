@@ -194,7 +194,7 @@ impl Default for RepairPolicyTargets {
 }
 
 /// Deterministic zone-level SLO summary derived during a planning cycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepairSloMetrics {
     /// Median coverage across tracked objects using nearest-rank percentiles.
     pub coverage_p50_bps: u32,
@@ -204,17 +204,6 @@ pub struct RepairSloMetrics {
     pub coverage_p99_bps: u32,
     /// Ratio of hot objects that are currently reconstructable.
     pub hot_object_access_bps: u32,
-}
-
-impl Default for RepairSloMetrics {
-    fn default() -> Self {
-        Self {
-            coverage_p50_bps: 0,
-            coverage_p90_bps: 0,
-            coverage_p99_bps: 0,
-            hot_object_access_bps: 0,
-        }
-    }
 }
 
 impl RepairSloMetrics {
@@ -339,6 +328,17 @@ pub struct RepairPlan {
     pub actions: Vec<RepairPlanAction>,
     /// Deferred actions that were explainably skipped.
     pub deferred: Vec<RepairPlanAction>,
+}
+
+#[derive(Debug)]
+struct ZonePlanInputs {
+    policy_targets: RepairPolicyTargets,
+    object_count_tracked: usize,
+    object_count_below_target: usize,
+    coverage_samples: Vec<u32>,
+    hot_object_count: usize,
+    hot_object_available_count: usize,
+    candidates: Vec<RepairPlanAction>,
 }
 
 /// Rate limiter for repairs.
@@ -725,14 +725,13 @@ impl RepairController {
         budget
     }
 
-    /// Build a deterministic, explainable repair plan for one zone evaluation cycle.
-    pub async fn plan_zone(
+    async fn collect_zone_plan_inputs(
         &self,
         zone_id: &ZoneId,
         symbol_store: &dyn SymbolStore,
         policies: &HashMap<ObjectId, ObjectPlacementPolicy>,
         options: &RepairPlanningOptions,
-    ) -> RepairPlan {
+    ) -> ZonePlanInputs {
         let mut object_ids = symbol_store.list_zone(zone_id).await;
         object_ids.sort();
 
@@ -795,6 +794,69 @@ impl RepairController {
             ));
         }
 
+        ZonePlanInputs {
+            policy_targets,
+            object_count_tracked,
+            object_count_below_target,
+            coverage_samples,
+            hot_object_count,
+            hot_object_available_count,
+            candidates,
+        }
+    }
+
+    fn select_plan_actions(
+        &self,
+        options: &RepairPlanningOptions,
+        plan: &mut RepairPlan,
+        candidates: Vec<RepairPlanAction>,
+    ) {
+        for action in candidates {
+            let is_noncritical_policy_deficit =
+                matches!(action.reason_code, RepairReasonCode::PolicySloDeficit)
+                    && action.priority < 1000;
+            let is_noncritical_hot_prestage =
+                action.reason_code == RepairReasonCode::HotObjectPreStage;
+            let should_defer_for_power = (options.power_saver || options.metered_network)
+                && (is_noncritical_policy_deficit || is_noncritical_hot_prestage);
+
+            if should_defer_for_power {
+                let mut deferred = action;
+                deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
+                plan.deferred.push(deferred);
+                continue;
+            }
+
+            if plan.budget_used.can_fit(&plan.budget, &action) {
+                plan.budget_used.record(&action);
+                plan.actions.push(action);
+            } else if options.power_saver || options.metered_network {
+                let mut deferred = action;
+                deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
+                plan.deferred.push(deferred);
+            }
+        }
+    }
+
+    /// Build a deterministic, explainable repair plan for one zone evaluation cycle.
+    pub async fn plan_zone(
+        &self,
+        zone_id: &ZoneId,
+        symbol_store: &dyn SymbolStore,
+        policies: &HashMap<ObjectId, ObjectPlacementPolicy>,
+        options: &RepairPlanningOptions,
+    ) -> RepairPlan {
+        let ZonePlanInputs {
+            policy_targets,
+            object_count_tracked,
+            object_count_below_target,
+            mut coverage_samples,
+            hot_object_count,
+            hot_object_available_count,
+            mut candidates,
+        } = self
+            .collect_zone_plan_inputs(zone_id, symbol_store, policies, options)
+            .await;
         let slo_metrics = RepairSloMetrics::from_coverages(
             &mut coverage_samples,
             hot_object_count,
@@ -825,32 +887,7 @@ impl RepairController {
             deferred: Vec::new(),
         };
 
-        for action in candidates {
-            let is_noncritical_policy_deficit =
-                matches!(action.reason_code, RepairReasonCode::PolicySloDeficit)
-                    && action.priority < 1000;
-            let is_noncritical_hot_prestage =
-                action.reason_code == RepairReasonCode::HotObjectPreStage;
-            let should_defer_for_power = (options.power_saver || options.metered_network)
-                && (is_noncritical_policy_deficit || is_noncritical_hot_prestage);
-
-            if should_defer_for_power {
-                let mut deferred = action;
-                deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
-                plan.deferred.push(deferred);
-                continue;
-            }
-
-            if plan.budget_used.can_fit(&plan.budget, &action) {
-                plan.budget_used.record(&action);
-                plan.actions.push(action);
-            } else if options.power_saver || options.metered_network {
-                let mut deferred = action;
-                deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
-                plan.deferred.push(deferred);
-            }
-        }
-
+        self.select_plan_actions(options, &mut plan, candidates);
         plan
     }
 

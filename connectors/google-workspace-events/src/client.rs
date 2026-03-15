@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use tracing::{instrument, warn};
@@ -33,6 +34,8 @@ pub struct WorkspaceEventsClient {
     events_base_url: String,
     pubsub_base_url: String,
     total_requests: AtomicU64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for WorkspaceEventsClient {
@@ -60,6 +63,14 @@ impl WorkspaceEventsClient {
             events_base_url: DEFAULT_EVENTS_BASE_URL.to_string(),
             pubsub_base_url: DEFAULT_PUBSUB_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -84,6 +95,11 @@ impl WorkspaceEventsClient {
                 format!("credential_id:{credential_id}")
             }
         }
+    }
+
+    /// Shut down the runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Total requests issued by the client.

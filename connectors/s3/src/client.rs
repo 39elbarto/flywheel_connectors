@@ -9,10 +9,12 @@ use std::fmt;
 use std::fmt::Write;
 use std::time::Duration;
 
-use fcp_async_core::time::sleep;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{S3Error, S3Result},
@@ -105,9 +107,8 @@ pub struct S3Client {
     client: Client,
     auth: S3Auth,
     base_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for S3Client {
@@ -115,7 +116,7 @@ impl fmt::Debug for S3Client {
         f.debug_struct("S3Client")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
-            .field("max_retries", &self.max_retries)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -153,9 +154,13 @@ impl S3Client {
             client,
             auth,
             base_url: DEFAULT_BASE_URL.into(),
-            max_retries: 3,
-            initial_delay_ms: 500,
-            max_delay_ms: 30_000,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -186,16 +191,19 @@ impl S3Client {
 
     /// Set retry configuration.
     #[must_use]
-    pub const fn with_retry_config(
-        mut self,
-        max_retries: u32,
-        initial_delay_ms: u64,
-        max_delay_ms: u64,
-    ) -> Self {
-        self.max_retries = max_retries;
-        self.initial_delay_ms = initial_delay_ms;
-        self.max_delay_ms = max_delay_ms;
+    pub fn with_retry_config(mut self, max_retries: u32, initial_delay_ms: u64, max_delay_ms: u64) -> Self {
+        self.retry_config = HttpRetryConfig {
+            max_retries,
+            initial_delay_ms,
+            max_delay_ms,
+            ..HttpRetryConfig::default()
+        };
         self
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Upload an object to a bucket.
@@ -458,49 +466,48 @@ impl S3Client {
 
     /// GET request returning deserialized JSON.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> S3Result<T> {
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "S3 GET request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.to_string();
+            async move {
+                debug!(attempt, url, "S3 GET request");
+                let result = self
+                    .apply_auth(self.client.get(&url))
+                    .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+                    .send()
+                    .await;
 
-            let result = self
-                .apply_auth(self.client.get(url))
-                .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempts, "Rate limited, waiting {wait:?}");
-                            sleep(wait).await;
-                            delay =
-                                std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                            continue;
+                match result {
+                    Ok(response) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&response) {
+                            return AttemptOutcome::Retryable {
+                                error: S3Error::RateLimited {
+                                    retry_after_ms: retry_result
+                                        .map_or(30_000, |d| d.as_millis() as u64),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(S3Error::RateLimited {
-                            retry_after_ms: delay.as_millis() as u64,
-                        });
+                        match self.handle_json_response(response).await {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: e,
+                            },
+                            Err(e) => AttemptOutcome::Terminal(e),
+                        }
                     }
-                    return self.handle_json_response(response).await;
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: S3Error::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(S3Error::Http(e)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(
-                        attempt = attempts,
-                        delay_ms = delay.as_millis(),
-                        error = %e,
-                        "Retrying after connection error"
-                    );
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(S3Error::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// GET with manual URL query parameters.
@@ -532,51 +539,52 @@ impl S3Client {
         url: &str,
         body: &str,
     ) -> S3Result<T> {
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let body_owned = body.to_string();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "S3 PUT request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.to_string();
+            let body_clone = body_owned.clone();
+            async move {
+                debug!(attempt, url, "S3 PUT request");
+                let result = self
+                    .apply_auth(self.client.put(&url))
+                    .header("content-type", "application/octet-stream")
+                    .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+                    .body(body_clone)
+                    .send()
+                    .await;
 
-            let result = self
-                .apply_auth(self.client.put(url))
-                .header("content-type", "application/octet-stream")
-                .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-                .body(body.to_string())
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempts, "Rate limited on PUT, waiting {wait:?}");
-                            sleep(wait).await;
-                            delay =
-                                std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                            continue;
+                match result {
+                    Ok(response) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&response) {
+                            return AttemptOutcome::Retryable {
+                                error: S3Error::RateLimited {
+                                    retry_after_ms: retry_result
+                                        .map_or(30_000, |d| d.as_millis() as u64),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(S3Error::RateLimited {
-                            retry_after_ms: delay.as_millis() as u64,
-                        });
+                        match self.handle_json_response(response).await {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: e,
+                            },
+                            Err(e) => AttemptOutcome::Terminal(e),
+                        }
                     }
-                    return self.handle_json_response(response).await;
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: S3Error::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(S3Error::Http(e)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(
-                        attempt = attempts,
-                        delay_ms = delay.as_millis(),
-                        error = %e,
-                        "Retrying PUT after connection error"
-                    );
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(S3Error::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// PUT request with x-amz-copy-source header for copy operations.
@@ -585,205 +593,206 @@ impl S3Client {
         url: &str,
         copy_source: &str,
     ) -> S3Result<T> {
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, copy_source, "S3 COPY request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.to_string();
+            let copy_source = copy_source.to_string();
+            async move {
+                debug!(attempt, url, copy_source, "S3 COPY request");
+                let result = self
+                    .apply_auth(self.client.put(&url))
+                    .header("x-amz-copy-source", &copy_source)
+                    .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+                    .send()
+                    .await;
 
-            let result = self
-                .apply_auth(self.client.put(url))
-                .header("x-amz-copy-source", copy_source)
-                .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempts, "Rate limited on COPY, waiting {wait:?}");
-                            sleep(wait).await;
-                            delay =
-                                std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                            continue;
+                match result {
+                    Ok(response) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&response) {
+                            return AttemptOutcome::Retryable {
+                                error: S3Error::RateLimited {
+                                    retry_after_ms: retry_result
+                                        .map_or(30_000, |d| d.as_millis() as u64),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(S3Error::RateLimited {
-                            retry_after_ms: delay.as_millis() as u64,
-                        });
+                        match self.handle_json_response(response).await {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: e,
+                            },
+                            Err(e) => AttemptOutcome::Terminal(e),
+                        }
                     }
-                    return self.handle_json_response(response).await;
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: S3Error::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(S3Error::Http(e)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(
-                        attempt = attempts,
-                        delay_ms = delay.as_millis(),
-                        error = %e,
-                        "Retrying COPY after connection error"
-                    );
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(S3Error::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// PUT request without parsing a response body.
     async fn put_empty_request(&self, url: &str) -> S3Result<()> {
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "S3 PUT(empty) request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.to_string();
+            async move {
+                debug!(attempt, url, "S3 PUT(empty) request");
+                let result = self
+                    .apply_auth(self.client.put(&url))
+                    .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+                    .send()
+                    .await;
 
-            let result = self
-                .apply_auth(self.client.put(url))
-                .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempts, "Rate limited on PUT(empty), waiting {wait:?}");
-                            sleep(wait).await;
-                            delay =
-                                std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                            continue;
+                match result {
+                    Ok(response) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&response) {
+                            return AttemptOutcome::Retryable {
+                                error: S3Error::RateLimited {
+                                    retry_after_ms: retry_result
+                                        .map_or(30_000, |d| d.as_millis() as u64),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(S3Error::RateLimited {
-                            retry_after_ms: delay.as_millis() as u64,
-                        });
+                        let status = response.status();
+                        if status.is_success() || status == StatusCode::NO_CONTENT {
+                            return AttemptOutcome::Success(());
+                        }
+                        let bytes = match response.bytes().await {
+                            Ok(b) => b,
+                            Err(e) => return AttemptOutcome::Terminal(S3Error::Http(e)),
+                        };
+                        let err = parse_error_response(status, &bytes);
+                        if err.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: err,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(err)
+                        }
                     }
-
-                    let status = response.status();
-                    if status.is_success() || status == StatusCode::NO_CONTENT {
-                        return Ok(());
-                    }
-
-                    let bytes = response.bytes().await?;
-                    return Err(parse_error_response(status, &bytes));
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: S3Error::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(S3Error::Http(e)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(
-                        attempt = attempts,
-                        delay_ms = delay.as_millis(),
-                        error = %e,
-                        "Retrying PUT(empty) after connection error"
-                    );
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(S3Error::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// DELETE request.
     async fn delete_request(&self, url: &str) -> S3Result<()> {
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "S3 DELETE request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.to_string();
+            async move {
+                debug!(attempt, url, "S3 DELETE request");
+                let result = self
+                    .apply_auth(self.client.delete(&url))
+                    .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+                    .send()
+                    .await;
 
-            let result = self
-                .apply_auth(self.client.delete(url))
-                .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempts, "Rate limited on DELETE, waiting {wait:?}");
-                            sleep(wait).await;
-                            delay =
-                                std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                            continue;
+                match result {
+                    Ok(response) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&response) {
+                            return AttemptOutcome::Retryable {
+                                error: S3Error::RateLimited {
+                                    retry_after_ms: retry_result
+                                        .map_or(30_000, |d| d.as_millis() as u64),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(S3Error::RateLimited {
-                            retry_after_ms: delay.as_millis() as u64,
-                        });
+                        let status = response.status();
+                        if status.is_success() || status == StatusCode::NO_CONTENT {
+                            return AttemptOutcome::Success(());
+                        }
+                        let bytes = match response.bytes().await {
+                            Ok(b) => b,
+                            Err(e) => return AttemptOutcome::Terminal(S3Error::Http(e)),
+                        };
+                        let err = parse_error_response(status, &bytes);
+                        if err.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: err,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(err)
+                        }
                     }
-
-                    let status = response.status();
-                    if status.is_success() || status == StatusCode::NO_CONTENT {
-                        return Ok(());
-                    }
-
-                    let bytes = response.bytes().await?;
-                    return Err(parse_error_response(status, &bytes));
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: S3Error::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(S3Error::Http(e)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(
-                        attempt = attempts,
-                        delay_ms = delay.as_millis(),
-                        error = %e,
-                        "Retrying DELETE after connection error"
-                    );
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(S3Error::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// HEAD request returning JSON-parsed metadata.
     async fn head_request<T: serde::de::DeserializeOwned>(&self, url: &str) -> S3Result<T> {
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "S3 HEAD request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.to_string();
+            async move {
+                debug!(attempt, url, "S3 HEAD request");
+                let result = self
+                    .apply_auth(self.client.head(&url))
+                    .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+                    .send()
+                    .await;
 
-            let result = self
-                .apply_auth(self.client.head(url))
-                .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempts, "Rate limited on HEAD, waiting {wait:?}");
-                            sleep(wait).await;
-                            delay =
-                                std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                            continue;
+                match result {
+                    Ok(response) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&response) {
+                            return AttemptOutcome::Retryable {
+                                error: S3Error::RateLimited {
+                                    retry_after_ms: retry_result
+                                        .map_or(30_000, |d| d.as_millis() as u64),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(S3Error::RateLimited {
-                            retry_after_ms: delay.as_millis() as u64,
-                        });
+                        match self.handle_json_response(response).await {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                                retry_after: None,
+                                error: e,
+                            },
+                            Err(e) => AttemptOutcome::Terminal(e),
+                        }
                     }
-                    return self.handle_json_response(response).await;
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: S3Error::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(S3Error::Http(e)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(
-                        attempt = attempts,
-                        delay_ms = delay.as_millis(),
-                        error = %e,
-                        "Retrying HEAD after connection error"
-                    );
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(S3Error::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// Handle a response by checking status and deserializing JSON.

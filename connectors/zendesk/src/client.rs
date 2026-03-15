@@ -4,9 +4,11 @@
 //! All POST/PUT bodies use JSON (`.json()`). Query params are built manually.
 
 use std::fmt;
+use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -84,6 +86,8 @@ pub struct ZendeskClient {
     base_url: String,
     auth: ZendeskAuth,
     max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for ZendeskClient {
@@ -143,12 +147,22 @@ impl ZendeskClient {
 
         let base_url = format!("https://{}.zendesk.com/api/v2", auth.subdomain());
 
+        let request_timeout = Duration::from_secs(30);
         Ok(Self {
             http,
             base_url,
             auth,
             max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
+            ),
+            retry_config: HttpRetryConfig::default(),
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Perform a lightweight health check by querying the current user.

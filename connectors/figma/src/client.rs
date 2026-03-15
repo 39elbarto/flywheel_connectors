@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tracing::{instrument, warn};
 
@@ -64,6 +65,8 @@ pub struct FigmaClient {
     initial_delay_ms: u64,
     max_delay_ms: u64,
     total_requests: AtomicU64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl std::fmt::Debug for FigmaClient {
@@ -98,7 +101,19 @@ impl FigmaClient {
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
             total_requests: AtomicU64::new(0),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Apply authentication to a request builder.

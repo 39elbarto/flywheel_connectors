@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -53,6 +54,8 @@ pub struct ZapierClient {
     client: Client,
     auth: ZapierAuth,
     base_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for ZapierClient {
@@ -72,6 +75,7 @@ impl ZapierClient {
             .user_agent("fcp-zapier/0.1.0 (FCP connector)")
             .build()?;
 
+        let request_timeout = Duration::from_secs(60);
         Ok(Self {
             client,
             auth,
@@ -79,7 +83,16 @@ impl ZapierClient {
                 .unwrap_or(DEFAULT_BASE_URL)
                 .trim_end_matches('/')
                 .to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
+            ),
+            retry_config: HttpRetryConfig::default(),
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

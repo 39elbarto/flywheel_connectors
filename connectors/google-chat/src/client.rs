@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use tracing::{instrument, warn};
@@ -23,6 +24,8 @@ pub struct ChatClient {
     auth: GoogleMaterializedAuth,
     base_url: String,
     total_requests: AtomicU64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl ChatClient {
@@ -39,6 +42,14 @@ impl ChatClient {
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -103,6 +114,11 @@ impl ChatClient {
         let url = format!("{}/{space_name}/members", self.base_url);
         let resp: ListMembershipsResponse = self.get_json(&url).await?;
         Ok(resp.memberships)
+    }
+
+    /// Shut down the runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get total request count.

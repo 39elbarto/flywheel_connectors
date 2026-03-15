@@ -14,8 +14,11 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, Url, header};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{DriveError, DriveResult},
@@ -30,7 +33,8 @@ pub struct DriveClient {
     executor: GoogleRestExecutor,
     auth: GoogleMaterializedAuth,
     base_url: String,
-    max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
 }
 
@@ -39,7 +43,7 @@ impl fmt::Debug for DriveClient {
         f.debug_struct("DriveClient")
             .field("auth", &self.auth_redacted_label())
             .field("base_url", &self.base_url)
-            .field("max_retries", &self.max_retries)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -61,7 +65,15 @@ impl DriveClient {
             executor: GoogleRestExecutor::new().with_client(client),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
-            max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                initial_delay_ms: 500,
+                max_delay_ms: 30_000,
+                jitter_enabled: true,
+            },
             total_requests: AtomicU64::new(0),
         })
     }
@@ -100,6 +112,11 @@ impl DriveClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// Trigger graceful shutdown of request contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     // ── File operations ─────────────────────────────────────────
@@ -279,31 +296,24 @@ impl DriveClient {
         response_mode: GoogleResponseMode,
     ) -> DriveResult<GoogleExecuteResponse> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            async move {
+                debug!(attempt, method = http_method, "drive request");
 
-            debug!(method = http_method, "drive request");
-
-            match self.execute_once(http_method, url, body, response_mode).await {
-                Ok(response) => return Ok(response),
-                Err(error) if error.is_retryable() && attempt < self.max_retries => {
-                    warn!(attempt, error = %error, "retryable error");
-                    last_err = Some(error);
+                match self.execute_once(http_method, url, body, response_mode).await {
+                    Ok(response) => AttemptOutcome::Success(response),
+                    Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: error.retry_after(),
+                        error,
+                    },
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
-                Err(error) => return Err(error),
             }
-        }
-
-        Err(last_err.unwrap_or(DriveError::Api {
-            status_code: 500,
-            message: "Max retries exceeded".into(),
-        }))
+        })
+        .await
     }
 
     async fn execute_once(

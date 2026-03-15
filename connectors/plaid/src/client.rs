@@ -3,6 +3,9 @@
 //! Plaid uses POST requests with JSON bodies for all API calls.
 //! Authentication is via `client_id` and `secret` fields embedded in each request body.
 
+use std::time::Duration;
+
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, StatusCode};
 use tracing::{debug, warn};
 
@@ -23,6 +26,8 @@ pub struct PlaidClient {
     client_id: String,
     secret: String,
     max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl PlaidClient {
@@ -39,7 +44,19 @@ impl PlaidClient {
             client_id: client_id.to_string(),
             secret: secret.to_string(),
             max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Set a custom base URL (for testing).

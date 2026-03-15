@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -57,6 +58,8 @@ pub struct TrelloClient {
     client: Client,
     auth: TrelloAuth,
     base_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for TrelloClient {
@@ -76,6 +79,7 @@ impl TrelloClient {
             .user_agent("fcp-trello/0.1.0 (FCP connector)")
             .build()?;
 
+        let request_timeout = Duration::from_secs(30);
         Ok(Self {
             client,
             auth,
@@ -83,7 +87,16 @@ impl TrelloClient {
                 .unwrap_or(DEFAULT_BASE_URL)
                 .trim_end_matches('/')
                 .to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
+            ),
+            retry_config: HttpRetryConfig::default(),
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Build the full URL with authentication query parameters (for API key/token auth).

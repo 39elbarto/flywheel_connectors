@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use fcp_async_core::time::sleep;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
@@ -79,6 +80,8 @@ pub struct TwitterApiClient {
     max_retries: u32,
     initial_delay_ms: u64,
     max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl TwitterApiClient {
@@ -89,6 +92,7 @@ impl TwitterApiClient {
             .user_agent(format!("fcp-twitter/{}", env!("CARGO_PKG_VERSION")))
             .build()?;
 
+        let request_timeout = config.timeout;
         Ok(Self {
             client,
             base_url: config.api_url.trim_end_matches('/').to_string(),
@@ -97,6 +101,15 @@ impl TwitterApiClient {
             max_retries: config.retry.max_attempts,
             initial_delay_ms: config.retry.initial_delay_ms,
             max_delay_ms: config.retry.max_delay_ms,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: config.retry.max_attempts,
+                initial_delay_ms: config.retry.initial_delay_ms,
+                max_delay_ms: config.retry.max_delay_ms,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -124,6 +137,7 @@ impl TwitterApiClient {
                     api_url: api_url.to_string(),
                     ..Default::default()
                 };
+                let request_timeout = Duration::from_secs(30);
                 Ok(Self {
                     client,
                     base_url: api_url.trim_end_matches('/').to_string(),
@@ -132,10 +146,16 @@ impl TwitterApiClient {
                     max_retries: 3,
                     initial_delay_ms: 1000,
                     max_delay_ms: 60_000,
+                    runtime: ConnectorRuntime::new(
+                        ConnectorRuntimeConfig::default()
+                            .with_request_timeout(request_timeout),
+                    ),
+                    retry_config: HttpRetryConfig::default(),
                 })
             }
             TwitterAuth::CredentialId(_) => {
                 // Secretless mode: egress proxy injects auth headers
+                let request_timeout = Duration::from_secs(30);
                 Ok(Self {
                     client,
                     base_url: api_url.trim_end_matches('/').to_string(),
@@ -144,9 +164,19 @@ impl TwitterApiClient {
                     max_retries: 3,
                     initial_delay_ms: 1000,
                     max_delay_ms: 60_000,
+                    runtime: ConnectorRuntime::new(
+                        ConnectorRuntimeConfig::default()
+                            .with_request_timeout(request_timeout),
+                    ),
+                    retry_config: HttpRetryConfig::default(),
                 })
             }
         }
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Perform a lightweight health check by fetching the authenticated user.

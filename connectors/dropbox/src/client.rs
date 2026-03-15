@@ -9,6 +9,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -64,6 +65,8 @@ pub struct DropboxClient {
     auth: DropboxAuth,
     base_url: String,
     content_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for DropboxClient {
@@ -99,7 +102,19 @@ impl DropboxClient {
                 .unwrap_or(DEFAULT_CONTENT_URL)
                 .trim_end_matches('/')
                 .to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

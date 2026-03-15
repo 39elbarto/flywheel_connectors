@@ -12,8 +12,11 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, Url, header};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     error::{GCalResult, GoogleCalendarError},
@@ -44,9 +47,8 @@ pub struct GoogleCalendarClient {
     executor: GoogleRestExecutor,
     auth: GoogleMaterializedAuth,
     base_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
 }
 
@@ -55,7 +57,7 @@ impl fmt::Debug for GoogleCalendarClient {
         f.debug_struct("GoogleCalendarClient")
             .field("auth", &google_auth_redacted_label(&self.auth))
             .field("base_url", &self.base_url)
-            .field("max_retries", &self.max_retries)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -87,9 +89,15 @@ impl GoogleCalendarClient {
             executor: GoogleRestExecutor::new().with_client(http),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
-            max_retries: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 60_000,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 3,
+                initial_delay_ms: 1000,
+                max_delay_ms: 60_000,
+                ..HttpRetryConfig::default()
+            },
             total_requests: AtomicU64::new(0),
         })
     }
@@ -109,10 +117,15 @@ impl GoogleCalendarClient {
         initial_delay_ms: u64,
         max_delay_ms: u64,
     ) -> Self {
-        self.max_retries = max_retries;
-        self.initial_delay_ms = initial_delay_ms;
-        self.max_delay_ms = max_delay_ms;
+        self.retry_config.max_retries = max_retries;
+        self.retry_config.initial_delay_ms = initial_delay_ms;
+        self.retry_config.max_delay_ms = max_delay_ms;
         self
+    }
+
+    /// Gracefully shut down the client, cancelling background contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get total requests made.
@@ -403,40 +416,26 @@ impl GoogleCalendarClient {
     ) -> GCalResult<GoogleExecuteResponse> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
-        let mut last_err = None;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let wait = last_err
-                    .as_ref()
-                    .and_then(GoogleCalendarError::retry_after)
-                    .unwrap_or(delay);
-                warn!(attempt, delay_ms = wait.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(wait).await;
-                delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-            }
-
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
             let redacted_url = redact_url(url);
-            debug!(url = %redacted_url, method = http_method, "request");
+            debug!(url = %redacted_url, method = http_method, attempt, "request");
 
             match self
                 .execute_once(http_method, url, body, response_mode)
                 .await
             {
-                Ok(response) => return Ok(response),
-                Err(error) if error.is_retryable() && attempt < self.max_retries => {
-                    warn!(attempt, error = %error, "retryable error");
-                    last_err = Some(error);
-                }
-                Err(error) => return Err(error),
+                Ok(response) => AttemptOutcome::Success(response),
+                Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                    retry_after: e.retry_after(),
+                    error: e,
+                },
+                Err(e) => AttemptOutcome::Terminal(e),
             }
-        }
-
-        Err(last_err.unwrap_or(GoogleCalendarError::Api {
-            code: 500,
-            message: "Max retries exceeded".into(),
-        }))
+        })
+        .await
     }
 
     async fn execute_once(

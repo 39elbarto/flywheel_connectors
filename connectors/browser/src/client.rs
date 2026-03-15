@@ -2,7 +2,10 @@
 //!
 //! Sends JSON POST commands to a Chrome DevTools Protocol HTTP endpoint.
 
+use std::time::Duration;
+
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -58,6 +61,8 @@ pub struct BrowserClient {
     browser_url: String,
     max_retries: u32,
     auth: BrowserAuth,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl std::fmt::Debug for BrowserClient {
@@ -114,7 +119,19 @@ impl BrowserClient {
             browser_url: DEFAULT_BROWSER_URL.to_string(),
             max_retries: 2,
             auth,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Lightweight connectivity probe – check if the browser endpoint is reachable.

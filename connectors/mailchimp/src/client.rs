@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -71,6 +72,8 @@ pub struct MailchimpClient {
     client: Client,
     auth: MailchimpAuth,
     base_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for MailchimpClient {
@@ -109,6 +112,13 @@ impl MailchimpClient {
             client,
             auth,
             base_url: resolved_url,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 3,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -116,6 +126,11 @@ impl MailchimpClient {
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Trigger graceful shutdown of request contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

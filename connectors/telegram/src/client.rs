@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use fcp_async_core::time::sleep;
 use fcp_core::FcpError;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{instrument, warn};
@@ -19,6 +20,8 @@ pub struct TelegramClient {
     credential: String,
     client: Client,
     base_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl TelegramClient {
@@ -37,7 +40,19 @@ impl TelegramClient {
             credential: bot_credential,
             client,
             base_url: "https://api.telegram.org".into(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(60)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Set a custom base URL.
@@ -66,8 +81,8 @@ impl TelegramClient {
     {
         let url = self.api_url(endpoint);
         let mut attempts = 0;
-        let max_retries = 3;
-        let mut delay = Duration::from_millis(100);
+        let max_retries = self.retry_config.max_retries;
+        let mut delay = Duration::from_millis(self.retry_config.initial_delay_ms);
 
         loop {
             attempts += 1;

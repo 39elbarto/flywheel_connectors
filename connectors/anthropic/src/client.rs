@@ -7,7 +7,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use fcp_async_core::ExecutionContext;
 use fcp_core::CredentialId;
-use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
@@ -67,6 +69,7 @@ pub struct AnthropicClient {
     client: Client,
     auth: AnthropicAuth,
     base_url: String,
+    runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
     // Cost tracking
     total_input_tokens: AtomicU64,
@@ -108,10 +111,19 @@ impl AnthropicClient {
             client,
             auth,
             base_url: DEFAULT_BASE_URL.into(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
             retry_config: HttpRetryConfig::default(),
             total_input_tokens: AtomicU64::new(0),
             total_output_tokens: AtomicU64::new(0),
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Set the base URL (for testing).

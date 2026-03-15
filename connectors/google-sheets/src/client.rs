@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use tracing::{instrument, warn};
@@ -22,6 +23,8 @@ pub struct SheetsClient {
     client: Client,
     auth: GoogleMaterializedAuth,
     base_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
 }
 
@@ -38,6 +41,15 @@ impl SheetsClient {
             client,
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                initial_delay_ms: 500,
+                max_delay_ms: 30_000,
+                jitter_enabled: true,
+            },
             total_requests: AtomicU64::new(0),
         })
     }
@@ -143,6 +155,11 @@ impl SheetsClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// Trigger graceful shutdown of request contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn bearer_token(&self) -> Option<&str> {

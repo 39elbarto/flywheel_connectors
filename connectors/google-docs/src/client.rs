@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use tracing::{instrument, warn};
@@ -20,6 +21,8 @@ pub struct DocsClient {
     auth: GoogleMaterializedAuth,
     base_url: String,
     total_requests: AtomicU64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl DocsClient {
@@ -36,6 +39,14 @@ impl DocsClient {
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -81,6 +92,11 @@ impl DocsClient {
         let url = format!("{}/documents/{document_id}:batchUpdate", self.base_url);
         let body = serde_json::json!({ "requests": requests });
         self.post_json(&url, &body).await
+    }
+
+    /// Shut down the runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get total request count.

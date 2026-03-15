@@ -8,6 +8,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -64,6 +65,8 @@ pub struct MixpanelClient {
     auth: MixpanelAuth,
     base_url: String,
     project_id: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for MixpanelClient {
@@ -96,7 +99,19 @@ impl MixpanelClient {
                 .trim_end_matches('/')
                 .to_string(),
             project_id: project_id.to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(60)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

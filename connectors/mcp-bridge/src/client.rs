@@ -4,6 +4,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::json;
 use tracing::{debug, instrument};
@@ -44,6 +45,8 @@ pub struct McpClient {
     auth: McpAuth,
     base_url: String,
     request_id: AtomicU64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for McpClient {
@@ -70,7 +73,19 @@ impl McpClient {
             auth,
             base_url: url,
             request_id: AtomicU64::new(1),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(120)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn next_id(&self) -> u64 {

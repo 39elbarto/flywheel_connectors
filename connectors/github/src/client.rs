@@ -4,10 +4,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use fcp_async_core::time::sleep;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     error::{GitHubError, GitHubResult},
@@ -61,9 +63,8 @@ pub struct GitHubClient {
     client: Client,
     auth: GitHubAuth,
     base_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
 }
 
@@ -72,7 +73,7 @@ impl std::fmt::Debug for GitHubClient {
         f.debug_struct("GitHubClient")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
-            .field("max_retries", &self.max_retries)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -101,9 +102,15 @@ impl GitHubClient {
             client,
             auth,
             base_url: DEFAULT_BASE_URL.into(),
-            max_retries: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 60_000,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 3,
+                initial_delay_ms: 1000,
+                max_delay_ms: 60_000,
+                ..HttpRetryConfig::default()
+            },
             total_requests: AtomicU64::new(0),
         })
     }
@@ -130,16 +137,21 @@ impl GitHubClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub const fn with_retry_config(
+    pub fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,
         max_delay_ms: u64,
     ) -> Self {
-        self.max_retries = max_retries;
-        self.initial_delay_ms = initial_delay_ms;
-        self.max_delay_ms = max_delay_ms;
+        self.retry_config.max_retries = max_retries;
+        self.retry_config.initial_delay_ms = initial_delay_ms;
+        self.retry_config.max_delay_ms = max_delay_ms;
         self
+    }
+
+    /// Gracefully shut down the client, cancelling background contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get total requests made.
@@ -293,53 +305,56 @@ impl GitHubClient {
         );
 
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, "Triggering workflow dispatch");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            let body = &body;
+            async move {
+                debug!(attempt, "Triggering workflow dispatch");
 
-            let result = self
-                .apply_auth(self.client.post(&url))
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .json(&body)
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-                    if status == StatusCode::NO_CONTENT {
-                        return Ok(());
-                    }
-                    let retry_after_secs = response
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok());
-                    let bytes = response.bytes().await.map_err(GitHubError::Http)?;
-                    let err = parse_error_response(status, &bytes, retry_after_secs);
-                    if err.is_retryable() && attempts < self.max_retries {
-                        if let Some(retry_after) = err.retry_after() {
-                            delay = retry_after;
+                match self
+                    .apply_auth(self.client.post(url))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .json(body)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status == StatusCode::NO_CONTENT {
+                            return AttemptOutcome::Success(());
                         }
-                        warn!(attempt = attempts, delay_ms = delay.as_millis(), "Retrying");
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    } else {
-                        return Err(err);
+                        let retry_after_secs = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok());
+                        let bytes = match response.bytes().await {
+                            Ok(b) => b,
+                            Err(e) => return AttemptOutcome::Terminal(GitHubError::Http(e)),
+                        };
+                        let err = parse_error_response(status, &bytes, retry_after_secs);
+                        if err.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(err)
+                        }
                     }
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: GitHubError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(GitHubError::Http(e)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts < self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(GitHubError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     // ── Content operations ────────────────────────────────────────
@@ -373,61 +388,48 @@ impl GitHubClient {
 
     // ── HTTP primitives ───────────────────────────────────────────
 
-    /// Make a GET request with retries.
+    /// Make a GET request with retries via [`RetryLoop`].
     async fn get<R>(&self, endpoint: &str) -> GitHubResult<R>
     where
         R: serde::de::DeserializeOwned + Send,
     {
         let url = format!("{}{endpoint}", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, endpoint, "GitHub API GET");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(attempt, endpoint, "GitHub API GET");
 
-            let result = self
-                .apply_auth(self.client.get(&url))
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying GitHub API request"
-                        );
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts < self.max_retries => {
-                    warn!(
-                        attempt = attempts,
-                        delay_ms = delay.as_millis(),
-                        error = %e,
-                        "Retrying after connection error"
-                    );
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                match self
+                    .apply_auth(self.client.get(url))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .send()
+                    .await
+                {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: GitHubError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(GitHubError::Http(e)),
                 }
-                Err(e) => return Err(GitHubError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
-    /// Make a POST request with retries.
+    /// Make a POST request with retries via [`RetryLoop`].
     async fn post<T, R>(&self, endpoint: &str, body: &T) -> GitHubResult<R>
     where
         T: serde::Serialize + Sync,
@@ -435,45 +437,42 @@ impl GitHubClient {
     {
         let url = format!("{}{endpoint}", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, endpoint, "GitHub API POST");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(attempt, endpoint, "GitHub API POST");
 
-            let result = self
-                .apply_auth(self.client.post(&url))
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .json(body)
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(attempt = attempts, error = %e, "Retrying");
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts < self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                match self
+                    .apply_auth(self.client.post(url))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .json(body)
+                    .send()
+                    .await
+                {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: GitHubError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(GitHubError::Http(e)),
                 }
-                Err(e) => return Err(GitHubError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
-    /// Make a PUT request with retries.
+    /// Make a PUT request with retries via [`RetryLoop`].
     async fn put<T, R>(&self, endpoint: &str, body: &T) -> GitHubResult<R>
     where
         T: serde::Serialize + Sync,
@@ -481,42 +480,39 @@ impl GitHubClient {
     {
         let url = format!("{}{endpoint}", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, endpoint, "GitHub API PUT");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(attempt, endpoint, "GitHub API PUT");
 
-            let result = self
-                .apply_auth(self.client.put(&url))
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .json(body)
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(attempt = attempts, error = %e, "Retrying");
-                        sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts < self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                match self
+                    .apply_auth(self.client.put(url))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .json(body)
+                    .send()
+                    .await
+                {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: GitHubError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(GitHubError::Http(e)),
                 }
-                Err(e) => return Err(GitHubError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// Handle a response, deserializing success or parsing errors.
@@ -804,9 +800,13 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/repos/octocat/hello-world"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "message": "API rate limit exceeded"
-            })))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "1")
+                    .set_body_json(serde_json::json!({
+                        "message": "API rate limit exceeded"
+                    })),
+            )
             .mount(&mock_server)
             .await;
 

@@ -3,6 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -41,6 +42,8 @@ pub struct BigQueryClient {
     auth: BigQueryAuth,
     base_url: String,
     project_id: Option<String>,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for BigQueryClient {
@@ -75,6 +78,14 @@ impl BigQueryClient {
             auth,
             base_url: url,
             project_id,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -82,6 +93,11 @@ impl BigQueryClient {
     #[must_use]
     pub fn project_id(&self) -> Option<&str> {
         self.project_id.as_deref()
+    }
+
+    /// Gracefully shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

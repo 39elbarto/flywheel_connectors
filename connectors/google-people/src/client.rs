@@ -15,7 +15,8 @@ use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, Url, header};
 use serde_json::Value;
-use tracing::{debug, instrument, warn};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop};
+use tracing::{debug, instrument};
 
 use crate::{
     error::{GooglePeopleError, PeopleResult},
@@ -49,9 +50,8 @@ pub struct GooglePeopleClient {
     executor: GoogleRestExecutor,
     auth: GoogleMaterializedAuth,
     base_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
 }
 
@@ -60,7 +60,7 @@ impl fmt::Debug for GooglePeopleClient {
         f.debug_struct("GooglePeopleClient")
             .field("auth", &google_auth_redacted_label(&self.auth))
             .field("base_url", &self.base_url)
-            .field("max_retries", &self.max_retries)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -92,9 +92,15 @@ impl GooglePeopleClient {
             executor: GoogleRestExecutor::new().with_client(http),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
-            max_retries: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 60_000,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 3,
+                initial_delay_ms: 1000,
+                max_delay_ms: 60_000,
+                jitter_enabled: true,
+            },
             total_requests: AtomicU64::new(0),
         })
     }
@@ -110,6 +116,11 @@ impl GooglePeopleClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// Shut down the runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Perform a safe read-only health check.
@@ -332,41 +343,26 @@ impl GooglePeopleClient {
         response_mode: GoogleResponseMode,
     ) -> PeopleResult<GoogleExecuteResponse> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut last_error = None;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
+        let redacted_url = redact_url(url);
+        debug!(url = %redacted_url, method = http_method, "request");
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let wait = last_error
-                    .as_ref()
-                    .and_then(GooglePeopleError::retry_after)
-                    .unwrap_or(delay);
-                warn!(attempt, delay_ms = wait.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(wait).await;
-                delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-            }
-
-            let redacted_url = redact_url(url);
-            debug!(url = %redacted_url, method = http_method, "request");
-
+        RetryLoop::execute(&ctx, &policy, |_attempt| async move {
             match self
                 .execute_once(http_method, url, body, response_mode)
                 .await
             {
-                Ok(response) => return Ok(response),
-                Err(error) if error.is_retryable() && attempt < self.max_retries => {
-                    warn!(attempt, error = %error, "retryable people request failure");
-                    last_error = Some(error);
-                }
-                Err(error) => return Err(error),
+                Ok(response) => AttemptOutcome::Success(response),
+                Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                    retry_after: error.retry_after(),
+                    error,
+                },
+                Err(error) => AttemptOutcome::Terminal(error),
             }
-        }
-
-        Err(last_error.unwrap_or(GooglePeopleError::Api {
-            status_code: 500,
-            message: "Max retries exceeded".into(),
-        }))
+        })
+        .await
     }
 
     async fn execute_once(

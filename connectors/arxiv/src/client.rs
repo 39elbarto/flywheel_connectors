@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -25,6 +26,8 @@ pub struct ArxivClient {
     arxiv_base_url: String,
     scholar_base_url: String,
     scholar_api_key: Option<String>,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for ArxivClient {
@@ -63,7 +66,20 @@ impl ArxivClient {
                 .trim_end_matches('/')
                 .to_string(),
             scholar_api_key,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_scholar_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

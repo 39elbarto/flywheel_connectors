@@ -6,8 +6,11 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     error::{JiraError, JiraResult},
@@ -98,9 +101,8 @@ pub struct JiraClient {
     base_url: String,
     agile_url: String,
     automation_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
 }
 
@@ -112,7 +114,7 @@ impl std::fmt::Debug for JiraClient {
             .field("base_url", &self.base_url)
             .field("agile_url", &self.agile_url)
             .field("automation_url", &self.automation_url)
-            .field("max_retries", &self.max_retries)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -184,9 +186,15 @@ impl JiraClient {
             base_url,
             agile_url,
             automation_url,
-            max_retries: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 60_000,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 3,
+                initial_delay_ms: 1000,
+                max_delay_ms: 60_000,
+                ..HttpRetryConfig::default()
+            },
             total_requests: AtomicU64::new(0),
         })
     }
@@ -279,16 +287,21 @@ impl JiraClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub const fn with_retry_config(
+    pub fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,
         max_delay_ms: u64,
     ) -> Self {
-        self.max_retries = max_retries;
-        self.initial_delay_ms = initial_delay_ms;
-        self.max_delay_ms = max_delay_ms;
+        self.retry_config.max_retries = max_retries;
+        self.retry_config.initial_delay_ms = initial_delay_ms;
+        self.retry_config.max_delay_ms = max_delay_ms;
         self
+    }
+
+    /// Gracefully shut down the client, cancelling background contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get total requests made.
@@ -543,65 +556,82 @@ impl JiraClient {
     ) -> JiraResult<Vec<JiraAttachment>> {
         let url = format!("{}/issue/{issue_key}/attachments", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(attempt, filename, "Jira attachment upload");
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, "Jira attachment upload");
-
-            let part = reqwest::multipart::Part::bytes(data.to_vec())
-                .file_name(filename.to_string())
-                .mime_str("application/octet-stream")
-                .unwrap();
-
-            let form = reqwest::multipart::Form::new().part("file", part);
-
-            let result = self
-                .client
-                .post(&url)
-                .header("X-Atlassian-Token", "no-check")
-                .multipart(form)
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-                    if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt = attempts, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(JiraError::RateLimited {
-                            retry_after_ms: retry_result.map_or(60_000, |d| d.as_millis() as u64),
+                let part = match reqwest::multipart::Part::bytes(data.to_vec())
+                    .file_name(filename.to_string())
+                    .mime_str("application/octet-stream")
+                {
+                    Ok(part) => part,
+                    Err(error) => {
+                        return AttemptOutcome::Terminal(JiraError::Api {
+                            message: format!("invalid attachment MIME metadata: {error}"),
+                            status_code: None,
                         });
                     }
+                };
 
-                    let bytes = response.bytes().await.map_err(JiraError::Http)?;
-                    if status.is_success() {
-                        return serde_json::from_slice(&bytes).map_err(JiraError::from);
+                let form = reqwest::multipart::Form::new().part("file", part);
+
+                match self
+                    .client
+                    .post(url)
+                    .header("X-Atlassian-Token", "no-check")
+                    .multipart(form)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        let status = response.status();
+                        if let Some(retry_result) = Self::check_rate_limit(&response) {
+                            return AttemptOutcome::Retryable {
+                                error: JiraError::RateLimited {
+                                    retry_after_ms: retry_result
+                                        .map_or(60_000, |d| d.as_millis() as u64),
+                                },
+                                retry_after: retry_result,
+                            };
+                        }
+
+                        let bytes = match response.bytes().await {
+                            Ok(bytes) => bytes,
+                            Err(error) => return AttemptOutcome::Terminal(JiraError::Http(error)),
+                        };
+
+                        if status.is_success() {
+                            return match serde_json::from_slice(&bytes) {
+                                Ok(attachments) => AttemptOutcome::Success(attachments),
+                                Err(error) => AttemptOutcome::Terminal(JiraError::from(error)),
+                            };
+                        }
+
+                        let error = Self::parse_error(status, &bytes);
+                        if error.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: error.retry_after(),
+                                error,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(error)
+                        }
                     }
-                    let err = Self::parse_error(status, &bytes);
-                    if err.is_retryable() && attempts <= self.max_retries {
-                        warn!(attempt = attempts, "Retrying attachment upload");
-                        fcp_async_core::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                        continue;
+                    Err(error) if error.is_timeout() || error.is_connect() => {
+                        AttemptOutcome::Retryable {
+                            error: JiraError::Http(error),
+                            retry_after: None,
+                        }
                     }
-                    return Err(err);
+                    Err(error) => AttemptOutcome::Terminal(JiraError::Http(error)),
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(JiraError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     // ── Automation Rule operations ─────────────────────────────────
@@ -673,36 +703,29 @@ impl JiraClient {
         R: serde::de::DeserializeOwned + Send,
     {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "Jira API GET");
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, url, "Jira API GET");
 
-            let result = self.client.get(url).send().await;
-
-            match result {
+            match self.client.get(url).send().await {
                 Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts <= self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(attempt = attempts, error = %e, "Retrying Jira API request");
-                        fcp_async_core::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
+                    Ok(data) => AttemptOutcome::Success(data),
+                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: e.retry_after(),
+                        error: e,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(e),
                 },
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(JiraError::Http(e)),
+                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                    error: JiraError::Http(e),
+                    retry_after: None,
+                },
+                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     async fn post<R>(&self, url: &str, body: &serde_json::Value) -> JiraResult<R>
@@ -710,84 +733,76 @@ impl JiraClient {
         R: serde::de::DeserializeOwned + Send,
     {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "Jira API POST");
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, url, "Jira API POST");
 
-            let result = self.client.post(url).json(body).send().await;
-
-            match result {
+            match self.client.post(url).json(body).send().await {
                 Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts <= self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(attempt = attempts, error = %e, "Retrying");
-                        fcp_async_core::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
+                    Ok(data) => AttemptOutcome::Success(data),
+                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: e.retry_after(),
+                        error: e,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(e),
                 },
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(JiraError::Http(e)),
+                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                    error: JiraError::Http(e),
+                    retry_after: None,
+                },
+                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     async fn post_no_content(&self, url: &str, body: &serde_json::Value) -> JiraResult<()> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "Jira API POST (no content)");
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, url, "Jira API POST (no content)");
 
-            let result = self.client.post(url).json(body).send().await;
-
-            match result {
+            match self.client.post(url).json(body).send().await {
                 Ok(response) => {
-                    let status = response.status();
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt = attempts, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(JiraError::RateLimited {
-                            retry_after_ms: retry_result.map_or(60_000, |d| d.as_millis() as u64),
-                        });
+                        return AttemptOutcome::Retryable {
+                            error: JiraError::RateLimited {
+                                retry_after_ms: retry_result
+                                    .map_or(60_000, |d| d.as_millis() as u64),
+                            },
+                            retry_after: retry_result,
+                        };
                     }
-                    if status.is_success() {
-                        return Ok(());
+                    if response.status().is_success() {
+                        return AttemptOutcome::Success(());
                     }
-                    let bytes = response.bytes().await.map_err(JiraError::Http)?;
+                    let status = response.status();
+                    let bytes = match response.bytes().await {
+                        Ok(b) => b,
+                        Err(e) => return AttemptOutcome::Terminal(JiraError::Http(e)),
+                    };
                     let err = Self::parse_error(status, &bytes);
-                    if err.is_retryable() && attempts <= self.max_retries {
-                        warn!(attempt = attempts, error = %err, "Retrying");
-                        fcp_async_core::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                        continue;
+                    if err.is_retryable() {
+                        AttemptOutcome::Retryable {
+                            retry_after: err.retry_after(),
+                            error: err,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
                     }
-                    return Err(err);
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(JiraError::Http(e)),
+                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                    error: JiraError::Http(e),
+                    retry_after: None,
+                },
+                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     async fn put<R>(&self, url: &str, body: &serde_json::Value) -> JiraResult<R>
@@ -795,132 +810,123 @@ impl JiraClient {
         R: serde::de::DeserializeOwned + Send,
     {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "Jira API PUT");
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, url, "Jira API PUT");
 
-            let result = self.client.put(url).json(body).send().await;
-
-            match result {
+            match self.client.put(url).json(body).send().await {
                 Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts <= self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(attempt = attempts, error = %e, "Retrying");
-                        fcp_async_core::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
+                    Ok(data) => AttemptOutcome::Success(data),
+                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: e.retry_after(),
+                        error: e,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(e),
                 },
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(JiraError::Http(e)),
+                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                    error: JiraError::Http(e),
+                    retry_after: None,
+                },
+                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     async fn put_no_content(&self, url: &str, body: &serde_json::Value) -> JiraResult<()> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "Jira API PUT");
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, url, "Jira API PUT (no content)");
 
-            let result = self.client.put(url).json(body).send().await;
-
-            match result {
+            match self.client.put(url).json(body).send().await {
                 Ok(response) => {
-                    let status = response.status();
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt = attempts, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(JiraError::RateLimited {
-                            retry_after_ms: retry_result.map_or(60_000, |d| d.as_millis() as u64),
-                        });
+                        return AttemptOutcome::Retryable {
+                            error: JiraError::RateLimited {
+                                retry_after_ms: retry_result
+                                    .map_or(60_000, |d| d.as_millis() as u64),
+                            },
+                            retry_after: retry_result,
+                        };
                     }
-                    if status.is_success() {
-                        return Ok(());
+                    if response.status().is_success() {
+                        return AttemptOutcome::Success(());
                     }
-                    let bytes = response.bytes().await.map_err(JiraError::Http)?;
+                    let status = response.status();
+                    let bytes = match response.bytes().await {
+                        Ok(b) => b,
+                        Err(e) => return AttemptOutcome::Terminal(JiraError::Http(e)),
+                    };
                     let err = Self::parse_error(status, &bytes);
-                    if err.is_retryable() && attempts <= self.max_retries {
-                        warn!(attempt = attempts, error = %err, "Retrying");
-                        fcp_async_core::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                        continue;
+                    if err.is_retryable() {
+                        AttemptOutcome::Retryable {
+                            retry_after: err.retry_after(),
+                            error: err,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
                     }
-                    return Err(err);
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(JiraError::Http(e)),
+                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                    error: JiraError::Http(e),
+                    retry_after: None,
+                },
+                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     async fn delete(&self, url: &str) -> JiraResult<()> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, url, "Jira API DELETE");
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, url, "Jira API DELETE");
 
-            let result = self.client.delete(url).send().await;
-
-            match result {
+            match self.client.delete(url).send().await {
                 Ok(response) => {
-                    let status = response.status();
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        if attempts <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt = attempts, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(JiraError::RateLimited {
-                            retry_after_ms: retry_result.map_or(60_000, |d| d.as_millis() as u64),
-                        });
+                        return AttemptOutcome::Retryable {
+                            error: JiraError::RateLimited {
+                                retry_after_ms: retry_result
+                                    .map_or(60_000, |d| d.as_millis() as u64),
+                            },
+                            retry_after: retry_result,
+                        };
                     }
-                    if status.is_success() {
-                        return Ok(());
+                    if response.status().is_success() {
+                        return AttemptOutcome::Success(());
                     }
-                    let bytes = response.bytes().await.map_err(JiraError::Http)?;
+                    let status = response.status();
+                    let bytes = match response.bytes().await {
+                        Ok(b) => b,
+                        Err(e) => return AttemptOutcome::Terminal(JiraError::Http(e)),
+                    };
                     let err = Self::parse_error(status, &bytes);
-                    if err.is_retryable() && attempts <= self.max_retries {
-                        warn!(attempt = attempts, error = %err, "Retrying");
-                        fcp_async_core::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                        continue;
+                    if err.is_retryable() {
+                        AttemptOutcome::Retryable {
+                            retry_after: err.retry_after(),
+                            error: err,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
                     }
-                    return Err(err);
                 }
-                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
-                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(JiraError::Http(e)),
+                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                    error: JiraError::Http(e),
+                    retry_after: None,
+                },
+                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// Handle a response, deserializing success or parsing errors.
@@ -1225,7 +1231,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/issue/PROJ-1"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
             .mount(&mock_server)
             .await;
 

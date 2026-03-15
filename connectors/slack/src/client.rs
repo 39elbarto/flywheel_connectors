@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method, Response as HttpResponse};
 use fcp_async_core::time;
-use tracing::{debug, instrument, warn};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
+use tracing::{debug, instrument};
 
 use crate::{
     error::{SlackError, SlackResult},
@@ -26,9 +29,8 @@ pub struct SlackClient {
     client: HttpClient,
     token: String,
     base_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     request_timeout: Duration,
     total_requests: AtomicU64,
 }
@@ -37,9 +39,7 @@ impl std::fmt::Debug for SlackClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SlackClient")
             .field("base_url", &self.base_url)
-            .field("max_retries", &self.max_retries)
-            .field("initial_delay_ms", &self.initial_delay_ms)
-            .field("max_delay_ms", &self.max_delay_ms)
+            .field("retry_config", &self.retry_config)
             .field("request_timeout", &self.request_timeout)
             .field("total_requests", &self.total_requests())
             .finish_non_exhaustive()
@@ -49,16 +49,23 @@ impl std::fmt::Debug for SlackClient {
 impl SlackClient {
     /// Create a new Slack client with a bot or user token.
     pub fn new(token: impl Into<String>) -> SlackResult<Self> {
+        let request_timeout = Duration::from_secs(30);
         Ok(Self {
             client: HttpClientBuilder::new()
                 .user_agent("fcp-slack/0.1.0")
                 .build(),
             token: token.into(),
             base_url: DEFAULT_BASE_URL.into(),
-            max_retries: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 60_000,
-            request_timeout: Duration::from_secs(30),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 3,
+                initial_delay_ms: 1000,
+                max_delay_ms: 60_000,
+                ..HttpRetryConfig::default()
+            },
+            request_timeout,
             total_requests: AtomicU64::new(0),
         })
     }
@@ -72,16 +79,21 @@ impl SlackClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub const fn with_retry_config(
+    pub fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,
         max_delay_ms: u64,
     ) -> Self {
-        self.max_retries = max_retries;
-        self.initial_delay_ms = initial_delay_ms;
-        self.max_delay_ms = max_delay_ms;
+        self.retry_config.max_retries = max_retries;
+        self.retry_config.initial_delay_ms = initial_delay_ms;
+        self.retry_config.max_delay_ms = max_delay_ms;
         self
+    }
+
+    /// Gracefully shut down the client, cancelling background contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get total requests made.
@@ -343,37 +355,37 @@ impl SlackClient {
             }
         }
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self.send_request(Method::Get, &url, Vec::new()).await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(method, attempt, "Rate limited, waiting {wait:?}");
-                            time::sleep(wait).await;
-                            continue;
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(method, attempt, "Slack API GET");
+                match self.send_request(Method::Get, url, Vec::new()).await {
+                    Ok(resp) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&resp) {
+                            return AttemptOutcome::Retryable {
+                                error: SlackError::RateLimited {
+                                    retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(SlackError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
+                        match resp.json::<T>() {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) => AttemptOutcome::Terminal(SlackError::Json(e)),
+                        }
                     }
-                    return resp.json::<T>().map_err(SlackError::Json);
+                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: err.retry_after(),
+                        error: err,
+                    },
+                    Err(err) => AttemptOutcome::Terminal(err),
                 }
-                Err(err) if err.is_retryable() && attempt <= self.max_retries => {
-                    warn!(method, attempt, error = %err, "Request failed, retrying in {delay:?}");
-                    time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(err) => return Err(err),
             }
-        }
+        })
+        .await
     }
 
     async fn post_json<T: serde::de::DeserializeOwned>(
@@ -383,38 +395,41 @@ impl SlackClient {
     ) -> SlackResult<T> {
         let url = format!("{}/{method}", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let body_bytes = serde_json::to_vec(body).map_err(SlackError::Json)?;
-            let response = self.send_request(Method::Post, &url, body_bytes).await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(method, attempt, "Rate limited, waiting {wait:?}");
-                            time::sleep(wait).await;
-                            continue;
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(method, attempt, "Slack API POST");
+                let body_bytes = match serde_json::to_vec(body) {
+                    Ok(b) => b,
+                    Err(e) => return AttemptOutcome::Terminal(SlackError::Json(e)),
+                };
+                match self.send_request(Method::Post, url, body_bytes).await {
+                    Ok(resp) => {
+                        if let Some(retry_result) = Self::check_rate_limit(&resp) {
+                            return AttemptOutcome::Retryable {
+                                error: SlackError::RateLimited {
+                                    retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
+                                },
+                                retry_after: retry_result,
+                            };
                         }
-                        return Err(SlackError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
+                        match resp.json::<T>() {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) => AttemptOutcome::Terminal(SlackError::Json(e)),
+                        }
                     }
-                    return resp.json::<T>().map_err(SlackError::Json);
+                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: err.retry_after(),
+                        error: err,
+                    },
+                    Err(err) => AttemptOutcome::Terminal(err),
                 }
-                Err(err) if err.is_retryable() && attempt <= self.max_retries => {
-                    warn!(method, attempt, error = %err, "Request failed, retrying in {delay:?}");
-                    time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(err) => return Err(err),
             }
-        }
+        })
+        .await
     }
 
     #[allow(clippy::option_option)]

@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -81,6 +82,8 @@ pub struct SemanticScholarClient {
     client: Client,
     auth: SemanticScholarAuth,
     base_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for SemanticScholarClient {
@@ -88,7 +91,8 @@ impl fmt::Debug for SemanticScholarClient {
         f.debug_struct("SemanticScholarClient")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
-            .finish()
+            .field("retry_config", &self.retry_config)
+            .finish_non_exhaustive()
     }
 }
 
@@ -107,7 +111,19 @@ impl SemanticScholarClient {
                 .unwrap_or(DEFAULT_BASE_URL)
                 .trim_end_matches('/')
                 .to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

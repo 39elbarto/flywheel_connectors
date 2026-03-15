@@ -5,10 +5,14 @@
 //! - Data plane (`https://{index-host}`) for vector operations
 
 use std::fmt;
+use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, header};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{PineconeError, PineconeResult},
@@ -72,7 +76,8 @@ pub struct PineconeClient {
     auth: PineconeAuth,
     control_plane_url: String,
     data_plane_url: Option<String>,
-    max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for PineconeClient {
@@ -81,6 +86,7 @@ impl fmt::Debug for PineconeClient {
             .field("auth", &self.auth)
             .field("control_plane_url", &self.control_plane_url)
             .field("data_plane_url", &self.data_plane_url)
+            .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
 }
@@ -124,7 +130,13 @@ impl PineconeClient {
             auth,
             control_plane_url: DEFAULT_CONTROL_PLANE_URL.to_string(),
             data_plane_url: None,
-            max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -154,9 +166,17 @@ impl PineconeClient {
 
     /// Set the maximum number of retries.
     #[must_use]
-    pub const fn with_retry_config(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
+    pub fn with_retry_config(mut self, max_retries: u32) -> Self {
+        self.retry_config = HttpRetryConfig {
+            max_retries,
+            ..HttpRetryConfig::default()
+        };
         self
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn data_plane_base(&self) -> PineconeResult<&str> {
@@ -349,109 +369,100 @@ impl PineconeClient {
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> PineconeResult<serde_json::Value> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let req = build_request();
+            async move {
+                debug!(attempt, "Pinecone request");
+                let result = req.send().await;
 
-            let result = build_request().send().await;
+                match result {
+                    Ok(response) => {
+                        let status = response.status();
 
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(PineconeError::Api {
-                            message: format!("Authentication failed: {body}"),
-                            status_code: Some(status.as_u16()),
-                        });
-                    }
-
-                    if status == StatusCode::NOT_FOUND {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(PineconeError::Api {
-                            message: format!("Not found: {body}"),
-                            status_code: Some(404),
-                        });
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .map_or(60_000, |s| s * 1000);
-
-                        let err = PineconeError::RateLimit {
-                            retry_after_ms: retry_after,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, "rate limited, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Terminal(PineconeError::Api {
+                                message: format!("Authentication failed: {body}"),
+                                status_code: Some(status.as_u16()),
+                            });
                         }
-                        return Err(err);
-                    }
 
-                    if status.is_server_error() {
-                        let body = response.text().await.unwrap_or_default();
-                        let err = PineconeError::Api {
-                            message: format!("Server error {status}: {body}"),
-                            status_code: Some(status.as_u16()),
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, status = %status, "server error, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::NOT_FOUND {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Terminal(PineconeError::Api {
+                                message: format!("Not found: {body}"),
+                                status_code: Some(404),
+                            });
                         }
-                        return Err(err);
-                    }
 
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
-                        let message = api_err
-                            .as_ref()
-                            .and_then(|e| {
-                                e.message
-                                    .clone()
-                                    .or_else(|| e.error.as_ref().and_then(|d| d.message.clone()))
-                            })
-                            .unwrap_or_else(|| format!("HTTP {status}: {body}"));
-                        return Err(PineconeError::Api {
-                            message,
-                            status_code: Some(status.as_u16()),
-                        });
-                    }
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .map_or(60_000, |s| s * 1000);
+                            return AttemptOutcome::Retryable {
+                                error: PineconeError::RateLimit {
+                                    retry_after_ms: retry_after,
+                                },
+                                retry_after: Some(Duration::from_millis(retry_after)),
+                            };
+                        }
 
-                    let body = response.text().await.map_err(PineconeError::Http)?;
-                    if body.is_empty() {
-                        return Ok(serde_json::json!({}));
+                        if status.is_server_error() {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Retryable {
+                                error: PineconeError::Api {
+                                    message: format!("Server error {status}: {body}"),
+                                    status_code: Some(status.as_u16()),
+                                },
+                                retry_after: None,
+                            };
+                        }
+
+                        if !status.is_success() {
+                            let body = response.text().await.unwrap_or_default();
+                            let api_err: Option<ApiErrorResponse> =
+                                serde_json::from_str(&body).ok();
+                            let message = api_err
+                                .as_ref()
+                                .and_then(|e| {
+                                    e.message
+                                        .clone()
+                                        .or_else(|| e.error.as_ref().and_then(|d| d.message.clone()))
+                                })
+                                .unwrap_or_else(|| format!("HTTP {status}: {body}"));
+                            return AttemptOutcome::Terminal(PineconeError::Api {
+                                message,
+                                status_code: Some(status.as_u16()),
+                            });
+                        }
+
+                        let body = match response.text().await {
+                            Ok(b) => b,
+                            Err(e) => return AttemptOutcome::Terminal(PineconeError::Http(e)),
+                        };
+                        if body.is_empty() {
+                            return AttemptOutcome::Success(serde_json::json!({}));
+                        }
+                        match serde_json::from_str(&body) {
+                            Ok(data) => AttemptOutcome::Success(data),
+                            Err(e) => AttemptOutcome::Terminal(PineconeError::from(e)),
+                        }
                     }
-                    let data: serde_json::Value = serde_json::from_str(&body)?;
-                    return Ok(data);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(PineconeError::Http(e));
-                        continue;
-                    }
-                    return Err(PineconeError::Http(e));
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: PineconeError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(PineconeError::Http(e)),
                 }
             }
-        }
-
-        Err(last_err.unwrap_or(PineconeError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-        }))
+        })
+        .await
     }
 }
 
@@ -769,14 +780,16 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/indexes"))
-            .respond_with(ResponseTemplate::new(429))
+            .respond_with(
+                ResponseTemplate::new(429).insert_header("retry-after", "1"),
+            )
             .mount(&mock_server)
             .await;
 
         let client = PineconeClient::new("test-api-key")
             .unwrap()
             .with_control_plane_url(&mock_server.uri())
-            .with_retry_config(0);
+            .with_retry_config(1);
 
         let result = client.list_indexes().await;
         assert!(result.is_err());

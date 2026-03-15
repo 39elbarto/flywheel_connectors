@@ -3,10 +3,14 @@
 //! Stripe uses form-encoded POST bodies for creates and query-string GET for reads.
 
 use std::fmt;
+use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, header};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{StripeError, StripeResult},
@@ -59,7 +63,8 @@ pub struct StripeClient {
     http: Client,
     auth: StripeAuth,
     api_url: String,
-    max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl StripeClient {
@@ -80,7 +85,13 @@ impl StripeClient {
             http,
             auth,
             api_url: DEFAULT_API_URL.to_string(),
-            max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -94,8 +105,13 @@ impl StripeClient {
     /// Set the maximum number of retries.
     #[must_use]
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
+        self.retry_config.max_retries = max_retries;
         self
+    }
+
+    /// Trigger graceful shutdown of request contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get the auth mode.
@@ -525,104 +541,104 @@ impl StripeClient {
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> StripeResult<serde_json::Value> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let request = build_request();
+            async move {
+                debug!(attempt, "Stripe API request");
 
-            let result = build_request().send().await;
+                match request.send().await {
+                    Ok(response) => {
+                        let status = response.status();
 
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(StripeError::Unauthorized);
-                    }
-
-                    if status == StatusCode::NOT_FOUND {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(StripeError::NotFound { resource: body });
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .map_or(60_000, |s| s * 1000);
-
-                        let err = StripeError::RateLimited {
-                            retry_after_ms: retry_after,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, "rate limited, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                            return AttemptOutcome::Terminal(StripeError::Unauthorized);
                         }
-                        return Err(err);
-                    }
 
-                    if status.is_server_error() {
-                        let body = response.text().await.unwrap_or_default();
-                        let err = StripeError::Api {
-                            message: format!("Server error {status}: {body}"),
-                            status_code: Some(status.as_u16()),
-                            error_type: None,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, status = %status, "server error, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::NOT_FOUND {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Terminal(StripeError::NotFound {
+                                resource: body,
+                            });
                         }
-                        return Err(err);
-                    }
 
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
-                        let (message, error_type) = api_err
-                            .as_ref()
-                            .and_then(|e| e.error.as_ref())
-                            .map(|d| {
-                                (
-                                    d.message.clone().unwrap_or(format!("HTTP {status}")),
-                                    d.error_type.clone(),
-                                )
-                            })
-                            .unwrap_or((format!("HTTP {status}: {body}"), None));
-                        return Err(StripeError::Api {
-                            message,
-                            status_code: Some(status.as_u16()),
-                            error_type,
-                        });
-                    }
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after_secs = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok());
+                            let retry_after = retry_after_secs
+                                .map_or(Duration::from_secs(60), Duration::from_secs);
 
-                    let body = response.text().await.map_err(StripeError::Http)?;
-                    let data: serde_json::Value = serde_json::from_str(&body)?;
-                    return Ok(data);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(StripeError::Http(e));
-                        continue;
+                            return AttemptOutcome::Retryable {
+                                error: StripeError::RateLimited {
+                                    retry_after_ms: retry_after.as_millis() as u64,
+                                },
+                                retry_after: Some(retry_after),
+                            };
+                        }
+
+                        if status.is_server_error() {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Retryable {
+                                error: StripeError::Api {
+                                    message: format!("Server error {status}: {body}"),
+                                    status_code: Some(status.as_u16()),
+                                    error_type: None,
+                                },
+                                retry_after: None,
+                            };
+                        }
+
+                        if !status.is_success() {
+                            let body = response.text().await.unwrap_or_default();
+                            let api_err: Option<ApiErrorResponse> =
+                                serde_json::from_str(&body).ok();
+                            let (message, error_type) = api_err
+                                .as_ref()
+                                .and_then(|e| e.error.as_ref())
+                                .map(|d| {
+                                    (
+                                        d.message.clone().unwrap_or(format!("HTTP {status}")),
+                                        d.error_type.clone(),
+                                    )
+                                })
+                                .unwrap_or((format!("HTTP {status}: {body}"), None));
+                            return AttemptOutcome::Terminal(StripeError::Api {
+                                message,
+                                status_code: Some(status.as_u16()),
+                                error_type,
+                            });
+                        }
+
+                        match response.text().await {
+                            Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+                                Ok(data) => AttemptOutcome::Success(data),
+                                Err(error) => AttemptOutcome::Terminal(StripeError::Json(error)),
+                            },
+                            Err(error) if error.is_timeout() || error.is_connect() => {
+                                AttemptOutcome::Retryable {
+                                    error: StripeError::Http(error),
+                                    retry_after: None,
+                                }
+                            }
+                            Err(error) => AttemptOutcome::Terminal(StripeError::Http(error)),
+                        }
                     }
-                    return Err(StripeError::Http(e));
+                    Err(error) if error.is_timeout() || error.is_connect() => {
+                        AttemptOutcome::Retryable {
+                            error: StripeError::Http(error),
+                            retry_after: None,
+                        }
+                    }
+                    Err(error) => AttemptOutcome::Terminal(StripeError::Http(error)),
                 }
             }
-        }
-
-        Err(last_err.unwrap_or(StripeError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-            error_type: None,
-        }))
+        })
+        .await
     }
 }
 
@@ -1133,13 +1149,13 @@ mod tests {
     #[test]
     fn client_with_retry_config() {
         let client = StripeClient::new("sk_test").unwrap().with_retry_config(5);
-        assert_eq!(client.max_retries, 5);
+        assert_eq!(client.retry_config.max_retries, 5);
     }
 
     #[test]
     fn client_default_max_retries() {
         let client = StripeClient::new("sk_test").unwrap();
-        assert_eq!(client.max_retries, 2);
+        assert_eq!(client.retry_config.max_retries, 2);
     }
 
     #[test]
@@ -1177,6 +1193,6 @@ mod tests {
             .with_api_url("https://test.com/v1")
             .with_retry_config(0);
         assert_eq!(client.api_url(), "https://test.com/v1");
-        assert_eq!(client.max_retries, 0);
+        assert_eq!(client.retry_config.max_retries, 0);
     }
 }

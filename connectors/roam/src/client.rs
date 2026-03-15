@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::json;
 use tracing::{debug, instrument};
@@ -58,6 +59,8 @@ pub struct RoamClient {
     auth: RoamAuth,
     base_url: String,
     graph_name: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for RoamClient {
@@ -66,7 +69,8 @@ impl fmt::Debug for RoamClient {
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
             .field("graph_name", &self.graph_name)
-            .finish()
+            .field("retry_config", &self.retry_config)
+            .finish_non_exhaustive()
     }
 }
 
@@ -86,6 +90,13 @@ impl RoamClient {
                 .trim_end_matches('/')
                 .to_string(),
             graph_name: graph_name.to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -93,6 +104,11 @@ impl RoamClient {
     #[must_use]
     pub fn graph_name(&self) -> &str {
         &self.graph_name
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {

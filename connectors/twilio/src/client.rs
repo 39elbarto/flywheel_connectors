@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -105,6 +106,8 @@ pub struct TwilioClient {
     video_base_url: String,
     account_sid: String,
     max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl std::fmt::Debug for TwilioClient {
@@ -167,6 +170,7 @@ impl TwilioClient {
         let verify_base_url = DEFAULT_VERIFY_BASE.to_string();
         let video_base_url = DEFAULT_VIDEO_BASE.to_string();
 
+        let request_timeout = Duration::from_secs(30);
         Ok(Self {
             http,
             auth,
@@ -176,7 +180,16 @@ impl TwilioClient {
             video_base_url,
             account_sid: sid,
             max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
+            ),
+            retry_config: HttpRetryConfig::default(),
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Lightweight connectivity probe for self-check.

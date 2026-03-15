@@ -4,9 +4,11 @@
 //! Handles OData pagination via `@odata.nextLink`.
 
 use std::fmt;
+use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -63,6 +65,8 @@ pub struct M365Client {
     auth: M365Auth,
     api_url: String,
     max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl M365Client {
@@ -83,7 +87,19 @@ impl M365Client {
             auth,
             api_url: DEFAULT_API_URL.to_string(),
             max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Trigger graceful shutdown.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Set a custom API URL (for testing).

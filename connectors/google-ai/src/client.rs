@@ -6,8 +6,10 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use parking_lot::Mutex;
 use reqwest::{Client, StatusCode, Url};
 use tracing::{debug, warn};
@@ -68,6 +70,8 @@ pub struct GoogleAiClient {
     auth: GoogleAiAuth,
     max_retries: u32,
     usage: Arc<Mutex<UsageCounters>>,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl GoogleAiClient {
@@ -89,6 +93,13 @@ impl GoogleAiClient {
             auth,
             max_retries: 2,
             usage: Arc::new(Mutex::new(UsageCounters::default())),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -163,6 +174,11 @@ impl GoogleAiClient {
     #[must_use]
     pub fn get_usage(&self) -> UsageCounters {
         self.usage.lock().clone()
+    }
+
+    /// Trigger graceful shutdown of request contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     // ── Generate Content ──────────────────────────────────────────

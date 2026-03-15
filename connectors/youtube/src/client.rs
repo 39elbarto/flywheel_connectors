@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
 use fcp_google_discovery::executor::{
@@ -10,6 +11,7 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, StatusCode, Url, header};
 use tracing::{debug, warn};
 
@@ -74,6 +76,8 @@ pub struct YouTubeClient {
     auth: YouTubeAuth,
     base_url: String,
     max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl YouTubeClient {
@@ -93,12 +97,22 @@ impl YouTubeClient {
             .build()
             .map_err(YouTubeError::Http)?;
 
+        let request_timeout = Duration::from_secs(30);
         Ok(Self {
             executor: GoogleRestExecutor::new().with_client(http),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
+            ),
+            retry_config: HttpRetryConfig::default(),
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get the auth mode.

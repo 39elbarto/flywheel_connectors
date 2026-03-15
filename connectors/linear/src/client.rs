@@ -1,10 +1,14 @@
 //! Linear GraphQL API client.
 
 use std::fmt;
+use std::time::Duration;
 
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, header};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{LinearError, LinearResult},
@@ -57,7 +61,8 @@ pub struct LinearClient {
     http: Client,
     auth: LinearAuth,
     api_url: String,
-    max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl LinearClient {
@@ -78,7 +83,13 @@ impl LinearClient {
             http,
             auth,
             api_url: DEFAULT_API_URL.to_string(),
-            max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -92,8 +103,13 @@ impl LinearClient {
     /// Set the maximum number of retries.
     #[must_use]
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
+        self.retry_config.max_retries = max_retries;
         self
+    }
+
+    /// Trigger graceful shutdown of request contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Get the auth mode.
@@ -416,100 +432,97 @@ impl LinearClient {
             query: query.to_string(),
             variables,
         };
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        let mut last_err = None;
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let request = &request;
+            async move {
+                debug!(attempt, api_url = %self.api_url, "GraphQL request");
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
+                let builder = self
+                    .http
+                    .post(&self.api_url)
+                    .header(header::CONTENT_TYPE, "application/json");
+                let builder = self.apply_auth(builder);
 
-            debug!("GraphQL request to {}", self.api_url);
+                match builder.json(request).send().await {
+                    Ok(response) => {
+                        let status = response.status();
 
-            let builder = self
-                .http
-                .post(&self.api_url)
-                .header(header::CONTENT_TYPE, "application/json");
-            let builder = self.apply_auth(builder);
-            let result = builder.json(&request).send().await;
-
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(LinearError::Unauthorized);
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let err = LinearError::RateLimited {
-                            retry_after_ms: 60_000,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, "rate limited, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                            return AttemptOutcome::Terminal(LinearError::Unauthorized);
                         }
-                        return Err(err);
-                    }
 
-                    if status.is_server_error() {
-                        let err = LinearError::Api {
-                            message: format!("Server error: {status}"),
-                            status_code: Some(status.as_u16()),
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, status = %status, "server error, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            return AttemptOutcome::Retryable {
+                                error: LinearError::RateLimited {
+                                    retry_after_ms: 60_000,
+                                },
+                                retry_after: Some(Duration::from_secs(60)),
+                            };
                         }
-                        return Err(err);
-                    }
 
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(LinearError::Api {
-                            message: format!("HTTP {status}: {body}"),
-                            status_code: Some(status.as_u16()),
-                        });
-                    }
+                        if status.is_server_error() {
+                            return AttemptOutcome::Retryable {
+                                error: LinearError::Api {
+                                    message: format!("Server error: {status}"),
+                                    status_code: Some(status.as_u16()),
+                                },
+                                retry_after: None,
+                            };
+                        }
 
-                    let body = response.text().await.map_err(LinearError::Http)?;
-                    let gql_response: GraphQLResponse = serde_json::from_str(&body)?;
+                        match response.text().await {
+                            Ok(body) if !status.is_success() => {
+                                AttemptOutcome::Terminal(LinearError::Api {
+                                    message: format!("HTTP {status}: {body}"),
+                                    status_code: Some(status.as_u16()),
+                                })
+                            }
+                            Ok(body) => match serde_json::from_str::<GraphQLResponse>(&body) {
+                                Ok(gql_response) => {
+                                    if let Some(errors) = gql_response.errors {
+                                        if !errors.is_empty() {
+                                            let messages: Vec<&str> =
+                                                errors.iter().map(|e| e.message.as_str()).collect();
+                                            return AttemptOutcome::Terminal(LinearError::Api {
+                                                message: messages.join("; "),
+                                                status_code: None,
+                                            });
+                                        }
+                                    }
 
-                    if let Some(errors) = gql_response.errors {
-                        if !errors.is_empty() {
-                            let messages: Vec<&str> =
-                                errors.iter().map(|e| e.message.as_str()).collect();
-                            return Err(LinearError::Api {
-                                message: messages.join("; "),
-                                status_code: None,
-                            });
+                                    match gql_response.data {
+                                        Some(data) => AttemptOutcome::Success(data),
+                                        None => AttemptOutcome::Terminal(LinearError::Api {
+                                            message: "Empty response data".into(),
+                                            status_code: None,
+                                        }),
+                                    }
+                                }
+                                Err(error) => AttemptOutcome::Terminal(LinearError::Json(error)),
+                            },
+                            Err(error) if error.is_timeout() || error.is_connect() => {
+                                AttemptOutcome::Retryable {
+                                    error: LinearError::Http(error),
+                                    retry_after: None,
+                                }
+                            }
+                            Err(error) => AttemptOutcome::Terminal(LinearError::Http(error)),
                         }
                     }
-
-                    return gql_response.data.ok_or(LinearError::Api {
-                        message: "Empty response data".into(),
-                        status_code: None,
-                    });
+                    Err(error) if error.is_timeout() || error.is_connect() => {
+                        AttemptOutcome::Retryable {
+                            error: LinearError::Http(error),
+                            retry_after: None,
+                        }
+                    }
+                    Err(error) => AttemptOutcome::Terminal(LinearError::Http(error)),
                 }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(LinearError::Http(e));
-                        continue;
-                    }
-                    return Err(LinearError::Http(e));
-                }
             }
-        }
-
-        Err(last_err.unwrap_or(LinearError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-        }))
+        })
+        .await
     }
 }
 

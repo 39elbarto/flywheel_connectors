@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode, Url, header, redirect::Policy};
 use tracing::{instrument, warn};
 
@@ -73,6 +74,8 @@ pub struct AirtableClient {
     initial_delay_ms: u64,
     max_delay_ms: u64,
     total_requests: AtomicU64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for AirtableClient {
@@ -107,7 +110,20 @@ impl AirtableClient {
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
             total_requests: AtomicU64::new(0),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// Set the base URL (for testing).

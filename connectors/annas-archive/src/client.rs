@@ -1,6 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -16,6 +17,8 @@ pub const DEFAULT_BASE_URL: &str = "https://annas-archive.org";
 pub struct AnnasArchiveClient {
     client: Client,
     base_url: String,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for AnnasArchiveClient {
@@ -40,7 +43,20 @@ impl AnnasArchiveClient {
                 .unwrap_or(DEFAULT_BASE_URL)
                 .trim_end_matches('/')
                 .to_string(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default()
+                    .with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
         })
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     async fn handle_response(&self, resp: Response) -> AnnasArchiveResult<serde_json::Value> {

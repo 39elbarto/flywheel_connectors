@@ -1,8 +1,13 @@
 //! Notion REST API client.
 
+use std::time::Duration;
+
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, header};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{NotionError, NotionResult},
@@ -49,7 +54,8 @@ impl NotionAuth {
 pub struct NotionClient {
     http: Client,
     api_url: String,
-    max_retries: u32,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     auth: NotionAuth,
 }
 
@@ -103,7 +109,13 @@ impl NotionClient {
         Ok(Self {
             http,
             api_url: DEFAULT_API_URL.to_string(),
-            max_retries: 2,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
             auth,
         })
     }
@@ -126,8 +138,13 @@ impl NotionClient {
     /// Set the maximum number of retries.
     #[must_use]
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
+        self.retry_config.max_retries = max_retries;
         self
+    }
+
+    /// Trigger graceful shutdown of request contexts.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     // ── Page operations ───────────────────────────────────────────
@@ -315,95 +332,96 @@ impl NotionClient {
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> NotionResult<serde_json::Value> {
-        let mut last_err = None;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let request = build_request();
+            async move {
+                debug!(attempt, "Notion API request");
 
-            let result = build_request().send().await;
+                match request.send().await {
+                    Ok(response) => {
+                        let status = response.status();
 
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-
-                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                        return Err(NotionError::Unauthorized);
-                    }
-
-                    if status == StatusCode::NOT_FOUND {
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(NotionError::NotFound { resource: body });
-                    }
-
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .map_or(60_000, |s| s * 1000);
-
-                        let err = NotionError::RateLimited {
-                            retry_after_ms: retry_after,
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, "rate limited, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                            return AttemptOutcome::Terminal(NotionError::Unauthorized);
                         }
-                        return Err(err);
-                    }
 
-                    if status.is_server_error() {
-                        let body = response.text().await.unwrap_or_default();
-                        let err = NotionError::Api {
-                            message: format!("Server error {status}: {body}"),
-                            status_code: Some(status.as_u16()),
-                        };
-                        if attempt < self.max_retries {
-                            warn!(attempt, status = %status, "server error, will retry");
-                            last_err = Some(err);
-                            continue;
+                        if status == StatusCode::NOT_FOUND {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Terminal(NotionError::NotFound {
+                                resource: body,
+                            });
                         }
-                        return Err(err);
-                    }
 
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
-                        let message = api_err
-                            .as_ref()
-                            .and_then(|e| e.message.clone())
-                            .unwrap_or(format!("HTTP {status}: {body}"));
-                        return Err(NotionError::Api {
-                            message,
-                            status_code: Some(status.as_u16()),
-                        });
-                    }
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after_secs = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<u64>().ok());
+                            let retry_after = retry_after_secs
+                                .map_or(Duration::from_secs(60), Duration::from_secs);
 
-                    let body = response.text().await.map_err(NotionError::Http)?;
-                    let data: serde_json::Value = serde_json::from_str(&body)?;
-                    return Ok(data);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(NotionError::Http(e));
-                        continue;
+                            return AttemptOutcome::Retryable {
+                                error: NotionError::RateLimited {
+                                    retry_after_ms: retry_after.as_millis() as u64,
+                                },
+                                retry_after: Some(retry_after),
+                            };
+                        }
+
+                        if status.is_server_error() {
+                            let body = response.text().await.unwrap_or_default();
+                            return AttemptOutcome::Retryable {
+                                error: NotionError::Api {
+                                    message: format!("Server error {status}: {body}"),
+                                    status_code: Some(status.as_u16()),
+                                },
+                                retry_after: None,
+                            };
+                        }
+
+                        if !status.is_success() {
+                            let body = response.text().await.unwrap_or_default();
+                            let api_err: Option<ApiErrorResponse> =
+                                serde_json::from_str(&body).ok();
+                            let message = api_err
+                                .as_ref()
+                                .and_then(|e| e.message.clone())
+                                .unwrap_or(format!("HTTP {status}: {body}"));
+                            return AttemptOutcome::Terminal(NotionError::Api {
+                                message,
+                                status_code: Some(status.as_u16()),
+                            });
+                        }
+
+                        match response.text().await {
+                            Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+                                Ok(data) => AttemptOutcome::Success(data),
+                                Err(error) => AttemptOutcome::Terminal(NotionError::Json(error)),
+                            },
+                            Err(error) if error.is_timeout() || error.is_connect() => {
+                                AttemptOutcome::Retryable {
+                                    error: NotionError::Http(error),
+                                    retry_after: None,
+                                }
+                            }
+                            Err(error) => AttemptOutcome::Terminal(NotionError::Http(error)),
+                        }
                     }
-                    return Err(NotionError::Http(e));
+                    Err(error) if error.is_timeout() || error.is_connect() => {
+                        AttemptOutcome::Retryable {
+                            error: NotionError::Http(error),
+                            retry_after: None,
+                        }
+                    }
+                    Err(error) => AttemptOutcome::Terminal(NotionError::Http(error)),
                 }
             }
-        }
-
-        Err(last_err.unwrap_or(NotionError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-        }))
+        })
+        .await
     }
 }
 

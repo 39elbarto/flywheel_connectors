@@ -5,8 +5,10 @@
 //! layer, analogous to an HTTP client in other connectors.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use chrono::Utc;
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use uuid::Uuid;
 
 use crate::{
@@ -15,17 +17,40 @@ use crate::{
 };
 
 /// In-memory store for cron schedules and execution history.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CronStore {
     schedules: HashMap<String, Schedule>,
     executions: Vec<Execution>,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
+}
+
+impl Default for CronStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CronStore {
     /// Create a new empty store.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            schedules: HashMap::new(),
+            executions: Vec::new(),
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: 2,
+                ..HttpRetryConfig::default()
+            },
+        }
+    }
+
+    /// Shut down the connector runtime.
+    pub fn shutdown(&self) {
+        self.runtime.shutdown();
     }
 
     /// List all schedules.

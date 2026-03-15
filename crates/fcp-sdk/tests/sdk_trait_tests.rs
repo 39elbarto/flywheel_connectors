@@ -845,12 +845,12 @@ fn test_connector_metrics_structure() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_rate_limits_default_is_empty_and_valid() {
+fn test_rate_limits_default_is_unknown() {
     let connector = MinimalConnector::new();
-    let decls = connector.rate_limits();
-
-    assert!(decls.is_empty());
-    assert!(decls.validate().is_ok());
+    assert!(
+        connector.rate_limits().is_none(),
+        "default FcpConnector::rate_limits() must preserve unknown/undeclared state"
+    );
 }
 
 #[test]

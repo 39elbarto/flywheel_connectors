@@ -5,7 +5,7 @@
 //! - Tool-to-pool mapping invariants
 //! - Basic config sanity checks
 //! - Enum serialization for scope/enforcement/unit
-//! - Connector `rate_limits()` default + override behavior
+//! - Connector `rate_limits()` unknown-default + explicit override behavior
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -336,8 +336,8 @@ impl FcpConnector for RateLimitedConnector {
         }
     }
 
-    fn rate_limits(&self) -> RateLimitDeclarations {
-        self.declarations.clone()
+    fn rate_limits(&self) -> Option<RateLimitDeclarations> {
+        Some(self.declarations.clone())
     }
 
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
@@ -354,18 +354,21 @@ impl FcpConnector for RateLimitedConnector {
 }
 
 #[test]
-fn connector_rate_limits_default_empty() {
+fn connector_rate_limits_default_is_unknown() {
     let connector = MinimalConnector::new();
-    let decls = connector.rate_limits();
-    assert!(decls.limits.is_empty());
-    assert!(decls.tool_pool_map.is_empty());
+    assert!(
+        connector.rate_limits().is_none(),
+        "default connector rate limits must remain unknown until explicitly declared"
+    );
 }
 
 #[test]
 fn connector_rate_limits_override_valid() {
     let decls = sample_declarations();
     let connector = RateLimitedConnector::new(decls.clone());
-    let returned = connector.rate_limits();
+    let returned = connector
+        .rate_limits()
+        .expect("connector should surface explicit rate-limit declarations");
     validate_declarations(&returned).expect("declarations should validate");
 
     let value = serde_json::to_value(&decls).unwrap();

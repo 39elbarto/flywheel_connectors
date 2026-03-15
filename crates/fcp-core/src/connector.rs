@@ -57,9 +57,9 @@ pub trait FcpConnector: Send + Sync {
 
     /// Declare connector rate limits for planning and observability.
     ///
-    /// Default: no limits declared.
-    fn rate_limits(&self) -> RateLimitDeclarations {
-        RateLimitDeclarations::default()
+    /// Default: the connector did not declare rate limits through this surface.
+    fn rate_limits(&self) -> Option<RateLimitDeclarations> {
+        None
     }
 
     /// Invoke an operation.

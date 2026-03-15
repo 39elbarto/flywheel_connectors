@@ -2400,6 +2400,10 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
             include_token_stats,
             &RenderOptions::default(),
         ),
+        Err(PrepareCliError::PlainText(text)) => Ok(ExecutionOutcome {
+            text,
+            exit_code: ExitCode::SUCCESS,
+        }),
     }
 }
 
@@ -21264,6 +21268,8 @@ struct PreparedCli {
 enum PrepareCliError {
     Clap(clap::Error),
     Structured(DispatchOutcome),
+    /// Plain text output that bypasses the TOON renderer (used for quickstart guide).
+    PlainText(String),
 }
 
 // Reserved variants keep the exit-code contract stable as host-backed errors land.
@@ -21369,10 +21375,7 @@ fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, Pre
                 .skip(1)
                 .all(|a| a.starts_with('-')))
     {
-        return Err(PrepareCliError::Structured(quickstart_dispatch(
-            received_args,
-            &normalized.args,
-        )));
+        return Err(PrepareCliError::PlainText(quickstart_text()));
     }
 
     match Cli::try_parse_from(&normalized.args) {
@@ -21916,34 +21919,22 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                 );
             }
 
-            DispatchOutcome {
-                payload: json!({
-                    "status": "ok",
-                    "command": "quickstart",
-                    "message": "Flywheel Connector Console — agent-first CLI for 84+ connectors.",
-                    "quickstart": {
-                        "discover": [
-                            {"command": "fwc list --offline", "purpose": "List all connectors with health and lifecycle signals"},
-                            {"command": "fwc search '<query>' --offline", "purpose": "Fuzzy-search operations across all connectors"},
-                            {"command": "fwc show <connector> --offline", "purpose": "Deep dive: zones, capabilities, rate limits, operations"},
-                            {"command": "fwc ops <connector> --offline", "purpose": "List operations with risk levels and idempotency"},
-                            {"command": "fwc schema <connector> <operation> --offline", "purpose": "Show input/output JSON schema for one operation"},
-                        ],
-                        "work": [
-                            {"command": "fwc guide", "purpose": "Full command taxonomy and progressive-disclosure contract"},
-                            {"command": "fwc auth add <connector> --token <token>", "purpose": "Store credentials for a connector"},
-                            {"command": "fwc simulate <connector> <operation> --file payload.json", "purpose": "Dry-run an operation without side effects"},
-                            {"command": "fwc invoke <connector> <operation> --file payload.json", "purpose": "Execute an operation for real"},
-                        ],
-                        "intent": [
-                            {"command": "fwc plan '<goal>'", "purpose": "Compile a natural-language goal into exact fwc steps"},
-                            {"command": "fwc task '<intent>'", "purpose": "Create a durable workflow capsule from intent"},
-                        ],
-                    },
-                    "tip": "Most commands need --offline without a running fcp-host. Use --json for full-fidelity structured output.",
-                }),
-                exit_code: CliExitCode::Success,
-            }
+            structured_error(
+                "missing-command",
+                "No `fwc` command was provided.",
+                CliExitCode::Parse,
+                true,
+                args,
+                &normalized_args,
+                ErrorDetails {
+                    did_you_mean: Vec::new(),
+                    examples: vec!["fwc guide".to_owned(), "fwc list".to_owned()],
+                    next_actions: vec![
+                        "Run `fwc guide` to inspect the command taxonomy.".to_owned(),
+                        "Run `fwc list` if you want to start from connector discovery.".to_owned(),
+                    ],
+                },
+            )
         }
         ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument => match command {
             Some("auth") => unknown_subcommand_dispatch(
@@ -22265,44 +22256,35 @@ fn structured_error(
     }
 }
 
-fn quickstart_dispatch(received_args: &[String], normalized_args: &[String]) -> DispatchOutcome {
-    let received_args = redact_sensitive_args(received_args);
-    let normalized_args = redact_sensitive_args(normalized_args);
-    DispatchOutcome {
-        payload: json!({
-            "status": "ok",
-            "command": "quickstart",
-            "message": "Flywheel Connector Console (fwc) — agent-first CLI for 84+ connectors.",
-            "quickstart": {
-                "discover": [
-                    {"run": "fwc list --offline", "does": "List all connectors with health and lifecycle signals"},
-                    {"run": "fwc search '<query>' --offline", "does": "Fuzzy-search operations across all connectors"},
-                    {"run": "fwc show <connector> --offline", "does": "Deep dive: zones, capabilities, rate limits, operations"},
-                    {"run": "fwc ops <connector> --offline", "does": "List operations with risk, safety tier, idempotency"},
-                    {"run": "fwc schema <connector> <op> --offline", "does": "Input/output JSON schema for one operation"},
-                ],
-                "execute": [
-                    {"run": "fwc auth add <connector> --token <tok>", "does": "Store credentials for a connector"},
-                    {"run": "fwc simulate <connector> <op> --file p.json", "does": "Dry-run without side effects"},
-                    {"run": "fwc invoke <connector> <op> --file p.json", "does": "Execute for real"},
-                ],
-                "intent": [
-                    {"run": "fwc plan '<goal>'", "does": "Compile natural-language goal into fwc steps"},
-                    {"run": "fwc task '<intent>'", "does": "Create a durable, resumable workflow capsule"},
-                ],
-                "learn_more": [
-                    {"run": "fwc guide", "does": "Full command taxonomy and progressive-disclosure contract"},
-                    {"run": "fwc --help", "does": "Complete argument reference"},
-                ],
-            },
-            "tip": "Most discovery commands need --offline without a running fcp-host. Use --json for structured output.",
-            "input": {
-                "received": received_args,
-                "normalized": normalized_args,
-            },
-        }),
-        exit_code: CliExitCode::Success,
-    }
+fn quickstart_text() -> String {
+    "\
+fwc — Flywheel Connector Console
+
+  Agent-first CLI for 84+ connectors. TOON output by default.
+
+Discover:
+  fwc list --offline                          List all connectors
+  fwc search '<query>' --offline              Fuzzy-search operations
+  fwc show <connector> --offline              Zones, caps, rate limits, operations
+  fwc ops <connector> --offline               Operations with risk and idempotency
+  fwc schema <connector> <op> --offline       Input/output JSON schema
+
+Execute:
+  fwc auth add <connector> --token <tok>      Store credentials
+  fwc simulate <connector> <op> --file p.json Dry-run without side effects
+  fwc invoke <connector> <op> --file p.json   Execute for real
+
+Intent:
+  fwc plan '<goal>'                           Compile goal into fwc steps
+  fwc task '<intent>'                         Create a resumable workflow capsule
+
+Learn more:
+  fwc guide                                   Command taxonomy and contracts
+  fwc --help                                  Full argument reference
+
+Tip: Most commands need --offline without a running fcp-host.
+     Use --json for full-fidelity structured output."
+        .to_owned()
 }
 
 fn parser_summary(error: &clap::Error) -> String {

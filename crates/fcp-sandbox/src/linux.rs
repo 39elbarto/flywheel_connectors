@@ -267,7 +267,7 @@ impl LinuxSandbox {
         filter.push(SockFilter::stmt(0x20, 4));
 
         #[cfg(target_arch = "x86_64")]
-        let expected_arch = 0xC000003E; // AUDIT_ARCH_X86_64
+        let expected_arch = 0xC000_003E; // AUDIT_ARCH_X86_64
         #[cfg(target_arch = "aarch64")]
         let expected_arch = 0xC00000B7; // AUDIT_ARCH_AARCH64
 
@@ -729,7 +729,7 @@ impl Sandbox for LinuxSandbox {
 
                     if ruleset_fd >= 0 {
                         // Add rules
-                        let mut apply_rule = |c_path: &std::ffi::CString, access: u64| {
+                        let apply_rule = |c_path: &std::ffi::CString, access: u64| {
                             let fd = libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
                             if fd >= 0 {
                                 let rule_attr = LandlockPathBeneathAttr {
@@ -1238,7 +1238,7 @@ mod tests {
     fn test_syscall_allowlist_no_network() {
         let sandbox = LinuxSandbox::new();
         let policy = test_policy(); // block_direct_network = true
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
         // Network syscalls should NOT be present when network is blocked
         assert!(!allowed.contains(&syscall_nr::SOCKET));
@@ -1251,7 +1251,7 @@ mod tests {
         let sandbox = LinuxSandbox::new();
         let mut policy = test_policy();
         policy.block_direct_network = false;
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
         // Network syscalls SHOULD be present when network is not blocked
         assert!(allowed.contains(&syscall_nr::SOCKET));
@@ -1263,12 +1263,13 @@ mod tests {
     fn test_syscall_allowlist_deny_exec() {
         let sandbox = LinuxSandbox::new();
         let policy = test_policy(); // deny_exec = true
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
-        // Exec syscalls should NOT be present
+        // Exec syscalls should NOT be present when exec is denied
         assert!(!allowed.contains(&syscall_nr::EXECVE));
         assert!(!allowed.contains(&syscall_nr::FORK));
-        assert!(!allowed.contains(&syscall_nr::CLONE));
+        // CLONE is always allowed (required for threading in Rust/Go async runtimes)
+        assert!(allowed.contains(&syscall_nr::CLONE));
     }
 
     #[test]
@@ -1276,7 +1277,7 @@ mod tests {
         let sandbox = LinuxSandbox::new();
         let mut policy = test_policy();
         policy.deny_exec = false;
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
         assert!(allowed.contains(&syscall_nr::EXECVE));
         assert!(allowed.contains(&syscall_nr::FORK));
@@ -1287,7 +1288,7 @@ mod tests {
     fn test_syscall_allowlist_deny_ptrace() {
         let sandbox = LinuxSandbox::new();
         let policy = test_policy(); // deny_ptrace = true
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
         assert!(!allowed.contains(&syscall_nr::PTRACE));
     }
@@ -1297,7 +1298,7 @@ mod tests {
         let sandbox = LinuxSandbox::new();
         let mut policy = test_policy();
         policy.deny_ptrace = false;
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
         assert!(allowed.contains(&syscall_nr::PTRACE));
     }
@@ -1306,7 +1307,7 @@ mod tests {
     fn test_syscall_allowlist_writable_paths_add_fs_modify() {
         let sandbox = LinuxSandbox::new();
         let policy = test_policy(); // has writable_paths = ["/tmp/test"]
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
         // File modification syscalls should be present
         assert!(allowed.contains(&syscall_nr::MKDIR));
@@ -1319,7 +1320,7 @@ mod tests {
         let sandbox = LinuxSandbox::new();
         let mut policy = test_policy();
         policy.writable_paths = vec![];
-        let allowed = sandbox.build_syscall_allowlist(&policy);
+        let (allowed, _graceful) = sandbox.build_syscall_allowlist(&policy);
 
         assert!(!allowed.contains(&syscall_nr::MKDIR));
         assert!(!allowed.contains(&syscall_nr::UNLINK));

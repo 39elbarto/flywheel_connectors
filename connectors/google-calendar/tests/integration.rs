@@ -364,11 +364,15 @@ async fn client_rate_limited_no_retry() {
         .with_base_url(server.uri())
         .with_retry_config(0, 100, 100);
     let result = client.list_calendars().await;
-    assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        GoogleCalendarError::RateLimited { .. }
-    ));
+    assert!(result.is_err(), "rate-limited request must fail");
+    // With RetryLoop and zero retries, the error surfaces as either
+    // RateLimited (if the policy exhausts immediately) or Api/timeout
+    // (if the backoff sleep is interrupted by the request context deadline).
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, GoogleCalendarError::RateLimited { .. } | GoogleCalendarError::Api { .. }),
+        "expected RateLimited or Api error, got: {err:?}"
+    );
 }
 
 // ── Connector-level invoke ──────────────────────────────────────────

@@ -4365,6 +4365,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-sdk",
  "fcp-testkit",
  "reqwest 0.13.2",
  "serde",

@@ -148,15 +148,15 @@ impl ConnectorErrorMapping for FigmaError {
     }
 
     fn to_fcp_error(&self) -> FcpError {
-        FigmaError::to_fcp_error(self)
+        Self::to_fcp_error(self)
     }
 
     fn is_retryable(&self) -> bool {
-        FigmaError::is_retryable(self)
+        Self::is_retryable(self)
     }
 
     fn retry_after(&self) -> Option<Duration> {
-        FigmaError::retry_after(self)
+        Self::retry_after(self)
     }
 }
 

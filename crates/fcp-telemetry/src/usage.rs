@@ -1502,7 +1502,7 @@ mod tests {
             10,
         );
         let e_private = event_for(
-            ZoneId::work(),
+            ZoneId::private(),
             ConnectorId::from_static("fcp.x:request-response:1"),
             CapabilityId::from_static("fcp.x.read"),
             SafetyTier::Safe,
@@ -2011,7 +2011,11 @@ mod tests {
 
         // Insert in reverse order to verify sorting
         let events = [
-            (ZoneId::work(), "fcp.zzz:request-response:1", "fcp.zzz.write"),
+            (
+                ZoneId::work(),
+                "fcp.zzz:request-response:1",
+                "fcp.zzz.write",
+            ),
             (ZoneId::work(), "fcp.aaa:request-response:1", "fcp.aaa.read"),
             (
                 ZoneId::private(),

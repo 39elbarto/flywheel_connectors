@@ -3185,9 +3185,8 @@ async fn fcp_host_binary_cancel_route_allows_follow_up_invoke_after_cleanup()
     assert_eq!(follow_up_response.status, InvokeStatus::Ok);
     assert_eq!(
         follow_up_response
-            .output
+            .result
             .as_ref()
-            .and_then(|output| output.get("result"))
             .and_then(|result| result.get("echo"))
             .and_then(|echo| echo.get("message"))
             .and_then(Value::as_str),

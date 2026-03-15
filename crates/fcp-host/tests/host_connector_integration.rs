@@ -2,7 +2,7 @@
 //!
 //! Bead: bd-219o
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]
@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use chrono::{TimeZone, Utc};
+use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_core::{
     ApprovalMode, AttestationMaterial, AttestationMetadata, AttestationPredicateType,
@@ -73,6 +73,26 @@ struct ManualRollbackResponse {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CapabilityPreflightVectorTokenMode {
+    Missing,
+    Signed,
+}
+
+#[derive(Debug, Deserialize)]
+struct CapabilityPreflightVectorCase {
+    name: String,
+    principal_override: String,
+    token_mode: CapabilityPreflightVectorTokenMode,
+    signing_key_hex: Option<String>,
+    token_principal: Option<String>,
+    not_before_offset_secs: Option<i64>,
+    expires_offset_secs: Option<i64>,
+    expected_allowed: bool,
+    expected_reason_contains: Option<String>,
+}
+
 fn test_time() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 3, 7, 12, 0, 0).unwrap()
 }
@@ -80,6 +100,8 @@ fn test_time() -> chrono::DateTime<Utc> {
 const TEST_PRINCIPAL: &str = "agent:test";
 const TEST_OPERATION: &str = "test.echo";
 const TEST_CAPABILITY_ID: &str = "cap.test.echo";
+const TRUSTED_CAPABILITY_SIGNING_KEY_HEX: &str =
+    "1111111111111111111111111111111111111111111111111111111111111111";
 
 fn valid_digest() -> String {
     format!("blake3-256:{}", "a".repeat(64))
@@ -360,6 +382,14 @@ fn capability_public_key_hex(signing_key: &Ed25519SigningKey) -> String {
     hex::encode(signing_key.verifying_key().to_bytes())
 }
 
+fn signing_key_from_hex(hex_key: &str) -> Ed25519SigningKey {
+    let bytes = hex::decode(hex_key).expect("signing key hex must decode");
+    let key_bytes: [u8; 32] = bytes
+        .try_into()
+        .expect("signing key hex must decode to 32 bytes");
+    Ed25519SigningKey::from_bytes(&key_bytes).expect("signing key bytes must be valid")
+}
+
 fn build_live_capability_token(
     signing_key: &Ed25519SigningKey,
     capability_id: &str,
@@ -375,6 +405,27 @@ fn build_live_capability_token(
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
+        .sign(signing_key)
+        .expect("capability token signing should succeed");
+    CapabilityToken { raw }
+}
+
+fn build_live_capability_token_with_validity(
+    signing_key: &Ed25519SigningKey,
+    capability_id: &str,
+    principal: &str,
+    operation: &str,
+    zone_id: &ZoneId,
+    not_before: chrono::DateTime<Utc>,
+    expires: chrono::DateTime<Utc>,
+) -> CapabilityToken {
+    let raw = CapabilityTokenBuilder::new()
+        .capability_id(capability_id)
+        .zone_id(zone_id.as_str())
+        .principal(principal)
+        .operations(&[operation])
+        .issuer("node:test")
+        .validity(not_before, expires)
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken { raw }
@@ -425,6 +476,23 @@ fn build_host_preflight_request(
         zone_id: Some(request.zone_id.clone()),
         capability_token: Some(request.capability_token.clone()),
         approval_tokens: request.approval_tokens.clone(),
+    }
+}
+
+fn build_vector_preflight_request(
+    connector_id: ConnectorId,
+    principal_override: &str,
+    capability_token: Option<CapabilityToken>,
+) -> HostPreflightRequest {
+    HostPreflightRequest {
+        request_id: RequestId::random(),
+        connector_id,
+        operation: TEST_OPERATION.to_string(),
+        params: Some(json!({ "message": "hello" })),
+        principal: Some(principal_override.to_owned()),
+        zone_id: Some(ZoneId::work()),
+        capability_token,
+        approval_tokens: Vec::new(),
     }
 }
 
@@ -2317,6 +2385,112 @@ async fn fcp_host_binary_preflight_route_denies_missing_capability_token()
             .as_deref()
             .is_some_and(|reason| reason.contains("capability token is required"))
     );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_preflight_route_matches_capability_verification_vectors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.preflight-vectors:utility:1.0.0");
+    let trusted_signing_key = signing_key_from_hex(TRUSTED_CAPABILITY_SIGNING_KEY_HEX);
+    let capability_public_key = capability_public_key_hex(&trusted_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Preflight Vector Auth",
+            &["test", "auth", "vectors"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let cases: Vec<CapabilityPreflightVectorCase> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/host/capability_verification.json"
+    )))
+    .expect("capability verification vectors should parse");
+    let mut seen_names = HashSet::new();
+    for case in &cases {
+        assert!(
+            seen_names.insert(case.name.clone()),
+            "duplicate capability vector name: {}",
+            case.name
+        );
+    }
+
+    let now = Utc::now();
+    for case in cases {
+        let capability_token = match case.token_mode {
+            CapabilityPreflightVectorTokenMode::Missing => None,
+            CapabilityPreflightVectorTokenMode::Signed => {
+                let signing_key = signing_key_from_hex(
+                    case.signing_key_hex
+                        .as_deref()
+                        .expect("signed vectors require a signing key"),
+                );
+                let not_before = now
+                    + ChronoDuration::seconds(
+                        case.not_before_offset_secs
+                            .expect("signed vectors require not_before_offset_secs"),
+                    );
+                let expires = now
+                    + ChronoDuration::seconds(
+                        case.expires_offset_secs
+                            .expect("signed vectors require expires_offset_secs"),
+                    );
+                Some(build_live_capability_token_with_validity(
+                    &signing_key,
+                    TEST_CAPABILITY_ID,
+                    case.token_principal
+                        .as_deref()
+                        .expect("signed vectors require token_principal"),
+                    TEST_OPERATION,
+                    &ZoneId::work(),
+                    not_before,
+                    expires,
+                ))
+            }
+        };
+
+        let response: PreflightResponse = http_post_json(
+            host.client.clone(),
+            url("/rpc/preflight"),
+            build_vector_preflight_request(
+                connector_id.clone(),
+                &case.principal_override,
+                capability_token,
+            ),
+        )
+        .await?;
+
+        assert_eq!(
+            response.allowed, case.expected_allowed,
+            "vector case `{}` had unexpected allow/deny result: {response:?}",
+            case.name
+        );
+        match case.expected_reason_contains {
+            Some(fragment) => assert!(
+                response
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(&fragment)),
+                "vector case `{}` expected reason containing `{fragment}`, got {:?}",
+                case.name,
+                response.reason
+            ),
+            None => assert!(
+                response.reason.is_none(),
+                "vector case `{}` unexpectedly returned denial reason {:?}",
+                case.name,
+                response.reason
+            ),
+        }
+    }
 
     Ok(())
 }

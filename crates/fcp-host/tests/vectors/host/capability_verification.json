@@ -1,0 +1,68 @@
+[
+  {
+    "name": "valid_token",
+    "principal_override": "agent:test",
+    "token_mode": "signed",
+    "signing_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "token_principal": "agent:test",
+    "not_before_offset_secs": -3600,
+    "expires_offset_secs": 3600,
+    "expected_allowed": true,
+    "expected_reason_contains": null
+  },
+  {
+    "name": "missing_token",
+    "principal_override": "agent:test",
+    "token_mode": "missing",
+    "signing_key_hex": null,
+    "token_principal": null,
+    "not_before_offset_secs": null,
+    "expires_offset_secs": null,
+    "expected_allowed": false,
+    "expected_reason_contains": "capability token is required"
+  },
+  {
+    "name": "invalid_signature",
+    "principal_override": "agent:test",
+    "token_mode": "signed",
+    "signing_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+    "token_principal": "agent:test",
+    "not_before_offset_secs": -3600,
+    "expires_offset_secs": 3600,
+    "expected_allowed": false,
+    "expected_reason_contains": "capability token rejected"
+  },
+  {
+    "name": "expired_token",
+    "principal_override": "agent:test",
+    "token_mode": "signed",
+    "signing_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "token_principal": "agent:test",
+    "not_before_offset_secs": -7200,
+    "expires_offset_secs": -3600,
+    "expected_allowed": false,
+    "expected_reason_contains": "token expired"
+  },
+  {
+    "name": "not_yet_valid_token",
+    "principal_override": "agent:test",
+    "token_mode": "signed",
+    "signing_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "token_principal": "agent:test",
+    "not_before_offset_secs": 3600,
+    "expires_offset_secs": 7200,
+    "expected_allowed": false,
+    "expected_reason_contains": "token not yet valid"
+  },
+  {
+    "name": "principal_mismatch",
+    "principal_override": "agent:test",
+    "token_mode": "signed",
+    "signing_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "token_principal": "agent:other",
+    "not_before_offset_secs": -3600,
+    "expires_offset_secs": 3600,
+    "expected_allowed": false,
+    "expected_reason_contains": "does not match capability token subject/principal_id"
+  }
+]

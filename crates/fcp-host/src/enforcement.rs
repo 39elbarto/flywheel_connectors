@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! The pipeline comprises 9 concrete checks executed in sequence:
+//! The pipeline comprises 10 concrete checks executed in sequence:
 //! 1. Canonical decode — validates request has required non-empty fields
 //! 2. Zone membership — validates principal is allowed in the zone
 //! 3. Capability verify — validates capability claims cover the operation
@@ -15,7 +15,8 @@
 //! 6. Taint approval — validates critical taints have approval tokens
 //! 7. Policy ceiling — validates zone policy permits connector/operation
 //! 8. Connector manifest — validates manifest includes the operation
-//! 9. Rate limit — validates request is within rate quota
+//! 9. Budget — validates request is within the current usage budget
+//! 10. Rate limit — validates request is within rate quota
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -768,6 +769,28 @@ impl EnforcementCheck for RateLimitCheck {
     }
 }
 
+/// Validates that the request is within the current usage budget.
+pub struct BudgetCheck;
+
+impl EnforcementCheck for BudgetCheck {
+    fn name(&self) -> &'static str {
+        "budget"
+    }
+
+    fn check(&self, ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
+        match (ctx.budget_used, ctx.budget_limit) {
+            (None, _) | (_, None) => CheckOutcome::Skip {
+                reason: "budget data not available".into(),
+            },
+            (Some(used), Some(limit)) if used < limit => CheckOutcome::Allow,
+            (Some(used), Some(limit)) => CheckOutcome::Deny {
+                reason_code: "BUDGET_EXCEEDED".into(),
+                explanation: format!("budget used {used} has reached limit {limit}"),
+            },
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Enforcement pipeline
 // ─────────────────────────────────────────────────────────────────────────────
@@ -782,7 +805,7 @@ pub struct EnforcementPipeline {
 }
 
 impl EnforcementPipeline {
-    /// Create a pipeline with the default 9 checks and default config.
+    /// Create a pipeline with the default 10 checks and default config.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -884,7 +907,7 @@ impl EnforcementPipeline {
         }
     }
 
-    /// The default set of 9 checks in canonical order.
+    /// The default set of 10 checks in canonical order.
     fn default_checks() -> Vec<Box<dyn EnforcementCheck>> {
         vec![
             Box::new(CanonicalDecodeCheck),
@@ -895,6 +918,7 @@ impl EnforcementPipeline {
             Box::new(TaintApprovalCheck),
             Box::new(PolicyCeilingCheck),
             Box::new(ConnectorManifestCheck),
+            Box::new(BudgetCheck),
             Box::new(RateLimitCheck),
         ]
     }
@@ -2031,6 +2055,84 @@ mod tests {
         assert!(outcome.is_allow());
     }
 
+    // ── BudgetCheck ──
+
+    #[test]
+    fn budget_name() {
+        assert_eq!(BudgetCheck.name(), "budget");
+    }
+
+    #[test]
+    fn budget_allow_under_limit() {
+        let ctx = test_context();
+        let config = EnforcementConfig::default();
+        let outcome = BudgetCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn budget_skip_no_used() {
+        let mut ctx = test_context();
+        ctx.budget_used = None;
+        let config = EnforcementConfig::default();
+        let outcome = BudgetCheck.check(&ctx, &config);
+        assert!(outcome.is_skip());
+    }
+
+    #[test]
+    fn budget_skip_no_limit() {
+        let mut ctx = test_context();
+        ctx.budget_limit = None;
+        let config = EnforcementConfig::default();
+        let outcome = BudgetCheck.check(&ctx, &config);
+        assert!(outcome.is_skip());
+    }
+
+    #[test]
+    fn budget_deny_at_limit() {
+        let mut ctx = test_context();
+        ctx.budget_used = Some(1000);
+        ctx.budget_limit = Some(1000);
+        let config = EnforcementConfig::default();
+        let outcome = BudgetCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "BUDGET_EXCEEDED");
+        }
+    }
+
+    #[test]
+    fn budget_deny_over_limit() {
+        let mut ctx = test_context();
+        ctx.budget_used = Some(1500);
+        ctx.budget_limit = Some(1000);
+        let config = EnforcementConfig::default();
+        let outcome = BudgetCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+    }
+
+    #[test]
+    fn budget_allow_zero_used() {
+        let mut ctx = test_context();
+        ctx.budget_used = Some(0);
+        ctx.budget_limit = Some(1000);
+        let config = EnforcementConfig::default();
+        let outcome = BudgetCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn budget_deny_explanation_includes_numbers() {
+        let mut ctx = test_context();
+        ctx.budget_used = Some(50);
+        ctx.budget_limit = Some(50);
+        let config = EnforcementConfig::default();
+        let outcome = BudgetCheck.check(&ctx, &config);
+        if let CheckOutcome::Deny { explanation, .. } = &outcome {
+            assert!(explanation.contains("50"));
+        }
+    }
+
     // ── RateLimitCheck ──
 
     #[test]
@@ -2122,9 +2224,9 @@ mod tests {
     // ── EnforcementPipeline ──
 
     #[test]
-    fn pipeline_default_has_9_checks() {
+    fn pipeline_default_has_10_checks() {
         let pipeline = EnforcementPipeline::new();
-        assert_eq!(pipeline.check_count(), 9);
+        assert_eq!(pipeline.check_count(), 10);
     }
 
     #[test]
@@ -2139,7 +2241,8 @@ mod tests {
         assert_eq!(names[5], "taint_approval");
         assert_eq!(names[6], "policy_ceiling");
         assert_eq!(names[7], "connector_manifest");
-        assert_eq!(names[8], "rate_limit");
+        assert_eq!(names[8], "budget");
+        assert_eq!(names[9], "rate_limit");
     }
 
     #[test]
@@ -2168,7 +2271,7 @@ mod tests {
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
         assert!(decision.elapsed_ms >= 0.0);
-        assert_eq!(decision.checks_executed(), 9);
+        assert_eq!(decision.checks_executed(), 10);
     }
 
     #[test]
@@ -2262,6 +2365,19 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_evaluate_deny_at_budget() {
+        let pipeline = EnforcementPipeline::new();
+        let mut ctx = test_context();
+        ctx.budget_used = Some(1000);
+        ctx.budget_limit = Some(1000);
+        let decision = pipeline.evaluate(&ctx);
+        assert!(!decision.is_allowed());
+        if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
+            assert_eq!(check_name, "budget");
+        }
+    }
+
+    #[test]
     fn pipeline_evaluate_deny_at_rate_limit() {
         let pipeline = EnforcementPipeline::new();
         let mut ctx = test_context();
@@ -2271,6 +2387,23 @@ mod tests {
         assert!(!decision.is_allowed());
         if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
             assert_eq!(check_name, "rate_limit");
+        }
+    }
+
+    #[test]
+    fn pipeline_deny_budget_before_rate_limit() {
+        let pipeline = EnforcementPipeline::new();
+        let mut ctx = test_context();
+        ctx.budget_used = Some(1000);
+        ctx.budget_limit = Some(1000);
+        ctx.rate_count = Some(100);
+        ctx.rate_limit = Some(100);
+        let decision = pipeline.evaluate(&ctx);
+        assert!(!decision.is_allowed());
+        assert_eq!(decision.checks_executed(), 9);
+        if let PipelineOutcome::Deny { check_name, reason_code, .. } = &decision.outcome {
+            assert_eq!(check_name, "budget");
+            assert_eq!(reason_code, "BUDGET_EXCEEDED");
         }
     }
 
@@ -3397,7 +3530,7 @@ mod tests {
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
-        assert_eq!(decision.checks_executed(), 9);
+        assert_eq!(decision.checks_executed(), 10);
         // With zone membership configured, it should be allow not skip
         let zone_check = &decision.checks_run[1];
         assert_eq!(zone_check.name, "zone_membership");

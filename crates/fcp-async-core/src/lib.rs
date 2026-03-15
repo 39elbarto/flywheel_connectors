@@ -1893,11 +1893,15 @@ pub mod io {
         R: AsyncBufRead + Unpin,
     {
         /// Return the next available line, matching Tokio's `next_line()` shape.
+        ///
+        /// # Errors
+        ///
+        /// Returns any I/O error produced while reading the next buffered line.
         pub async fn next_line(&mut self) -> io::Result<Option<String>> {
-            match self.inner.next().await {
-                Some(result) => result.map(Some),
-                None => Ok(None),
-            }
+            self.inner
+                .next()
+                .await
+                .map_or(Ok(None), |result| result.map(Some))
         }
     }
 
@@ -1989,9 +1993,7 @@ pub mod http {
 pub mod raptorq {
     /// Decoder types for `RaptorQ` symbol reconstruction.
     pub mod decoder {
-        pub use asupersync::raptorq::decoder::{
-            DecodeError, InactivationDecoder, ReceivedSymbol,
-        };
+        pub use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
     }
     /// Systematic encoder for `RaptorQ` symbol generation.
     pub mod systematic {

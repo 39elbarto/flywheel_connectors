@@ -406,9 +406,10 @@ impl DecodeAdmissionController {
         let mut permit = self.acquire()?;
         let mut ordered_symbols: Vec<(u32, Vec<u8>)> = symbols.into_iter().collect();
         ordered_symbols.sort_unstable_by_key(|(esi, _)| *esi);
+        let loop_context = context.clone();
 
         match context
-            .run(async {
+            .run(async move {
                 for (index, (esi, data)) in ordered_symbols.into_iter().enumerate() {
                     permit.try_buffer_symbol(data.len())?;
 
@@ -422,6 +423,13 @@ impl DecodeAdmissionController {
                     }
                 }
 
+                // Give a just-issued cancellation a final chance to win before
+                // reporting an ordinary decode miss.
+                fcp_async_core::task::yield_now().await;
+                if loop_context.is_cancelled() {
+                    return Err(DecodeError::Cancelled);
+                }
+
                 Err(DecodeError::InsufficientSymbols {
                     received: decoder.received_count(),
                     needed: decoder.needed(),
@@ -429,6 +437,9 @@ impl DecodeAdmissionController {
             })
             .await
         {
+            Ok(Err(DecodeError::InsufficientSymbols { .. })) if context.is_cancelled() => {
+                Err(DecodeError::Cancelled)
+            }
             Ok(result) => result,
             Err(error) => Err(Self::map_async_error(error)),
         }

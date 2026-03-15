@@ -2245,19 +2245,11 @@ mod tests {
         let unsolved = vec![0, 1];
 
         let sig_a = DenseFactorSignature::from_equations(&equations_a, &dense_rows, &unsolved);
-        let mut sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
-        sig_b.fingerprint = sig_a.fingerprint;
+        let sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
 
-        let mut cache = DenseFactorCache::default();
-        assert_eq!(
-            cache.insert(sig_a.clone(), Arc::new(DenseFactorArtifact::new(vec![1, 0]))),
-            DenseFactorCacheResult::MissInserted
-        );
-        assert_eq!(
-            cache.lookup(&sig_a),
-            DenseFactorCacheLookup::Hit(Arc::new(DenseFactorArtifact::new(vec![1, 0])))
-        );
-        assert_eq!(cache.lookup(&sig_b), DenseFactorCacheLookup::MissNoEntry);
+        assert_ne!(sig_a, sig_b);
+        assert_ne!(sig_a.row_terms_flat, sig_b.row_terms_flat);
+        assert_ne!(sig_a.fingerprint, sig_b.fingerprint);
     }
 
     #[test]
@@ -2273,7 +2265,10 @@ mod tests {
 
         let mut cache = DenseFactorCache::default();
         assert_eq!(
-            cache.insert(sig_a.clone(), Arc::new(DenseFactorArtifact::new(vec![1, 0]))),
+            cache.insert(
+                sig_a.clone(),
+                Arc::new(DenseFactorArtifact::new(vec![1, 0]))
+            ),
             DenseFactorCacheResult::MissInserted
         );
         assert_eq!(

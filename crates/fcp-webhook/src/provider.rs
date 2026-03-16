@@ -7,11 +7,23 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     DEFAULT_TIMESTAMP_TOLERANCE, HmacSha256Verifier, SignatureVerifier, WebhookError, WebhookEvent,
     WebhookResult,
 };
+
+fn deterministic_event_id(provider: &str, event_type: &str, body: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(provider.as_bytes());
+    hasher.update([0]);
+    hasher.update(event_type.as_bytes());
+    hasher.update([0]);
+    hasher.update(body);
+    let digest = hasher.finalize();
+    format!("{provider}:{}", hex::encode(digest))
+}
 
 /// Webhook provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +103,7 @@ impl GitHubWebhook {
             .get("x-github-delivery")
             .or_else(|| headers.get("X-GitHub-Delivery"))
             .cloned()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .unwrap_or_else(|| deterministic_event_id("github", &event_type, body));
 
         Ok(WebhookEvent::new(delivery_id, event_type, "github")
             .with_default_webhook_taint()
@@ -169,17 +181,16 @@ impl StripeWebhook {
         let payload: Value = serde_json::from_slice(body)?;
 
         // Extract event details
-        let event_id = payload
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-
         let event_type = payload
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
+
+        let event_id = payload.get("id").and_then(Value::as_str).map_or_else(
+            || deterministic_event_id("stripe", &event_type, body),
+            ToString::to_string,
+        );
 
         Ok(WebhookEvent::new(event_id, event_type, "stripe")
             .with_default_webhook_taint()
@@ -214,7 +225,7 @@ impl StripeWebhook {
     /// Validate timestamp is within tolerance.
     fn validate_timestamp(&self, timestamp: i64) -> WebhookResult<()> {
         let now = Utc::now().timestamp();
-        let tolerance = u64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(u64::MAX);
+        let tolerance = self.timestamp_tolerance.as_secs();
 
         if now.abs_diff(timestamp) > tolerance {
             return Err(WebhookError::TimestampValidation {
@@ -273,7 +284,7 @@ impl SlackWebhook {
 
         // Validate timestamp
         let now = Utc::now().timestamp();
-        let tolerance = u64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(u64::MAX);
+        let tolerance = self.timestamp_tolerance.as_secs();
         if now.abs_diff(timestamp) > tolerance {
             return Err(WebhookError::TimestampValidation {
                 reason: "Timestamp outside tolerance".into(),
@@ -294,22 +305,32 @@ impl SlackWebhook {
         let payload: Value = serde_json::from_slice(body)?;
 
         // Extract event details
-        let event_id = payload
-            .get("event_id")
-            .and_then(Value::as_str)
-            .map_or_else(|| uuid::Uuid::new_v4().to_string(), ToString::to_string);
-
-        let event_type = payload
-            .get("type")
-            .or_else(|| payload.get("event").and_then(|e| e.get("type")))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
+        let event_type = Self::event_type(&payload).to_string();
+        let event_id = payload.get("event_id").and_then(Value::as_str).map_or_else(
+            || deterministic_event_id("slack", &event_type, body),
+            ToString::to_string,
+        );
 
         Ok(WebhookEvent::new(event_id, event_type, "slack")
             .with_default_webhook_taint()
             .with_payload(payload)
             .with_headers(headers.clone()))
+    }
+
+    fn event_type(payload: &Value) -> &str {
+        match payload.get("type").and_then(Value::as_str) {
+            Some("event_callback") => payload
+                .get("event")
+                .and_then(|event| event.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            Some(top_level_type) => top_level_type,
+            None => payload
+                .get("event")
+                .and_then(|event| event.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+        }
     }
 }
 
@@ -351,16 +372,19 @@ impl LinearWebhook {
         let payload: Value = serde_json::from_slice(body)?;
 
         // Extract event details
-        let event_id = payload
-            .get("webhookId")
-            .and_then(Value::as_str)
-            .map_or_else(|| uuid::Uuid::new_v4().to_string(), ToString::to_string);
-
         let event_type = payload
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
+
+        let event_id = payload
+            .get("webhookId")
+            .and_then(Value::as_str)
+            .map_or_else(
+                || deterministic_event_id("linear", &event_type, body),
+                ToString::to_string,
+            );
 
         Ok(WebhookEvent::new(event_id, event_type, "linear")
             .with_default_webhook_taint()
@@ -372,7 +396,7 @@ impl LinearWebhook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EventRouter, EventSubscription};
+    use crate::{EventRouter, EventSubscription, WebhookHandler};
     use fcp_core::TaintFlag;
     use wiremock::matchers::{body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -746,7 +770,7 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.provider, "slack");
-        assert_eq!(event.event_type, "event_callback");
+        assert_eq!(event.event_type, "message");
         assert!(
             event
                 .metadata
@@ -807,6 +831,28 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.event_type, "message");
+    }
+
+    #[test]
+    fn test_slack_preserves_top_level_control_event_type() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = br#"{"type":"url_verification","challenge":"abc"}"#;
+
+        let timestamp = Utc::now().timestamp();
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.event_type, "url_verification");
     }
 
     #[test]
@@ -880,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn test_github_auto_generates_delivery_id() {
+    fn test_github_missing_delivery_uses_deterministic_fallback_id() {
         let handler = GitHubWebhook::new("secret");
         let body = br#"{"action": "created"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
@@ -890,11 +936,39 @@ mod tests {
         headers.insert("x-github-event".to_string(), "star".to_string());
         // No x-github-delivery header
 
-        let event = handler.verify_and_parse(&headers, body).unwrap();
-        assert_eq!(event.event_type, "star");
-        // ID should be auto-generated UUID
-        assert!(!event.id.is_empty());
-        assert!(event.id.len() >= 32); // UUID format
+        let first = handler.verify_and_parse(&headers, body).unwrap();
+        let second = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(first.event_type, "star");
+        assert_eq!(first.id, deterministic_event_id("github", "star", body));
+        assert_eq!(first.id, second.id);
+    }
+
+    #[test]
+    fn test_github_missing_delivery_fallback_distinguishes_event_headers() {
+        let handler = GitHubWebhook::new("secret");
+        let body = br#"{"action": "created"}"#;
+        let signature = format!("sha256={}", handler.verifier.compute(body));
+
+        let mut star_headers = HashMap::new();
+        star_headers.insert("x-hub-signature-256".to_string(), signature.clone());
+        star_headers.insert("x-github-event".to_string(), "star".to_string());
+
+        let mut watch_headers = HashMap::new();
+        watch_headers.insert("x-hub-signature-256".to_string(), signature);
+        watch_headers.insert("x-github-event".to_string(), "watch".to_string());
+
+        let star_event = handler.verify_and_parse(&star_headers, body).unwrap();
+        let watch_event = handler.verify_and_parse(&watch_headers, body).unwrap();
+
+        assert_eq!(
+            star_event.id,
+            deterministic_event_id("github", "star", body)
+        );
+        assert_eq!(
+            watch_event.id,
+            deterministic_event_id("github", "watch", body)
+        );
+        assert_ne!(star_event.id, watch_event.id);
     }
 
     #[test]
@@ -939,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn test_linear_auto_generates_webhook_id() {
+    fn test_linear_missing_webhook_id_uses_deterministic_fallback_id() {
         let handler = LinearWebhook::new("secret");
         let body = br#"{"type": "Issue", "action": "update"}"#;
         let signature = handler.verifier.compute(body);
@@ -948,9 +1022,11 @@ mod tests {
         headers.insert("linear-signature".to_string(), signature);
         // No webhookId in payload
 
-        let event = handler.verify_and_parse(&headers, body).unwrap();
-        assert_eq!(event.event_type, "Issue");
-        assert!(!event.id.is_empty());
+        let first = handler.verify_and_parse(&headers, body).unwrap();
+        let second = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(first.event_type, "Issue");
+        assert_eq!(first.id, deterministic_event_id("linear", "Issue", body));
+        assert_eq!(first.id, second.id);
     }
 
     #[test]
@@ -1040,8 +1116,55 @@ mod tests {
         );
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
-        assert_eq!(event.id, "unknown");
+        assert_eq!(event.id, deterministic_event_id("stripe", "unknown", body));
         assert_eq!(event.event_type, "unknown");
+    }
+
+    #[test]
+    fn test_stripe_missing_event_id_uses_deterministic_fallback_without_aliasing_distinct_payloads()
+    {
+        let secret = "secret";
+        let stripe = StripeWebhook::new(secret);
+        let handler = WebhookHandler::new(HmacSha256Verifier::new(secret), "stripe");
+
+        let first_body = br#"{"type":"charge.created","data":{"object":{"amount":1000}}}"#;
+        let second_body = br#"{"type":"charge.created","data":{"object":{"amount":2000}}}"#;
+        let timestamp = Utc::now().timestamp();
+        let verifier = HmacSha256Verifier::new(secret);
+
+        let first_signature = verifier
+            .compute(format!("{timestamp}.{}", String::from_utf8_lossy(first_body)).as_bytes());
+        let second_signature = verifier
+            .compute(format!("{timestamp}.{}", String::from_utf8_lossy(second_body)).as_bytes());
+
+        let mut first_headers = HashMap::new();
+        first_headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp},v1={first_signature}"),
+        );
+
+        let mut second_headers = HashMap::new();
+        second_headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp},v1={second_signature}"),
+        );
+
+        let first_event = stripe.verify_and_parse(&first_headers, first_body).unwrap();
+        let second_event = stripe
+            .verify_and_parse(&second_headers, second_body)
+            .unwrap();
+
+        assert_eq!(
+            first_event.id,
+            deterministic_event_id("stripe", "charge.created", first_body)
+        );
+        assert_eq!(
+            second_event.id,
+            deterministic_event_id("stripe", "charge.created", second_body)
+        );
+        assert_ne!(first_event.id, second_event.id);
+        assert!(handler.claim_event(&first_event.id).is_ok());
+        assert!(handler.claim_event(&second_event.id).is_ok());
     }
 
     #[test]
@@ -1510,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn test_slack_auto_generates_event_id() {
+    fn test_slack_missing_event_id_uses_deterministic_fallback_id() {
         let signing_secret = "test-secret";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"event_callback"}"#; // No event_id field
@@ -1527,9 +1650,10 @@ mod tests {
             timestamp.to_string(),
         );
 
-        let event = handler.verify_and_parse(&headers, body).unwrap();
-        // Auto-generated UUID should be non-empty
-        assert!(!event.id.is_empty());
+        let first = handler.verify_and_parse(&headers, body).unwrap();
+        let second = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(first.id, deterministic_event_id("slack", "unknown", body));
+        assert_eq!(first.id, second.id);
     }
 
     #[test]

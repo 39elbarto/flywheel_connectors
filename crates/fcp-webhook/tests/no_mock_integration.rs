@@ -115,6 +115,43 @@ fn pipeline_github_push_routes_to_ci() {
 }
 
 #[test]
+fn pipeline_github_missing_delivery_keeps_distinct_event_headers_distinct() {
+    let github = GitHubWebhook::new("secret");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "github");
+    let mut router = EventRouter::new();
+    router.subscribe(
+        EventSubscription::for_types(vec!["star".into()]),
+        "star_handler",
+    );
+    router.subscribe(
+        EventSubscription::for_types(vec!["watch".into()]),
+        "watch_handler",
+    );
+
+    let body = br#"{"action":"created"}"#;
+    let sig = format!("sha256={}", HmacSha256Verifier::new("secret").compute(body));
+
+    let mut star_headers = HashMap::new();
+    star_headers.insert("x-hub-signature-256".into(), sig.clone());
+    star_headers.insert("x-github-event".into(), "star".into());
+
+    let mut watch_headers = HashMap::new();
+    watch_headers.insert("x-hub-signature-256".into(), sig);
+    watch_headers.insert("x-github-event".into(), "watch".into());
+
+    let star_event = github.verify_and_parse(&star_headers, body).unwrap();
+    let watch_event = github.verify_and_parse(&watch_headers, body).unwrap();
+
+    assert_eq!(star_event.event_type, "star");
+    assert_eq!(watch_event.event_type, "watch");
+    assert_ne!(star_event.id, watch_event.id);
+    assert_eq!(router.route(&star_event), vec!["star_handler"]);
+    assert_eq!(router.route(&watch_event), vec!["watch_handler"]);
+    assert!(handler.claim_event(&star_event.id).is_ok());
+    assert!(handler.claim_event(&watch_event.id).is_ok());
+}
+
+#[test]
 fn pipeline_stripe_verify_route_with_timestamp() {
     let secret = "whsec_stripe_secret_key";
     let stripe = StripeWebhook::new(secret);
@@ -172,13 +209,55 @@ fn pipeline_slack_verify_route_event_callback() {
 
     let event = slack.verify_and_parse(&headers, body).unwrap();
     assert_eq!(event.id, "Ev_slack_1");
-    // Slack uses top-level "type" first, which is "event_callback"
-    assert_eq!(event.event_type, "event_callback");
+    assert_eq!(event.event_type, "message");
     assert_eq!(event.provider, "slack");
 
-    // event_callback doesn't match "message" or "url_verification"
     let handlers = router.route(&event);
-    assert!(handlers.is_empty());
+    assert_eq!(handlers, vec!["message_handler"]);
+}
+
+#[test]
+fn pipeline_slack_missing_event_id_still_dedups_retries() {
+    let signing_secret = "slack_signing_secret_2026";
+    let slack = SlackWebhook::new(signing_secret);
+    let handler = WebhookHandler::new(
+        HmacSha256Verifier::new(signing_secret),
+        WebhookProvider::Slack.to_string(),
+    );
+    let body = br#"{"type":"url_verification","challenge":"abc"}"#;
+
+    let first_timestamp = Utc::now().timestamp();
+    let first_base = format!("v0:{first_timestamp}:{}", String::from_utf8_lossy(body));
+    let verifier = HmacSha256Verifier::new(signing_secret);
+    let first_signature = verifier.compute(first_base.as_bytes());
+
+    let mut first_headers = HashMap::new();
+    first_headers.insert("x-slack-signature".into(), format!("v0={first_signature}"));
+    first_headers.insert(
+        "x-slack-request-timestamp".into(),
+        first_timestamp.to_string(),
+    );
+
+    let second_timestamp = first_timestamp + 1;
+    let second_base = format!("v0:{second_timestamp}:{}", String::from_utf8_lossy(body));
+    let second_signature = verifier.compute(second_base.as_bytes());
+
+    let mut second_headers = HashMap::new();
+    second_headers.insert("x-slack-signature".into(), format!("v0={second_signature}"));
+    second_headers.insert(
+        "x-slack-request-timestamp".into(),
+        second_timestamp.to_string(),
+    );
+
+    let first_event = slack.verify_and_parse(&first_headers, body).unwrap();
+    let second_event = slack.verify_and_parse(&second_headers, body).unwrap();
+
+    assert_eq!(first_event.id, second_event.id);
+    assert!(handler.claim_event(&first_event.id).is_ok());
+    assert!(matches!(
+        handler.claim_event(&second_event.id),
+        Err(WebhookError::ReplayDetected { .. })
+    ));
 }
 
 #[test]
@@ -1792,16 +1871,14 @@ fn different_secrets_reject_each_other() {
 // ─── Router dedup & ordering ───────────────────────────────────────────
 
 #[test]
-fn router_same_handler_multiple_matching_subs_returns_duplicates() {
+fn router_same_handler_multiple_matching_subs_routes_once() {
     let mut router = EventRouter::new();
     router.subscribe(EventSubscription::for_types(vec!["push".into()]), "ci");
     router.subscribe(EventSubscription::all(), "ci"); // also matches
 
     let event = WebhookEvent::new("1", "push", "github");
     let handlers = router.route(&event);
-    // Both subscriptions match, returning "ci" twice (no dedup)
-    assert!(handlers.len() >= 2);
-    assert!(handlers.iter().all(|h| *h == "ci"));
+    assert_eq!(handlers, vec!["ci"]);
 }
 
 #[test]

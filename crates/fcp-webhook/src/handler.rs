@@ -224,7 +224,7 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         {
             let mut state = self.seen_events.write();
             let now = Utc::now();
-            
+
             if let Some(&time) = state.events.get(event_id) {
                 let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
                     .unwrap_or(chrono::TimeDelta::MAX);
@@ -243,9 +243,9 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     /// Clean up old seen events periodically to avoid O(N) traversal on every request.
     fn cleanup_seen_events(&self) {
         let now = Utc::now();
-        
+
         let mut state = self.seen_events.write();
-        
+
         // Only run cleanup if at least 1 minute has passed since last cleanup
         if now - state.last_cleanup < chrono::Duration::minutes(1) {
             return;
@@ -254,7 +254,7 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         // Use saturating conversion to avoid panic on extreme durations
         let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
             .unwrap_or(chrono::TimeDelta::MAX);
-            
+
         state.events.retain(|_, time| now - *time < ttl);
         state.last_cleanup = now;
     }
@@ -303,11 +303,14 @@ impl EventRouter {
     /// Get handlers that should receive an event.
     #[must_use]
     pub fn route(&self, event: &WebhookEvent) -> Vec<&str> {
-        self.subscriptions
-            .iter()
-            .filter(|(sub, _)| sub.matches(event))
-            .map(|(_, handler)| handler.as_str())
-            .collect()
+        let mut handlers = Vec::new();
+        for (subscription, handler) in &self.subscriptions {
+            let handler = handler.as_str();
+            if subscription.matches(event) && !handlers.contains(&handler) {
+                handlers.push(handler);
+            }
+        }
+        handlers
     }
 }
 
@@ -1392,8 +1395,7 @@ mod tests {
         );
         let event = crate::WebhookEvent::new("e1", "push", "gh");
         let handlers = router.route(&event);
-        // Both subscriptions match, so handler appears twice
-        assert_eq!(handlers.len(), 2);
+        assert_eq!(handlers, vec!["same_handler"]);
     }
 
     #[test]

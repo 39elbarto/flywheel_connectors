@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::net::IpAddr;
+use std::path::{Component, Path};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -357,8 +358,7 @@ impl ManifestError {
     pub fn capability_id_lint_message(&self) -> Option<String> {
         match self {
             Self::Invalid { field, message }
-                if message.contains("capability id")
-                    && message.contains("network_constraints") =>
+                if message.contains("capability id") && message.contains("network_constraints") =>
             {
                 Some(format!(
                     "{message} (field: {field}). \
@@ -1559,8 +1559,54 @@ impl SandboxSection {
                 message: "must be > 0".into(),
             });
         }
+        for path in &self.fs_readonly_paths {
+            validate_sandbox_fs_path(path).map_err(|message| ManifestError::Invalid {
+                field: "sandbox.fs_readonly_paths",
+                message: message.to_string(),
+            })?;
+        }
+        for path in &self.fs_writable_paths {
+            validate_sandbox_fs_path(path).map_err(|message| ManifestError::Invalid {
+                field: "sandbox.fs_writable_paths",
+                message: message.to_string(),
+            })?;
+        }
         Ok(())
     }
+}
+
+fn validate_sandbox_fs_path(path: &str) -> Result<(), &'static str> {
+    if path == "$CONNECTOR_STATE" {
+        return Ok(());
+    }
+
+    if let Some(suffix) = path.strip_prefix("$CONNECTOR_STATE/") {
+        return validate_connector_state_subpath(suffix);
+    }
+
+    if is_absolute_sandbox_fs_path(path) {
+        return Ok(());
+    }
+
+    Err("paths must be absolute or use `$CONNECTOR_STATE[/subpath]`")
+}
+
+fn validate_connector_state_subpath(suffix: &str) -> Result<(), &'static str> {
+    for component in Path::new(suffix).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err("`$CONNECTOR_STATE` subpaths must contain only normal path components");
+        }
+    }
+
+    Ok(())
+}
+
+fn is_absolute_sandbox_fs_path(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || path.starts_with(r"\\")
+        || path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && matches!(path.as_bytes().get(1), Some(b':'))
+            && matches!(path.as_bytes().get(2), Some(b'\\' | b'/'))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4027,6 +4073,55 @@ deny_ptrace = true
         };
         let err = section.validate().unwrap_err();
         assert!(err.to_string().contains("wall_clock_timeout_ms"));
+    }
+
+    #[test]
+    fn sandbox_section_rejects_relative_readonly_path() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 128,
+            cpu_percent: 50,
+            wall_clock_timeout_ms: 30_000,
+            fs_readonly_paths: vec!["relative/path".into()],
+            fs_writable_paths: vec![],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("fs_readonly_paths"));
+        assert!(err.to_string().contains("absolute"));
+    }
+
+    #[test]
+    fn sandbox_section_rejects_connector_state_parent_escape() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 128,
+            cpu_percent: 50,
+            wall_clock_timeout_ms: 30_000,
+            fs_readonly_paths: vec![],
+            fs_writable_paths: vec!["$CONNECTOR_STATE/../cache".into()],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("fs_writable_paths"));
+        assert!(err.to_string().contains("normal path components"));
+    }
+
+    #[test]
+    fn sandbox_section_allows_connector_state_subpath() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 128,
+            cpu_percent: 50,
+            wall_clock_timeout_ms: 30_000,
+            fs_readonly_paths: vec!["/usr".into()],
+            fs_writable_paths: vec!["$CONNECTOR_STATE/cache".into()],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        assert!(section.validate().is_ok());
     }
 
     // ── ManifestError display ──────────────────────────────────────────

@@ -157,17 +157,17 @@ impl CompiledPolicy {
         state_dir: Option<PathBuf>,
     ) -> Result<Self, SandboxError> {
         // Expand special paths
-        let readonly_paths = section
-            .fs_readonly_paths
-            .iter()
-            .filter_map(|p| expand_path(p, state_dir.as_ref()))
-            .collect();
+        let readonly_paths = compile_paths(
+            &section.fs_readonly_paths,
+            state_dir.as_ref(),
+            "sandbox.fs_readonly_paths",
+        )?;
 
-        let mut writable_paths: Vec<PathBuf> = section
-            .fs_writable_paths
-            .iter()
-            .filter_map(|p| expand_path(p, state_dir.as_ref()))
-            .collect();
+        let mut writable_paths = compile_paths(
+            &section.fs_writable_paths,
+            state_dir.as_ref(),
+            "sandbox.fs_writable_paths",
+        )?;
 
         // Always add state_dir to writable paths if provided
         if let Some(ref dir) = state_dir {
@@ -206,8 +206,32 @@ impl CompiledPolicy {
 }
 
 /// Expand special path variables.
-fn expand_path(path: &str, state_dir: Option<&PathBuf>) -> Option<PathBuf> {
-    path.strip_prefix("$CONNECTOR_STATE/").map_or_else(
+fn compile_paths(
+    paths: &[String],
+    state_dir: Option<&PathBuf>,
+    field_name: &str,
+) -> Result<Vec<PathBuf>, SandboxError> {
+    let mut compiled = Vec::with_capacity(paths.len());
+
+    for path in paths {
+        match expand_path(path, state_dir) {
+            Ok(Some(expanded)) => compiled.push(expanded),
+            Ok(None) => {}
+            Err(message) => {
+                return Err(SandboxError::PolicyCompilationFailed(format!(
+                    "invalid {field_name} entry `{path}`: {message}"
+                )));
+            }
+        }
+    }
+
+    Ok(compiled)
+}
+
+fn expand_path(path: &str, state_dir: Option<&PathBuf>) -> Result<Option<PathBuf>, &'static str> {
+    validate_manifest_path(path)?;
+
+    Ok(path.strip_prefix("$CONNECTOR_STATE/").map_or_else(
         || {
             if path == "$CONNECTOR_STATE" {
                 state_dir.cloned()
@@ -215,23 +239,42 @@ fn expand_path(path: &str, state_dir: Option<&PathBuf>) -> Option<PathBuf> {
                 Some(PathBuf::from(path))
             }
         },
-        |suffix| {
-            state_dir.map(|sd| {
-                // Ensure the suffix cannot escape the state_dir via absolute paths or traversal
-                let mut safe_suffix = PathBuf::new();
-                for component in Path::new(suffix).components() {
-                    match component {
-                        std::path::Component::Normal(c) => safe_suffix.push(c),
-                        std::path::Component::ParentDir => {
-                            safe_suffix.pop();
-                        }
-                        _ => {} // Ignore RootDir, Prefix, CurDir to prevent escapes
-                    }
-                }
-                sd.join(safe_suffix)
-            })
-        },
-    )
+        |suffix| state_dir.map(|sd| sd.join(suffix)),
+    ))
+}
+
+fn validate_manifest_path(path: &str) -> Result<(), &'static str> {
+    if path == "$CONNECTOR_STATE" {
+        return Ok(());
+    }
+
+    if let Some(suffix) = path.strip_prefix("$CONNECTOR_STATE/") {
+        return validate_connector_state_subpath(suffix);
+    }
+
+    if is_manifest_absolute_path(path) {
+        return Ok(());
+    }
+
+    Err("paths must be absolute or use `$CONNECTOR_STATE[/subpath]`")
+}
+
+fn validate_connector_state_subpath(suffix: &str) -> Result<(), &'static str> {
+    for component in Path::new(suffix).components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err("`$CONNECTOR_STATE` subpaths must contain only normal path components");
+        }
+    }
+
+    Ok(())
+}
+
+fn is_manifest_absolute_path(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || path.starts_with(r"\\")
+        || path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && matches!(path.as_bytes().get(1), Some(b':'))
+            && matches!(path.as_bytes().get(2), Some(b'\\' | b'/'))
 }
 
 // ============================================================================
@@ -429,20 +472,20 @@ mod tests {
 
         assert_eq!(
             expand_path("$CONNECTOR_STATE", Some(&state_dir)),
-            Some(PathBuf::from("/var/lib/fcp/state"))
+            Ok(Some(PathBuf::from("/var/lib/fcp/state")))
         );
 
         assert_eq!(
             expand_path("$CONNECTOR_STATE/data", Some(&state_dir)),
-            Some(PathBuf::from("/var/lib/fcp/state/data"))
+            Ok(Some(PathBuf::from("/var/lib/fcp/state/data")))
         );
 
         assert_eq!(
             expand_path("/usr/lib", Some(&state_dir)),
-            Some(PathBuf::from("/usr/lib"))
+            Ok(Some(PathBuf::from("/usr/lib")))
         );
 
-        assert_eq!(expand_path("$CONNECTOR_STATE", None), None);
+        assert_eq!(expand_path("$CONNECTOR_STATE", None), Ok(None));
     }
 
     #[test]
@@ -562,7 +605,7 @@ mod tests {
         let state_dir = PathBuf::from("/data/state");
         assert_eq!(
             expand_path("$CONNECTOR_STATE/db/main.sqlite", Some(&state_dir)),
-            Some(PathBuf::from("/data/state/db/main.sqlite"))
+            Ok(Some(PathBuf::from("/data/state/db/main.sqlite")))
         );
     }
 
@@ -571,7 +614,7 @@ mod tests {
         let state_dir = PathBuf::from("/data/state");
         assert_eq!(
             expand_path("/etc/hosts", Some(&state_dir)),
-            Some(PathBuf::from("/etc/hosts"))
+            Ok(Some(PathBuf::from("/etc/hosts")))
         );
     }
 
@@ -791,7 +834,7 @@ mod tests {
     #[test]
     fn test_expand_path_no_state_dir_prefix() {
         // A path that starts with $CONNECTOR_STATE/ but state_dir is None
-        assert_eq!(expand_path("$CONNECTOR_STATE/data", None), None);
+        assert_eq!(expand_path("$CONNECTOR_STATE/data", None), Ok(None));
     }
 
     #[test]
@@ -799,7 +842,7 @@ mod tests {
         // Regular paths don't need state_dir
         assert_eq!(
             expand_path("/etc/config", None),
-            Some(PathBuf::from("/etc/config"))
+            Ok(Some(PathBuf::from("/etc/config")))
         );
     }
 
@@ -808,7 +851,7 @@ mod tests {
         let state_dir = PathBuf::from("/data");
         assert_eq!(
             expand_path("$CONNECTOR_STATE/a/b/c/d", Some(&state_dir)),
-            Some(PathBuf::from("/data/a/b/c/d"))
+            Ok(Some(PathBuf::from("/data/a/b/c/d")))
         );
     }
 
@@ -1112,25 +1155,46 @@ mod tests {
         let sd = PathBuf::from("/mnt/data");
         assert_eq!(
             expand_path("$CONNECTOR_STATE/a/b/c/d/e/f", Some(&sd)),
-            Some(PathBuf::from("/mnt/data/a/b/c/d/e/f"))
+            Ok(Some(PathBuf::from("/mnt/data/a/b/c/d/e/f")))
         );
     }
 
     #[test]
-    fn test_expand_path_dollar_sign_not_connector_state() {
-        // Path starting with $ but not $CONNECTOR_STATE should be literal
-        assert_eq!(
-            expand_path("$HOME/data", None),
-            Some(PathBuf::from("$HOME/data"))
-        );
+    fn test_expand_path_rejects_unknown_dollar_prefix() {
+        let err = expand_path("$HOME/data", None).unwrap_err();
+        assert!(err.contains("absolute"));
     }
 
     #[test]
-    fn test_expand_path_relative_path() {
-        assert_eq!(
-            expand_path("relative/path", None),
-            Some(PathBuf::from("relative/path"))
-        );
+    fn test_expand_path_rejects_relative_path() {
+        let err = expand_path("relative/path", None).unwrap_err();
+        assert!(err.contains("absolute"));
+    }
+
+    #[test]
+    fn test_expand_path_rejects_connector_state_parent_escape() {
+        let err =
+            expand_path("$CONNECTOR_STATE/../cache", Some(&PathBuf::from("/state"))).unwrap_err();
+        assert!(err.contains("normal path components"));
+    }
+
+    #[test]
+    fn test_compiled_policy_rejects_relative_paths() {
+        let mut section = test_sandbox_section();
+        section.fs_readonly_paths = vec!["relative/path".into()];
+        let err = CompiledPolicy::from_manifest(&section, None).unwrap_err();
+        assert!(matches!(err, SandboxError::PolicyCompilationFailed(_)));
+        assert!(err.to_string().contains("fs_readonly_paths"));
+    }
+
+    #[test]
+    fn test_compiled_policy_rejects_connector_state_escape() {
+        let mut section = test_sandbox_section();
+        section.fs_writable_paths = vec!["$CONNECTOR_STATE/../cache".into()];
+        let err =
+            CompiledPolicy::from_manifest(&section, Some(PathBuf::from("/state"))).unwrap_err();
+        assert!(matches!(err, SandboxError::PolicyCompilationFailed(_)));
+        assert!(err.to_string().contains("normal path components"));
     }
 
     // ── New batch: NoOpSandbox default trait ──

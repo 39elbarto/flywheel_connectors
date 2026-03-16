@@ -80,7 +80,7 @@ pub struct StreamHealthSnapshot {
     /// Milliseconds since the last acknowledgment was sent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ack_ms_ago: Option<u64>,
-    /// Total reconnection attempts in the current session.
+    /// Consecutive reconnection attempts since the last healthy connection.
     pub reconnect_count: u32,
     /// Total messages received in the current session.
     pub messages_received: u64,
@@ -154,6 +154,7 @@ impl StreamHealthTracker {
     /// Record that reconnection succeeded.
     pub fn record_reconnected(&mut self) {
         self.state = StreamHealthState::Connected;
+        self.reconnect_count = 0;
         self.connected_since = Some(Instant::now());
         self.last_heartbeat = Some(Instant::now());
     }
@@ -205,17 +206,11 @@ impl StreamHealthTracker {
         let now = Instant::now();
         StreamHealthSnapshot {
             state: self.state,
-            last_heartbeat_ms_ago: self
-                .last_heartbeat
-                .map(|t| millis_since(now, t)),
-            last_ack_ms_ago: self
-                .last_ack
-                .map(|t| millis_since(now, t)),
+            last_heartbeat_ms_ago: self.last_heartbeat.map(|t| millis_since(now, t)),
+            last_ack_ms_ago: self.last_ack.map(|t| millis_since(now, t)),
             reconnect_count: self.reconnect_count,
             messages_received: self.messages_received,
-            uptime_ms: self
-                .connected_since
-                .map_or(0, |t| millis_since(now, t)),
+            uptime_ms: self.connected_since.map_or(0, |t| millis_since(now, t)),
         }
     }
 
@@ -232,10 +227,7 @@ impl StreamHealthTracker {
                 ),
             },
             StreamHealthState::Reconnecting => fcp_core::ConnectorHealth::Degraded {
-                reason: format!(
-                    "reconnecting (attempt {})",
-                    self.reconnect_count
-                ),
+                reason: format!("reconnecting (attempt {})", self.reconnect_count),
             },
             StreamHealthState::Unhealthy => fcp_core::ConnectorHealth::Unavailable {
                 reason: "streaming connection dead".into(),
@@ -399,19 +391,27 @@ mod tests {
         tracker.record_disconnect();
         tracker.record_reconnected();
         assert_eq!(tracker.state(), StreamHealthState::Connected);
+        assert_eq!(tracker.snapshot().reconnect_count, 0);
     }
 
     #[test]
     fn max_reconnect_attempts_makes_unhealthy() {
         let mut tracker = fast_tracker(); // max_reconnect_attempts = 3
         tracker.record_disconnect(); // 1
-        tracker.record_reconnected();
         tracker.record_disconnect(); // 2
-        tracker.record_reconnected();
         tracker.record_disconnect(); // 3
-        tracker.record_reconnected();
         tracker.record_disconnect(); // 4 > 3
         assert_eq!(tracker.state(), StreamHealthState::Unhealthy);
+    }
+
+    #[test]
+    fn successful_reconnect_resets_reconnect_count() {
+        let mut tracker = default_tracker();
+        tracker.record_disconnect();
+        assert_eq!(tracker.snapshot().reconnect_count, 1);
+
+        tracker.record_reconnected();
+        assert_eq!(tracker.snapshot().reconnect_count, 0);
     }
 
     #[test]
@@ -723,7 +723,7 @@ mod tests {
 
         // Second disconnect/reconnect cycle
         tracker.record_disconnect();
-        assert_eq!(tracker.snapshot().reconnect_count, 2);
+        assert_eq!(tracker.snapshot().reconnect_count, 1);
         tracker.record_reconnected();
 
         // Still healthy
@@ -761,22 +761,19 @@ mod tests {
 
     #[test]
     fn simulated_max_reconnects_exhaustion() {
-        // Simulate: rapid connect/disconnect exceeding max_reconnect_attempts.
+        // Simulate: repeated reconnect attempts exceeding max_reconnect_attempts.
         let mut tracker = fast_tracker(); // max = 3
 
-        // Disconnect 4 times without successful recovery staying
+        // Disconnect 4 times without a successful reconnect
         tracker.record_disconnect(); // 1 → Reconnecting
         assert_eq!(tracker.state(), StreamHealthState::Reconnecting);
 
-        tracker.record_reconnected();
         tracker.record_disconnect(); // 2 → Reconnecting
         assert_eq!(tracker.state(), StreamHealthState::Reconnecting);
 
-        tracker.record_reconnected();
         tracker.record_disconnect(); // 3 → Reconnecting
         assert_eq!(tracker.state(), StreamHealthState::Reconnecting);
 
-        tracker.record_reconnected();
         tracker.record_disconnect(); // 4 > max(3) → Unhealthy
         assert_eq!(tracker.state(), StreamHealthState::Unhealthy);
 
@@ -872,6 +869,6 @@ mod tests {
         let snap = tracker.snapshot();
         assert_eq!(snap.state, StreamHealthState::Connected);
         assert!(snap.uptime_ms < 50); // just reconnected
-        assert_eq!(snap.reconnect_count, 1); // still counted
+        assert_eq!(snap.reconnect_count, 0);
     }
 }

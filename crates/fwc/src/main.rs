@@ -4497,6 +4497,18 @@ fn host_live_boolean_field(value: Option<bool>) -> MetadataField<bool> {
     }
 }
 
+const fn host_tool_requires_approval(tool: &HostToolDescriptor) -> bool {
+    match tool.approval_mode {
+        Some(fcp_core::ApprovalMode::None) => false,
+        Some(
+            fcp_core::ApprovalMode::Policy
+            | fcp_core::ApprovalMode::Interactive
+            | fcp_core::ApprovalMode::ElevationToken,
+        ) => true,
+        None => tool.requires_confirmation,
+    }
+}
+
 fn host_live_event_field(introspection: &HostIntrospectionResponse) -> MetadataField<bool> {
     if !introspection.introspection.events.is_empty() {
         return MetadataField::Known(true);
@@ -4539,7 +4551,7 @@ fn host_tool_summary_entry(tool: &HostToolDescriptor) -> Value {
         "risk_level": risk_level_label(tool.risk_level),
         "safety_tier": safety_tier_label(tool.safety_tier),
         "idempotency": idempotency_label(tool.idempotency),
-        "requires_approval": tool.approval_mode.is_some(),
+        "requires_approval": host_tool_requires_approval(tool),
         "supports_simulate": host_live_boolean_field(tool.supports_simulate),
         "example_count": tool.examples.len(),
         "rate_limits": tool.rate_limits.clone(),
@@ -4710,7 +4722,7 @@ fn host_discovered_operation(
             risk_level: risk_level_label(tool.risk_level).to_owned(),
             safety_tier: safety_tier_label(tool.safety_tier).to_owned(),
             idempotency: idempotency_label(tool.idempotency).to_owned(),
-            requires_approval: tool.approval_mode.is_some(),
+            requires_approval: host_tool_requires_approval(tool),
             supports_simulate: host_live_boolean_field(tool.supports_simulate),
         },
         input_schema: tool.input_schema.clone(),
@@ -18212,7 +18224,7 @@ fn pipeline_step_uses_dynamic_outputs(step: &pipe::PlannedPipelineStep) -> bool 
 
 const fn pipeline_dry_run_can_materialize_output(operation: &HostToolDescriptor) -> bool {
     operation.idempotent
-        && operation.approval_mode.is_none()
+        && !host_tool_requires_approval(operation)
         && matches!(operation.safety_tier, SafetyTier::Safe)
 }
 
@@ -18265,7 +18277,7 @@ fn live_pipeline_operation_metadata(
                     capability: resolved.operation.capability.to_string(),
                     risk_level: risk_level_label(resolved.operation.risk_level).to_owned(),
                     safety_tier: safety_tier_label(resolved.operation.safety_tier).to_owned(),
-                    requires_approval: resolved.operation.approval_mode.is_some(),
+                    requires_approval: host_tool_requires_approval(&resolved.operation),
                     approval_mode: resolved.operation.approval_mode.as_ref().map_or_else(
                         || "none".to_owned(),
                         |mode| match mode {
@@ -23171,7 +23183,7 @@ mod tests {
             "safety_tier": safety_tier,
             "idempotency": idempotency,
             "approval_mode": approval_mode,
-            "requires_confirmation": approval_mode.is_some(),
+            "requires_confirmation": approval_mode.is_some_and(|mode| mode != "none"),
             "idempotent": matches!(idempotency, "strict" | "best_effort"),
             "supports_simulate": true,
         })
@@ -30306,6 +30318,91 @@ depends_on = ["missing"]
         assert_eq!(connector_rate_limits[0].window, "1h");
         assert_eq!(operation_rate_limits.len(), 1);
         assert_eq!(operation_rate_limits[0].scope, "core");
+    }
+
+    #[test]
+    fn host_live_tool_views_treat_explicit_none_approval_as_not_required() {
+        let introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        let mut tool = introspection
+            .tools
+            .iter()
+            .find(|tool| tool.name == "github.get_issue")
+            .expect("get_issue tool should exist")
+            .clone();
+        tool.approval_mode = Some(fcp_core::ApprovalMode::None);
+        tool.requires_confirmation = false;
+
+        let summary_entry = host_tool_summary_entry(&tool);
+        let operation = host_discovered_operation(&tool, introspection.rate_limits.as_ref());
+
+        assert_eq!(summary_entry["requires_approval"], false);
+        assert!(!operation.summary.requires_approval);
+        assert_eq!(operation.approval_mode, "none");
+    }
+
+    #[test]
+    fn host_live_tool_views_prefer_explicit_approval_mode_over_boolean() {
+        let introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        let mut tool = introspection
+            .tools
+            .iter()
+            .find(|tool| tool.name == "github.get_issue")
+            .expect("get_issue tool should exist")
+            .clone();
+        tool.approval_mode = Some(fcp_core::ApprovalMode::Policy);
+        tool.requires_confirmation = false;
+
+        let summary_entry = host_tool_summary_entry(&tool);
+        let operation = host_discovered_operation(&tool, introspection.rate_limits.as_ref());
+
+        assert_eq!(summary_entry["requires_approval"], true);
+        assert!(operation.summary.requires_approval);
+        assert!(!pipeline_dry_run_can_materialize_output(&tool));
+    }
+
+    #[test]
+    fn host_live_pipeline_metadata_preserves_explicit_none_approval_mode() {
+        let response: HostDiscoveryResponse =
+            serde_json::from_value(mock_discovery_response_json())
+                .expect("mock discovery response should deserialize");
+        let catalog = HostConnectorCatalog::from_response(&response);
+        let connector = catalog
+            .connectors
+            .first()
+            .expect("mock catalog should contain a connector")
+            .clone();
+        let introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        let mut tool = introspection
+            .tools
+            .iter()
+            .find(|tool| tool.name == "github.get_issue")
+            .expect("get_issue tool should exist")
+            .clone();
+        tool.approval_mode = Some(fcp_core::ApprovalMode::None);
+        tool.requires_confirmation = false;
+
+        assert!(pipeline_dry_run_can_materialize_output(&tool));
+
+        let metadata = live_pipeline_operation_metadata(&BTreeMap::from([(
+            "lookup".to_owned(),
+            ResolvedHostOperation {
+                connector,
+                operation: tool,
+                rate_limits: None,
+            },
+        )]));
+        let lookup = metadata
+            .get("lookup")
+            .expect("pipeline metadata should contain the lookup step");
+
+        assert!(!lookup.requires_approval);
+        assert_eq!(lookup.approval_mode, "none");
     }
 
     #[test]

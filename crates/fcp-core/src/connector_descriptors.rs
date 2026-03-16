@@ -213,17 +213,29 @@ impl ConnectorDescriptor {
     /// Compute the worst status across auth, prerequisites, and readiness.
     #[must_use]
     pub const fn overall_status(&self) -> DescriptorStatus {
-        let mut status = DescriptorStatus::Unknown;
+        let mut status: Option<DescriptorStatus> = None;
         if let Some(auth) = &self.auth {
-            status = status.combine(auth.status);
+            status = Some(match status {
+                Some(current) => current.combine(auth.status),
+                None => auth.status,
+            });
         }
         if let Some(prerequisites) = &self.prerequisites {
-            status = status.combine(prerequisites.status);
+            status = Some(match status {
+                Some(current) => current.combine(prerequisites.status),
+                None => prerequisites.status,
+            });
         }
         if let Some(readiness) = &self.readiness {
-            status = status.combine(readiness.status);
+            status = Some(match status {
+                Some(current) => current.combine(readiness.status),
+                None => readiness.status,
+            });
         }
-        status
+        match status {
+            Some(status) => status,
+            None => DescriptorStatus::Unknown,
+        }
     }
 }
 
@@ -947,6 +959,34 @@ mod tests {
         );
 
         assert_eq!(descriptor.overall_status(), DescriptorStatus::Unavailable);
+    }
+
+    #[test]
+    fn connector_descriptor_overall_status_is_ready_when_all_surfaces_are_ready() {
+        let mut descriptor = ConnectorDescriptor::new("github");
+        descriptor.auth = Some(
+            AuthDescriptor::not_yet_measured("auth pending").configured("credential_id", true),
+        );
+        descriptor.prerequisites = Some(PrerequisiteCatalog::from_recipe(ProvisioningRecipe::new(
+            RecipeId::new("github.noop"),
+            "1",
+            "No prerequisites",
+        )));
+        descriptor.readiness = Some(ReadinessDescriptor::from_readiness_response(
+            ReadinessResponse {
+                ready: true,
+                components: std::collections::HashMap::new(),
+                timestamp: chrono::Utc::now(),
+            },
+        ));
+
+        assert_eq!(descriptor.overall_status(), DescriptorStatus::Ready);
+    }
+
+    #[test]
+    fn connector_descriptor_overall_status_stays_unknown_without_any_surfaces() {
+        let descriptor = ConnectorDescriptor::new("github");
+        assert_eq!(descriptor.overall_status(), DescriptorStatus::Unknown);
     }
 
     // --- Metadata truthfulness invariants (bead 29.6.1) ---

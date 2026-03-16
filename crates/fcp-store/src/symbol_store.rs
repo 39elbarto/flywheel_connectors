@@ -237,6 +237,10 @@ impl MemorySymbolStore {
         let size = symbol.data.len() as u64 + 64; // 64 byte metadata estimate
         size
     }
+
+    fn has_required_symbols(symbol_count: usize, source_symbols: u32) -> bool {
+        u32::try_from(symbol_count).map_or(true, |count| count >= source_symbols)
+    }
 }
 
 #[async_trait]
@@ -424,7 +428,7 @@ impl SymbolStore for MemorySymbolStore {
         let objects = self.objects.read();
         if let Some(obj) = objects.get(object_id) {
             // RaptorQ needs K' ≈ K × 1.002 symbols, we approximate with K
-            obj.symbols.len() as u32 >= obj.meta.source_symbols
+            Self::has_required_symbols(obj.symbols.len(), obj.meta.source_symbols)
         } else {
             false
         }
@@ -670,6 +674,18 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn has_required_symbols_treats_counts_above_u32_max_as_sufficient() {
+        if usize::BITS <= 32 {
+            return;
+        }
+
+        let huge_count =
+            usize::try_from(u64::from(u32::MAX) + 1).expect("usize must hold u32::MAX + 1");
+        assert!(MemorySymbolStore::has_required_symbols(huge_count, 10));
+        assert!(!MemorySymbolStore::has_required_symbols(9, 10));
     }
 
     #[test]

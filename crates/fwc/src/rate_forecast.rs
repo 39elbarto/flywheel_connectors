@@ -187,6 +187,8 @@ pub struct BatchFeasibility {
     pub fits_now: bool,
     /// Operations that can be done before needing to wait.
     pub ops_before_wait: u64,
+    /// Whether the requested batch can ever complete under this pool configuration.
+    pub schedulable: bool,
     /// If doesn't fit, how long to wait for reset.
     pub wait_for_reset: Option<Duration>,
     /// Estimated time to complete the batch.
@@ -200,8 +202,9 @@ pub fn check_batch_feasibility(snapshot: &PoolSnapshot, ops_requested: u64) -> B
     let remaining = snapshot.remaining();
     let fits_now = ops_requested <= remaining;
     let ops_before_wait = remaining.min(ops_requested);
+    let schedulable = fits_now || snapshot.limit > 0;
 
-    let wait_for_reset = if fits_now {
+    let wait_for_reset = if fits_now || !schedulable {
         None
     } else {
         Some(snapshot.time_to_reset())
@@ -213,6 +216,8 @@ pub fn check_batch_feasibility(snapshot: &PoolSnapshot, ops_requested: u64) -> B
     // Estimated completion time
     let reset_dur = snapshot.time_to_reset();
     let estimated_completion = if fits_now {
+        Duration::zero()
+    } else if !schedulable {
         Duration::zero()
     } else if feasible_in_one_window {
         reset_dur
@@ -231,6 +236,7 @@ pub fn check_batch_feasibility(snapshot: &PoolSnapshot, ops_requested: u64) -> B
         remaining,
         fits_now,
         ops_before_wait,
+        schedulable,
         wait_for_reset,
         estimated_completion,
         feasible_in_one_window,
@@ -248,6 +254,8 @@ pub struct SchedulingSuggestion {
     pub suggested_rate_per_hour: f64,
     /// Suggested delay between operations in milliseconds.
     pub suggested_delay_ms: u64,
+    /// Whether the requested work can be scheduled at all under this pool configuration.
+    pub schedulable: bool,
     /// Whether to wait before starting.
     pub wait_before_start: Option<Duration>,
     /// Reasoning.
@@ -281,6 +289,7 @@ pub fn suggest_scheduling(
             pool: snapshot.pool.clone(),
             suggested_rate_per_hour: rate,
             suggested_delay_ms: delay_ms,
+            schedulable: true,
             wait_before_start: None,
             reasoning: format!(
                 "{remaining} remaining, {ops_needed} needed — fits in current window"
@@ -290,7 +299,7 @@ pub fn suggest_scheduling(
 
     // Not enough quota — suggest waiting for reset
     let after_reset_remaining = snapshot.limit;
-    let total_available = remaining + after_reset_remaining;
+    let total_available = remaining.saturating_add(after_reset_remaining);
 
     if ops_needed <= total_available {
         // Can complete after one reset
@@ -305,6 +314,7 @@ pub fn suggest_scheduling(
             pool: snapshot.pool.clone(),
             suggested_rate_per_hour: rate,
             suggested_delay_ms: 0,
+            schedulable: true,
             wait_before_start: Some(reset_dur),
             reasoning: format!(
                 "Need {ops_needed} ops but only {remaining} remaining. \
@@ -328,6 +338,7 @@ pub fn suggest_scheduling(
             pool: snapshot.pool.clone(),
             suggested_rate_per_hour: rate,
             suggested_delay_ms: 0,
+            schedulable: true,
             wait_before_start: Some(reset_dur),
             reasoning: format!(
                 "Need {ops_needed} ops, limit is {}. Requires {windows} windows.",
@@ -340,10 +351,9 @@ pub fn suggest_scheduling(
             pool: snapshot.pool.clone(),
             suggested_rate_per_hour: 0.0,
             suggested_delay_ms: 0,
-            wait_before_start: Some(reset_dur),
-            reasoning: format!(
-                "Pool limit is 0. Cannot schedule {ops_needed} ops."
-            ),
+            schedulable: false,
+            wait_before_start: None,
+            reasoning: format!("Pool limit is 0. Cannot schedule {ops_needed} ops."),
         }
     }
 }
@@ -398,6 +408,11 @@ pub fn format_feasibility(f: &BatchFeasibility) -> String {
         format!(
             "{}: {} ops requested, {} remaining — fits in current quota",
             f.pool, f.ops_requested, f.remaining
+        )
+    } else if !f.schedulable {
+        format!(
+            "{}: {} ops requested — unschedulable with a zero-capacity pool",
+            f.pool, f.ops_requested
         )
     } else if f.feasible_in_one_window {
         format!(
@@ -623,6 +638,7 @@ mod tests {
         let f = check_batch_feasibility(&snap, 100);
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["ops_requested"], 100);
+        assert_eq!(json["schedulable"], true);
     }
 
     // ── suggest_scheduling ────────────────────────────────────────
@@ -662,6 +678,7 @@ mod tests {
         let s = suggest_scheduling(&snap, 100, None);
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["pool"], "core");
+        assert_eq!(json["schedulable"], true);
     }
 
     // ── format helpers ────────────────────────────────────────────
@@ -950,6 +967,16 @@ mod tests {
         assert_eq!(f.pool, "search.v2");
     }
 
+    #[test]
+    fn batch_zero_limit_is_unschedulable() {
+        let snap = PoolSnapshot::new("core", 0, 0, Some(Utc::now() + Duration::minutes(30)));
+        let f = check_batch_feasibility(&snap, 1);
+        assert!(!f.fits_now);
+        assert!(!f.schedulable);
+        assert!(f.wait_for_reset.is_none());
+        assert!(f.estimated_completion.is_zero());
+    }
+
     // ── SchedulingSuggestion edge cases ──────────────────────────
 
     #[test]
@@ -997,6 +1024,15 @@ mod tests {
         // 500 remaining + 5000 after reset = 5500, need 1000 → fits after one reset
         assert!(s.wait_before_start.is_some());
         assert!(s.reasoning.contains("remaining"));
+    }
+
+    #[test]
+    fn scheduling_zero_limit_is_unschedulable_without_wait() {
+        let snap = PoolSnapshot::new("core", 0, 0, Some(Utc::now() + Duration::minutes(30)));
+        let s = suggest_scheduling(&snap, 1, None);
+        assert!(!s.schedulable);
+        assert!(s.wait_before_start.is_none());
+        assert!(s.reasoning.contains("Cannot schedule"));
     }
 
     // ── format_duration edge cases ───────────────────────────────
@@ -1417,6 +1453,7 @@ mod tests {
         assert_eq!(f.remaining, cloned.remaining);
         assert_eq!(f.fits_now, cloned.fits_now);
         assert_eq!(f.ops_before_wait, cloned.ops_before_wait);
+        assert_eq!(f.schedulable, cloned.schedulable);
         assert_eq!(f.feasible_in_one_window, cloned.feasible_in_one_window);
     }
 
@@ -1478,6 +1515,7 @@ mod tests {
         assert!(json.get("remaining").is_some());
         assert!(json.get("fits_now").is_some());
         assert!(json.get("ops_before_wait").is_some());
+        assert!(json.get("schedulable").is_some());
         assert!(json.get("estimated_completion").is_some());
         assert!(json.get("feasible_in_one_window").is_some());
     }
@@ -1507,6 +1545,7 @@ mod tests {
         assert_eq!(s.pool, cloned.pool);
         assert!((s.suggested_rate_per_hour - cloned.suggested_rate_per_hour).abs() < f64::EPSILON);
         assert_eq!(s.suggested_delay_ms, cloned.suggested_delay_ms);
+        assert_eq!(s.schedulable, cloned.schedulable);
         assert_eq!(s.reasoning, cloned.reasoning);
     }
 
@@ -1527,6 +1566,7 @@ mod tests {
         assert!(json.get("pool").is_some());
         assert!(json.get("suggested_rate_per_hour").is_some());
         assert!(json.get("suggested_delay_ms").is_some());
+        assert!(json.get("schedulable").is_some());
         assert!(json.get("reasoning").is_some());
     }
 
@@ -1697,6 +1737,15 @@ mod tests {
         assert!(s.contains("multiple windows"));
     }
 
+    #[test]
+    fn format_feasibility_zero_limit_reports_unschedulable() {
+        let snap = PoolSnapshot::new("core", 0, 0, Some(Utc::now() + Duration::minutes(30)));
+        let f = check_batch_feasibility(&snap, 1);
+        let s = format_feasibility(&f);
+        assert!(s.contains("unschedulable"));
+        assert!(!s.contains("multiple windows"));
+    }
+
     // ── format_suggestion additional ────────────────────────────
 
     #[test]
@@ -1723,6 +1772,15 @@ mod tests {
         let s = suggest_scheduling(&snap, 10, None);
         let output = format_suggestion(&s);
         assert!(output.contains("fits in current window"));
+    }
+
+    #[test]
+    fn format_suggestion_zero_limit_omits_wait_line() {
+        let snap = PoolSnapshot::new("core", 0, 0, Some(Utc::now() + Duration::minutes(30)));
+        let s = suggest_scheduling(&snap, 1, None);
+        let output = format_suggestion(&s);
+        assert!(output.contains("Cannot schedule"));
+        assert!(!output.contains("Wait before starting"));
     }
 
     // ── Cross-function integration ──────────────────────────────

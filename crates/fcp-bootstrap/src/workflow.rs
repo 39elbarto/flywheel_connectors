@@ -13,6 +13,7 @@ use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, writ
 use crate::recovery_phrase::RecoveryPhrase;
 use crate::time_validation::{TimeValidation, TimeValidationResult};
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Mode of bootstrap operation.
@@ -456,9 +457,22 @@ impl BootstrapWorkflow {
     /// Save the genesis state to disk.
     fn save_genesis(&self, genesis: &GenesisState) -> BootstrapResult<()> {
         let genesis_path = self.config.data_dir.join("genesis.cbor");
+        let temp_path = genesis_temporary_path(&genesis_path);
         let cbor = genesis.to_cbor()?;
-        std::fs::write(genesis_path, cbor)?;
-        Ok(())
+        let write_result = (|| -> BootstrapResult<()> {
+            let mut file = std::fs::File::create(&temp_path)?;
+            file.write_all(&cbor)?;
+            file.sync_all()?;
+            std::fs::rename(&temp_path, &genesis_path)?;
+            sync_directory(&self.config.data_dir)?;
+            Ok(())
+        })();
+
+        if write_result.is_err() && temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+
+        write_result
     }
 
     /// Save the recovery phrase (in a real implementation, this would be encrypted).
@@ -479,6 +493,20 @@ impl BootstrapWorkflow {
     }
 }
 
+fn genesis_temporary_path(genesis_path: &Path) -> PathBuf {
+    genesis_path.with_extension("cbor.tmp")
+}
+
+#[cfg(not(windows))]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Result of checking initialization state.
 enum InitCheckResult {
     /// Fresh initialization can proceed.
@@ -496,6 +524,8 @@ fn check_initialization_state(
     data_dir: &Path,
     force_overwrite: bool,
 ) -> BootstrapResult<InitCheckResult> {
+    let partial_state = detect_partial_state(data_dir);
+
     // Check for existing genesis
     let genesis_path = data_dir.join("genesis.cbor");
     if genesis_path.exists() {
@@ -504,16 +534,32 @@ fn check_initialization_state(
             std::fs::remove_file(&genesis_path)?;
         } else {
             // Load existing genesis to get fingerprint
-            let cbor = std::fs::read(&genesis_path)?;
-            let genesis = GenesisState::from_cbor(&cbor)?;
-            return Ok(InitCheckResult::AlreadyExists {
-                fingerprint: genesis.fingerprint(),
-            });
+            match std::fs::read(&genesis_path)
+                .map_err(BootstrapError::from)
+                .and_then(|cbor| GenesisState::from_cbor(&cbor))
+            {
+                Ok(genesis) => {
+                    return Ok(InitCheckResult::AlreadyExists {
+                        fingerprint: genesis.fingerprint(),
+                    });
+                }
+                Err(err) => {
+                    if let Some(phase) = partial_state {
+                        tracing::warn!(
+                            path = %genesis_path.display(),
+                            ?err,
+                            "Genesis file is unreadable during partial bootstrap; preferring recovery marker"
+                        );
+                        return Ok(InitCheckResult::PartialState { phase });
+                    }
+                    return Err(err);
+                }
+            }
         }
     }
 
     // Check for partial state
-    if let Some(phase) = detect_partial_state(data_dir) {
+    if let Some(phase) = partial_state {
         return Ok(InitCheckResult::PartialState { phase });
     }
 
@@ -778,6 +824,10 @@ mod tests {
         assert!(
             dir.path().join("init.lock").exists(),
             "init.lock should remain when finalization fails"
+        );
+        assert!(
+            !genesis_temporary_path(&dir.path().join("genesis.cbor")).exists(),
+            "temporary genesis file should be cleaned up on failure"
         );
         assert_eq!(
             crate::phase::detect_partial_state(dir.path()),
@@ -1286,6 +1336,37 @@ mod tests {
 
         let result = check_initialization_state(dir.path(), false).unwrap();
         assert!(matches!(result, InitCheckResult::PartialState { .. }));
+    }
+
+    #[test]
+    fn test_check_init_state_corrupt_genesis_with_partial_state_prefers_recovery_marker() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::GenesisCreate;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), b"not cbor").unwrap();
+
+        let result = check_initialization_state(dir.path(), false).unwrap();
+        assert!(matches!(
+            result,
+            InitCheckResult::PartialState {
+                phase: BootstrapPhase::GenesisCreate
+            }
+        ));
+    }
+
+    #[test]
+    fn test_check_init_state_valid_genesis_beats_stale_partial_marker() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::GenesisCreate;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+
+        let key = fcp_crypto::Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&key.verifying_key());
+        let cbor = genesis.to_cbor().unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), cbor).unwrap();
+
+        let result = check_initialization_state(dir.path(), false).unwrap();
+        assert!(matches!(result, InitCheckResult::AlreadyExists { .. }));
     }
 
     // ---- Config builder with PathBuf vs &Path ----

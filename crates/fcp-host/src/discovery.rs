@@ -522,10 +522,12 @@ impl From<&OperationInfo> for ToolDescriptor {
                 .ai_hints
                 .examples
                 .iter()
-                .map(|e| ToolExample {
-                    description: None,
-                    input: serde_json::from_str(e).unwrap_or_else(|_| serde_json::json!({})),
-                    output: None,
+                .filter_map(|example| {
+                    serde_json::from_str(example).ok().map(|input| ToolExample {
+                        description: None,
+                        input,
+                        output: None,
+                    })
                 })
                 .collect(),
             ai_hints: if op.ai_hints.when_to_use.is_empty()
@@ -1293,7 +1295,8 @@ impl DiscoveryCache {
         payload: &T,
         last_modified: DateTime<Utc>,
     ) -> CacheMetadata {
-        let ttl_seconds = u32::try_from(self.ttl.as_secs().min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
+        let ttl_seconds =
+            u32::try_from(self.ttl.as_secs().min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
         CacheMetadata::strong(payload, last_modified, ttl_seconds, Some(ttl_seconds))
     }
 
@@ -2923,8 +2926,17 @@ mod tests {
         let mut op = make_operation("op7", None);
         op.ai_hints.examples = vec!["not valid json".into()];
         let tool = ToolDescriptor::from(&op);
-        // Invalid JSON falls back to empty object
-        assert_eq!(tool.examples[0].input, serde_json::json!({}));
+        assert!(tool.examples.is_empty());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_skips_only_invalid_examples() {
+        let mut op = make_operation("op8", None);
+        op.ai_hints.examples = vec![r#"{"key":"val"}"#.into(), "not valid json".into()];
+        let tool = ToolDescriptor::from(&op);
+
+        assert_eq!(tool.examples.len(), 1);
+        assert_eq!(tool.examples[0].input, serde_json::json!({"key": "val"}));
     }
 
     #[test]
@@ -4182,7 +4194,8 @@ mod tests {
 
     #[test]
     fn discovery_response_with_host_capabilities_preserves_known_values() {
-        let resp = DiscoveryResponse::new(vec![], 5).with_host_capabilities(Some(true), Some(false));
+        let resp =
+            DiscoveryResponse::new(vec![], 5).with_host_capabilities(Some(true), Some(false));
         assert_eq!(resp.supports_streaming, Some(true));
         assert_eq!(resp.supports_batching, Some(false));
     }
@@ -5782,17 +5795,9 @@ mod tests {
             category: Some("messaging".to_string()),
             ..Default::default()
         };
-        let first = endpoint
-            .discover_query(Some(filter.clone()), None)
-            .await;
+        let first = endpoint.discover_query(Some(filter.clone()), None).await;
         assert_eq!(first.response.connectors.len(), 1);
-        let etag = first
-            .response
-            .cache
-            .as_ref()
-            .unwrap()
-            .etag
-            .clone();
+        let etag = first.response.cache.as_ref().unwrap().etag.clone();
 
         // Same filter + matching etag => 304
         let second = endpoint
@@ -5804,10 +5809,7 @@ mod tests {
                 }),
             )
             .await;
-        assert_eq!(
-            second.response.meta.as_ref().map(|m| m.status),
-            Some(304)
-        );
+        assert_eq!(second.response.meta.as_ref().map(|m| m.status), Some(304));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

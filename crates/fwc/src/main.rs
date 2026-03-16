@@ -4490,12 +4490,25 @@ fn host_connector_rate_limits(
     }
 }
 
-fn host_live_boolean_field(value: bool) -> MetadataField<bool> {
-    if value {
-        MetadataField::Known(true)
-    } else {
-        MetadataField::Unknown
+fn host_live_boolean_field(value: Option<bool>) -> MetadataField<bool> {
+    match value {
+        Some(v) => MetadataField::Known(v),
+        None => MetadataField::Unknown,
     }
+}
+
+fn host_live_event_field(introspection: &HostIntrospectionResponse) -> MetadataField<bool> {
+    if !introspection.introspection.events.is_empty() {
+        return MetadataField::Known(true);
+    }
+
+    introspection
+        .introspection
+        .event_caps
+        .as_ref()
+        .map_or(MetadataField::Unknown, |caps| {
+            MetadataField::Known(caps.streaming || caps.replay)
+        })
 }
 
 fn host_operation_rate_limits(
@@ -4732,10 +4745,7 @@ fn host_discovered_connector(
         .max_by_key(|risk| risk_rank(risk))
         .unwrap_or("low")
         .to_owned();
-    let has_events = host_live_boolean_field(
-        introspection.introspection.event_caps.is_some()
-            || !introspection.introspection.events.is_empty(),
-    );
+    let has_events = host_live_event_field(introspection);
     let archetypes = host_connector_archetypes(introspection);
     let categories = connector.summary.categories.clone();
     let slug = connector.slug.clone();
@@ -5158,10 +5168,7 @@ fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
             "archetype": introspection.archetype,
             "operation_count": introspection.tools.len(),
             "max_risk": safety_tier_label(inventory.connector.max_safety_tier),
-            "has_events": host_live_boolean_field(
-                introspection.introspection.event_caps.is_some()
-                    || !introspection.introspection.events.is_empty()
-            ),
+            "has_events": host_live_event_field(&introspection),
             "manifest_path": Value::Null,
         },
         "rate_limits": introspection.rate_limits,
@@ -24735,11 +24742,45 @@ deny_ptrace = true
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["archetype"], "request_response");
         assert_eq!(payload["connector"]["operation_count"], 2);
+        assert_eq!(payload["connector"]["has_events"]["status"], "unknown");
         assert_eq!(
             payload["operations"]["preview"][0]["selector"],
             "github.create_issue"
         );
         assert_eq!(payload["metadata_gaps"], json!([]));
+    }
+
+    #[test]
+    fn execute_show_with_host_preserves_explicit_false_event_caps() {
+        let mut introspection = mock_introspection_response_json();
+        introspection["introspection"]["event_caps"] =
+            json!({ "streaming": false, "replay": false });
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1".to_owned(),
+                    mock_inventory_response_json(),
+                ),
+                (
+                    "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+                    introspection,
+                ),
+            ]),
+            3,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "show", "github"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["connector"]["has_events"]["status"], "known");
+        assert_eq!(payload["connector"]["has_events"]["value"], false);
     }
 
     #[test]
@@ -30185,6 +30226,29 @@ depends_on = ["missing"]
                 .operations
                 .iter()
                 .all(|operation| operation.rate_limits.is_none())
+        );
+    }
+
+    #[test]
+    fn host_discovered_connector_preserves_explicit_false_event_caps() {
+        let response: HostDiscoveryResponse =
+            serde_json::from_value(mock_discovery_response_json())
+                .expect("mock discovery response should deserialize");
+        let catalog = HostConnectorCatalog::from_response(&response);
+        let connector = catalog
+            .connectors
+            .first()
+            .expect("mock catalog should contain a connector");
+        let mut introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        introspection.introspection.event_caps = Some(fcp_core::EventCaps::default());
+
+        let discovered = host_discovered_connector(connector, &introspection);
+
+        assert_eq!(
+            discovered.detail.summary.has_events,
+            MetadataField::Known(false)
         );
     }
 

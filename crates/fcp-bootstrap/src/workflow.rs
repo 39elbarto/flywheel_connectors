@@ -219,13 +219,16 @@ impl BootstrapWorkflow {
             BootstrapMode::Import { phrase } => self.run_import_bootstrap(&phrase)?,
         };
 
+        self.finalize_bootstrap(&genesis)?;
+
+        Ok(genesis)
+    }
+
+    fn finalize_bootstrap(&mut self, genesis: &GenesisState) -> BootstrapResult<()> {
         // Validate genesis
         genesis
             .validate()
             .map_err(|e| BootstrapError::Internal(e.to_string()))?;
-
-        // Clean up phase lock
-        remove_phase_lock(&self.config.data_dir)?;
 
         // Update phase to completed
         self.phase = BootstrapPhase::Completed {
@@ -234,14 +237,17 @@ impl BootstrapWorkflow {
         };
 
         // Save genesis to disk
-        self.save_genesis(&genesis)?;
+        self.save_genesis(genesis)?;
+
+        // Clean up phase lock only after genesis is durable on disk.
+        remove_phase_lock(&self.config.data_dir)?;
 
         tracing::info!(
             fingerprint = genesis.fingerprint(),
             "Bootstrap completed successfully"
         );
 
-        Ok(genesis)
+        Ok(())
     }
 
     /// Run time validation phase.
@@ -746,6 +752,38 @@ mod tests {
 
         let result = BootstrapWorkflow::new(config);
         assert!(matches!(result, Err(BootstrapError::PartialState { .. })));
+    }
+
+    #[test]
+    fn test_finalize_bootstrap_preserves_partial_state_marker_when_save_genesis_fails() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let mut workflow = BootstrapWorkflow::new(config).unwrap();
+        workflow.phase = BootstrapPhase::GenesisCreate;
+        crate::phase::write_phase_lock(dir.path(), &workflow.phase).unwrap();
+
+        std::fs::create_dir(dir.path().join("genesis.cbor")).unwrap();
+
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+
+        let result = workflow.finalize_bootstrap(&genesis);
+        assert!(result.is_err(), "expected genesis persistence to fail");
+        assert!(
+            dir.path().join("init.lock").exists(),
+            "init.lock should remain when finalization fails"
+        );
+        assert_eq!(
+            crate::phase::detect_partial_state(dir.path()),
+            Some(BootstrapPhase::GenesisCreate),
+            "failed finalization should still be discoverable as partial state"
+        );
     }
 
     // ---- BootstrapMode eq ----

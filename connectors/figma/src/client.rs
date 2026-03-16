@@ -477,10 +477,18 @@ impl FigmaClient {
                 }
                 if !status.is_success() {
                     let body = resp.text().await.unwrap_or_default();
-                    return AttemptOutcome::Terminal(FigmaError::Api {
+                    let err = FigmaError::Api {
                         status: status.as_u16(),
                         message: body,
-                    });
+                    };
+                    return if status.is_server_error() {
+                        AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
+                    };
                 }
 
                 match resp.json::<T>().await {
@@ -524,10 +532,18 @@ impl FigmaClient {
                 }
                 if !status.is_success() {
                     let body_text = resp.text().await.unwrap_or_default();
-                    return AttemptOutcome::Terminal(FigmaError::Api {
+                    let err = FigmaError::Api {
                         status: status.as_u16(),
                         message: body_text,
-                    });
+                    };
+                    return if status.is_server_error() {
+                        AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
+                    };
                 }
 
                 match resp.json::<T>().await {
@@ -577,10 +593,18 @@ impl FigmaClient {
                 }
                 if !status.is_success() {
                     let body_text = resp.text().await.unwrap_or_default();
-                    return AttemptOutcome::Terminal(FigmaError::Api {
+                    let err = FigmaError::Api {
                         status: status.as_u16(),
                         message: body_text,
-                    });
+                    };
+                    return if status.is_server_error() {
+                        AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
+                    };
                 }
 
                 AttemptOutcome::Success(())

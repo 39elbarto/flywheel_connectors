@@ -256,17 +256,73 @@ impl BitwardenConnector {
             critical: false,
         });
 
+        // Base URL policy: must be HTTPS (unless localhost for testing).
+        if let Some(config) = &self.config {
+            let (url_ok, url_msg) = validate_base_url(&config.base_url);
+            checks.push(DoctorCheck {
+                name: "base_url_policy".into(),
+                passed: url_ok,
+                message: Some(url_msg),
+                critical: true,
+            });
+        }
+
+        // Live auth validation: make a lightweight read-only API call.
+        if let Some(client) = &self.client {
+            match client.list_collections().await {
+                Ok(body) => {
+                    let count = body
+                        .get("data")
+                        .and_then(|d| d.as_array())
+                        .map_or(0, |a| a.len());
+                    checks.push(DoctorCheck {
+                        name: "auth_validation".into(),
+                        passed: true,
+                        message: Some(format!("Auth valid; {count} collection(s) accessible")),
+                        critical: true,
+                    });
+                }
+                Err(e) => {
+                    checks.push(DoctorCheck {
+                        name: "auth_validation".into(),
+                        passed: false,
+                        message: Some(format!("Cannot access vault: {e}")),
+                        critical: true,
+                    });
+                }
+            }
+        }
+
         let result = DoctorResult::from_checks(checks);
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     /// Handle the `self_check` method.
+    ///
+    /// Performs a lightweight live connectivity check when configured.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.bitwarden",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ok" } else { "degraded" },
-        }))
+        let Some(client) = &self.client else {
+            return Ok(json!({
+                "connector_id": "fcp.bitwarden",
+                "version": "0.1.0",
+                "status": "degraded",
+                "reason": "Not configured",
+            }));
+        };
+
+        match client.list_collections().await {
+            Ok(_) => Ok(json!({
+                "connector_id": "fcp.bitwarden",
+                "version": "0.1.0",
+                "status": "ok",
+            })),
+            Err(e) => Ok(json!({
+                "connector_id": "fcp.bitwarden",
+                "version": "0.1.0",
+                "status": "degraded",
+                "reason": format!("Connectivity check failed: {e}"),
+            })),
+        }
     }
 
     /// Handle the `introspect` method.
@@ -453,6 +509,43 @@ fn op_info(
         safety_tier,
         idempotency,
         ai_hints,
+    }
+}
+
+/// Validate the base URL for security policy compliance.
+///
+/// Returns `(passed, diagnostic_message)`.
+fn validate_base_url(base_url: &str) -> (bool, String) {
+    // Allow localhost/127.0.0.1 for testing without HTTPS.
+    let is_local = base_url.contains("localhost") || base_url.contains("127.0.0.1");
+
+    if !base_url.starts_with("https://") && !is_local {
+        return (
+            false,
+            format!("Base URL must use HTTPS: {base_url}"),
+        );
+    }
+
+    // Known Bitwarden hosts (official cloud + self-hosted pattern).
+    let known_hosts = [
+        "api.bitwarden.com",
+        "api.bitwarden.eu",
+        "vault.bitwarden.com",
+        "vault.bitwarden.eu",
+    ];
+
+    if is_local {
+        return (true, "Local test endpoint".into());
+    }
+
+    // Allow known hosts or self-hosted patterns.
+    let host_ok = known_hosts.iter().any(|h| base_url.contains(h))
+        || base_url.contains("bitwarden");
+
+    if host_ok {
+        (true, format!("Accepted endpoint: {base_url}"))
+    } else {
+        (false, format!("Unrecognized Bitwarden host: {base_url}. Expected api.bitwarden.com, api.bitwarden.eu, or a self-hosted domain containing 'bitwarden'."))
     }
 }
 
@@ -1162,5 +1255,49 @@ mod tests {
         assert!(dbg.contains("BitwardenConfig"), "got: {dbg}");
         let cloned = config.clone();
         assert_eq!(cloned.base_url, config.base_url);
+    }
+
+    // ── Base URL policy ──────────────────────────────────────────────
+
+    #[test]
+    fn validate_base_url_official_cloud() {
+        let (ok, _) = validate_base_url("https://api.bitwarden.com");
+        assert!(ok);
+    }
+
+    #[test]
+    fn validate_base_url_eu_cloud() {
+        let (ok, _) = validate_base_url("https://api.bitwarden.eu");
+        assert!(ok);
+    }
+
+    #[test]
+    fn validate_base_url_self_hosted() {
+        let (ok, _) = validate_base_url("https://bitwarden.example.com");
+        assert!(ok);
+    }
+
+    #[test]
+    fn validate_base_url_localhost() {
+        let (ok, msg) = validate_base_url("http://localhost:8080");
+        assert!(ok, "localhost should be allowed: {msg}");
+    }
+
+    #[test]
+    fn validate_base_url_rejects_http() {
+        let (ok, msg) = validate_base_url("http://api.bitwarden.com");
+        assert!(!ok, "HTTP should be rejected: {msg}");
+    }
+
+    #[test]
+    fn validate_base_url_rejects_unknown_host() {
+        let (ok, _) = validate_base_url("https://evil.example.com");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn validate_base_url_loopback() {
+        let (ok, _) = validate_base_url("http://127.0.0.1:8080");
+        assert!(ok);
     }
 }

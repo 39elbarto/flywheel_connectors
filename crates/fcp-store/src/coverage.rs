@@ -173,9 +173,8 @@ impl CoverageEvaluation {
         // target_symbols = source_symbols * target_bps / 10000
         let target_symbols = u64::from(self.source_symbols) * u64::from(target_bps) / 10000;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let needed = target_symbols.saturating_sub(u64::from(self.total_symbols)) as u32;
-        needed
+        let needed = target_symbols.saturating_sub(u64::from(self.total_symbols));
+        u32::try_from(needed).unwrap_or(u32::MAX)
     }
 }
 
@@ -287,10 +286,8 @@ impl CoverageEvaluation {
             .saturating_mul(10_000)
             .saturating_sub(max_allowed.saturating_mul(u64::from(self.total_symbols)));
 
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            ((numerator.saturating_add(max_allowed.saturating_sub(1))) / max_allowed) as u32
-        }
+        let result = (numerator.saturating_add(max_allowed.saturating_sub(1))) / max_allowed;
+        u32::try_from(result).unwrap_or(u32::MAX)
     }
 }
 

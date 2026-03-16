@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{DEFAULT_REFRESH_THRESHOLD, OAuthError, OAuthResult};
 
 /// OAuth token response from provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     /// The access token.
     pub access_token: String,
@@ -34,6 +34,22 @@ pub struct TokenResponse {
     /// ID token (`OpenID Connect`).
     #[serde(default)]
     pub id_token: Option<String>,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("scope", &self.scope)
+            .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Stored OAuth tokens with metadata.
@@ -851,7 +867,11 @@ mod tests {
         let resp = mock_token_response(Some(3600));
         let debug = format!("{resp:?}");
         assert!(debug.contains("TokenResponse"));
-        assert!(debug.contains("test_access_token"));
+        assert!(
+            !debug.contains("test_access_token"),
+            "access_token must be redacted in Debug output"
+        );
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

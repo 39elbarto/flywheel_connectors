@@ -39,7 +39,7 @@ impl std::fmt::Display for AuthStyle {
 }
 
 /// OAuth 2.0 configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuth2Config {
     /// Client ID.
     pub client_id: String,
@@ -67,6 +67,24 @@ pub struct OAuth2Config {
     pub extra_token_params: HashMap<String, String>,
     /// HTTP client timeout.
     pub timeout: Duration,
+}
+
+impl std::fmt::Debug for OAuth2Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth2Config")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("authorization_url", &self.authorization_url)
+            .field("token_url", &self.token_url)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("default_scopes", &self.default_scopes)
+            .field("use_pkce", &self.use_pkce)
+            .field("auth_style", &self.auth_style)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OAuth2Config {
@@ -536,8 +554,12 @@ impl AuthorizationCallback {
     /// Returns an error when the URL is invalid or callback parameters cannot be parsed.
     pub fn from_url(url: &str) -> OAuthResult<Self> {
         let parsed = Url::parse(url)?;
-        let query = parsed.query().unwrap_or("");
-        Self::from_query(query)
+        let encoded = parsed
+            .query()
+            .filter(|query| !query.is_empty())
+            .or_else(|| parsed.fragment().filter(|fragment| !fragment.is_empty()))
+            .unwrap_or("");
+        Self::from_query(encoded)
     }
 
     /// Validate the callback and extract the code.
@@ -753,6 +775,15 @@ mod tests {
     fn test_callback_from_url() {
         let callback =
             AuthorizationCallback::from_url("https://localhost/callback?code=abc&state=xyz")
+                .unwrap();
+        assert_eq!(callback.code, Some("abc".to_string()));
+        assert_eq!(callback.state, Some("xyz".to_string()));
+    }
+
+    #[test]
+    fn test_callback_from_url_fragment_response_mode() {
+        let callback =
+            AuthorizationCallback::from_url("https://localhost/callback#code=abc&state=xyz")
                 .unwrap();
         assert_eq!(callback.code, Some("abc".to_string()));
         assert_eq!(callback.state, Some("xyz".to_string()));

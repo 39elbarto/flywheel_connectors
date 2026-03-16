@@ -222,13 +222,13 @@ impl StreamHealthTracker {
     /// Map the current streaming health to the core `ConnectorHealth` enum.
     #[must_use]
     pub fn to_connector_health(&self) -> fcp_core::ConnectorHealth {
+        let now = Instant::now();
         match self.state {
             StreamHealthState::Connected => fcp_core::ConnectorHealth::Healthy,
             StreamHealthState::Degraded => fcp_core::ConnectorHealth::Degraded {
                 reason: format!(
                     "heartbeat overdue ({}ms)",
-                    self.last_heartbeat
-                        .map_or(0, |t| millis_since(Instant::now(), t))
+                    self.last_heartbeat.map_or(0, |t| millis_since(now, t))
                 ),
             },
             StreamHealthState::Reconnecting => fcp_core::ConnectorHealth::Degraded {
@@ -260,8 +260,8 @@ mod tests {
 
     fn fast_tracker() -> StreamHealthTracker {
         StreamHealthTracker::new(StreamHealthConfig {
-            heartbeat_timeout: Duration::from_millis(10),
-            zombie_timeout: Duration::from_millis(50),
+            heartbeat_timeout: Duration::from_millis(50),
+            zombie_timeout: Duration::from_millis(200),
             max_reconnect_attempts: 3,
         })
     }
@@ -339,7 +339,7 @@ mod tests {
     fn missed_heartbeat_degrades() {
         let mut tracker = fast_tracker();
         tracker.record_heartbeat();
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         let state = tracker.evaluate();
         assert_eq!(state, StreamHealthState::Degraded);
     }
@@ -349,7 +349,7 @@ mod tests {
         // If no heartbeat was ever recorded, last_heartbeat is None,
         // so the timeout check doesn't trigger.
         let mut tracker = fast_tracker();
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         let state = tracker.evaluate();
         assert_eq!(state, StreamHealthState::Connected);
     }
@@ -360,7 +360,7 @@ mod tests {
     fn heartbeat_recovers_from_degraded() {
         let mut tracker = fast_tracker();
         tracker.record_heartbeat();
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         tracker.evaluate();
         assert_eq!(tracker.state(), StreamHealthState::Degraded);
 
@@ -374,11 +374,11 @@ mod tests {
     fn zombie_timeout_makes_unhealthy() {
         let mut tracker = fast_tracker();
         tracker.record_heartbeat();
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         tracker.evaluate();
         assert_eq!(tracker.state(), StreamHealthState::Degraded);
 
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(170));
         let state = tracker.evaluate();
         assert_eq!(state, StreamHealthState::Unhealthy);
     }
@@ -512,7 +512,7 @@ mod tests {
     fn degraded_maps_to_degraded() {
         let mut tracker = fast_tracker();
         tracker.record_heartbeat();
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         tracker.evaluate();
         assert!(matches!(
             tracker.to_connector_health(),
@@ -683,13 +683,13 @@ mod tests {
         assert_eq!(tracker.evaluate(), StreamHealthState::Connected);
 
         // Phase 2: miss heartbeat
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         assert_eq!(tracker.evaluate(), StreamHealthState::Degraded);
 
         // Snapshot during degradation
         let snap = tracker.snapshot();
         assert_eq!(snap.state, StreamHealthState::Degraded);
-        assert!(snap.last_heartbeat_ms_ago.unwrap() >= 10);
+        assert!(snap.last_heartbeat_ms_ago.unwrap() >= 50);
 
         // Phase 3: heartbeat arrives → recovery
         tracker.record_heartbeat();
@@ -742,11 +742,11 @@ mod tests {
         assert_eq!(tracker.evaluate(), StreamHealthState::Connected);
 
         // Phase 2: miss heartbeat → degrade
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         assert_eq!(tracker.evaluate(), StreamHealthState::Degraded);
 
         // Phase 3: still no heartbeat → zombie
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(170));
         assert_eq!(tracker.evaluate(), StreamHealthState::Unhealthy);
 
         // Verify it stays unhealthy
@@ -803,7 +803,7 @@ mod tests {
         assert!(snap.last_ack_ms_ago.is_some());
 
         // 2. Degrade: miss heartbeat
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         assert_eq!(tracker.evaluate(), StreamHealthState::Degraded);
 
         // 3. Recover: heartbeat arrives
@@ -823,9 +823,9 @@ mod tests {
         tracker.record_heartbeat();
 
         // 7. Zombie: miss heartbeat past zombie timeout
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(80));
         tracker.evaluate();
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(170));
         assert_eq!(tracker.evaluate(), StreamHealthState::Unhealthy);
 
         // 8. Reset

@@ -216,10 +216,13 @@ pub fn check_batch_feasibility(snapshot: &PoolSnapshot, ops_requested: u64) -> B
         Duration::zero()
     } else if feasible_in_one_window {
         reset_dur
-    } else {
+    } else if snapshot.limit > 0 {
         // Need multiple windows
         let windows_needed = ops_requested.div_ceil(snapshot.limit).max(1);
         reset_dur * i32::try_from(windows_needed).unwrap_or(i32::MAX)
+    } else {
+        // Zero limit means the pool is fully restricted; cannot estimate
+        reset_dur
     };
 
     BatchFeasibility {
@@ -309,7 +312,7 @@ pub fn suggest_scheduling(
                 format_duration(reset_dur)
             ),
         }
-    } else {
+    } else if snapshot.limit > 0 {
         // Needs multiple windows
         let windows = ops_needed.div_ceil(snapshot.limit);
         let total_time = reset_secs * i64::try_from(windows).unwrap_or(i64::MAX);
@@ -329,6 +332,17 @@ pub fn suggest_scheduling(
             reasoning: format!(
                 "Need {ops_needed} ops, limit is {}. Requires {windows} windows.",
                 snapshot.limit
+            ),
+        }
+    } else {
+        // Zero limit: pool is fully restricted
+        SchedulingSuggestion {
+            pool: snapshot.pool.clone(),
+            suggested_rate_per_hour: 0.0,
+            suggested_delay_ms: 0,
+            wait_before_start: Some(reset_dur),
+            reasoning: format!(
+                "Pool limit is 0. Cannot schedule {ops_needed} ops."
             ),
         }
     }

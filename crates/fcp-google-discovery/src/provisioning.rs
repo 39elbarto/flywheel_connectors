@@ -424,7 +424,7 @@ fn build_setup_descriptor(
                 "type": "object",
                 "properties": {
                     "project_id": { "type": "string" },
-                    "selected_escalations": { "type": "array", "items": { "type": "string" } },
+                    "scope_triggers": { "type": "array", "items": { "type": "string" } },
                     "auth_flow": {
                         "type": "string",
                         "enum": ["authorization_code_pkce", "device_code"]
@@ -1226,6 +1226,18 @@ mod tests {
         assert!(
             td.get("metadata").is_some(),
             "tool descriptor should have metadata"
+        );
+        assert!(
+            td["input_schema"]["properties"]
+                .get("scope_triggers")
+                .is_some(),
+            "tool descriptor should expose scope_triggers in the input schema"
+        );
+        assert!(
+            td["input_schema"]["properties"]
+                .get("selected_escalations")
+                .is_none(),
+            "tool descriptor should not expose the stale selected_escalations field"
         );
     }
 

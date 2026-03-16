@@ -291,8 +291,12 @@ impl DiscoveryResponse {
     }
 
     #[must_use]
-    fn not_modified(registry_version: u64, cache: CacheMetadata) -> Self {
-        Self::new(Vec::new(), registry_version)
+    fn not_modified(
+        connectors: Vec<ConnectorSummary>,
+        registry_version: u64,
+        cache: CacheMetadata,
+    ) -> Self {
+        Self::new(connectors, registry_version)
             .with_cache_metadata(cache)
             .with_response_meta(ResponseMeta::not_modified())
     }
@@ -395,21 +399,18 @@ impl IntrospectionResponse {
     #[must_use]
     fn not_modified(
         connector: ConnectorSummary,
+        tools: Vec<ToolDescriptor>,
+        rate_limits: Option<RateLimitDeclarations>,
         archetype: ConnectorArchetype,
+        introspection: Introspection,
         cache: CacheMetadata,
     ) -> Self {
         Self {
             connector,
-            tools: Vec::new(),
-            rate_limits: None,
+            tools,
+            rate_limits,
             archetype,
-            introspection: Introspection {
-                operations: Vec::new(),
-                events: Vec::new(),
-                resource_types: Vec::new(),
-                auth_caps: None,
-                event_caps: None,
-            },
+            introspection,
             cache: Some(cache),
             meta: Some(ResponseMeta::not_modified()),
         }
@@ -504,7 +505,12 @@ impl From<&OperationInfo> for ToolDescriptor {
             safety_tier: op.safety_tier,
             idempotency: op.idempotency,
             approval_mode: op.requires_approval,
-            requires_confirmation: op.requires_approval.is_some(),
+            requires_confirmation: matches!(
+                op.requires_approval,
+                Some(
+                    ApprovalMode::Policy | ApprovalMode::Interactive | ApprovalMode::ElevationToken
+                )
+            ),
             idempotent: matches!(
                 op.idempotency,
                 fcp_core::IdempotencyClass::Strict | fcp_core::IdempotencyClass::BestEffort
@@ -512,12 +518,11 @@ impl From<&OperationInfo> for ToolDescriptor {
             // OperationInfo alone does not prove live simulate support.
             supports_simulate: None,
             latency_hint: None,
-            rate_limits: op.rate_limit.as_ref().map_or_else(Vec::new, |rl| {
-                rl.pool_name
-                    .clone()
-                    .or_else(|| rl.scope.clone())
-                    .map_or_else(Vec::new, |value| vec![value])
-            }),
+            rate_limits: op
+                .rate_limit
+                .as_ref()
+                .and_then(|rl| rl.pool_name.clone())
+                .map_or_else(Vec::new, |pool_name| vec![pool_name]),
             examples: op
                 .ai_hints
                 .examples
@@ -1037,7 +1042,7 @@ where
             .as_ref()
             .is_some_and(|validator| validator.is_not_modified(&cache))
         {
-            DiscoveryResponse::not_modified(cache_result.registry_version, cache)
+            DiscoveryResponse::not_modified(filtered, cache_result.registry_version, cache)
         } else {
             DiscoveryResponse::new(filtered, cache_result.registry_version)
                 .with_cache_metadata(cache)
@@ -1172,7 +1177,12 @@ where
             .is_some_and(|validator| validator.is_not_modified(&cache))
         {
             return Ok(IntrospectionResponse::not_modified(
-                summary, archetype, cache,
+                summary,
+                tools,
+                rate_limits,
+                archetype,
+                introspection,
+                cache,
             ));
         }
 
@@ -2121,7 +2131,7 @@ mod tests {
             SafetyTier::Safe,
             ConnectorHealth::healthy(),
         );
-        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
         let endpoint = DiscoveryEndpoint::with_cache_ttl(
             Arc::new(registry),
             Arc::new(AllowPolicy),
@@ -2147,7 +2157,8 @@ mod tests {
             )
             .await;
 
-        assert_eq!(second.response.connectors.len(), 0);
+        assert_eq!(second.response.connectors.len(), 1);
+        assert_eq!(second.response.connectors[0].id, summary.id);
         assert_eq!(
             second.response.meta.as_ref().map(|meta| meta.status),
             Some(304)
@@ -2165,7 +2176,7 @@ mod tests {
             SafetyTier::Safe,
             ConnectorHealth::healthy(),
         );
-        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
         let endpoint = DiscoveryEndpoint::with_cache_ttl(
             Arc::new(registry),
             Arc::new(AllowPolicy),
@@ -2194,6 +2205,8 @@ mod tests {
             second.response.meta.as_ref().map(|meta| meta.status),
             Some(304)
         );
+        assert_eq!(second.response.connectors.len(), 1);
+        assert_eq!(second.response.connectors[0].id, summary.id);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2287,7 +2300,12 @@ mod tests {
             .await
             .expect("conditional introspection should succeed");
 
-        assert!(second.tools.is_empty());
+        assert_eq!(second.tools.len(), first.tools.len());
+        assert_eq!(
+            second.introspection.operations.len(),
+            first.introspection.operations.len()
+        );
+        assert_eq!(second.rate_limits.is_some(), first.rate_limits.is_some());
         assert_eq!(second.meta.as_ref().map(|meta| meta.status), Some(304));
     }
 
@@ -2876,12 +2894,11 @@ mod tests {
     fn tool_descriptor_from_operation_rate_limit_pool_name_preferred() {
         let op = make_operation("op1", None);
         let tool = ToolDescriptor::from(&op);
-        // pool_name takes precedence via or_else chain
         assert_eq!(tool.rate_limits, vec!["api_pool"]);
     }
 
     #[test]
-    fn tool_descriptor_from_operation_rate_limit_scope_fallback() {
+    fn tool_descriptor_from_operation_rate_limit_without_pool_name_has_no_named_pools() {
         use fcp_core::RateLimit;
         let mut op = make_operation("op2", None);
         op.rate_limit = Some(RateLimit {
@@ -2892,7 +2909,7 @@ mod tests {
             pool_name: None,
         });
         let tool = ToolDescriptor::from(&op);
-        assert_eq!(tool.rate_limits, vec!["per_connector"]);
+        assert!(tool.rate_limits.is_empty());
     }
 
     #[test]
@@ -2937,6 +2954,16 @@ mod tests {
 
         assert_eq!(tool.examples.len(), 1);
         assert_eq!(tool.examples[0].input, serde_json::json!({"key": "val"}));
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_approval_mode_none_does_not_require_confirmation() {
+        let mut op = make_operation("op9", None);
+        op.requires_approval = Some(ApprovalMode::None);
+        let tool = ToolDescriptor::from(&op);
+
+        assert_eq!(tool.approval_mode, Some(ApprovalMode::None));
+        assert!(!tool.requires_confirmation);
     }
 
     #[test]
@@ -4211,6 +4238,14 @@ mod tests {
 
     #[test]
     fn discovery_response_not_modified_has_304_meta() {
+        let connectors = vec![make_summary(
+            "test",
+            "cache",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        )];
         let now = Utc::now();
         let cache = CacheMetadata {
             etag: "\"etag\"".to_string(),
@@ -4218,8 +4253,8 @@ mod tests {
             max_age_seconds: 30,
             stale_while_revalidate_seconds: None,
         };
-        let resp = DiscoveryResponse::not_modified(5, cache);
-        assert!(resp.connectors.is_empty());
+        let resp = DiscoveryResponse::not_modified(connectors, 5, cache);
+        assert_eq!(resp.connectors.len(), 1);
         assert_eq!(resp.registry_version, 5);
         assert!(resp.cache.is_some());
         assert_eq!(resp.meta.as_ref().unwrap().status, 304);
@@ -4346,6 +4381,19 @@ mod tests {
             SafetyTier::Safe,
             ConnectorHealth::healthy(),
         );
+        let operation = make_operation("nm_op", Some("not modified op"));
+        let tools = vec![ToolDescriptor::from(&operation)];
+        let introspection = Introspection {
+            operations: vec![operation],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+        let rate_limits = Some(RateLimitDeclarations {
+            limits: vec![],
+            tool_pool_map: HashMap::new(),
+        });
         let now = Utc::now();
         let cache = CacheMetadata {
             etag: "\"e\"".to_string(),
@@ -4355,13 +4403,18 @@ mod tests {
         };
         let resp = IntrospectionResponse::not_modified(
             summary,
+            tools,
+            rate_limits,
             ConnectorArchetype::RequestResponse,
+            introspection,
             cache,
         );
-        assert!(resp.tools.is_empty());
+        assert_eq!(resp.tools.len(), 1);
         assert_eq!(resp.meta.as_ref().unwrap().status, 304);
         assert!(resp.cache.is_some());
         assert_eq!(resp.archetype, ConnectorArchetype::RequestResponse);
+        assert_eq!(resp.introspection.operations.len(), 1);
+        assert!(resp.rate_limits.is_some());
     }
 
     #[test]
@@ -5676,6 +5729,19 @@ mod tests {
             SafetyTier::Safe,
             ConnectorHealth::healthy(),
         );
+        let operation = make_operation("arch_op", Some("arch op"));
+        let tools = vec![ToolDescriptor::from(&operation)];
+        let introspection = Introspection {
+            operations: vec![operation],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+        let rate_limits = Some(RateLimitDeclarations {
+            limits: vec![],
+            tool_pool_map: HashMap::new(),
+        });
         let now = Utc::now();
         for archetype in [
             ConnectorArchetype::Unknown,
@@ -5691,11 +5757,18 @@ mod tests {
                 max_age_seconds: 30,
                 stale_while_revalidate_seconds: None,
             };
-            let resp = IntrospectionResponse::not_modified(summary.clone(), archetype, cache);
+            let resp = IntrospectionResponse::not_modified(
+                summary.clone(),
+                tools.clone(),
+                rate_limits.clone(),
+                archetype,
+                introspection.clone(),
+                cache,
+            );
             assert_eq!(resp.archetype, archetype);
-            assert!(resp.tools.is_empty());
-            assert!(resp.introspection.operations.is_empty());
-            assert!(resp.rate_limits.is_none());
+            assert_eq!(resp.tools.len(), 1);
+            assert_eq!(resp.introspection.operations.len(), 1);
+            assert!(resp.rate_limits.is_some());
         }
     }
 
@@ -5718,7 +5791,7 @@ mod tests {
         let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
 
         // Populate cache
-        let _ = endpoint.introspect(&summary.id).await.unwrap();
+        let first = endpoint.introspect(&summary.id).await.unwrap();
 
         let far_future = Utc::now() + chrono::Duration::seconds(86400);
         let resp = endpoint
@@ -5733,6 +5806,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.meta.as_ref().map(|m| m.status), Some(304));
+        assert_eq!(resp.tools.len(), first.tools.len());
+        assert_eq!(
+            resp.introspection.operations.len(),
+            first.introspection.operations.len()
+        );
+        assert_eq!(resp.rate_limits.is_some(), first.rate_limits.is_some());
     }
 
     #[fcp_async_core::runtime::test]
@@ -5810,6 +5889,11 @@ mod tests {
             )
             .await;
         assert_eq!(second.response.meta.as_ref().map(|m| m.status), Some(304));
+        assert_eq!(second.response.connectors.len(), 1);
+        assert_eq!(
+            second.response.connectors[0].id,
+            first.response.connectors[0].id
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

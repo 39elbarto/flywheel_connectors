@@ -106,10 +106,8 @@ impl CoverageEvaluation {
         // Calculate coverage in basis points
         // coverage_bps = (total_symbols / source_symbols) * 10000
         let coverage_bps = if dist.source_symbols > 0 {
-            #[allow(clippy::cast_possible_truncation)]
-            let bps =
-                (u64::from(dist.total_symbols) * 10000 / u64::from(dist.source_symbols)) as u32;
-            bps
+            let bps = u64::from(dist.total_symbols) * 10_000 / u64::from(dist.source_symbols);
+            u32::try_from(bps).unwrap_or(u32::MAX)
         } else {
             0
         };
@@ -1862,6 +1860,20 @@ mod tests {
         }
         let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
         assert_eq!(eval.coverage_bps, 200_000); // 100/5 * 10000
+        assert!(eval.is_available);
+    }
+
+    #[test]
+    fn from_distribution_extreme_overcoverage_saturates_coverage_bps() {
+        let dist = SymbolDistribution {
+            nodes: HashMap::from([(1, (u32::MAX, 0))]),
+            source_symbols: 1,
+            total_symbols: u32::MAX,
+        };
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+
+        assert_eq!(eval.coverage_bps, u32::MAX);
+        assert_eq!(eval.max_node_fraction_bps, 10_000);
         assert!(eval.is_available);
     }
 

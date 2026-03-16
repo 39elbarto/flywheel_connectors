@@ -112,8 +112,7 @@ impl AnthropicClient {
             auth,
             base_url: DEFAULT_BASE_URL.into(),
             runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default()
-                    .with_request_timeout(Duration::from_secs(30)),
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
             retry_config: HttpRetryConfig::default(),
             total_input_tokens: AtomicU64::new(0),
@@ -465,7 +464,7 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> AnthropicError {
 fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<StreamEvent>> {
     async_stream::stream! {
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = match chunk {
@@ -476,14 +475,11 @@ fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<St
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend_from_slice(&chunk);
 
             // Process complete SSE events
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_str = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
-
-                if let Some(event) = parse_sse_event(&event_str) {
+            while let Some(event_bytes) = take_next_sse_event(&mut buffer) {
+                if let Some(event) = parse_sse_event_bytes(&event_bytes) {
                     yield event;
                 }
             }
@@ -491,27 +487,78 @@ fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<St
 
         // Process any remaining buffer
         if !buffer.is_empty() {
-            if let Some(event) = parse_sse_event(&buffer) {
+            if let Some(event) = parse_sse_event_bytes(&buffer) {
                 yield event;
             }
         }
     }
 }
 
+fn take_next_sse_event(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let (event_end, delimiter_len) = next_sse_event_boundary(buffer)?;
+    let event = buffer[..event_end].to_vec();
+    buffer.drain(..event_end + delimiter_len);
+    Some(event)
+}
+
+fn next_sse_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|pos| (pos, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|pos| (pos, 4));
+
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
+        (Some(lf), None) => Some(lf),
+        (None, Some(crlf)) => Some(crlf),
+        (None, None) => None,
+    }
+}
+
+fn parse_sse_event_bytes(event_bytes: &[u8]) -> Option<AnthropicResult<StreamEvent>> {
+    let event_str = match std::str::from_utf8(event_bytes) {
+        Ok(event_str) => event_str,
+        Err(error) => {
+            return Some(Err(AnthropicError::Api {
+                error_type: "invalid_sse_utf8".to_string(),
+                message: format!("Anthropic SSE event was not valid UTF-8: {error}"),
+                status_code: None,
+            }));
+        }
+    };
+
+    parse_sse_event(event_str)
+}
+
+fn parse_sse_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let value = line.strip_prefix(field)?;
+    Some(value.strip_prefix(' ').unwrap_or(value))
+}
+
 /// Parse a single SSE event.
 fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
     let mut event_type = None;
-    let mut data = None;
+    let mut data_lines = Vec::new();
 
-    for line in event_str.lines() {
-        if let Some(value) = line.strip_prefix("event: ") {
+    for raw_line in event_str.lines() {
+        let line = raw_line.trim_end_matches('\r');
+
+        if let Some(value) = parse_sse_field(line, "event:") {
             event_type = Some(value.trim());
-        } else if let Some(value) = line.strip_prefix("data: ") {
-            data = Some(value.trim());
+        } else if let Some(value) = parse_sse_field(line, "data:") {
+            data_lines.push(value);
         }
     }
 
-    let data = data?;
+    if data_lines.is_empty() {
+        return None;
+    }
+
+    let data = data_lines.join("\n");
 
     // Parse based on event type
     match event_type {
@@ -524,7 +571,7 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
             | "message_stop"
             | "ping"
             | "error",
-        ) => match serde_json::from_str::<StreamEvent>(data) {
+        ) => match serde_json::from_str::<StreamEvent>(&data) {
             Ok(event) => Some(Ok(event)),
             Err(e) => Some(Err(AnthropicError::Json(e))),
         },
@@ -764,6 +811,84 @@ mod tests {
     fn test_parse_sse_event_unknown_ignored() {
         let event = parse_sse_event("event: unknown\ndata: {}\n");
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_accepts_fields_without_optional_space() {
+        let event = parse_sse_event("event:ping\ndata:{\"type\":\"ping\"}\n");
+        let event = event
+            .expect("expected ping event")
+            .expect("expected ok event");
+
+        assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    #[test]
+    fn test_parse_sse_event_multiline_data_joins_lines() {
+        let event = parse_sse_event("event: ping\ndata: {\"type\":\ndata: \"ping\"}\n");
+        let event = event
+            .expect("expected ping event")
+            .expect("expected ok event");
+
+        assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    #[test]
+    fn test_take_next_sse_event_handles_crlf_delimiters() {
+        let mut buffer = concat!(
+            "event: ping\r\n",
+            "data: {\"type\":\"ping\"}\r\n",
+            "\r\n",
+            "event: message_stop\r\n",
+            "data: {\"type\":\"message_stop\"}\r\n",
+            "\r\n",
+        )
+        .as_bytes()
+        .to_vec();
+
+        let first = take_next_sse_event(&mut buffer).expect("expected first event");
+        let first = parse_sse_event_bytes(&first)
+            .expect("expected first parsed event")
+            .expect("expected first ok event");
+        assert!(matches!(first, StreamEvent::Ping));
+
+        let second = take_next_sse_event(&mut buffer).expect("expected second event");
+        let second = parse_sse_event_bytes(&second)
+            .expect("expected second parsed event")
+            .expect("expected second ok event");
+        assert!(matches!(second, StreamEvent::MessageStop));
+
+        assert!(buffer.is_empty(), "expected buffer to be fully consumed");
+    }
+
+    #[test]
+    fn test_take_next_sse_event_preserves_utf8_across_chunk_boundaries() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"caf",
+        );
+        buffer.push(0xC3);
+
+        assert!(
+            take_next_sse_event(&mut buffer).is_none(),
+            "partial multibyte code point should not produce an event yet"
+        );
+
+        buffer.push(0xA9);
+        buffer.extend_from_slice(b"\"}}\n\n");
+
+        let event = take_next_sse_event(&mut buffer).expect("expected complete event");
+        let event = parse_sse_event_bytes(&event)
+            .expect("expected parsed event")
+            .expect("expected ok event");
+
+        match event {
+            StreamEvent::Error { error } => {
+                assert_eq!(error.error_type, "api_error");
+                assert_eq!(error.message, "café");
+            }
+            _ => panic!("expected Error"),
+        }
     }
 
     #[fcp_async_core::runtime::test]

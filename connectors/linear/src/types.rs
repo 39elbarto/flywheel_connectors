@@ -572,6 +572,23 @@ fn compare_sync_timestamps(left: &str, right: &str) -> Ordering {
     }
 }
 
+const UNKNOWN_SYNC_TIMESTAMP: &str = "unknown";
+
+fn claims_remote_link(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn incomplete_linkage_conflict(
+    bead_updated_at: impl Into<String>,
+    linear_updated_at: impl Into<String>,
+) -> SyncConflict {
+    SyncConflict {
+        field: SyncField::Linkage,
+        bead_updated_at: bead_updated_at.into(),
+        linear_updated_at: linear_updated_at.into(),
+    }
+}
+
 fn linkage_conflict(bead: &BeadSyncSnapshot, linear: &LinearSyncSnapshot) -> Option<SyncConflict> {
     let bead_mismatch = bead
         .linear_issue_id
@@ -643,14 +660,38 @@ pub fn plan_bead_linear_sync(
     policy: SyncConflictPolicy,
 ) -> SyncPlan {
     match (bead, linear) {
-        (Some(_), None) => SyncPlan {
-            create_linear: true,
-            ..SyncPlan::default()
-        },
-        (None, Some(_)) => SyncPlan {
-            create_bead: true,
-            ..SyncPlan::default()
-        },
+        (Some(bead), None) => {
+            if claims_remote_link(bead.linear_issue_id.as_deref()) {
+                SyncPlan {
+                    conflicts: vec![incomplete_linkage_conflict(
+                        bead.updated_at.clone(),
+                        UNKNOWN_SYNC_TIMESTAMP,
+                    )],
+                    ..SyncPlan::default()
+                }
+            } else {
+                SyncPlan {
+                    create_linear: true,
+                    ..SyncPlan::default()
+                }
+            }
+        }
+        (None, Some(linear)) => {
+            if claims_remote_link(linear.bead_id.as_deref()) {
+                SyncPlan {
+                    conflicts: vec![incomplete_linkage_conflict(
+                        UNKNOWN_SYNC_TIMESTAMP,
+                        linear.updated_at.clone(),
+                    )],
+                    ..SyncPlan::default()
+                }
+            } else {
+                SyncPlan {
+                    create_bead: true,
+                    ..SyncPlan::default()
+                }
+            }
+        }
         (None, None) => SyncPlan::default(),
         (Some(bead), Some(linear)) => {
             if let Some(conflict) = linkage_conflict(bead, linear) {
@@ -748,6 +789,13 @@ mod tests {
         }
     }
 
+    fn sample_unlinked_bead_snapshot() -> BeadSyncSnapshot {
+        BeadSyncSnapshot {
+            linear_issue_id: None,
+            ..sample_bead_snapshot()
+        }
+    }
+
     fn sample_linear_snapshot() -> LinearSyncSnapshot {
         LinearSyncSnapshot {
             issue_id: "lin-1".to_string(),
@@ -758,6 +806,13 @@ mod tests {
             status: Some("open".to_string()),
             priority: Some(1),
             updated_at: "2026-03-07T06:00:00+00:00".to_string(),
+        }
+    }
+
+    fn sample_unlinked_linear_snapshot() -> LinearSyncSnapshot {
+        LinearSyncSnapshot {
+            bead_id: None,
+            ..sample_linear_snapshot()
         }
     }
 
@@ -778,13 +833,43 @@ mod tests {
 
     #[test]
     fn sync_plan_creates_linear_when_missing() {
-        let bead = sample_bead_snapshot();
+        let bead = sample_unlinked_bead_snapshot();
         let plan = plan_bead_linear_sync(Some(&bead), None, SyncConflictPolicy::PreferFreshest);
 
         assert!(plan.create_linear);
         assert!(!plan.create_bead);
         assert!(plan.update_linear_fields.is_empty());
         assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn sync_plan_conflicts_when_bead_claims_missing_linear_issue() {
+        let bead = sample_bead_snapshot();
+        let plan = plan_bead_linear_sync(Some(&bead), None, SyncConflictPolicy::PreferFreshest);
+
+        assert!(!plan.create_linear);
+        assert!(!plan.create_bead);
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.update_bead_fields.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, SyncField::Linkage);
+        assert_eq!(plan.conflicts[0].bead_updated_at, bead.updated_at);
+        assert_eq!(plan.conflicts[0].linear_updated_at, UNKNOWN_SYNC_TIMESTAMP);
+    }
+
+    #[test]
+    fn sync_plan_conflicts_when_linear_claims_missing_bead() {
+        let linear = sample_linear_snapshot();
+        let plan = plan_bead_linear_sync(None, Some(&linear), SyncConflictPolicy::PreferFreshest);
+
+        assert!(!plan.create_linear);
+        assert!(!plan.create_bead);
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.update_bead_fields.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, SyncField::Linkage);
+        assert_eq!(plan.conflicts[0].bead_updated_at, UNKNOWN_SYNC_TIMESTAMP);
+        assert_eq!(plan.conflicts[0].linear_updated_at, linear.updated_at);
     }
 
     #[test]
@@ -907,8 +992,8 @@ mod tests {
 
     #[test]
     fn sync_plan_operation_classification_is_stable() {
-        let bead = sample_bead_snapshot();
-        let linear = sample_linear_snapshot();
+        let bead = sample_unlinked_bead_snapshot();
+        let linear = sample_unlinked_linear_snapshot();
 
         assert_eq!(
             plan_bead_linear_sync(Some(&bead), None, SyncConflictPolicy::PreferFreshest)
@@ -1010,7 +1095,7 @@ mod tests {
 
     #[test]
     fn sync_operation_intent_uses_bead_metadata_when_linear_missing() {
-        let bead = sample_bead_snapshot();
+        let bead = sample_unlinked_bead_snapshot();
 
         let intent = SyncOperationIntent::from_snapshots(
             Some(&bead),
@@ -1021,8 +1106,26 @@ mod tests {
 
         assert_eq!(intent.operation, SyncOperationKind::CreateLinear);
         assert_eq!(intent.bead_id.as_deref(), Some("br-123"));
-        assert_eq!(intent.linear_issue_id.as_deref(), Some("lin-1"));
+        assert!(intent.linear_issue_id.is_none());
         assert!(intent.linear_identifier.is_none());
+    }
+
+    #[test]
+    fn sync_operation_intent_surfaces_claimed_link_when_linear_snapshot_missing() {
+        let bead = sample_bead_snapshot();
+
+        let intent = SyncOperationIntent::from_snapshots(
+            Some(&bead),
+            None,
+            SyncConflictPolicy::PreferFreshest,
+            "2026-03-07T10:00:00+00:00",
+        );
+
+        assert_eq!(intent.operation, SyncOperationKind::Conflict);
+        assert_eq!(intent.bead_id.as_deref(), Some("br-123"));
+        assert_eq!(intent.linear_issue_id.as_deref(), Some("lin-1"));
+        assert_eq!(intent.plan.conflicts.len(), 1);
+        assert_eq!(intent.plan.conflicts[0].field, SyncField::Linkage);
     }
 
     #[test]

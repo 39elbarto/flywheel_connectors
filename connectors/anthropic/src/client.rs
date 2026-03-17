@@ -461,6 +461,10 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> AnthropicError {
 }
 
 /// Parse SSE stream into events.
+/// Maximum SSE buffer size (16 MiB). Prevents memory exhaustion from
+/// malformed streams that never produce an event delimiter.
+const MAX_SSE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
 fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<StreamEvent>> {
     async_stream::stream! {
         let mut stream = response.bytes_stream();
@@ -476,6 +480,18 @@ fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<St
             };
 
             buffer.extend_from_slice(&chunk);
+
+            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                yield Err(AnthropicError::Api {
+                    error_type: "sse_buffer_overflow".into(),
+                    message: format!(
+                        "SSE buffer exceeded {} bytes without a complete event",
+                        MAX_SSE_BUFFER_BYTES,
+                    ),
+                    status_code: None,
+                });
+                return;
+            }
 
             // Process complete SSE events
             while let Some(event_bytes) = take_next_sse_event(&mut buffer) {

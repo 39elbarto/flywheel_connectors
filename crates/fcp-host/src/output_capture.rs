@@ -232,7 +232,9 @@ impl OutputCapture {
                 // Try to parse accumulated line as JSON.
                 if let Ok(line_str) = std::str::from_utf8(&self.stdout_line_buf) {
                     let trimmed = line_str.trim();
-                    if !trimmed.is_empty() && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if !trimmed.is_empty()
+                        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+                    {
                         self.json_lines.push_front(value);
                         if self.json_lines.len() > self.config.max_json_lines {
                             self.json_lines.pop_back();
@@ -1261,7 +1263,7 @@ mod tests {
     fn ring_buffer_write_after_overflow() {
         let mut buf = RingBuffer::new(3);
         buf.write(b"abcdef"); // overflow: keeps "def"
-        buf.write(b"gh");     // evicts "d", "e" -> "fgh"
+        buf.write(b"gh"); // evicts "d", "e" -> "fgh"
         assert_eq!(buf.contents(), b"fgh");
         assert_eq!(buf.total_written(), 8);
     }
@@ -1437,6 +1439,20 @@ mod tests {
         assert_eq!(cap.json_line_count(), 1);
         assert_eq!(cap.latest_json().unwrap()["b"], 2);
         assert_eq!(cap.stderr_string(), "new err\n");
+    }
+
+    #[test]
+    fn capture_clear_discards_partial_json_buffer() {
+        let mut cap = OutputCapture::with_defaults();
+        cap.write_stdout(b"{\"stale\":1");
+        assert_eq!(cap.json_line_count(), 0);
+
+        cap.clear();
+        cap.write_stdout(b"{\"fresh\":2}\n");
+
+        assert_eq!(cap.json_line_count(), 1);
+        assert_eq!(cap.latest_json().unwrap()["fresh"], 2);
+        assert!(cap.latest_json().unwrap().get("stale").is_none());
     }
 
     #[test]
@@ -1715,8 +1731,8 @@ mod tests {
 
     #[test]
     fn install_result_with_steps_replaces() {
-        let result = InstallResult::failed("err")
-            .with_steps(vec![InstallStep::passed("a", "ok", 0.5)]);
+        let result =
+            InstallResult::failed("err").with_steps(vec![InstallStep::passed("a", "ok", 0.5)]);
         assert_eq!(result.steps.len(), 1);
         // Replace with new steps
         let result2 = result.with_steps(vec![
@@ -1760,9 +1776,10 @@ mod tests {
     fn install_step_clone() {
         let s = InstallStep::passed("step", "detail", 5.0);
         let cloned = s.clone();
-        assert_eq!(cloned.name, "step");
-        assert_eq!(cloned.detail, "detail");
-        assert!(cloned.passed);
+        assert_eq!(cloned.name, s.name);
+        assert_eq!(cloned.detail, s.detail);
+        assert!((cloned.elapsed_ms - s.elapsed_ms).abs() < f64::EPSILON);
+        assert_eq!(cloned.passed, s.passed);
     }
 
     // ────────── NEW: InstalledConnector additional ──────────
@@ -1836,9 +1853,9 @@ mod tests {
             has_overflow: true,
         };
         let cloned = s.clone();
-        assert_eq!(cloned.len, 10);
-        assert_eq!(cloned.capacity, 100);
-        assert_eq!(cloned.total_written, 500);
-        assert!(cloned.has_overflow);
+        assert_eq!(cloned.len, s.len);
+        assert_eq!(cloned.capacity, s.capacity);
+        assert_eq!(cloned.total_written, s.total_written);
+        assert_eq!(cloned.has_overflow, s.has_overflow);
     }
 }

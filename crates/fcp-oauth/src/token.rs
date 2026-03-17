@@ -871,7 +871,12 @@ mod tests {
             !debug.contains("test_access_token"),
             "access_token must be redacted in Debug output"
         );
+        assert!(
+            !debug.contains("test_refresh_token"),
+            "refresh_token must be redacted in Debug output"
+        );
         assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("Bearer"), "token_type should be visible");
     }
 
     #[test]

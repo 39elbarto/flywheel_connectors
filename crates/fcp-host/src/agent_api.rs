@@ -485,10 +485,7 @@ impl McpErrorCode {
     pub const fn is_standard_jsonrpc(self) -> bool {
         matches!(
             self,
-            Self::InvalidRequest
-                | Self::MethodNotFound
-                | Self::InvalidParams
-                | Self::InternalError
+            Self::InvalidRequest | Self::MethodNotFound | Self::InvalidParams | Self::InternalError
         )
     }
 
@@ -971,14 +968,16 @@ impl AgentSession {
     #[must_use]
     pub fn is_idle_expired(&self) -> bool {
         let idle_secs = (Utc::now() - self.last_activity).num_seconds();
-        idle_secs >= 0 && u64::try_from(idle_secs).unwrap_or(u64::MAX) >= self.config.idle_timeout.as_secs()
+        idle_secs >= 0
+            && u64::try_from(idle_secs).unwrap_or(u64::MAX) >= self.config.idle_timeout.as_secs()
     }
 
     /// Whether the session has exceeded its maximum lifetime.
     #[must_use]
     pub fn is_lifetime_expired(&self) -> bool {
         let life_secs = (Utc::now() - self.connected_at).num_seconds();
-        life_secs >= 0 && u64::try_from(life_secs).unwrap_or(u64::MAX) >= self.config.max_lifetime.as_secs()
+        life_secs >= 0
+            && u64::try_from(life_secs).unwrap_or(u64::MAX) >= self.config.max_lifetime.as_secs()
     }
 }
 
@@ -1313,10 +1312,7 @@ impl ToolDescriptor {
             safety_tier: Some(format!("{:?}", self.safety_tier).to_lowercase()),
             idempotency: Some(format!("{:?}", self.idempotency).to_lowercase()),
             capability: Some(self.capability.as_str().to_owned()),
-            read_only: Some(matches!(
-                self.risk_level,
-                fcp_core::RiskLevel::Low
-            )),
+            read_only: Some(matches!(self.risk_level, fcp_core::RiskLevel::Low)),
             destructive: Some(matches!(
                 self.safety_tier,
                 fcp_core::SafetyTier::Dangerous | fcp_core::SafetyTier::Critical
@@ -1401,9 +1397,8 @@ impl Serialize for McpErrorCode {
 impl<'de> Deserialize<'de> for McpErrorCode {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let code = i32::deserialize(deserializer)?;
-        Self::from_code(code).ok_or_else(|| {
-            serde::de::Error::custom(format!("unknown MCP error code: {code}"))
-        })
+        Self::from_code(code)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown MCP error code: {code}")))
     }
 }
 
@@ -1697,10 +1692,8 @@ mod tests {
 
     #[test]
     fn jsonrpc_response_success() {
-        let resp = McpJsonRpcResponse::success(
-            serde_json::json!(1),
-            serde_json::json!({"status": "ok"}),
-        );
+        let resp =
+            McpJsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"status": "ok"}));
         assert_eq!(resp.jsonrpc, "2.0");
         assert_eq!(resp.id, serde_json::json!(1));
         assert_eq!(resp.result["status"], "ok");
@@ -1807,9 +1800,18 @@ mod tests {
 
     #[test]
     fn error_code_default_messages() {
-        assert_eq!(McpErrorCode::InvalidRequest.default_message(), "Invalid request");
-        assert_eq!(McpErrorCode::MethodNotFound.default_message(), "Method not found");
-        assert_eq!(McpErrorCode::ToolNotFound.default_message(), "Tool not found");
+        assert_eq!(
+            McpErrorCode::InvalidRequest.default_message(),
+            "Invalid request"
+        );
+        assert_eq!(
+            McpErrorCode::MethodNotFound.default_message(),
+            "Method not found"
+        );
+        assert_eq!(
+            McpErrorCode::ToolNotFound.default_message(),
+            "Tool not found"
+        );
         assert_eq!(McpErrorCode::RateLimited.default_message(), "Rate limited");
     }
 
@@ -2228,7 +2230,11 @@ mod tests {
             ..AgentSessionConfig::default()
         };
         let errors = config.validate();
-        assert!(errors.iter().any(|e| e.contains("max_lifetime must be >= idle_timeout")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("max_lifetime must be >= idle_timeout"))
+        );
     }
 
     #[test]
@@ -2367,7 +2373,11 @@ mod tests {
 
     #[test]
     fn session_terminate_from_any_state() {
-        for initial in [SessionStatus::Active, SessionStatus::Idle, SessionStatus::Expired] {
+        for initial in [
+            SessionStatus::Active,
+            SessionStatus::Idle,
+            SessionStatus::Expired,
+        ] {
             let req = make_init_request();
             let mut session = AgentSession::new("sess", &req, AgentSessionConfig::default());
             match initial {
@@ -2398,7 +2408,10 @@ mod tests {
 
     #[test]
     fn route_initialize() {
-        assert_eq!(route_mcp_method("initialize"), McpMethodCategory::Initialize);
+        assert_eq!(
+            route_mcp_method("initialize"),
+            McpMethodCategory::Initialize
+        );
     }
 
     #[test]
@@ -2413,32 +2426,50 @@ mod tests {
 
     #[test]
     fn route_resources_list() {
-        assert_eq!(route_mcp_method("resources/list"), McpMethodCategory::ResourcesList);
+        assert_eq!(
+            route_mcp_method("resources/list"),
+            McpMethodCategory::ResourcesList
+        );
     }
 
     #[test]
     fn route_resources_read() {
-        assert_eq!(route_mcp_method("resources/read"), McpMethodCategory::ResourcesRead);
+        assert_eq!(
+            route_mcp_method("resources/read"),
+            McpMethodCategory::ResourcesRead
+        );
     }
 
     #[test]
     fn route_prompts_list() {
-        assert_eq!(route_mcp_method("prompts/list"), McpMethodCategory::PromptsList);
+        assert_eq!(
+            route_mcp_method("prompts/list"),
+            McpMethodCategory::PromptsList
+        );
     }
 
     #[test]
     fn route_prompts_get() {
-        assert_eq!(route_mcp_method("prompts/get"), McpMethodCategory::PromptsGet);
+        assert_eq!(
+            route_mcp_method("prompts/get"),
+            McpMethodCategory::PromptsGet
+        );
     }
 
     #[test]
     fn route_completion() {
-        assert_eq!(route_mcp_method("completion/complete"), McpMethodCategory::Completion);
+        assert_eq!(
+            route_mcp_method("completion/complete"),
+            McpMethodCategory::Completion
+        );
     }
 
     #[test]
     fn route_logging() {
-        assert_eq!(route_mcp_method("logging/setLevel"), McpMethodCategory::Logging);
+        assert_eq!(
+            route_mcp_method("logging/setLevel"),
+            McpMethodCategory::Logging
+        );
     }
 
     #[test]
@@ -2506,7 +2537,10 @@ mod tests {
     fn router_custom_route() {
         let mut router = McpMethodRouter::new();
         router.add_route("fcp/discover", McpMethodCategory::ResourcesList);
-        assert_eq!(router.route("fcp/discover"), McpMethodCategory::ResourcesList);
+        assert_eq!(
+            router.route("fcp/discover"),
+            McpMethodCategory::ResourcesList
+        );
     }
 
     #[test]
@@ -2719,7 +2753,10 @@ mod tests {
         };
         let entry = desc.to_mcp_tool_list_entry();
         assert_eq!(entry.name, "send_message");
-        assert_eq!(entry.description, Some("Send a message to a channel".to_owned()));
+        assert_eq!(
+            entry.description,
+            Some("Send a message to a channel".to_owned())
+        );
         assert!(entry.annotations.is_some());
         let ann = entry.annotations.unwrap();
         assert_eq!(ann.risk_level, Some("medium".to_owned()));
@@ -2935,7 +2972,10 @@ mod tests {
             serde_json::to_value(&client_req).unwrap(),
         );
         assert!(rpc_req.is_valid());
-        assert_eq!(route_mcp_method(&rpc_req.method), McpMethodCategory::Initialize);
+        assert_eq!(
+            route_mcp_method(&rpc_req.method),
+            McpMethodCategory::Initialize
+        );
 
         // Server builds response.
         let init_resp = McpInitializeResponse::fcp_default(client_req.protocol_version);
@@ -2961,7 +3001,10 @@ mod tests {
             "tools/call",
             serde_json::to_value(&call_req).unwrap(),
         );
-        assert_eq!(route_mcp_method(&rpc_req.method), McpMethodCategory::ToolsCall);
+        assert_eq!(
+            route_mcp_method(&rpc_req.method),
+            McpMethodCategory::ToolsCall
+        );
 
         // Build context.
         let ctx = ToolCallContext::new(
@@ -2975,15 +3018,10 @@ mod tests {
         assert_eq!(ctx.tool_name, "get_channel");
 
         // Build result.
-        let result = ToolCallResult::success_text(
-            r#"{"id":"C123","name":"general"}"#,
-            45,
-        );
+        let result = ToolCallResult::success_text(r#"{"id":"C123","name":"general"}"#, 45);
         let mcp_resp = result.to_mcp_response();
-        let rpc_resp = McpJsonRpcResponse::success(
-            ctx.request_id,
-            serde_json::to_value(&mcp_resp).unwrap(),
-        );
+        let rpc_resp =
+            McpJsonRpcResponse::success(ctx.request_id, serde_json::to_value(&mcp_resp).unwrap());
         assert_eq!(rpc_resp.id, serde_json::json!(2));
     }
 
@@ -3186,7 +3224,10 @@ mod tests {
             McpErrorCode::RateLimited,
         ];
         for code in codes {
-            assert!(!code.default_message().is_empty(), "empty message for {code:?}");
+            assert!(
+                !code.default_message().is_empty(),
+                "empty message for {code:?}"
+            );
         }
     }
 
@@ -3227,7 +3268,10 @@ mod tests {
         ];
         for (code, expected_num) in codes {
             let s = code.to_string();
-            assert!(s.contains(expected_num), "{s} does not contain {expected_num}");
+            assert!(
+                s.contains(expected_num),
+                "{s} does not contain {expected_num}"
+            );
         }
     }
 
@@ -3273,18 +3317,15 @@ mod tests {
         map.insert(McpErrorCode::InvalidRequest, "request");
         assert_eq!(map.get(&McpErrorCode::ToolNotFound), Some(&"tool"));
         assert_eq!(map.get(&McpErrorCode::InvalidRequest), Some(&"request"));
-        assert!(map.get(&McpErrorCode::RateLimited).is_none());
+        assert!(!map.contains_key(&McpErrorCode::RateLimited));
     }
 
     // ── McpJsonRpcRequest extras ─────────────────────────────────────────
 
     #[test]
     fn jsonrpc_request_with_params_has_params() {
-        let req = McpJsonRpcRequest::with_params(
-            serde_json::json!(1),
-            "test",
-            serde_json::json!(null),
-        );
+        let req =
+            McpJsonRpcRequest::with_params(serde_json::json!(1), "test", serde_json::json!(null));
         // params is Some even if the value is null
         assert!(req.params.is_some());
     }
@@ -3549,14 +3590,18 @@ mod tests {
         let errors = config.validate();
         // idle_timeout zero, max_lifetime zero, concurrent zero, rate_limit zero
         // Also max_lifetime < idle_timeout won't fire since both are zero
-        assert!(errors.len() >= 4, "expected at least 4 errors, got {}", errors.len());
+        assert!(
+            errors.len() >= 4,
+            "expected at least 4 errors, got {}",
+            errors.len()
+        );
     }
 
     #[test]
     fn session_config_boundary_lifetime_equals_idle() {
         let config = AgentSessionConfig {
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
+            idle_timeout: Duration::from_mins(5),
+            max_lifetime: Duration::from_mins(5),
             max_concurrent_calls: 1,
             rate_limit_per_minute: 1,
         };
@@ -3566,8 +3611,8 @@ mod tests {
     #[test]
     fn session_config_serialize_uses_seconds() {
         let config = AgentSessionConfig {
-            idle_timeout: Duration::from_secs(120),
-            max_lifetime: Duration::from_secs(3600),
+            idle_timeout: Duration::from_mins(2),
+            max_lifetime: Duration::from_hours(1),
             max_concurrent_calls: 5,
             rate_limit_per_minute: 30,
         };
@@ -3580,8 +3625,8 @@ mod tests {
     fn session_config_deserialize_from_seconds() {
         let json_str = r#"{"idle_timeout":60,"max_lifetime":1800,"max_concurrent_calls":8,"rate_limit_per_minute":100}"#;
         let config: AgentSessionConfig = serde_json::from_str(json_str).unwrap();
-        assert_eq!(config.idle_timeout, Duration::from_secs(60));
-        assert_eq!(config.max_lifetime, Duration::from_secs(1800));
+        assert_eq!(config.idle_timeout, Duration::from_mins(1));
+        assert_eq!(config.max_lifetime, Duration::from_mins(30));
         assert_eq!(config.max_concurrent_calls, 8);
         assert_eq!(config.rate_limit_per_minute, 100);
     }
@@ -3708,7 +3753,10 @@ mod tests {
             McpMethodCategory::Unknown,
         ];
         for cat in does_not {
-            assert!(!cat.requires_session(), "{cat:?} should not require session");
+            assert!(
+                !cat.requires_session(),
+                "{cat:?} should not require session"
+            );
         }
     }
 
@@ -3828,8 +3876,12 @@ mod tests {
     #[test]
     fn tool_call_result_with_metadata_roundtrip() {
         let mut result = ToolCallResult::success_text("ok", 10);
-        result.metadata.insert("key1".to_owned(), serde_json::json!("val1"));
-        result.metadata.insert("key2".to_owned(), serde_json::json!(42));
+        result
+            .metadata
+            .insert("key1".to_owned(), serde_json::json!("val1"));
+        result
+            .metadata
+            .insert("key2".to_owned(), serde_json::json!(42));
         let json = serde_json::to_string(&result).unwrap();
         let back: ToolCallResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.metadata.len(), 2);
@@ -3885,8 +3937,14 @@ mod tests {
         for code in codes {
             let err = ToolCallError::new(code, "test message");
             let s = err.to_string();
-            assert!(s.contains("test message"), "display missing message for {code:?}");
-            assert!(s.contains(&code.code().to_string()), "display missing code for {code:?}");
+            assert!(
+                s.contains("test message"),
+                "display missing message for {code:?}"
+            );
+            assert!(
+                s.contains(&code.code().to_string()),
+                "display missing code for {code:?}"
+            );
         }
     }
 
@@ -3930,11 +3988,7 @@ mod tests {
             McpErrorCode::RateLimited,
         ];
         for code in codes {
-            let resp = build_error_response(
-                serde_json::json!(1),
-                code,
-                code.default_message(),
-            );
+            let resp = build_error_response(serde_json::json!(1), code, code.default_message());
             assert_eq!(resp.error.code, code.code());
             assert_eq!(resp.error.message, code.default_message());
         }

@@ -1,11 +1,11 @@
-//! V3 ConnectorRuntime lifecycle E2E tests.
+//! V3 `ConnectorRuntime` lifecycle E2E tests.
 //!
 //! Validates the full retry/timeout/shutdown lifecycle of the
 //! Anthropic connector through the V3 `ConnectorRuntime` + `RetryLoop`
 //! machinery in `fcp-sdk::migration`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fcp_anthropic::client::AnthropicClient;
@@ -30,7 +30,7 @@ struct TransientThen200 {
 }
 
 impl TransientThen200 {
-    fn new(counter: Arc<AtomicUsize>) -> Self {
+    const fn new(counter: Arc<AtomicUsize>) -> Self {
         Self { counter }
     }
 }
@@ -64,13 +64,13 @@ impl Respond for TransientThen200 {
     }
 }
 
-/// Always returns 502 (retryable server error without a retry_after hint).
+/// Always returns 502 (retryable server error without a `retry_after` hint).
 struct AlwaysTransient {
     counter: Arc<AtomicUsize>,
 }
 
 impl AlwaysTransient {
-    fn new(counter: Arc<AtomicUsize>) -> Self {
+    const fn new(counter: Arc<AtomicUsize>) -> Self {
         Self { counter }
     }
 }
@@ -130,7 +130,7 @@ async fn e2e_retry_on_429() {
 
 /// E2E: Client exhausts all retries when the server persistently fails.
 ///
-/// With max_retries=2, the RetryLoop makes up to 3 total attempts
+/// With `max_retries=2`, the `RetryLoop` makes up to 3 total attempts
 /// (1 initial + 2 retries). All return 502, a retryable status code,
 /// so the loop exhausts and surfaces the last error.
 #[fcp_async_core::test]
@@ -175,7 +175,7 @@ async fn e2e_retry_exhaustion() {
 /// a `RetryLoop` whose operation sleeps for 5 seconds. The context deadline
 /// fires during the sleep, proving the V3 deadline enforcement path works.
 ///
-/// This tests the runtime + RetryLoop layer directly rather than going
+/// This tests the runtime + `RetryLoop` layer directly rather than going
 /// through the HTTP client, because `AnthropicClient::new` hardcodes a
 /// 120s reqwest timeout that cannot be overridden from the public API.
 /// The `RetryLoop` + `ExecutionContext` is the V3 deadline enforcement
@@ -192,8 +192,10 @@ async fn e2e_deadline_enforcement() {
 
     // Execute a RetryLoop where each attempt "hangs" (sleeps 5s).
     // The 100ms context deadline should cancel the sleep.
-    let result: Result<(), AnthropicError> =
-        RetryLoop::execute(&ctx, &fcp_sdk::migration::HttpRetryConfig::default().to_retry_policy(), |_attempt| async {
+    let result: Result<(), AnthropicError> = RetryLoop::execute(
+        &ctx,
+        &fcp_sdk::migration::HttpRetryConfig::default().to_retry_policy(),
+        |_attempt| async {
             // Simulate a slow operation by sleeping under the context.
             // The context's 100ms deadline will fire, returning an error.
             match ctx.sleep(Duration::from_secs(5)).await {
@@ -202,8 +204,9 @@ async fn e2e_deadline_enforcement() {
                     AttemptOutcome::Terminal(AnthropicError::from_async_error(async_err))
                 }
             }
-        })
-        .await;
+        },
+    )
+    .await;
 
     let elapsed = start.elapsed();
 
@@ -212,7 +215,9 @@ async fn e2e_deadline_enforcement() {
     // The error should indicate a deadline timeout or cancellation
     let err_str = err.to_string();
     assert!(
-        err_str.contains("deadline") || err_str.contains("timeout") || err_str.contains("cancelled"),
+        err_str.contains("deadline")
+            || err_str.contains("timeout")
+            || err_str.contains("cancelled"),
         "expected timeout/deadline error, got: {err_str}"
     );
 
@@ -223,9 +228,9 @@ async fn e2e_deadline_enforcement() {
     );
 }
 
-/// E2E: ConnectorRuntime graceful shutdown cancels background contexts.
+/// E2E: `ConnectorRuntime` graceful shutdown cancels background contexts.
 ///
-/// Creates a runtime, obtains a background context, calls shutdown(), and
+/// Creates a runtime, obtains a background context, calls `shutdown()`, and
 /// verifies that `is_shutting_down()` returns true and the background
 /// context is cancelled. No HTTP needed.
 #[fcp_async_core::test]

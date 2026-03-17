@@ -485,8 +485,7 @@ fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<St
                 yield Err(AnthropicError::Api {
                     error_type: "sse_buffer_overflow".into(),
                     message: format!(
-                        "SSE buffer exceeded {} bytes without a complete event",
-                        MAX_SSE_BUFFER_BYTES,
+                        "SSE buffer exceeded {MAX_SSE_BUFFER_BYTES} bytes without a complete event"
                     ),
                     status_code: None,
                 });

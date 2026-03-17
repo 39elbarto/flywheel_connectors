@@ -15,10 +15,10 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
-use reqwest::{Client, StatusCode, Url, header};
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use reqwest::{Client, StatusCode, Url, header};
 use tracing::{debug, instrument};
 
 use crate::{
@@ -108,7 +108,7 @@ impl GmailClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub fn with_retry_config(
+    pub const fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,

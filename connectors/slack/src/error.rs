@@ -220,17 +220,17 @@ impl fcp_sdk::migration::ConnectorErrorMapping for SlackError {
 
     fn to_fcp_error(&self) -> FcpError {
         // Delegate to the existing inherent method.
-        SlackError::to_fcp_error(self)
+        Self::to_fcp_error(self)
     }
 
     fn is_retryable(&self) -> bool {
         // Delegate to the existing inherent method.
-        SlackError::is_retryable(self)
+        Self::is_retryable(self)
     }
 
     fn retry_after(&self) -> Option<Duration> {
         // Delegate to the existing inherent method.
-        SlackError::retry_after(self)
+        Self::retry_after(self)
     }
 }
 

@@ -291,6 +291,7 @@ impl SyncConflictPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncField {
+    Linkage,
     Title,
     Description,
     Status,
@@ -302,6 +303,7 @@ impl SyncField {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::Linkage => "linkage",
             Self::Title => "title",
             Self::Description => "description",
             Self::Status => "status",
@@ -570,6 +572,23 @@ fn compare_sync_timestamps(left: &str, right: &str) -> Ordering {
     }
 }
 
+fn linkage_conflict(bead: &BeadSyncSnapshot, linear: &LinearSyncSnapshot) -> Option<SyncConflict> {
+    let bead_mismatch = bead
+        .linear_issue_id
+        .as_deref()
+        .is_some_and(|issue_id| issue_id != linear.issue_id.as_str());
+    let linear_mismatch = linear
+        .bead_id
+        .as_deref()
+        .is_some_and(|bead_id| bead_id != bead.bead_id.as_str());
+
+    (bead_mismatch || linear_mismatch).then(|| SyncConflict {
+        field: SyncField::Linkage,
+        bead_updated_at: bead.updated_at.clone(),
+        linear_updated_at: linear.updated_at.clone(),
+    })
+}
+
 fn derive_sync_idempotency_key(
     bead: Option<&BeadSyncSnapshot>,
     linear: Option<&LinearSyncSnapshot>,
@@ -584,16 +603,24 @@ fn derive_sync_idempotency_key(
         .map(|snapshot| snapshot.issue_id.as_str())
         .or_else(|| bead.and_then(|snapshot| snapshot.linear_issue_id.as_deref()))
         .unwrap_or("none");
+    let bead_claimed_linear_issue_id = bead
+        .and_then(|snapshot| snapshot.linear_issue_id.as_deref())
+        .unwrap_or("none");
+    let linear_claimed_bead_id = linear
+        .and_then(|snapshot| snapshot.bead_id.as_deref())
+        .unwrap_or("none");
     let linear_identifier = linear.map_or("none", |snapshot| snapshot.identifier.as_str());
     let bead_updated_at = bead.map_or("none", |snapshot| snapshot.updated_at.as_str());
     let linear_updated_at = linear.map_or("none", |snapshot| snapshot.updated_at.as_str());
 
     let fingerprint = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         plan.operation().as_str(),
         policy.as_str(),
         bead_id,
         linear_issue_id,
+        bead_claimed_linear_issue_id,
+        linear_claimed_bead_id,
         linear_identifier,
         bead_updated_at,
         linear_updated_at,
@@ -626,6 +653,13 @@ pub fn plan_bead_linear_sync(
         },
         (None, None) => SyncPlan::default(),
         (Some(bead), Some(linear)) => {
+            if let Some(conflict) = linkage_conflict(bead, linear) {
+                return SyncPlan {
+                    conflicts: vec![conflict],
+                    ..SyncPlan::default()
+                };
+            }
+
             let mut differing_fields = Vec::new();
 
             if bead.title.trim() != linear.title.trim() {
@@ -838,6 +872,40 @@ mod tests {
     }
 
     #[test]
+    fn sync_plan_conflicts_when_linked_issue_ids_disagree() {
+        let bead = BeadSyncSnapshot {
+            linear_issue_id: Some("lin-other".to_string()),
+            ..sample_bead_snapshot()
+        };
+        let linear = sample_linear_snapshot();
+
+        let plan =
+            plan_bead_linear_sync(Some(&bead), Some(&linear), SyncConflictPolicy::PreferBead);
+
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.update_bead_fields.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, SyncField::Linkage);
+    }
+
+    #[test]
+    fn sync_plan_conflicts_when_linked_bead_ids_disagree() {
+        let bead = sample_bead_snapshot();
+        let linear = LinearSyncSnapshot {
+            bead_id: Some("br-other".to_string()),
+            ..sample_linear_snapshot()
+        };
+
+        let plan =
+            plan_bead_linear_sync(Some(&bead), Some(&linear), SyncConflictPolicy::PreferLinear);
+
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.update_bead_fields.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, SyncField::Linkage);
+    }
+
+    #[test]
     fn sync_plan_operation_classification_is_stable() {
         let bead = sample_bead_snapshot();
         let linear = sample_linear_snapshot();
@@ -883,6 +951,61 @@ mod tests {
                 .idempotency_key
                 .starts_with("fcp2:linear-sync:update_linear:")
         );
+    }
+
+    #[test]
+    fn sync_operation_intent_uses_conflict_operation_for_linkage_mismatch() {
+        let bead = BeadSyncSnapshot {
+            linear_issue_id: Some("lin-other".to_string()),
+            ..sample_bead_snapshot()
+        };
+        let linear = sample_linear_snapshot();
+
+        let intent = SyncOperationIntent::from_snapshots(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+            "2026-03-07T10:00:00+00:00",
+        );
+
+        assert_eq!(intent.operation, SyncOperationKind::Conflict);
+        assert_eq!(intent.plan.conflicts.len(), 1);
+        assert_eq!(intent.plan.conflicts[0].field, SyncField::Linkage);
+        assert!(
+            intent
+                .idempotency_key
+                .starts_with("fcp2:linear-sync:conflict:")
+        );
+    }
+
+    #[test]
+    fn sync_operation_intent_distinguishes_conflicting_linkage_claims() {
+        let linear = sample_linear_snapshot();
+        let first_bead = BeadSyncSnapshot {
+            linear_issue_id: Some("lin-other-a".to_string()),
+            ..sample_bead_snapshot()
+        };
+        let second_bead = BeadSyncSnapshot {
+            linear_issue_id: Some("lin-other-b".to_string()),
+            ..sample_bead_snapshot()
+        };
+
+        let first = SyncOperationIntent::from_snapshots(
+            Some(&first_bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+            "2026-03-07T10:00:00+00:00",
+        );
+        let second = SyncOperationIntent::from_snapshots(
+            Some(&second_bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+            "2026-03-07T10:00:00+00:00",
+        );
+
+        assert_eq!(first.operation, SyncOperationKind::Conflict);
+        assert_eq!(second.operation, SyncOperationKind::Conflict);
+        assert_ne!(first.idempotency_key, second.idempotency_key);
     }
 
     #[test]

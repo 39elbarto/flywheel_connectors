@@ -753,6 +753,56 @@ async fn invoke_plan_sync_through_connector() {
     );
 }
 
+/// Invoke `linear.plan_sync` when provided snapshots disagree on linkage.
+#[fcp_async_core::runtime::test]
+async fn invoke_plan_sync_surfaces_linkage_conflict() {
+    let mut connector = LinearConnector::new();
+    let signing_key = setup_handshake(&mut connector, &["linear.plan_sync"]).await;
+    let token = generate_valid_token(&signing_key, "linear.plan_sync");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "linear.plan_sync",
+            "input": {
+                "planned_at": "2026-03-15T00:00:00Z",
+                "policy": "prefer_bead",
+                "bead": {
+                    "bead_id": "br-123",
+                    "linear_issue_id": "lin-other",
+                    "title": "Current bead title",
+                    "description": "Body",
+                    "status": "open",
+                    "priority": 1,
+                    "updated_at": "2026-03-15T00:00:00Z"
+                },
+                "linear": {
+                    "issue_id": "lin-1",
+                    "identifier": "LIN-123",
+                    "bead_id": "br-123",
+                    "title": "Current linear title",
+                    "description": "Body",
+                    "status": "open",
+                    "priority": 1,
+                    "updated_at": "2026-03-14T23:00:00Z"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["intent"]["operation"], "conflict");
+    assert_eq!(result["intent"]["plan"]["update_linear_fields"], json!([]));
+    assert_eq!(result["intent"]["plan"]["update_bead_fields"], json!([]));
+    assert_eq!(result["intent"]["plan"]["conflicts"][0]["field"], "linkage");
+    assert!(
+        result["intent"]["idempotency_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("fcp2:linear-sync:conflict:")
+    );
+}
+
 /// Invoke `linear.add_comment` through the connector.
 #[fcp_async_core::runtime::test]
 async fn invoke_add_comment_through_connector() {

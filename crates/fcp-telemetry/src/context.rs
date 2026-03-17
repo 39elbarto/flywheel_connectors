@@ -96,6 +96,7 @@ pub struct TraceContext {
 }
 
 mod hex_16 {
+    use super::is_lowercase_hex;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
@@ -110,6 +111,9 @@ mod hex_16 {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
+        if !is_lowercase_hex(&s) {
+            return Err(serde::de::Error::custom("trace_id must be lowercase hex"));
+        }
         let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
         if bytes.len() != 16 {
             return Err(serde::de::Error::custom("invalid trace_id length"));
@@ -124,6 +128,7 @@ mod hex_16 {
 }
 
 mod hex_8 {
+    use super::is_lowercase_hex;
     use serde::{Deserialize, Deserializer, Serializer};
 
     #[allow(clippy::trivially_copy_pass_by_ref)] // serde requires reference
@@ -139,6 +144,9 @@ mod hex_8 {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
+        if !is_lowercase_hex(&s) {
+            return Err(serde::de::Error::custom("span_id must be lowercase hex"));
+        }
         let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
         if bytes.len() != 8 {
             return Err(serde::de::Error::custom("invalid span_id length"));
@@ -1307,6 +1315,20 @@ mod tests {
     fn test_trace_context_serde_invalid_hex() {
         // Invalid hex in trace_id
         let json = r#"{"trace_id":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","span_id":"0123456789abcdef","trace_flags":1}"#;
+        let result: Result<TraceContext, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_serde_rejects_uppercase_trace_id() {
+        let json = r#"{"trace_id":"4BF92F3577B34DA6A3CE929D0E0E4736","span_id":"0123456789abcdef","trace_flags":1}"#;
+        let result: Result<TraceContext, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_serde_rejects_uppercase_span_id() {
+        let json = r#"{"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"0123456789ABCDEF","trace_flags":1}"#;
         let result: Result<TraceContext, _> = serde_json::from_str(json);
         assert!(result.is_err());
     }

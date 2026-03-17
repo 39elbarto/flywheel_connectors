@@ -13,8 +13,9 @@ use blake3::hash;
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_core::{
-    ApprovalToken, CapabilityToken, ConnectorId, CredentialId, LifecycleError, LifecycleManager,
-    LifecycleRecord, LifecycleState, LifecycleStatus, ObjectPlacementPolicy, TransitionReason,
+    ApprovalToken, CapabilityConstraints, CapabilityToken, ConnectorId, CredentialId,
+    LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState, LifecycleStatus,
+    ObjectPlacementPolicy, TransitionReason,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -671,7 +672,7 @@ pub struct CapabilityIssuanceRequest {
     pub max_bytes: Option<u64>,
     /// Allowed credential IDs for secretless egress.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credential_allow: Vec<String>,
+    pub credential_allow: Vec<CredentialId>,
     /// Preview the issuance without signing. Returns the redacted inspection
     /// but no raw token.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -680,6 +681,58 @@ pub struct CapabilityIssuanceRequest {
 
 const fn default_token_ttl_secs() -> u64 {
     3600
+}
+
+fn capability_constraints_from_request(
+    request: &CapabilityIssuanceRequest,
+) -> Option<CapabilityConstraints> {
+    let constraints = CapabilityConstraints {
+        resource_allow: request.resource_allow.clone(),
+        resource_deny: request.resource_deny.clone(),
+        max_calls: request.max_calls,
+        max_bytes: request.max_bytes,
+        idempotency_key: None,
+        credential_allow: request.credential_allow.clone(),
+    };
+
+    (!constraints.resource_allow.is_empty()
+        || !constraints.resource_deny.is_empty()
+        || constraints.max_calls.is_some()
+        || constraints.max_bytes.is_some()
+        || !constraints.credential_allow.is_empty())
+    .then_some(constraints)
+}
+
+fn serialize_capability_constraints(
+    constraints: &CapabilityConstraints,
+) -> Result<ciborium::Value, LifecycleError> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(constraints, &mut bytes).map_err(|error| {
+        LifecycleError::Persistence {
+            reason: format!("failed to serialize capability constraints: {error}"),
+        }
+    })?;
+    ciborium::from_reader(&bytes[..]).map_err(|error| LifecycleError::Persistence {
+        reason: format!("failed to encode capability constraints claim: {error}"),
+    })
+}
+
+fn deserialize_capability_constraints(
+    claims: &fcp_crypto::cose::CwtClaims,
+) -> Result<CapabilityConstraints, LifecycleError> {
+    let Some(encoded_constraints) = claims.get(fcp_crypto::cose::fcp2_claims::CONSTRAINTS) else {
+        return Ok(CapabilityConstraints::default());
+    };
+
+    let mut bytes = Vec::new();
+    ciborium::into_writer(encoded_constraints, &mut bytes).map_err(|error| {
+        LifecycleError::Persistence {
+            reason: format!("failed to reserialize capability constraints claim: {error}"),
+        }
+    })?;
+    ciborium::from_reader(&bytes[..]).map_err(|error| LifecycleError::Persistence {
+        reason: format!("failed to decode capability constraints claim: {error}"),
+    })
 }
 
 /// Host admin API response after issuing a capability token.
@@ -756,7 +809,7 @@ pub struct CapabilityTokenInspection {
     pub max_bytes: Option<u64>,
     /// Credential IDs allowed for secretless egress.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credential_allow: Vec<String>,
+    pub credential_allow: Vec<CredentialId>,
 }
 
 /// Host admin API request for inspecting a capability token without verifying its signature.
@@ -3687,6 +3740,12 @@ impl HostAdminStateStore {
             fcp_crypto::cose::fcp2_claims::DELEGATION_DEPTH,
             ciborium::Value::Integer(request.max_delegation_depth.into()),
         );
+        if let Some(constraints) = capability_constraints_from_request(request) {
+            claims = claims.custom(
+                fcp_crypto::cose::fcp2_claims::CONSTRAINTS,
+                serialize_capability_constraints(&constraints)?,
+            );
+        }
 
         // Build redaction-safe inspection.
         let inspection = CapabilityTokenInspection {
@@ -3849,6 +3908,7 @@ impl HostAdminStateStore {
                 _ => None,
             })
             .unwrap_or(0);
+        let constraints = deserialize_capability_constraints(&claims)?;
 
         Ok(CapabilityTokenInspection {
             token_id,
@@ -3879,11 +3939,11 @@ impl HostAdminStateStore {
             expires_at,
             currently_valid,
             seconds_remaining,
-            resource_allow: Vec::new(),
-            resource_deny: Vec::new(),
-            max_calls: None,
-            max_bytes: None,
-            credential_allow: Vec::new(),
+            resource_allow: constraints.resource_allow,
+            resource_deny: constraints.resource_deny,
+            max_calls: constraints.max_calls,
+            max_bytes: constraints.max_bytes,
+            credential_allow: constraints.credential_allow,
         })
     }
 
@@ -4791,6 +4851,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
     use fcp_core::{CanaryPolicy, ConnectorHealth};
+    use fcp_crypto::cose::CoseToken;
 
     fn connector_id() -> ConnectorId {
         ConnectorId::from_static("fcp.test.admin-state:utility:1.0.0")
@@ -6405,6 +6466,18 @@ mod tests {
         fcp_crypto::ed25519::Ed25519SigningKey::generate()
     }
 
+    fn test_credential_id(byte: u8) -> CredentialId {
+        let raw = match byte {
+            0x11 => "11111111-1111-1111-1111-111111111111",
+            0x22 => "22222222-2222-2222-2222-222222222222",
+            0x33 => "33333333-3333-3333-3333-333333333333",
+            0x44 => "44444444-4444-4444-4444-444444444444",
+            0x55 => "55555555-5555-5555-5555-555555555555",
+            _ => panic!("unsupported credential id test byte: {byte:#04x}"),
+        };
+        CredentialId::parse(raw).unwrap()
+    }
+
     fn basic_issuance_request() -> CapabilityIssuanceRequest {
         CapabilityIssuanceRequest {
             connector_id: "github:saas:1.0.0".to_string(),
@@ -6505,12 +6578,13 @@ mod tests {
     async fn issue_capability_token_with_constraints() {
         let store = HostAdminStateStore::new();
         let key = test_signing_key();
+        let credential_id = test_credential_id(0x11);
         let mut request = basic_issuance_request();
         request.resource_allow = vec!["repos/my-org/*".to_string()];
         request.resource_deny = vec!["repos/my-org/secret-repo".to_string()];
         request.max_calls = Some(100);
         request.max_bytes = Some(1_048_576);
-        request.credential_allow = vec!["cred:github-pat".to_string()];
+        request.credential_allow = vec![credential_id];
 
         let response = store.issue_capability_token(&request, &key).await.unwrap();
 
@@ -6521,17 +6595,20 @@ mod tests {
         );
         assert_eq!(response.inspection.max_calls, Some(100));
         assert_eq!(response.inspection.max_bytes, Some(1_048_576));
-        assert_eq!(
-            response.inspection.credential_allow,
-            vec!["cred:github-pat"]
-        );
+        assert_eq!(response.inspection.credential_allow, vec![credential_id]);
     }
 
     #[fcp_async_core::runtime::test]
     async fn issue_and_inspect_round_trip() {
         let store = HostAdminStateStore::new();
         let key = test_signing_key();
-        let request = basic_issuance_request();
+        let credential_id = test_credential_id(0x22);
+        let mut request = basic_issuance_request();
+        request.resource_allow = vec!["repos/my-org/*".to_string()];
+        request.resource_deny = vec!["repos/my-org/secret-repo".to_string()];
+        request.max_calls = Some(100);
+        request.max_bytes = Some(1_048_576);
+        request.credential_allow = vec![credential_id];
 
         let response = store.issue_capability_token(&request, &key).await.unwrap();
         let token_b64 = response.token_cbor_b64.unwrap();
@@ -6541,8 +6618,40 @@ mod tests {
         assert_eq!(inspection.subject, "agent:test-agent");
         assert_eq!(inspection.zone_id, "z:work");
         assert_eq!(inspection.operations, vec!["list_repos", "create_issue"]);
+        assert_eq!(inspection.resource_allow, vec!["repos/my-org/*"]);
+        assert_eq!(inspection.resource_deny, vec!["repos/my-org/secret-repo"]);
+        assert_eq!(inspection.max_calls, Some(100));
+        assert_eq!(inspection.max_bytes, Some(1_048_576));
+        assert_eq!(inspection.credential_allow, vec![credential_id]);
         assert!(inspection.currently_valid);
         assert!(!inspection.token_id.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issued_token_serializes_constraints_claim() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let credential_id = test_credential_id(0x33);
+        let mut request = basic_issuance_request();
+        request.resource_allow = vec!["repos/my-org/*".to_string()];
+        request.resource_deny = vec!["repos/my-org/secret-repo".to_string()];
+        request.max_calls = Some(100);
+        request.max_bytes = Some(1_048_576);
+        request.credential_allow = vec![credential_id];
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+        let token_b64 = response.token_cbor_b64.unwrap();
+        let token_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token_b64).unwrap();
+        let token = CoseToken::from_cbor(&token_bytes).unwrap();
+        let claims = token.claims_unverified().unwrap();
+        let constraints = deserialize_capability_constraints(&claims).unwrap();
+
+        assert_eq!(constraints.resource_allow, request.resource_allow);
+        assert_eq!(constraints.resource_deny, request.resource_deny);
+        assert_eq!(constraints.max_calls, request.max_calls);
+        assert_eq!(constraints.max_bytes, request.max_bytes);
+        assert_eq!(constraints.credential_allow, request.credential_allow);
     }
 
     #[fcp_async_core::runtime::test]
@@ -6808,7 +6917,8 @@ mod tests {
 
     #[test]
     fn capability_issuance_request_serde_round_trip() {
-        let request = basic_issuance_request();
+        let mut request = basic_issuance_request();
+        request.credential_allow = vec![test_credential_id(0x44)];
         let json = serde_json::to_string(&request).unwrap();
         let parsed: CapabilityIssuanceRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.connector_id, request.connector_id);
@@ -6816,6 +6926,7 @@ mod tests {
         assert_eq!(parsed.principal_id, request.principal_id);
         assert_eq!(parsed.operations, request.operations);
         assert_eq!(parsed.ttl_secs, request.ttl_secs);
+        assert_eq!(parsed.credential_allow, request.credential_allow);
     }
 
     #[test]
@@ -6839,13 +6950,14 @@ mod tests {
             resource_deny: Vec::new(),
             max_calls: None,
             max_bytes: None,
-            credential_allow: Vec::new(),
+            credential_allow: vec![test_credential_id(0x55)],
         };
 
         let json = serde_json::to_string(&inspection).unwrap();
         let parsed: CapabilityTokenInspection = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.token_id, "abc123");
         assert_eq!(parsed.subject, "agent:test");
+        assert_eq!(parsed.credential_allow, inspection.credential_allow);
     }
 
     #[test]
@@ -8742,9 +8854,8 @@ mod tests {
 
     #[test]
     fn validate_provenance_rejects_all_zeros_hash() {
-        let prov = make_provenance(
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        );
+        let prov =
+            make_provenance("0000000000000000000000000000000000000000000000000000000000000000");
         let rejection = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None);
         assert!(rejection.is_some());
         assert!(matches!(
@@ -8796,11 +8907,13 @@ mod tests {
 
     #[test]
     fn validate_provenance_accepts_real_hash() {
-        let prov = make_provenance(
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-        );
+        let prov =
+            make_provenance("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
         let result = validate_artifact_provenance("fcp.test:util:1.0", &prov, false, None);
-        assert!(result.is_none(), "Real hash should pass provenance validation");
+        assert!(
+            result.is_none(),
+            "Real hash should pass provenance validation"
+        );
     }
 
     // ── diff_config_values edge cases ───────────────────────────────────
@@ -9081,12 +9194,18 @@ mod tests {
 
     #[test]
     fn desired_runtime_state_default_is_unspecified() {
-        assert_eq!(DesiredRuntimeState::default(), DesiredRuntimeState::Unspecified);
+        assert_eq!(
+            DesiredRuntimeState::default(),
+            DesiredRuntimeState::Unspecified
+        );
     }
 
     #[test]
     fn observed_runtime_state_default_is_unknown() {
-        assert_eq!(ObservedRuntimeState::default(), ObservedRuntimeState::Unknown);
+        assert_eq!(
+            ObservedRuntimeState::default(),
+            ObservedRuntimeState::Unknown
+        );
     }
 
     #[test]
@@ -9299,14 +9418,8 @@ mod tests {
     #[test]
     fn connector_admin_state_config_revision_by_id() {
         let mut state = ConnectorAdminState::default();
-        let revision = ConfigRevisionRecord::new(
-            42,
-            None,
-            config_payload("test"),
-            None,
-            None,
-        )
-        .expect("revision");
+        let revision = ConfigRevisionRecord::new(42, None, config_payload("test"), None, None)
+            .expect("revision");
         state.config_revisions.push(revision);
         assert!(state.config_revision(42).is_some());
         assert!(state.config_revision(999).is_none());
@@ -9320,16 +9433,12 @@ mod tests {
 
     #[test]
     fn connector_admin_state_active_config_revision_none_when_id_does_not_match() {
-        let mut state = ConnectorAdminState::default();
-        state.active_config_revision_id = Some(999);
-        let revision = ConfigRevisionRecord::new(
-            42,
-            None,
-            config_payload("test"),
-            None,
-            None,
-        )
-        .expect("revision");
+        let mut state = ConnectorAdminState {
+            active_config_revision_id: Some(999),
+            ..ConnectorAdminState::default()
+        };
+        let revision = ConfigRevisionRecord::new(42, None, config_payload("test"), None, None)
+            .expect("revision");
         state.config_revisions.push(revision);
         assert!(state.active_config_revision().is_none());
     }
@@ -9373,21 +9482,19 @@ mod tests {
         let sanitized = SanitizedConnectorConfig::from(&revision);
         assert_eq!(sanitized.payload, revision.payload);
         assert_eq!(sanitized.payload_digest, revision.payload_digest);
-        assert_eq!(sanitized.contains_inline_secrets, revision.contains_inline_secrets);
+        assert_eq!(
+            sanitized.contains_inline_secrets,
+            revision.contains_inline_secrets
+        );
     }
 
     // ── ConfigRevisionRecord::is_replayable ─────────────────────────────
 
     #[test]
     fn config_revision_record_is_replayable_when_no_secrets() {
-        let revision = ConfigRevisionRecord::new(
-            1,
-            None,
-            serde_json::json!({"profile": "work"}),
-            None,
-            None,
-        )
-        .expect("revision");
+        let revision =
+            ConfigRevisionRecord::new(1, None, serde_json::json!({"profile": "work"}), None, None)
+                .expect("revision");
         assert!(revision.is_replayable());
     }
 
@@ -9434,7 +9541,10 @@ mod tests {
 
     #[test]
     fn secret_reference_status_default_is_unknown() {
-        assert_eq!(SecretReferenceStatus::default(), SecretReferenceStatus::Unknown);
+        assert_eq!(
+            SecretReferenceStatus::default(),
+            SecretReferenceStatus::Unknown
+        );
     }
 
     #[test]
@@ -9638,25 +9748,37 @@ mod tests {
     #[test]
     fn desired_state_from_summary_enabled() {
         let summary = connector_summary(connector_id(), true, ConnectorHealth::healthy());
-        assert_eq!(desired_state_from_summary(&summary), DesiredRuntimeState::Enabled);
+        assert_eq!(
+            desired_state_from_summary(&summary),
+            DesiredRuntimeState::Enabled
+        );
     }
 
     #[test]
     fn desired_state_from_summary_disabled() {
         let summary = connector_summary(connector_id(), false, ConnectorHealth::healthy());
-        assert_eq!(desired_state_from_summary(&summary), DesiredRuntimeState::Disabled);
+        assert_eq!(
+            desired_state_from_summary(&summary),
+            DesiredRuntimeState::Disabled
+        );
     }
 
     #[test]
     fn observed_state_from_summary_disabled_is_stopped() {
         let summary = connector_summary(connector_id(), false, ConnectorHealth::healthy());
-        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Stopped);
+        assert_eq!(
+            observed_state_from_summary(&summary),
+            ObservedRuntimeState::Stopped
+        );
     }
 
     #[test]
     fn observed_state_from_summary_enabled_healthy_is_running() {
         let summary = connector_summary(connector_id(), true, ConnectorHealth::healthy());
-        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Running);
+        assert_eq!(
+            observed_state_from_summary(&summary),
+            ObservedRuntimeState::Running
+        );
     }
 
     #[test]
@@ -9668,7 +9790,10 @@ mod tests {
                 reason: "flaky".to_string(),
             },
         );
-        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Degraded);
+        assert_eq!(
+            observed_state_from_summary(&summary),
+            ObservedRuntimeState::Degraded
+        );
     }
 
     #[test]
@@ -9681,7 +9806,10 @@ mod tests {
                 since: Utc::now(),
             },
         );
-        assert_eq!(observed_state_from_summary(&summary), ObservedRuntimeState::Stopped);
+        assert_eq!(
+            observed_state_from_summary(&summary),
+            ObservedRuntimeState::Stopped
+        );
     }
 
     // ── RecoveryAction and ConnectorDriftKind serde ──────────────────────
@@ -9789,5 +9917,4 @@ mod tests {
         let _default_store = HostAdminStateStore::default();
         let _new_store = HostAdminStateStore::new();
     }
-
 }

@@ -1115,6 +1115,8 @@ impl AuthDenial {
 pub enum ArtifactSourceKind {
     /// A real registry artifact with full provenance.
     Registry,
+    /// A mesh-mirrored copy of a registry artifact, available from a peer node.
+    MeshMirror,
     /// A local file path (development/staging).
     LocalPath,
     /// A remote URL (direct download).
@@ -8176,6 +8178,7 @@ mod tests {
     fn artifact_source_kind_serde_roundtrip() {
         let kinds = [
             ArtifactSourceKind::Registry,
+            ArtifactSourceKind::MeshMirror,
             ArtifactSourceKind::LocalPath,
             ArtifactSourceKind::RemoteUrl,
             ArtifactSourceKind::InlineBlob,

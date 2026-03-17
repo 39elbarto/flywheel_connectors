@@ -6275,6 +6275,7 @@ fn mesh_availability_subcommand(explain: bool, hints_only: bool) -> &'static str
 fn artifact_source_kind_tag(kind: fcp_host::ArtifactSourceKind) -> &'static str {
     match kind {
         fcp_host::ArtifactSourceKind::Registry => "registry",
+        fcp_host::ArtifactSourceKind::MeshMirror => "mesh-mirror",
         fcp_host::ArtifactSourceKind::LocalPath => "local-path",
         fcp_host::ArtifactSourceKind::RemoteUrl => "remote-url",
         fcp_host::ArtifactSourceKind::InlineBlob => "inline-blob",
@@ -6325,20 +6326,27 @@ fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
     })
 }
 
-fn mesh_offline_availability_fact(zone_supported: Option<bool>) -> Value {
+fn mesh_offline_availability_fact(
+    zone_supported: Option<bool>,
+    has_local_mirror: bool,
+) -> Value {
+    let state = match (zone_supported, has_local_mirror) {
+        (Some(false), _) => "unavailable-for-requested-zone",
+        (_, true) => "offline-but-mirrored",
+        _ => "offline-planning-only",
+    };
+    let explanation = match (zone_supported, has_local_mirror) {
+        (Some(false), _) => "Workspace manifests say the requested zone is not declared for this connector, so this offline plan is unavailable for that zone.",
+        (_, true) => "A mesh-mirrored copy of this connector is available locally. Offline operations should work but the mirror may be stale.",
+        (Some(true), false) => "Workspace manifests support the requested zone, but this remains an offline planning view rather than proof of live host availability.",
+        (None, false) => "Workspace manifests can support planning, but they do not prove live install state or current mesh coverage.",
+    };
     json!({
-        "state": match zone_supported {
-            Some(false) => "unavailable-for-requested-zone",
-            Some(true) | None => "offline-planning-only",
-        },
-        "authoritative_scope": "workspace-manifests",
+        "state": state,
+        "authoritative_scope": if has_local_mirror { "local-mesh-mirror" } else { "workspace-manifests" },
         "live_runtime_proven": false,
         "silent_fallback": false,
-        "explanation": match zone_supported {
-            Some(false) => "Workspace manifests say the requested zone is not declared for this connector, so this offline plan is unavailable for that zone.",
-            Some(true) => "Workspace manifests support the requested zone, but this remains an offline planning view rather than proof of live host availability.",
-            None => "Workspace manifests can support planning, but they do not prove live install state or current mesh coverage.",
-        },
+        "explanation": explanation,
     })
 }
 
@@ -6367,6 +6375,35 @@ fn install_unknown_live_availability_fact(artifact: &PreparedPackageArtifact) ->
         "requested_package_source": &artifact.source_description,
         "explanation": "The host accepted the install request, but `fwc` could not fetch post-install connector status to prove the resulting live availability state.",
     })
+}
+
+fn install_verify_only_repair_hints(
+    artifact: &PreparedPackageArtifact,
+    requested_source: &str,
+) -> Vec<String> {
+    vec![
+        format!(
+            "Run `fwc install {requested_source} --host <endpoint>` when you are ready to apply this verified package to a live host."
+        ),
+        format!(
+            "Run `fwc mesh availability {} --host <endpoint>` after installation to confirm live runtime state and mesh mirror coverage.",
+            artifact.manifest.connector.id
+        ),
+    ]
+}
+
+fn install_unknown_live_repair_hints(connector_slug: &str, host: &str) -> Vec<String> {
+    vec![
+        format!(
+            "Run `fwc status {connector_slug} --host {host}` to retry authoritative post-install connector status."
+        ),
+        format!(
+            "Run `fwc mesh availability {connector_slug} --host {host}` once status lookups recover to confirm live availability and mirror coverage."
+        ),
+        format!(
+            "Run `fwc doctor --host {host}` if the host continues failing post-install status lookups after install."
+        ),
+    ]
 }
 
 fn mesh_live_repair_hints(
@@ -6658,7 +6695,15 @@ fn mesh_availability_dispatch(
             .any(|candidate| candidate == zone)
     });
     let repair_hints = mesh_offline_repair_hints(&connector.slug, zone_supported);
-    let availability_fact = mesh_offline_availability_fact(zone_supported);
+    // Check if a local mirror exists (e.g., from a mesh peer replication).
+    // In offline mode we only have workspace manifests, so mirror detection is
+    // based on whether a local artifact path exists for this connector.
+    let has_local_mirror = std::path::Path::new(&format!(
+        ".fcp/mirrors/{}.wasm",
+        connector.slug
+    ))
+    .exists();
+    let availability_fact = mesh_offline_availability_fact(zone_supported, has_local_mirror);
     let offline_readiness = json!({
         "state": match zone_supported {
             Some(true) => "declared-in-manifest",
@@ -12218,6 +12263,7 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
             "availability_fact": install_verify_only_availability_fact(&artifact),
             "source_selection": package_source_selection_value(&artifact),
             "offline_readiness": package_local_offline_readiness_value(&artifact),
+            "repair_hints": install_verify_only_repair_hints(&artifact, &args.source),
             "verification": artifact.verification,
             "next_actions": [
                 format!("fwc install {} --host <endpoint>", &args.source),
@@ -12315,6 +12361,10 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
         || install_unknown_live_offline_readiness_value(&artifact),
         |status| mesh_live_offline_readiness_value(status.artifact.as_ref()),
     );
+    let post_install_repair_hints = post_install_status.as_ref().map_or_else(
+        || install_unknown_live_repair_hints(applied.current.id.as_str(), &host.endpoint),
+        |status| mesh_live_repair_hints(status, applied.current.id.as_str(), &host.endpoint),
+    );
     let mut warnings = Vec::new();
     if post_install_status.is_none() {
         warnings.push(
@@ -12341,6 +12391,7 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
         "availability_fact": post_install_availability_fact,
         "source_selection": post_install_source_selection,
         "offline_readiness": post_install_offline_readiness,
+        "repair_hints": post_install_repair_hints,
         "verification": artifact.verification,
         "activation": {
             "inventory_updated": true,
@@ -25961,6 +26012,15 @@ deny_ptrace = true
             payload["offline_readiness"]["state"],
             "tracked-by-placement-policy"
         );
+        assert!(
+            payload["repair_hints"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.as_str().is_some_and(|item| {
+                        item.contains("No immediate repair action is indicated")
+                    })
+                }))
+        );
         assert_eq!(
             payload["installed"]["canonical_id"],
             "fcp.github:enterprise:v1"
@@ -26017,6 +26077,14 @@ deny_ptrace = true
         assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(payload["offline_readiness"]["state"], "unknown");
         assert!(
+            payload["repair_hints"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|item| item.contains("fwc status fcp.github:enterprise:v1"))
+                }))
+        );
+        assert!(
             payload["warnings"]
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
@@ -26067,6 +26135,14 @@ deny_ptrace = true
         assert_eq!(payload["availability_fact"]["state"], "unknown");
         assert_eq!(payload["source_selection"]["state"], "unknown");
         assert_eq!(payload["offline_readiness"]["state"], "unknown");
+        assert!(
+            payload["repair_hints"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|item| item.contains("fwc doctor --host"))
+                }))
+        );
         assert!(
             payload["warnings"]
                 .as_array()
@@ -32863,6 +32939,14 @@ depends_on = ["missing"]
         assert_eq!(
             payload["offline_readiness"]["state"],
             "local-artifact-present"
+        );
+        assert!(
+            payload["repair_hints"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|item| item.contains("fwc mesh availability"))
+                }))
         );
         assert!(
             payload["verification"]

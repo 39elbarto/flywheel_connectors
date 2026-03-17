@@ -47,8 +47,8 @@ use fcp_crypto::{
 };
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
-    BatchOptions, BatchStatus, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse,
-    CacheMetadata, CacheValidator, CancellationController, CancellationRequest,
+    BatchOptions, BatchStatus, BudgetAction, BudgetPolicyEngine, BudgetReportRequest,
+    BudgetReportResponse, CacheMetadata, CacheValidator, CancellationController, CancellationRequest,
     CancellationResponse, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
     ConnectorArchetype, ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
     ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
@@ -84,7 +84,7 @@ use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(test)]
-use fcp_core::{LifecycleRecord, TransitionReason};
+use fcp_core::{LifecycleRecord, TransitionReason, UsageMetric};
 
 type ConnectorConfig = ManagedConnectorConfig;
 
@@ -3494,6 +3494,7 @@ async fn invoke_handler(
         .map(std::string::ToString::to_string);
     let operation_id = request.id.to_string();
     let idempotency_key = request.idempotency_key.clone();
+    let zone_id = request.zone_id.clone();
     let started_at = Instant::now();
 
     tracing::debug!(
@@ -3530,6 +3531,14 @@ async fn invoke_handler(
     match invoke_result {
         Ok(response) => {
             let duration_ms = elapsed_millis(started_at);
+            record_invoke_budget_usage(
+                state.budget.as_ref(),
+                Some(&zone_id),
+                &connector_id,
+                &operation_name,
+                &response,
+            )
+            .await;
             record_invoke_receipt_summary(
                 state.lifecycle.as_ref(),
                 connector_id.as_str(),
@@ -3598,6 +3607,41 @@ async fn record_invoke_receipt_summary(
             error = %err,
             "failed to persist invoke receipt summary"
         );
+    }
+}
+
+async fn record_invoke_budget_usage(
+    budget: &BudgetPolicyEngine,
+    zone_id: Option<&ZoneId>,
+    connector_id: &ConnectorId,
+    operation: &str,
+    response: &InvokeResponse,
+) {
+    let Some(zone_id) = zone_id else {
+        return;
+    };
+    let Some(metrics) = response
+        .usage_metrics
+        .as_deref()
+        .filter(|metrics| !metrics.is_empty())
+    else {
+        return;
+    };
+    let Some(evaluation) = budget.record_usage(zone_id, metrics).await else {
+        return;
+    };
+    match evaluation.action {
+        BudgetAction::Allow => {}
+        BudgetAction::Warn | BudgetAction::Deny => {
+            tracing::warn!(
+                event = "invoke_budget_usage_recorded",
+                connector_id = %connector_id,
+                operation,
+                zone_id = %zone_id,
+                action = ?evaluation.action,
+                "connector invocation usage exceeded configured budget after execution"
+            );
+        }
     }
 }
 
@@ -3720,6 +3764,7 @@ async fn execute_batch_operation(
     let connector_id = request.connector_id.clone();
     let operation_name = request.operation.to_string();
     let idempotency_key = request.idempotency_key.clone();
+    let zone_id = request.zone_id.clone();
 
     if let Err(err) = request.validate_idempotency_key() {
         return OperationResult {
@@ -3753,6 +3798,14 @@ async fn execute_batch_operation(
     match state.registry.invoke(request).await {
         Ok(response) => {
             let duration_ms = elapsed_millis(started_at);
+            record_invoke_budget_usage(
+                state.budget.as_ref(),
+                Some(&zone_id),
+                &connector_id,
+                &operation_name,
+                &response,
+            )
+            .await;
             record_invoke_receipt_summary(
                 state.lifecycle.as_ref(),
                 connector_id.as_str(),
@@ -4566,7 +4619,9 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use fcp_core::OperationId;
+    use fcp_core::{
+        BudgetEnforcement, OperationId, UsageBudgetLimit, UsageBudgetPolicy, UsageMetricKind,
+    };
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
         if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
@@ -4608,6 +4663,90 @@ mod tests {
             categories: vec!["test".to_string()],
             version: None,
         }
+    }
+
+    fn invoke_response_with_metrics(metrics: Vec<UsageMetric>) -> InvokeResponse {
+        InvokeResponse::ok(RequestId::random(), json!({"ok": true})).with_usage_metrics(metrics)
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn record_invoke_budget_usage_updates_zone_budget_from_response_metrics() {
+        let budget = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        let connector_id = ConnectorId::from_static("fcp.test.budget-recording:utility:1.0.0");
+        budget
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+
+        record_invoke_budget_usage(
+            &budget,
+            Some(&zone),
+            &connector_id,
+            "test.echo",
+            &invoke_response_with_metrics(vec![UsageMetric::tokens(60)]),
+        )
+        .await;
+
+        let snapshot = budget
+            .snapshot(&zone)
+            .await
+            .expect("budget policy should produce a snapshot");
+        assert_eq!(snapshot.budgets[0].used, 60);
+        assert_eq!(snapshot.budgets[0].remaining, 40);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn record_invoke_budget_usage_ignores_missing_zone_or_metrics() {
+        let budget = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        let connector_id = ConnectorId::from_static("fcp.test.budget-noop:utility:1.0.0");
+        budget
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+
+        record_invoke_budget_usage(
+            &budget,
+            None,
+            &connector_id,
+            "test.echo",
+            &invoke_response_with_metrics(vec![UsageMetric::tokens(60)]),
+        )
+        .await;
+        record_invoke_budget_usage(
+            &budget,
+            Some(&zone),
+            &connector_id,
+            "test.echo",
+            &InvokeResponse::ok(RequestId::random(), json!({"ok": true})),
+        )
+        .await;
+
+        let snapshot = budget
+            .snapshot(&zone)
+            .await
+            .expect("budget policy should produce a snapshot");
+        assert_eq!(snapshot.budgets[0].used, 0);
+        assert_eq!(snapshot.budgets[0].remaining, 100);
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

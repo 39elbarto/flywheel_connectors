@@ -2027,6 +2027,7 @@ mod tests {
             zone_id: Some("zone-alpha".to_string()),
         };
         let cloned = req.clone();
+        assert_eq!(req.zone_id.as_deref(), Some("zone-alpha"));
         assert_eq!(cloned.zone_id.as_deref(), Some("zone-alpha"));
     }
 
@@ -2088,7 +2089,8 @@ mod tests {
             zones: vec![],
         };
         let cloned = resp.clone();
-        assert_eq!(cloned.schema_version, "1.0.0");
+        assert_eq!(resp.schema_version, cloned.schema_version);
+        assert!(resp.zones.is_empty());
         assert!(cloned.zones.is_empty());
     }
 
@@ -2992,7 +2994,7 @@ mod tests {
             .map(|z| z.zone_id.as_str())
             .collect();
         let mut sorted = zone_ids.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(zone_ids, sorted);
     }
 }

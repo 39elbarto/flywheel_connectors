@@ -49,12 +49,14 @@ impl DocsConnector {
                 }
             })?;
 
-        let materialized = selection.materialize().await.map_err(|error| {
-            FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Failed to materialize Google auth: {error}"),
-            }
-        })?;
+        let materialized =
+            selection
+                .materialize()
+                .await
+                .map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Failed to materialize Google auth: {error}"),
+                })?;
 
         let status = match &materialized {
             GoogleMaterializedAuth::CredentialReference { .. } => {
@@ -81,12 +83,11 @@ impl DocsConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let req: HandshakeRequest = serde_json::from_value(params).map_err(|e| {
-            FcpError::InvalidRequest {
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
-            }
-        })?;
+            })?;
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -160,7 +161,10 @@ impl DocsConnector {
                 "critical": true,
             }),
         ];
-        let status = if checks.iter().all(|c| c["passed"].as_bool().unwrap_or(false)) {
+        let status = if checks
+            .iter()
+            .all(|c| c["passed"].as_bool().unwrap_or(false))
+        {
             "healthy"
         } else {
             "unhealthy"
@@ -349,9 +353,7 @@ impl DocsConnector {
                 let document_id = require_str(&input, "document_id")?;
                 let requests = input
                     .get("requests")
-                    .and_then(|v| {
-                        serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok()
-                    })
+                    .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok())
                     .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1001,
                         message: "Missing or invalid 'requests' (must be array)".into(),
@@ -372,10 +374,7 @@ impl DocsConnector {
         }
     }
 
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -407,12 +406,13 @@ impl Default for DocsConnector {
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
-    input.get(field).and_then(|v| v.as_str()).ok_or_else(|| {
-        FcpError::InvalidRequest {
+    input
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| FcpError::InvalidRequest {
             code: 1001,
             message: format!("Missing '{field}'"),
-        }
-    })
+        })
 }
 
 fn op_info(
@@ -445,27 +445,27 @@ fn op_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn run_async_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
 
     #[test]
     fn health_unconfigured() {
         let connector = DocsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_health()).unwrap();
+        let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["status"], "not_configured");
     }
 
     #[test]
     fn health_configured() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test-token" }))
@@ -478,11 +478,7 @@ mod tests {
 
     #[test]
     fn configure_no_auth_fails() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector.handle_configure(json!({})).await
         });
@@ -491,11 +487,7 @@ mod tests {
 
     #[test]
     fn configure_with_access_token() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = DocsConnector::new();
             let result = connector
                 .handle_configure(json!({ "access_token": "test-token" }))
@@ -507,11 +499,7 @@ mod tests {
 
     #[test]
     fn configure_with_credential_id() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = DocsConnector::new();
             let cred_id = fcp_core::CredentialId::new();
             let result = connector
@@ -525,18 +513,11 @@ mod tests {
     #[test]
     fn introspect_has_all_operations() {
         let connector = DocsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_introspect()).unwrap();
+        let result = run_async_test(connector.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
         assert_eq!(ops.len(), 3);
 
-        let op_ids: Vec<&str> = ops
-            .iter()
-            .map(|o| o["id"].as_str().unwrap())
-            .collect();
+        let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
         assert!(op_ids.contains(&"docs.get"));
         assert!(op_ids.contains(&"docs.create"));
         assert!(op_ids.contains(&"docs.batch_update"));
@@ -545,28 +526,36 @@ mod tests {
     #[test]
     fn introspect_operations_have_schemas() {
         let connector = DocsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_introspect()).unwrap();
+        let result = run_async_test(connector.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
         for op in ops {
-            assert!(op.get("input_schema").is_some(), "missing input_schema for {}", op["id"]);
-            assert!(op.get("output_schema").is_some(), "missing output_schema for {}", op["id"]);
-            assert!(op.get("risk_level").is_some(), "missing risk_level for {}", op["id"]);
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier for {}", op["id"]);
+            assert!(
+                op.get("input_schema").is_some(),
+                "missing input_schema for {}",
+                op["id"]
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "missing output_schema for {}",
+                op["id"]
+            );
+            assert!(
+                op.get("risk_level").is_some(),
+                "missing risk_level for {}",
+                op["id"]
+            );
+            assert!(
+                op.get("safety_tier").is_some(),
+                "missing safety_tier for {}",
+                op["id"]
+            );
         }
     }
 
     #[test]
     fn introspect_docs_get_is_safe() {
         let connector = DocsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_introspect()).unwrap();
+        let result = run_async_test(connector.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
         let docs_get = ops.iter().find(|o| o["id"] == "docs.get").unwrap();
         assert_eq!(docs_get["safety_tier"], "safe");
@@ -575,11 +564,7 @@ mod tests {
 
     #[test]
     fn shutdown_succeeds() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = DocsConnector::new();
             let result = connector.handle_shutdown(json!({})).await.unwrap();
             assert_eq!(result["status"], "shutdown");
@@ -588,11 +573,7 @@ mod tests {
 
     #[test]
     fn invoke_without_configure_returns_not_configured() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_invoke(json!({
@@ -606,11 +587,7 @@ mod tests {
 
     #[test]
     fn invoke_unknown_operation() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -631,11 +608,7 @@ mod tests {
 
     #[test]
     fn invoke_missing_operation_field() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -658,15 +631,10 @@ mod tests {
     #[test]
     fn simulate_returns_dry_run() {
         let connector = DocsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt
-            .block_on(connector.handle_simulate(json!({
-                "operation": "docs.get"
-            })))
-            .unwrap();
+        let result = run_async_test(connector.handle_simulate(json!({
+            "operation": "docs.get"
+        })))
+        .unwrap();
         assert_eq!(result["dry_run"], true);
         assert_eq!(result["would_execute"], true);
         assert_eq!(result["operation"], "docs.get");
@@ -675,23 +643,13 @@ mod tests {
     #[test]
     fn simulate_unknown_operation() {
         let connector = DocsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt
-            .block_on(connector.handle_simulate(json!({})))
-            .unwrap();
+        let result = run_async_test(connector.handle_simulate(json!({}))).unwrap();
         assert_eq!(result["operation"], "unknown");
     }
 
     #[test]
     fn lifecycle_configure_then_shutdown() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = DocsConnector::new();
 
             // Initially not configured
@@ -720,11 +678,7 @@ mod tests {
 
     #[test]
     fn get_document_via_mock() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path_regex(r"/v1/documents/.+"))
@@ -752,11 +706,7 @@ mod tests {
 
     #[test]
     fn invoke_docs_get_missing_document_id() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -777,11 +727,7 @@ mod tests {
 
     #[test]
     fn invoke_docs_create_missing_title() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -802,11 +748,7 @@ mod tests {
 
     #[test]
     fn invoke_docs_batch_update_missing_requests() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -827,11 +769,7 @@ mod tests {
 
     #[test]
     fn invoke_docs_batch_update_missing_document_id() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -853,11 +791,7 @@ mod tests {
     #[test]
     fn health_metrics_initially_zero() {
         let connector = DocsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_health()).unwrap();
+        let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["metrics"]["requests_total"], 0);
         assert_eq!(result["metrics"]["requests_error"], 0);
     }

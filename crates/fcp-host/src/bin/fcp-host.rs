@@ -48,14 +48,14 @@ use fcp_crypto::{
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetAction, BudgetPolicyEngine, BudgetReportRequest,
-    BudgetReportResponse, CacheMetadata, CacheValidator, CancellationController, CancellationRequest,
-    CancellationResponse, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
-    ConnectorArchetype, ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
-    ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
-    ConnectorConfigApplyResponse, ConnectorConfigDiffRequest, ConnectorConfigDiffResponse,
-    ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest, ConnectorConfigSnapshot,
-    ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
-    ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
+    BudgetReportResponse, CacheMetadata, CacheValidator, CancellationController,
+    CancellationRequest, CancellationResponse, ConfigRevisionRecord, ConnectorAdminState,
+    ConnectorAdminStatus, ConnectorArchetype, ConnectorArtifactMetadataResponse,
+    ConnectorArtifactRegistrationRequest, ConnectorArtifactRegistrationResponse,
+    ConnectorConfigApplyRequest, ConnectorConfigApplyResponse, ConnectorConfigDiffRequest,
+    ConnectorConfigDiffResponse, ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest,
+    ConnectorConfigSnapshot, ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest,
+    ConnectorConfigValidateResponse, ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
     ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
     DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
@@ -2091,15 +2091,24 @@ async fn signal_handler_loop(
     state: Arc<AppState>,
     shutdown_tx: fcp_async_core::channel::watch::Sender<bool>,
 ) {
-    use futures_util::StreamExt;
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    use asupersync::signal::{sighup, sigint, sigterm};
+    use futures_util::FutureExt;
 
-    let mut signals = signal_hook_tokio::Signals::new([SIGHUP, SIGTERM, SIGINT])
-        .expect("register signal handlers");
+    let mut sighup_stream = sighup().expect("register SIGHUP handler");
+    let mut sigterm_stream = sigterm().expect("register SIGTERM handler");
+    let mut sigint_stream = sigint().expect("register SIGINT handler");
 
-    while let Some(sig) = signals.next().await {
-        match sig {
-            SIGHUP => {
+    loop {
+        let sighup_recv = sighup_stream.recv().fuse();
+        let sigterm_recv = sigterm_stream.recv().fuse();
+        let sigint_recv = sigint_stream.recv().fuse();
+        futures_util::pin_mut!(sighup_recv, sigterm_recv, sigint_recv);
+
+        futures_util::select! {
+            delivered = sighup_recv => {
+                if delivered.is_none() {
+                    break;
+                }
                 tracing::info!(
                     event = "sighup_received",
                     "reloading connector configuration"
@@ -2121,17 +2130,22 @@ async fn signal_handler_loop(
                     }
                 }
             }
-            SIGTERM => {
+            delivered = sigterm_recv => {
+                if delivered.is_none() {
+                    break;
+                }
                 tracing::info!(event = "sigterm_received", "initiating graceful shutdown");
                 let _ = shutdown_tx.send(true);
                 break;
             }
-            SIGINT => {
+            delivered = sigint_recv => {
+                if delivered.is_none() {
+                    break;
+                }
                 tracing::info!(event = "sigint_received", "initiating graceful shutdown");
                 let _ = shutdown_tx.send(true);
                 break;
             }
-            _ => {}
         }
     }
 }
@@ -2141,15 +2155,13 @@ async fn signal_handler_loop(
     _state: Arc<AppState>,
     shutdown_tx: fcp_async_core::channel::watch::Sender<bool>,
 ) {
-    // On non-Unix platforms, wait for Ctrl+C via signal-hook.
-    use futures_util::StreamExt;
-    use signal_hook::consts::SIGINT;
-
-    let mut signals = signal_hook_tokio::Signals::new([SIGINT]).expect("register signal handlers");
-    if let Some(_sig) = signals.next().await {
-        tracing::info!(event = "ctrl_c_received", "initiating graceful shutdown");
-        let _ = shutdown_tx.send(true);
-    }
+    // On non-Unix platforms, wait for Ctrl+C through the native asupersync
+    // signal shim instead of the tokio bridge.
+    asupersync::signal::ctrl_c()
+        .await
+        .expect("register Ctrl+C handler");
+    tracing::info!(event = "ctrl_c_received", "initiating graceful shutdown");
+    let _ = shutdown_tx.send(true);
 }
 
 /// Reload connector configuration from disk without restarting the host.

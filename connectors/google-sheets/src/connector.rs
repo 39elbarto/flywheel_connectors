@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
+    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use serde_json::json;
@@ -25,14 +25,19 @@ impl SheetsConnector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("google-sheets"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static(
+                "google-sheets",
+            ))),
             client: None,
             verifier: None,
             session_id: None,
         }
     }
 
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let auth_params = params
             .get("auth")
             .cloned()
@@ -46,12 +51,14 @@ impl SheetsConnector {
                 }
             })?;
 
-        let materialized = selection.materialize().await.map_err(|error| {
-            FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Failed to materialize Google auth: {error}"),
-            }
-        })?;
+        let materialized =
+            selection
+                .materialize()
+                .await
+                .map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Failed to materialize Google auth: {error}"),
+                })?;
 
         let status = match &materialized {
             GoogleMaterializedAuth::CredentialReference { .. } => {
@@ -66,19 +73,23 @@ impl SheetsConnector {
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
-        self.base.configured.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .configured
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         info!(auth = %auth_label, status, "Google Sheets connector configured");
 
         Ok(json!({ "status": status }))
     }
 
-    pub async fn handle_handshake(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let req: HandshakeRequest = serde_json::from_value(params).map_err(|e| {
-            FcpError::InvalidRequest {
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
-            }
-        })?;
+            })?;
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -152,7 +163,10 @@ impl SheetsConnector {
                 "critical": true,
             }),
         ];
-        let status = if checks.iter().all(|c| c["passed"].as_bool().unwrap_or(false)) {
+        let status = if checks
+            .iter()
+            .all(|c| c["passed"].as_bool().unwrap_or(false))
+        {
             "healthy"
         } else {
             "unhealthy"
@@ -334,13 +348,19 @@ impl SheetsConnector {
         })
     }
 
-    pub async fn handle_invoke(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_invoke(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let result = self.handle_invoke_internal(params).await;
         self.base.record_request(result.is_ok());
         result
     }
 
-    async fn handle_invoke_internal(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -375,7 +395,9 @@ impl SheetsConnector {
                 let range = require_str(&input, "range")?;
                 let values = input
                     .get("values")
-                    .and_then(|v| serde_json::from_value::<Vec<Vec<serde_json::Value>>>(v.clone()).ok())
+                    .and_then(|v| {
+                        serde_json::from_value::<Vec<Vec<serde_json::Value>>>(v.clone()).ok()
+                    })
                     .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1001,
                         message: "Missing or invalid 'values' (must be 2D array)".into(),
@@ -395,7 +417,9 @@ impl SheetsConnector {
                 let range = require_str(&input, "range")?;
                 let values = input
                     .get("values")
-                    .and_then(|v| serde_json::from_value::<Vec<Vec<serde_json::Value>>>(v.clone()).ok())
+                    .and_then(|v| {
+                        serde_json::from_value::<Vec<Vec<serde_json::Value>>>(v.clone()).ok()
+                    })
                     .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1001,
                         message: "Missing or invalid 'values'".into(),
@@ -437,7 +461,10 @@ impl SheetsConnector {
         }))
     }
 
-    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
         }
@@ -454,12 +481,13 @@ impl Default for SheetsConnector {
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
-    input.get(field).and_then(|v| v.as_str()).ok_or_else(|| {
-        FcpError::InvalidRequest {
+    input
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| FcpError::InvalidRequest {
             code: 1001,
             message: format!("Missing '{field}'"),
-        }
-    })
+        })
 }
 
 fn op_info(
@@ -492,27 +520,27 @@ fn op_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn run_async_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
 
     #[test]
     fn health_unconfigured() {
         let connector = SheetsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_health()).unwrap();
+        let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["status"], "not_configured");
     }
 
     #[test]
     fn health_configured() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = SheetsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test-token" }))
@@ -525,11 +553,7 @@ mod tests {
 
     #[test]
     fn configure_no_auth_fails() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = SheetsConnector::new();
             connector.handle_configure(json!({})).await
         });
@@ -538,11 +562,7 @@ mod tests {
 
     #[test]
     fn configure_with_access_token() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = SheetsConnector::new();
             let result = connector
                 .handle_configure(json!({ "access_token": "test-token" }))
@@ -554,11 +574,7 @@ mod tests {
 
     #[test]
     fn configure_with_credential_id() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = SheetsConnector::new();
             let cred_id = fcp_core::CredentialId::new();
             let result = connector
@@ -572,18 +588,11 @@ mod tests {
     #[test]
     fn introspect_has_all_operations() {
         let connector = SheetsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_introspect()).unwrap();
+        let result = run_async_test(connector.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
         assert!(ops.len() >= 5);
 
-        let op_ids: Vec<&str> = ops
-            .iter()
-            .map(|o| o["id"].as_str().unwrap())
-            .collect();
+        let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
         assert!(op_ids.contains(&"sheets.get_spreadsheet"));
         assert!(op_ids.contains(&"sheets.get_values"));
         assert!(op_ids.contains(&"sheets.update_values"));
@@ -593,11 +602,7 @@ mod tests {
 
     #[test]
     fn shutdown_succeeds() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = SheetsConnector::new();
             let result = connector.handle_shutdown(json!({})).await.unwrap();
             assert_eq!(result["status"], "shutdown");
@@ -606,11 +611,7 @@ mod tests {
 
     #[test]
     fn invoke_without_configure_returns_not_configured() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = SheetsConnector::new();
             connector
                 .handle_invoke(json!({
@@ -624,11 +625,7 @@ mod tests {
 
     #[test]
     fn invoke_unknown_operation() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = SheetsConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -655,11 +652,7 @@ mod tests {
 
     #[test]
     fn get_spreadsheet_via_mock() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path_regex(r"/v4/spreadsheets/.+"))

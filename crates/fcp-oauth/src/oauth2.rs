@@ -616,11 +616,7 @@ mod tests {
     where
         F: std::future::Future<Output = T>,
     {
-        fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build test runtime")
-            .block_on(future)
+        fcp_async_core::runtime::block_on_sync(future).expect("build sync test runtime")
     }
 
     fn test_config() -> OAuth2Config {

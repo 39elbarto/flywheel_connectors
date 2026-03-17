@@ -1386,11 +1386,7 @@ mod tests {
     {
         let start = Instant::now();
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            let rt = fcp_async_core::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .expect("runtime");
-            rt.block_on(f())
+            fcp_async_core::runtime::block_on_sync(f()).expect("build sync test runtime")
         }));
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 

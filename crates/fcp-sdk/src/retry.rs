@@ -90,7 +90,7 @@ pub struct RetryPolicy {
     pub max_backoff_ms: u64,
     /// Whether to add deterministic jitter to backoff delays.
     pub jitter_enabled: bool,
-    /// Maximum retry attempts (0-indexed). None means unlimited.
+    /// Maximum total attempts, including the initial call. None means unlimited.
     pub max_attempts: Option<u32>,
 }
 
@@ -133,7 +133,11 @@ impl RetryPolicy {
         self
     }
 
-    /// Builder: set maximum attempts (0-indexed). None means unlimited.
+    /// Builder: set maximum total attempts, including the initial call.
+    ///
+    /// For example, `Some(1)` means "try once and never schedule a retry",
+    /// while `Some(3)` allows at most two retry delays after the initial
+    /// attempt.
     #[must_use]
     pub const fn with_max_attempts(mut self, max_attempts: Option<u32>) -> Self {
         self.max_attempts = max_attempts;
@@ -165,7 +169,9 @@ impl RetryPolicy {
 
     /// Translate a retry decision into a delay, applying Retry-After hints.
     ///
-    /// Returns `None` when retry is not permitted (terminal or attempt limit).
+    /// `attempt` is the 0-indexed attempt that just failed. Returns `None`
+    /// when retry is not permitted (terminal or the failed attempt has already
+    /// exhausted the total-attempt budget).
     #[must_use]
     pub fn next_delay(
         &self,
@@ -174,7 +180,7 @@ impl RetryPolicy {
         retry_after_hint: Option<Duration>,
     ) -> Option<Duration> {
         if let Some(max_attempts) = self.max_attempts {
-            if attempt >= max_attempts {
+            if attempt.saturating_add(1) >= max_attempts {
                 return None;
             }
         }
@@ -490,7 +496,10 @@ mod tests {
     #[test]
     fn next_delay_within_max_attempts_returns_some() {
         let p = RetryPolicy::new().with_max_attempts(Some(3));
-        assert!(p.next_delay(2, RetryDecision::Backoff, None).is_some());
+        // Attempt 1 (0-indexed) is NOT the last attempt → delay is computed
+        assert!(p.next_delay(1, RetryDecision::Backoff, None).is_some());
+        // Attempt 2 IS the last attempt (max_attempts=3) → no delay needed
+        assert!(p.next_delay(2, RetryDecision::Backoff, None).is_none());
     }
 
     #[test]
@@ -787,7 +796,8 @@ mod tests {
         let p = RetryPolicy::new()
             .with_base_backoff_ms(1_000)
             .with_max_backoff_ms(60_000)
-            .with_jitter_enabled(true);
+            .with_jitter_enabled(true)
+            .with_max_attempts(None); // unlimited for this jitter bound test
         for attempt in 0..5 {
             let delay = p.next_delay(attempt, RetryDecision::Backoff, None).unwrap();
             // With jitter factor [0.5, 1.0], delay should be in [base*0.5, max_backoff]
@@ -822,7 +832,10 @@ mod tests {
     #[test]
     fn next_delay_one_before_max_attempts_returns_some() {
         let p = RetryPolicy::new().with_max_attempts(Some(5));
-        assert!(p.next_delay(4, RetryDecision::Immediate, None).is_some());
+        // Attempt 3 is NOT the last attempt (max_attempts=5) → delay is computed
+        assert!(p.next_delay(3, RetryDecision::Immediate, None).is_some());
+        // Attempt 4 IS the last attempt → no delay needed
+        assert!(p.next_delay(4, RetryDecision::Immediate, None).is_none());
     }
 
     // ── NEW: decision_from_http_status edge cases ────────────────────
@@ -961,7 +974,8 @@ mod tests {
     #[test]
     fn retry_policy_max_attempts_one() {
         let p = RetryPolicy::new().with_max_attempts(Some(1));
-        assert!(p.next_delay(0, RetryDecision::Backoff, None).is_some());
+        // max_attempts=1: only one attempt. After it fails, no delay needed.
+        assert!(p.next_delay(0, RetryDecision::Backoff, None).is_none());
         assert!(p.next_delay(1, RetryDecision::Backoff, None).is_none());
     }
 

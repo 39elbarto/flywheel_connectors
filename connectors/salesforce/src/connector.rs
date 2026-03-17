@@ -2006,11 +2006,9 @@ mod tests {
     #[test]
     fn self_check_includes_provisioning() {
         let c = SalesforceConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
+        let result = fcp_async_core::runtime::block_on_sync(c.handle_self_check())
+            .expect("build sync test runtime")
             .unwrap();
-        let result = rt.block_on(c.handle_self_check()).unwrap();
         assert!(result.get("provisioning").is_some());
         let prov = &result["provisioning"];
         assert_eq!(prov["auth_mode"], "unconfigured");

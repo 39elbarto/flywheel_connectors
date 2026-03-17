@@ -34,6 +34,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
+use fcp_async_core::runtime::Builder;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use fcp_telegram::connector::TelegramConnector;
@@ -58,23 +59,15 @@ fn run_fcp_loop() -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut connector = TelegramConnector::new();
+    let runtime = Builder::new_multi_thread().enable_all().build()?;
 
     for line in stdin.lock().lines() {
         let line = line?;
-        if line.is_empty() {
+        if should_skip_protocol_line(&line) {
             continue;
         }
 
-        let response =
-            fcp_async_core::runtime::block_on_sync(handle_message(&mut connector, &line))
-                .unwrap_or_else(|e| {
-                    serde_json::json!({
-                        "error": {
-                            "code": "FCP-9001",
-                            "message": format!("Runtime error: {e}")
-                        }
-                    })
-                });
+        let response = runtime.block_on(async { handle_message(&mut connector, &line).await });
 
         let response_json = serde_json::to_string(&response)?;
         writeln!(stdout, "{response_json}")?;
@@ -84,18 +77,26 @@ fn run_fcp_loop() -> Result<()> {
     Ok(())
 }
 
+fn should_skip_protocol_line(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
+fn parse_error_response(error: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": "FCP-1001",
+            "message": format!("Invalid JSON: {error}")
+        }
+    })
+}
+
 /// Handle a single FCP message.
 async fn handle_message(connector: &mut TelegramConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
-        Err(e) => {
-            return serde_json::json!({
-                "error": {
-                    "code": "FCP-1001",
-                    "message": format!("Invalid JSON: {e}")
-                }
-            });
-        }
+        Err(e) => return parse_error_response(e),
     };
 
     let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -144,5 +145,32 @@ async fn handle_message(connector: &mut TelegramConnector, message: &str) -> ser
             }
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_loop_skips_whitespace_only_lines() {
+        assert!(should_skip_protocol_line(""));
+        assert!(should_skip_protocol_line(" \t "));
+        assert!(!should_skip_protocol_line("{\"jsonrpc\":\"2.0\"}"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invalid_json_is_wrapped_in_jsonrpc_parse_error() {
+        let mut connector = TelegramConnector::new();
+        let response = handle_message(&mut connector, "{not json").await;
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert!(response["id"].is_null());
+        assert_eq!(response["error"]["code"], "FCP-1001");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Invalid JSON:"))
+        );
     }
 }

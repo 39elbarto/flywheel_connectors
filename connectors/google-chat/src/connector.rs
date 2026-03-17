@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
+    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use serde_json::json;
@@ -32,7 +32,10 @@ impl ChatConnector {
         }
     }
 
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let auth_params = params
             .get("auth")
             .cloned()
@@ -46,12 +49,14 @@ impl ChatConnector {
                 }
             })?;
 
-        let materialized = selection.materialize().await.map_err(|error| {
-            FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Failed to materialize Google auth: {error}"),
-            }
-        })?;
+        let materialized =
+            selection
+                .materialize()
+                .await
+                .map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Failed to materialize Google auth: {error}"),
+                })?;
 
         let status = match &materialized {
             GoogleMaterializedAuth::CredentialReference { .. } => {
@@ -66,19 +71,23 @@ impl ChatConnector {
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
-        self.base.configured.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .configured
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         info!(auth = %auth_label, status, "Google Chat connector configured");
 
         Ok(json!({ "status": status }))
     }
 
-    pub async fn handle_handshake(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let req: HandshakeRequest = serde_json::from_value(params).map_err(|e| {
-            FcpError::InvalidRequest {
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
-            }
-        })?;
+            })?;
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -152,7 +161,10 @@ impl ChatConnector {
                 "critical": true,
             }),
         ];
-        let status = if checks.iter().all(|c| c["passed"].as_bool().unwrap_or(false)) {
+        let status = if checks
+            .iter()
+            .all(|c| c["passed"].as_bool().unwrap_or(false))
+        {
             "healthy"
         } else {
             "unhealthy"
@@ -356,13 +368,19 @@ impl ChatConnector {
         })
     }
 
-    pub async fn handle_invoke(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_invoke(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let result = self.handle_invoke_internal(params).await;
         self.base.record_request(result.is_ok());
         result
     }
 
-    async fn handle_invoke_internal(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -376,10 +394,7 @@ impl ChatConnector {
 
         match operation {
             "chat.list_spaces" => {
-                let spaces = client
-                    .list_spaces()
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                let spaces = client.list_spaces().await.map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "spaces": spaces }))
             }
             "chat.get_space" => {
@@ -442,7 +457,10 @@ impl ChatConnector {
         }))
     }
 
-    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
         }
@@ -459,12 +477,13 @@ impl Default for ChatConnector {
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
-    input.get(field).and_then(|v| v.as_str()).ok_or_else(|| {
-        FcpError::InvalidRequest {
+    input
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| FcpError::InvalidRequest {
             code: 1001,
             message: format!("Missing '{field}'"),
-        }
-    })
+        })
 }
 
 fn op_info(
@@ -497,27 +516,27 @@ fn op_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn run_async_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
 
     #[test]
     fn health_unconfigured() {
         let connector = ChatConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_health()).unwrap();
+        let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["status"], "not_configured");
     }
 
     #[test]
     fn health_configured() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test-token" }))
@@ -530,11 +549,7 @@ mod tests {
 
     #[test]
     fn configure_no_auth_fails() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector.handle_configure(json!({})).await
         });
@@ -543,11 +558,7 @@ mod tests {
 
     #[test]
     fn configure_with_access_token() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = ChatConnector::new();
             let result = connector
                 .handle_configure(json!({ "access_token": "test-token" }))
@@ -559,11 +570,7 @@ mod tests {
 
     #[test]
     fn configure_with_credential_id() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = ChatConnector::new();
             let cred_id = fcp_core::CredentialId::new();
             let result = connector
@@ -577,18 +584,11 @@ mod tests {
     #[test]
     fn introspect_has_all_operations() {
         let connector = ChatConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_introspect()).unwrap();
+        let result = run_async_test(connector.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
         assert!(ops.len() >= 6);
 
-        let op_ids: Vec<&str> = ops
-            .iter()
-            .map(|o| o["id"].as_str().unwrap())
-            .collect();
+        let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
         assert!(op_ids.contains(&"chat.list_spaces"));
         assert!(op_ids.contains(&"chat.get_space"));
         assert!(op_ids.contains(&"chat.send_message"));
@@ -599,11 +599,7 @@ mod tests {
 
     #[test]
     fn shutdown_succeeds() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = ChatConnector::new();
             let result = connector.handle_shutdown(json!({})).await.unwrap();
             assert_eq!(result["status"], "shutdown");
@@ -612,11 +608,7 @@ mod tests {
 
     #[test]
     fn invoke_without_configure_returns_not_configured() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_invoke(json!({
@@ -630,11 +622,7 @@ mod tests {
 
     #[test]
     fn invoke_unknown_operation() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -662,24 +650,16 @@ mod tests {
     #[test]
     fn simulate_returns_dry_run() {
         let connector = ChatConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt
-            .block_on(connector.handle_simulate(json!({ "operation": "chat.send_message" })))
-            .unwrap();
+        let result =
+            run_async_test(connector.handle_simulate(json!({ "operation": "chat.send_message" })))
+                .unwrap();
         assert_eq!(result["dry_run"], true);
         assert_eq!(result["operation"], "chat.send_message");
     }
 
     #[test]
     fn invoke_missing_operation_field() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -695,11 +675,7 @@ mod tests {
 
     #[test]
     fn invoke_get_space_missing_space_name() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -720,11 +696,7 @@ mod tests {
 
     #[test]
     fn invoke_send_message_missing_text() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -745,11 +717,7 @@ mod tests {
 
     #[test]
     fn invoke_list_messages_missing_space_name() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -770,11 +738,7 @@ mod tests {
 
     #[test]
     fn invoke_get_message_missing_name() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -795,11 +759,7 @@ mod tests {
 
     #[test]
     fn invoke_list_members_missing_space_name() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(async {
+        let result = run_async_test(async {
             let mut connector = ChatConnector::new();
             connector
                 .handle_configure(json!({ "access_token": "test" }))
@@ -820,11 +780,7 @@ mod tests {
 
     #[test]
     fn list_spaces_via_mock() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path_regex(r"/v1/spaces$"))
@@ -845,11 +801,7 @@ mod tests {
 
     #[test]
     fn send_message_via_mock() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/.+/messages"))

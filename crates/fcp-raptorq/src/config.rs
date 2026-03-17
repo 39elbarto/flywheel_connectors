@@ -167,7 +167,12 @@ impl RaptorQConfig {
         if payload_len == 0 {
             return 0;
         }
-        payload_len.div_ceil(self.chunk_size as usize)
+        let chunk_size = if self.chunk_size == 0 {
+            1
+        } else {
+            self.chunk_size as usize
+        };
+        payload_len.div_ceil(chunk_size)
     }
 
     /// Compute an MTU-safe symbol size for the given datagram limit.
@@ -346,6 +351,17 @@ mod tests {
         assert_eq!(config.chunk_count(64 * 1024 + 1), 2);
         // 256KB = 4 chunks
         assert_eq!(config.chunk_count(256 * 1024), 4);
+    }
+
+    #[test]
+    fn chunk_count_zero_chunk_size_uses_single_byte_fallback() {
+        let config = RaptorQConfig {
+            chunk_size: 0,
+            ..RaptorQConfig::default()
+        };
+        assert_eq!(config.chunk_count(0), 0);
+        assert_eq!(config.chunk_count(1), 1);
+        assert_eq!(config.chunk_count(5), 5);
     }
 
     #[test]

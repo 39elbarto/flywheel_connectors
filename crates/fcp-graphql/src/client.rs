@@ -112,8 +112,27 @@ fn header_value<'a>(headers: &'a HeaderList, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+fn is_sensitive_header_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-api-key"
+            | "api-key"
+            | "x-auth-token"
+            | "x-access-token"
+            | "x-refresh-token"
+    ) || normalized.contains("token")
+        || normalized.contains("apikey")
+        || normalized.contains("secret")
+        || normalized.ends_with("-key")
+}
+
 /// GraphQL client configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GraphqlClientConfig {
     /// Service name for error mapping.
     pub service_name: String,
@@ -127,6 +146,31 @@ pub struct GraphqlClientConfig {
     pub validation: SchemaValidationMode,
     /// Deduplicate in-flight requests.
     pub dedup_in_flight: bool,
+}
+
+impl fmt::Debug for GraphqlClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Redact secret-bearing headers to prevent credential leaks in logs.
+        let safe_headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                if is_sensitive_header_name(k) {
+                    (k.as_str(), "[REDACTED]")
+                } else {
+                    (k.as_str(), v.as_str())
+                }
+            })
+            .collect();
+        f.debug_struct("GraphqlClientConfig")
+            .field("service_name", &self.service_name)
+            .field("headers", &safe_headers)
+            .field("timeout", &self.timeout)
+            .field("retry", &self.retry)
+            .field("validation", &self.validation)
+            .field("dedup_in_flight", &self.dedup_in_flight)
+            .finish()
+    }
 }
 
 impl Default for GraphqlClientConfig {
@@ -724,9 +768,45 @@ mod tests {
 
     #[test]
     fn config_debug() {
-        let config = GraphqlClientConfig::default();
+        let config = GraphqlClientConfig {
+            headers: vec![
+                (
+                    AUTHORIZATION_HEADER.to_string(),
+                    "Bearer top-secret".to_string(),
+                ),
+                ("Cookie".to_string(), "session=abc123".to_string()),
+                ("X-Api-Key".to_string(), "key-123".to_string()),
+                ("X-Request-Id".to_string(), "req-42".to_string()),
+            ],
+            ..GraphqlClientConfig::default()
+        };
         let dbg = format!("{config:?}");
         assert!(dbg.contains("graphql"));
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(dbg.contains("X-Request-Id"));
+        assert!(dbg.contains("req-42"));
+        assert!(!dbg.contains("top-secret"));
+        assert!(!dbg.contains("session=abc123"));
+        assert!(!dbg.contains("key-123"));
+    }
+
+    #[test]
+    fn config_debug_redacts_compact_api_key_spellings() {
+        let config = GraphqlClientConfig {
+            headers: vec![
+                ("ApiKey".to_string(), "compact-secret".to_string()),
+                ("X-ApiKey".to_string(), "prefixed-secret".to_string()),
+                ("X-Request-Id".to_string(), "req-77".to_string()),
+            ],
+            ..GraphqlClientConfig::default()
+        };
+
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(dbg.contains("X-Request-Id"));
+        assert!(dbg.contains("req-77"));
+        assert!(!dbg.contains("compact-secret"));
+        assert!(!dbg.contains("prefixed-secret"));
     }
 
     // ---- GraphqlClientBuilder ----

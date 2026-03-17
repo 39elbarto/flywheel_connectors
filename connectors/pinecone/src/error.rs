@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Pinecone API error.
@@ -36,7 +36,7 @@ impl PineconeError {
     pub const fn is_retryable(&self) -> bool {
         match self {
             Self::Http(_) | Self::RateLimit { .. } => true,
-            Self::Api { status_code, .. } => matches!(status_code, Some(500..=599 | 429)),
+            Self::Api { status_code, .. } => matches!(status_code, Some(408 | 429 | 500..=599)),
             Self::Serialization(_) | Self::InvalidConfig(_) => false,
         }
     }
@@ -103,7 +103,6 @@ impl PineconeError {
         }
     }
 }
-
 
 impl ConnectorErrorMapping for PineconeError {
     fn from_async_error(error: AsyncError) -> Self {
@@ -190,17 +189,14 @@ mod tests {
     fn display_http_error() {
         // Build a reqwest error from an invalid URL
         let client = reqwest::Client::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let err = rt.block_on(async {
+        let err = fcp_async_core::runtime::block_on_sync(async {
             client
                 .get("http://[::ffff:0.0.0.0.0]:1/bad")
                 .send()
                 .await
                 .unwrap_err()
-        });
+        })
+        .expect("build sync test runtime");
         let pinecone_err = PineconeError::Http(err);
         let display = pinecone_err.to_string();
         assert!(display.starts_with("HTTP error:"), "got: {display}");
@@ -248,6 +244,15 @@ mod tests {
         let err = PineconeError::Api {
             message: "Too many requests".into(),
             status_code: Some(429),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_408() {
+        let err = PineconeError::Api {
+            message: "Request timeout".into(),
+            status_code: Some(408),
         };
         assert!(err.is_retryable());
     }
@@ -789,6 +794,25 @@ mod tests {
             }
             other => panic!("Expected External, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn from_async_timeout_is_retryable() {
+        let err = <PineconeError as ConnectorErrorMapping>::from_async_error(AsyncError::Timeout {
+            timeout_ms: 250,
+        });
+        match err.to_fcp_error() {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(status_code, Some(408));
+                assert!(retryable);
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+        assert!(err.is_retryable());
     }
 
     #[test]

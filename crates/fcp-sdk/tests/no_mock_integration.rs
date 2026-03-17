@@ -254,7 +254,7 @@ fn retry_policy_respects_max_attempts() {
 
     assert!(policy.next_delay(0, RetryDecision::Backoff, None).is_some());
     assert!(policy.next_delay(1, RetryDecision::Backoff, None).is_some());
-    assert!(policy.next_delay(2, RetryDecision::Backoff, None).is_some());
+    assert!(policy.next_delay(2, RetryDecision::Backoff, None).is_none());
     assert!(policy.next_delay(3, RetryDecision::Backoff, None).is_none());
 }
 

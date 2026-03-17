@@ -18,13 +18,9 @@ use fcp_streaming::{
     with_retry,
 };
 
-/// Helper: run an async block inside the shared reactor-enabled test runtime.
+/// Helper: run an async block inside the shared sync test runtime.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    fcp_async_core::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build test runtime")
-        .block_on(f)
+    fcp_async_core::runtime::block_on_sync(f).expect("build sync test runtime")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

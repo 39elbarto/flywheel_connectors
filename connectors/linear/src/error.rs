@@ -45,7 +45,7 @@ impl LinearError {
         match self {
             Self::Http(_) => true,
             Self::RateLimited { .. } => true,
-            Self::Api { status_code, .. } => matches!(status_code, Some(500..=599 | 429)),
+            Self::Api { status_code, .. } => matches!(status_code, Some(408 | 429 | 500..=599)),
             _ => false,
         }
     }
@@ -227,13 +227,11 @@ mod tests {
     fn display_http_error() {
         // Build a reqwest error via an invalid URL
         let client = reqwest::Client::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let http_err = rt
-            .block_on(async { client.get("http://[::0:0:0:invalid]:0/bad").send().await })
-            .unwrap_err();
+        let http_err = fcp_async_core::runtime::block_on_sync(async {
+            client.get("http://[::0:0:0:invalid]:0/bad").send().await
+        })
+        .expect("build sync test runtime")
+        .unwrap_err();
         let err = LinearError::Http(http_err);
         let s = err.to_string();
         assert!(s.starts_with("HTTP error:"));
@@ -256,13 +254,11 @@ mod tests {
     #[test]
     fn is_retryable_http_error() {
         let client = reqwest::Client::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let http_err = rt
-            .block_on(async { client.get("http://[::0:0:0:invalid]:0/bad").send().await })
-            .unwrap_err();
+        let http_err = fcp_async_core::runtime::block_on_sync(async {
+            client.get("http://[::0:0:0:invalid]:0/bad").send().await
+        })
+        .expect("build sync test runtime")
+        .unwrap_err();
         assert!(LinearError::Http(http_err).is_retryable());
     }
 
@@ -316,6 +312,17 @@ mod tests {
             LinearError::Api {
                 message: "rate limited".into(),
                 status_code: Some(429),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_408() {
+        assert!(
+            LinearError::Api {
+                message: "request timeout".into(),
+                status_code: Some(408),
             }
             .is_retryable()
         );
@@ -453,13 +460,11 @@ mod tests {
     #[test]
     fn to_fcp_error_http() {
         let client = reqwest::Client::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let http_err = rt
-            .block_on(async { client.get("http://[::0:0:0:invalid]:0/bad").send().await })
-            .unwrap_err();
+        let http_err = fcp_async_core::runtime::block_on_sync(async {
+            client.get("http://[::0:0:0:invalid]:0/bad").send().await
+        })
+        .expect("build sync test runtime")
+        .unwrap_err();
         let err = LinearError::Http(http_err);
         match err.to_fcp_error() {
             FcpError::External {
@@ -820,7 +825,7 @@ mod tests {
 
     #[test]
     fn api_error_4xx_not_retryable_except_429() {
-        for code in [400, 401, 403, 404, 405, 408, 409, 410, 413, 415, 422] {
+        for code in [400, 401, 403, 404, 405, 409, 410, 413, 415, 422] {
             let err = LinearError::Api {
                 message: format!("status {code}"),
                 status_code: Some(code),
@@ -836,6 +841,31 @@ mod tests {
             status_code: Some(429),
         };
         assert!(err429.is_retryable());
+
+        let err408 = LinearError::Api {
+            message: "timed out".into(),
+            status_code: Some(408),
+        };
+        assert!(err408.is_retryable());
+    }
+
+    #[test]
+    fn from_async_timeout_is_retryable() {
+        let err = <LinearError as ConnectorErrorMapping>::from_async_error(AsyncError::Timeout {
+            timeout_ms: 250,
+        });
+        match err.to_fcp_error() {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(status_code, Some(408));
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+        assert!(err.is_retryable());
     }
 
     #[test]

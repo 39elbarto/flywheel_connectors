@@ -80,11 +80,23 @@ impl TraceContext {
 
         let trace_id = parts[1];
         let parent_span_id = parts[2];
-        let trace_flags = u8::from_str_radix(parts[3], 16).ok()?;
+        let trace_flags = parts[3];
 
-        if trace_id.len() != 32 || parent_span_id.len() != 16 {
+        if trace_id.len() != 32 || parent_span_id.len() != 16 || trace_flags.len() != 2 {
             return None;
         }
+
+        // W3C Trace Context requires lowercase hex and forbids all-zero IDs.
+        if !is_lowercase_hex(trace_id)
+            || !is_lowercase_hex(parent_span_id)
+            || !is_lowercase_hex(trace_flags)
+            || is_all_zero_hex(trace_id)
+            || is_all_zero_hex(parent_span_id)
+        {
+            return None;
+        }
+
+        let trace_flags = u8::from_str_radix(trace_flags, 16).ok()?;
 
         Some(Self {
             trace_id: trace_id.to_string(),
@@ -127,6 +139,26 @@ impl Default for TraceContext {
     }
 }
 
+fn is_lowercase_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_all_zero_hex(value: &str) -> bool {
+    value.bytes().all(|byte| byte == b'0')
+}
+
+fn ensure_nonzero_hex(value: String) -> String {
+    if is_all_zero_hex(&value) {
+        let mut corrected = "0".repeat(value.len().saturating_sub(1));
+        corrected.push('1');
+        corrected
+    } else {
+        value
+    }
+}
+
 /// Generate a random trace ID (32 hex chars).
 fn generate_trace_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -137,12 +169,12 @@ fn generate_trace_id() -> String {
 
     let random: u64 = rand::rng().random();
     let timestamp = u64::try_from(timestamp).unwrap_or(u64::MAX);
-    format!("{timestamp:016x}{random:016x}")
+    ensure_nonzero_hex(format!("{timestamp:016x}{random:016x}"))
 }
 
 /// Generate a random span ID (16 hex chars).
 fn generate_span_id() -> String {
-    format!("{:016x}", rand::rng().random::<u64>())
+    ensure_nonzero_hex(format!("{:016x}", rand::rng().random::<u64>()))
 }
 
 /// FCP operation span builder.
@@ -363,6 +395,13 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_context_generated_ids_are_non_zero() {
+        let ctx = TraceContext::new();
+        assert!(!is_all_zero_hex(&ctx.trace_id));
+        assert!(!is_all_zero_hex(&ctx.parent_span_id));
+    }
+
+    #[test]
     fn test_trace_id_format() {
         let ctx = TraceContext::new();
         // Trace ID should be 32 hex chars
@@ -431,6 +470,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_traceparent_rejects_uppercase_trace_id() {
+        let value = "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01";
+        assert!(TraceContext::from_traceparent(value).is_none());
+    }
+
+    #[test]
+    fn test_parse_traceparent_rejects_uppercase_span_id() {
+        let value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00F067AA0BA902B7-01";
+        assert!(TraceContext::from_traceparent(value).is_none());
+    }
+
+    #[test]
+    fn test_parse_traceparent_rejects_wrong_length_flags() {
+        let short = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1";
+        let long = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-001";
+
+        assert!(TraceContext::from_traceparent(short).is_none());
+        assert!(TraceContext::from_traceparent(long).is_none());
+    }
+
+    #[test]
+    fn test_parse_traceparent_rejects_all_zero_ids() {
+        let zero_trace_id = "00-00000000000000000000000000000000-00f067aa0ba902b7-01";
+        let zero_span_id = "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01";
+
+        assert!(TraceContext::from_traceparent(zero_trace_id).is_none());
+        assert!(TraceContext::from_traceparent(zero_span_id).is_none());
+    }
+
+    #[test]
+    fn test_ensure_nonzero_hex_rewrites_all_zero_input() {
+        assert_eq!(ensure_nonzero_hex("0000".to_string()), "0001");
+        assert_eq!(ensure_nonzero_hex("00af".to_string()), "00af");
+    }
+
+    #[test]
     fn test_is_sampled_true() {
         let mut ctx = TraceContext::new();
         ctx.trace_flags = 0x01;
@@ -466,6 +541,7 @@ mod tests {
 
         let child = parent.child();
         assert_eq!(child.trace_flags, 0x03);
+        assert!(!is_all_zero_hex(&child.parent_span_id));
     }
 
     #[test]

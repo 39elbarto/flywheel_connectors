@@ -878,8 +878,6 @@ mod tests {
 
     // ── ConnectorErrorMapping trait tests ────────────────────────────
 
-    use fcp_sdk::migration::ConnectorErrorMapping as _;
-
     fn from_async(err: AsyncError) -> SlackError {
         <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::from_async_error(err)
     }
@@ -930,7 +928,13 @@ mod tests {
     fn connector_error_mapping_trait_to_fcp_error() {
         let err = from_async(AsyncError::Timeout { timeout_ms: 1000 });
         let fcp = <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::to_fcp_error(&err);
-        assert!(matches!(fcp, FcpError::External { retryable: true, .. }));
+        assert!(matches!(
+            fcp,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -942,6 +946,8 @@ mod tests {
     #[test]
     fn connector_error_mapping_trait_retry_after_none_for_transport() {
         let err = from_async(AsyncError::Timeout { timeout_ms: 100 });
-        assert!(<SlackError as fcp_sdk::migration::ConnectorErrorMapping>::retry_after(&err).is_none());
+        assert!(
+            <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::retry_after(&err).is_none()
+        );
     }
 }

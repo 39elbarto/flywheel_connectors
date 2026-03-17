@@ -49,13 +49,8 @@ fn retry_policy_respects_max_attempts() {
         .with_jitter_enabled(false)
         .with_max_attempts(Some(1));
 
-    let delay = policy
-        .next_delay(0, RetryDecision::Backoff, None)
-        .expect("delay");
-    assert_eq!(delay, Duration::from_secs(1));
-
-    let delay = policy.next_delay(1, RetryDecision::Backoff, None);
-    assert!(delay.is_none());
+    assert!(policy.next_delay(0, RetryDecision::Backoff, None).is_none());
+    assert!(policy.next_delay(1, RetryDecision::Backoff, None).is_none());
 }
 
 #[test]

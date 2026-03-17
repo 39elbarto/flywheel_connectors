@@ -1455,15 +1455,11 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn run_with_tokio_reactor<F, T>(future: F) -> T
+    fn run_with_test_runtime<F, T>(future: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
-        fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build test runtime")
-            .block_on(future)
+        fcp_async_core::runtime::block_on_sync(future).expect("build sync test runtime")
     }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
@@ -1615,7 +1611,7 @@ mod tests {
 
     #[test]
     fn test_doctor_valid_token_all_scopes() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let mock_server = MockServer::start().await;
 
             Mock::given(method("POST"))
@@ -1666,7 +1662,7 @@ mod tests {
 
     #[test]
     fn test_doctor_missing_scopes() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let mock_server = MockServer::start().await;
 
             Mock::given(method("POST"))
@@ -1709,7 +1705,7 @@ mod tests {
 
     #[test]
     fn test_doctor_invalid_token() {
-        run_with_tokio_reactor(async {
+        run_with_test_runtime(async {
             let mock_server = MockServer::start().await;
 
             Mock::given(method("POST"))

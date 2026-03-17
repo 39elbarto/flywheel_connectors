@@ -45,13 +45,20 @@ fn main() -> Result<()> {
 fn run_fcp_loop() -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let mut connector = BigQueryConnector::new();
+    run_fcp_loop_with_io(stdin.lock(), &mut stdout)
+}
 
+fn run_fcp_loop_with_io<R, W>(reader: R, stdout: &mut W) -> Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut connector = BigQueryConnector::new();
     let runtime = Builder::new_multi_thread().enable_all().build()?;
 
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        if line.is_empty() {
+    for line in reader.lines() {
+        let line = line?;
+        if should_skip_protocol_line(&line) {
             continue;
         }
 
@@ -65,17 +72,25 @@ fn run_fcp_loop() -> Result<()> {
     Ok(())
 }
 
+fn should_skip_protocol_line(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
+fn parse_error_response(error: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": "FCP-1001",
+            "message": format!("Invalid JSON: {error}")
+        }
+    })
+}
+
 async fn handle_message(connector: &mut BigQueryConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
-        Err(e) => {
-            return serde_json::json!({
-                "error": {
-                    "code": "FCP-1001",
-                    "message": format!("Invalid JSON: {e}")
-                }
-            });
-        }
+        Err(e) => return parse_error_response(e),
     };
 
     let method = request
@@ -126,5 +141,99 @@ async fn handle_message(connector: &mut BigQueryConnector, message: &str) -> ser
             }
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, BufReader, Read};
+
+    use super::*;
+
+    struct ErrorAfterBytes {
+        bytes: &'static [u8],
+        position: usize,
+        error_kind: io::ErrorKind,
+        error_message: &'static str,
+        did_error: bool,
+    }
+
+    impl ErrorAfterBytes {
+        fn new(
+            bytes: &'static [u8],
+            error_kind: io::ErrorKind,
+            error_message: &'static str,
+        ) -> Self {
+            Self {
+                bytes,
+                position: 0,
+                error_kind,
+                error_message,
+                did_error: false,
+            }
+        }
+    }
+
+    impl Read for ErrorAfterBytes {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.position < self.bytes.len() {
+                let remaining = &self.bytes[self.position..];
+                let bytes_to_copy = remaining.len().min(buf.len());
+                buf[..bytes_to_copy].copy_from_slice(&remaining[..bytes_to_copy]);
+                self.position += bytes_to_copy;
+                return Ok(bytes_to_copy);
+            }
+
+            if self.did_error {
+                return Ok(0);
+            }
+
+            self.did_error = true;
+            Err(io::Error::new(self.error_kind, self.error_message))
+        }
+    }
+
+    #[test]
+    fn protocol_loop_skips_whitespace_only_lines() {
+        assert!(should_skip_protocol_line(""));
+        assert!(should_skip_protocol_line(" \t "));
+        assert!(!should_skip_protocol_line("{\"jsonrpc\":\"2.0\"}"));
+    }
+
+    #[test]
+    fn protocol_loop_propagates_input_read_errors() {
+        let reader = BufReader::new(ErrorAfterBytes::new(
+            b"   \n",
+            io::ErrorKind::ConnectionReset,
+            "simulated read failure",
+        ));
+        let mut output = Vec::new();
+        let error = run_fcp_loop_with_io(reader, &mut output)
+            .expect_err("input read error should propagate");
+        let io_error = error
+            .downcast_ref::<io::Error>()
+            .expect("error should preserve io::Error");
+
+        assert_eq!(io_error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(io_error.to_string(), "simulated read failure");
+        assert!(
+            output.is_empty(),
+            "whitespace-only input should not emit a response"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invalid_json_is_wrapped_in_jsonrpc_parse_error() {
+        let mut connector = BigQueryConnector::new();
+        let response = handle_message(&mut connector, "{not json").await;
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert!(response["id"].is_null());
+        assert_eq!(response["error"]["code"], "FCP-1001");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Invalid JSON:"))
+        );
     }
 }

@@ -10,6 +10,24 @@ use crate::config::RaptorQConfig;
 use crate::error::EncodeError;
 use crate::oti::ObjectTransmissionInformation;
 
+fn validated_symbol_size(config: &RaptorQConfig) -> Result<usize, EncodeError> {
+    if config.symbol_size == 0 {
+        return Err(EncodeError::InvalidConfiguration {
+            reason: "symbol size must be greater than 0".into(),
+        });
+    }
+    Ok(usize::from(config.symbol_size))
+}
+
+fn validate_chunk_size(config: &RaptorQConfig) -> Result<(), EncodeError> {
+    if config.chunk_size == 0 {
+        return Err(EncodeError::InvalidConfiguration {
+            reason: "chunk size must be greater than 0".into(),
+        });
+    }
+    Ok(())
+}
+
 /// `RaptorQ` encoder for producing symbols from a payload.
 pub struct RaptorQEncoder {
     inner: SystematicEncoder,
@@ -26,6 +44,7 @@ impl RaptorQEncoder {
     ///
     /// Returns `EncodeError::PayloadTooLarge` if payload exceeds max object size.
     /// Returns `EncodeError::EmptyPayload` if payload is empty.
+    /// Returns `EncodeError::InvalidConfiguration` if `symbol_size` is zero.
     ///
     /// # Panics
     ///
@@ -43,7 +62,7 @@ impl RaptorQEncoder {
             });
         }
 
-        let symbol_size = usize::from(config.symbol_size);
+        let symbol_size = validated_symbol_size(config)?;
 
         // Split payload into symbol-sized chunks, zero-padding the last one
         let source_symbols: Vec<Vec<u8>> = payload
@@ -182,7 +201,11 @@ impl EncodingDecision {
     /// # Errors
     ///
     /// Returns `EncodeError::PayloadTooLarge` if payload exceeds max object size.
+    /// Returns `EncodeError::InvalidConfiguration` if `symbol_size` is zero or
+    /// if chunking is required and `chunk_size` is zero.
     pub fn for_payload(payload: &[u8], config: &RaptorQConfig) -> Result<Self, EncodeError> {
+        validated_symbol_size(config)?;
+
         if payload.is_empty() {
             // Empty payloads use direct encoding with no symbols
             return Ok(Self::Direct {
@@ -206,6 +229,7 @@ impl EncodingDecision {
 
         if config.requires_chunking(payload.len()) {
             // Large object: use chunking
+            validate_chunk_size(config)?;
             let (manifest, chunks) =
                 ChunkedObjectManifest::from_payload(payload, config.chunk_size);
             Ok(Self::Chunked { manifest, chunks })
@@ -266,6 +290,20 @@ mod tests {
         let config = test_config();
         let result = RaptorQEncoder::new(&[], &config);
         assert!(matches!(result, Err(EncodeError::EmptyPayload)));
+    }
+
+    #[test]
+    fn encoder_zero_symbol_size_rejected() {
+        let config = RaptorQConfig {
+            symbol_size: 0,
+            ..test_config()
+        };
+        let result = RaptorQEncoder::new(&[42u8; 16], &config);
+        assert!(matches!(
+            result,
+            Err(EncodeError::InvalidConfiguration { reason })
+            if reason == "symbol size must be greater than 0"
+        ));
     }
 
     #[test]
@@ -359,6 +397,20 @@ mod tests {
         if let EncodingDecision::Direct { symbols, .. } = decision {
             assert!(symbols.is_empty());
         }
+    }
+
+    #[test]
+    fn encoding_decision_empty_payload_rejects_zero_symbol_size() {
+        let config = RaptorQConfig {
+            symbol_size: 0,
+            ..test_config()
+        };
+        let result = EncodingDecision::for_payload(&[], &config);
+        assert!(matches!(
+            result,
+            Err(EncodeError::InvalidConfiguration { reason })
+            if reason == "symbol size must be greater than 0"
+        ));
     }
 
     #[test]
@@ -807,6 +859,21 @@ mod tests {
         let payload = vec![42u8; 2049];
         let result = EncodingDecision::for_payload(&payload, &config);
         assert!(matches!(result, Err(EncodeError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn encoding_decision_chunked_zero_chunk_size_rejected() {
+        let config = RaptorQConfig {
+            chunk_size: 0,
+            ..test_config()
+        };
+        let payload = vec![42u8; 2048];
+        let result = EncodingDecision::for_payload(&payload, &config);
+        assert!(matches!(
+            result,
+            Err(EncodeError::InvalidConfiguration { reason })
+            if reason == "chunk size must be greater than 0"
+        ));
     }
 
     #[test]

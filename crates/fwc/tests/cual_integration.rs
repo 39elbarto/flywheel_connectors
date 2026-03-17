@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use fcp_async_core::runtime::{self, Builder as AsyncRuntimeBuilder};
 use fcp_core::{CapabilityToken, ConnectorHealth, InvokeResponse, RequestId};
 use fcp_host::{
     EventQueryRequest as HostEventQueryRequest, HostAdminStateStore, HostEventKind,
@@ -17,7 +18,6 @@ use fcp_host::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::tempdir;
-use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -247,10 +247,8 @@ fn emit_host_admin_event(
     summary: &str,
     payload: Option<Value>,
 ) {
-    let runtime = TokioRuntimeBuilder::new_current_thread()
-        .build()
-        .expect("tokio runtime should build");
-    runtime.block_on(store.emit_event(kind, connector_id, summary.to_owned(), payload));
+    runtime::block_on_sync(store.emit_event(kind, connector_id, summary.to_owned(), payload))
+        .expect("async-core runtime should run host admin event");
 }
 
 fn spawn_host_admin_state_server(
@@ -267,9 +265,10 @@ fn spawn_host_admin_state_server(
     );
 
     let handle = thread::spawn(move || {
-        let runtime = TokioRuntimeBuilder::new_current_thread()
+        let runtime = AsyncRuntimeBuilder::new_current_thread()
+            .enable_all()
             .build()
-            .expect("tokio runtime should build");
+            .expect("async-core runtime should build");
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut served = 0usize;
 

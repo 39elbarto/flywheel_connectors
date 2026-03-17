@@ -117,6 +117,10 @@ pub fn compatibility_cx() -> asupersync::Cx {
 pub mod runtime {
     use std::cell::RefCell;
     use std::io;
+    use std::sync::OnceLock;
+
+    #[cfg(test)]
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use asupersync::runtime::{
         Runtime as AsupersyncRuntime, RuntimeBuilder as AsupersyncRuntimeBuilder,
@@ -127,43 +131,47 @@ pub mod runtime {
 
     pub use fcp_async_core_macros::{main, test};
 
-    thread_local! {
-        /// Cached Tokio runtime handle for compatibility with crates that require
-        /// `tokio::runtime::Handle::current()` (e.g., wiremock, reqwest).
-        ///
-        /// The actual runtime lives on a dedicated background thread so that tasks
-        /// spawned via `tokio::spawn` (e.g., wiremock's HTTP server) are actively
-        /// polled even though the main thread runs the Asupersync event loop.
-        static TOKIO_COMPAT_HANDLE: RefCell<Option<tokio::runtime::Handle>> = const { RefCell::new(None) };
-    }
+    /// Cached Tokio runtime handle for compatibility with crates that require
+    /// `tokio::runtime::Handle::current()` (e.g., wiremock, reqwest).
+    ///
+    /// The actual runtime lives on a dedicated background thread so that tasks
+    /// spawned via `tokio::spawn` (e.g., wiremock's HTTP server) are actively
+    /// polled even though the main thread runs the Asupersync event loop.
+    static TOKIO_COMPAT_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+    #[cfg(test)]
+    static TOKIO_COMPAT_DRIVER_SPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     pub(crate) fn get_or_create_tokio_compat_handle() -> tokio::runtime::Handle {
-        TOKIO_COMPAT_HANDLE.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            if let Some(handle) = borrow.as_ref() {
-                return handle.clone();
-            }
-            let (handle_tx, handle_rx) = std::sync::mpsc::channel();
-            std::thread::Builder::new()
-                .name("tokio-compat-driver".into())
-                .spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("failed to create Tokio compatibility runtime");
-                    handle_tx
-                        .send(rt.handle().clone())
-                        .expect("failed to send Tokio compat handle");
-                    // Drive the event loop so spawned tasks (wiremock, etc.) get polled.
-                    rt.block_on(std::future::pending::<()>());
-                })
-                .expect("failed to spawn tokio-compat-driver thread");
-            let handle = handle_rx
-                .recv()
-                .expect("tokio-compat-driver thread died before sending handle");
-            *borrow = Some(handle.clone());
-            handle
-        })
+        TOKIO_COMPAT_HANDLE
+            .get_or_init(|| {
+                let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name("tokio-compat-driver".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("failed to create Tokio compatibility runtime");
+                        #[cfg(test)]
+                        TOKIO_COMPAT_DRIVER_SPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
+                        handle_tx
+                            .send(rt.handle().clone())
+                            .expect("failed to send Tokio compat handle");
+                        // Drive the event loop so spawned tasks (wiremock, etc.) get polled.
+                        rt.block_on(std::future::pending::<()>());
+                    })
+                    .expect("failed to spawn tokio-compat-driver thread");
+                handle_rx
+                    .recv()
+                    .expect("tokio-compat-driver thread died before sending handle")
+            })
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tokio_compat_driver_spawn_count() -> usize {
+        TOKIO_COMPAT_DRIVER_SPAWN_COUNT.load(Ordering::SeqCst)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6450,6 +6458,29 @@ mod tests {
             let nested = tokio_handle.spawn(async { 11_u32 });
             assert_eq!(nested.await.expect("nested tokio task should complete"), 11);
         });
+    }
+
+    #[test]
+    fn runtime_block_on_reuses_single_tokio_compat_driver_across_threads() {
+        let thread_handles = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let rt = runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        let tokio_handle = tokio::runtime::Handle::try_current()
+                            .expect("tokio compat handle missing");
+                        let nested = tokio_handle.spawn(async { 13_u32 });
+                        assert_eq!(nested.await.expect("nested tokio task should complete"), 13);
+                    });
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in thread_handles {
+            handle.join().expect("runtime thread should join cleanly");
+        }
+
+        assert_eq!(runtime::tokio_compat_driver_spawn_count(), 1);
     }
 
     // ─── TaskGroup: async edge cases ─────────────────────────────────────

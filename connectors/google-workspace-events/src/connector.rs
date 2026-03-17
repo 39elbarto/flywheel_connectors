@@ -293,7 +293,10 @@ impl WorkspaceEventsConnector {
                 "critical": true,
             }),
         ];
-        let status = if checks.iter().all(|c| c["passed"].as_bool().unwrap_or(false)) {
+        let status = if checks
+            .iter()
+            .all(|c| c["passed"].as_bool().unwrap_or(false))
+        {
             "healthy"
         } else {
             "unhealthy"
@@ -898,27 +901,27 @@ fn op_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use wiremock::matchers::{body_string_contains, method, path, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn run_async_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
 
     #[test]
     fn health_unconfigured() {
         let connector = WorkspaceEventsConnector::new();
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = rt.block_on(connector.handle_health()).unwrap();
+        let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["status"], "not_configured");
     }
 
     #[test]
     fn configure_uses_default_scope_bundle() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = WorkspaceEventsConnector::new();
             let result = connector
                 .handle_configure(json!({ "access_token": "test-token" }))
@@ -934,11 +937,7 @@ mod tests {
 
     #[test]
     fn describe_provisioning_returns_workspace_events_bundle() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let mut connector = WorkspaceEventsConnector::new();
             let result = connector
                 .handle_invoke(json!({
@@ -982,11 +981,7 @@ mod tests {
 
     #[test]
     fn list_subscriptions_uses_workspace_events_endpoint() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/v1/subscriptions"))
@@ -1022,11 +1017,7 @@ mod tests {
 
     #[test]
     fn create_subscription_posts_expected_shape() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/v1/subscriptions"))
@@ -1071,11 +1062,7 @@ mod tests {
 
     #[test]
     fn pull_events_reads_pubsub_delivery_path() {
-        let rt = fcp_async_core::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+        run_async_test(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/projects/.+/subscriptions/.+:pull"))

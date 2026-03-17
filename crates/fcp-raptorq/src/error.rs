@@ -52,6 +52,13 @@ pub enum EncodeError {
     /// Empty payload cannot be encoded.
     #[error("cannot encode empty payload")]
     EmptyPayload,
+
+    /// Encoder configuration is invalid.
+    #[error("invalid encode configuration: {reason}")]
+    InvalidConfiguration {
+        /// Reason the configuration is invalid.
+        reason: String,
+    },
 }
 
 /// `RaptorQ` decode errors.
@@ -160,6 +167,14 @@ mod tests {
 
         let err = EncodeError::EmptyPayload;
         assert_eq!(err.to_string(), "cannot encode empty payload");
+
+        let err = EncodeError::InvalidConfiguration {
+            reason: "symbol size must be greater than 0".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid encode configuration: symbol size must be greater than 0"
+        );
     }
 
     #[test]
@@ -239,6 +254,7 @@ mod tests {
         fn assert_error<E: std::error::Error>(_: &E) {}
         assert_error(&EncodeError::PayloadTooLarge { size: 1, max: 0 });
         assert_error(&EncodeError::EmptyPayload);
+        assert_error(&EncodeError::InvalidConfiguration { reason: "x".into() });
     }
 
     #[test]
@@ -285,6 +301,9 @@ mod tests {
         let variants: Vec<EncodeError> = vec![
             EncodeError::PayloadTooLarge { size: 100, max: 50 },
             EncodeError::EmptyPayload,
+            EncodeError::InvalidConfiguration {
+                reason: "symbol size must be greater than 0".into(),
+            },
         ];
         for v in &variants {
             assert_eq!(v, &v.clone());
@@ -510,6 +529,17 @@ mod tests {
         assert_eq!(err.to_string(), "cannot encode empty payload");
     }
 
+    #[test]
+    fn encode_error_invalid_configuration_display_exact() {
+        let err = EncodeError::InvalidConfiguration {
+            reason: "chunk size must be greater than 0".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid encode configuration: chunk size must be greater than 0"
+        );
+    }
+
     // ── DecodeError additional tests ───────────────────────────────────────
 
     #[test]
@@ -628,6 +658,7 @@ mod tests {
         let variants: Vec<EncodeError> = vec![
             EncodeError::PayloadTooLarge { size: 1, max: 0 },
             EncodeError::EmptyPayload,
+            EncodeError::InvalidConfiguration { reason: "x".into() },
         ];
         for v in &variants {
             let debug = format!("{v:?}");
@@ -840,6 +871,7 @@ mod tests {
         let encode_variants: Vec<EncodeError> = vec![
             EncodeError::PayloadTooLarge { size: 1, max: 0 },
             EncodeError::EmptyPayload,
+            EncodeError::InvalidConfiguration { reason: "x".into() },
         ];
         for v in &encode_variants {
             assert!(v.source().is_none(), "EncodeError should have no source");
@@ -890,6 +922,15 @@ mod tests {
     }
 
     #[test]
+    fn encode_error_invalid_configuration_debug_field_values() {
+        let err = EncodeError::InvalidConfiguration {
+            reason: "symbol size must be greater than 0".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("symbol size must be greater than 0"));
+    }
+
+    #[test]
     fn decode_error_debug_field_values() {
         let err = DecodeError::InsufficientSymbols {
             received: 55,
@@ -926,6 +967,7 @@ mod tests {
         let variants: Vec<EncodeError> = vec![
             EncodeError::PayloadTooLarge { size: 1, max: 0 },
             EncodeError::EmptyPayload,
+            EncodeError::InvalidConfiguration { reason: "x".into() },
         ];
         for v in &variants {
             assert!(!v.to_string().is_empty());
@@ -989,6 +1031,18 @@ mod tests {
         if let EncodeError::PayloadTooLarge { size, max } = cloned {
             assert_eq!(size, 999);
             assert_eq!(max, 500);
+        }
+    }
+
+    #[test]
+    fn encode_error_invalid_configuration_clone_preserves_fields() {
+        let err = EncodeError::InvalidConfiguration {
+            reason: "chunk size must be greater than 0".into(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+        if let EncodeError::InvalidConfiguration { reason } = cloned {
+            assert_eq!(reason, "chunk size must be greater than 0");
         }
     }
 
@@ -1148,6 +1202,17 @@ mod tests {
         };
         assert_eq!(a, b);
         assert_eq!(b, a);
+    }
+
+    #[test]
+    fn encode_error_invalid_configuration_different_reasons() {
+        let a = EncodeError::InvalidConfiguration {
+            reason: "symbol size must be greater than 0".into(),
+        };
+        let b = EncodeError::InvalidConfiguration {
+            reason: "chunk size must be greater than 0".into(),
+        };
+        assert_ne!(a, b);
     }
 
     #[test]

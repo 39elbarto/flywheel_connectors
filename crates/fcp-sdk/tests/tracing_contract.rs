@@ -391,6 +391,11 @@ fn max_attempts_exhausted_emits_correct_retry_count() {
         .iter()
         .filter(|e| e.message.contains("retrying after transient error"))
         .collect();
+    assert_eq!(
+        retry_events.len(),
+        2,
+        "max_attempts=3 should emit exactly two retry warnings before exhaustion"
+    );
     for (i, event) in retry_events.iter().enumerate() {
         let attempt: u32 = event
             .field("attempt")

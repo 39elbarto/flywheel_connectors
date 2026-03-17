@@ -15,13 +15,38 @@ use rand::Rng;
 pub const TRACEPARENT_HEADER: &str = "traceparent";
 pub const TRACESTATE_HEADER: &str = "tracestate";
 
+fn header_value_case_insensitive<'a, S: BuildHasher>(
+    headers: &'a HashMap<String, String, S>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn remove_header_case_insensitive<S: BuildHasher>(
+    headers: &mut HashMap<String, String, S>,
+    name: &str,
+) {
+    if let Some(existing_name) = headers
+        .keys()
+        .find(|header_name| header_name.eq_ignore_ascii_case(name))
+        .cloned()
+    {
+        headers.remove(&existing_name);
+    }
+}
+
 /// Extract trace context from headers (W3C Trace Context format).
 #[must_use]
 pub fn extract_trace_context<S: BuildHasher>(
     headers: &HashMap<String, String, S>,
 ) -> Option<TraceContext> {
-    let traceparent = headers.get(TRACEPARENT_HEADER)?;
-    TraceContext::from_traceparent(traceparent)
+    let traceparent = header_value_case_insensitive(headers, TRACEPARENT_HEADER)?;
+    let mut ctx = TraceContext::from_traceparent(traceparent)?;
+    ctx.trace_state = header_value_case_insensitive(headers, TRACESTATE_HEADER).map(str::to_owned);
+    Some(ctx)
 }
 
 /// Inject trace context into headers.
@@ -29,7 +54,9 @@ pub fn inject_trace_context<S: BuildHasher>(
     ctx: &TraceContext,
     headers: &mut HashMap<String, String, S>,
 ) {
+    remove_header_case_insensitive(headers, TRACEPARENT_HEADER);
     headers.insert(TRACEPARENT_HEADER.to_string(), ctx.to_traceparent());
+    remove_header_case_insensitive(headers, TRACESTATE_HEADER);
     if let Some(ref state) = ctx.trace_state {
         headers.insert(TRACESTATE_HEADER.to_string(), state.clone());
     }
@@ -378,6 +405,22 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_accepts_mixed_case_header_names() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert("TraceState".to_string(), "vendor=value".to_string());
+
+        let extracted = extract_trace_context(&headers).unwrap();
+        assert_eq!(extracted.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(extracted.parent_span_id, "00f067aa0ba902b7");
+        assert_eq!(extracted.trace_flags, 0x01);
+        assert_eq!(extracted.trace_state.as_deref(), Some("vendor=value"));
+    }
+
+    #[test]
     fn test_trace_context_default() {
         let ctx = TraceContext::default();
         assert_eq!(ctx.trace_id.len(), 32);
@@ -561,6 +604,21 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_preserves_trace_state() {
+        let mut ctx = TraceContext::new();
+        ctx.trace_state = Some("vendor1=value1,vendor2=value2".to_string());
+
+        let mut headers = HashMap::new();
+        inject_trace_context(&ctx, &mut headers);
+
+        let extracted = extract_trace_context(&headers).unwrap();
+        assert_eq!(
+            extracted.trace_state.as_deref(),
+            Some("vendor1=value1,vendor2=value2")
+        );
+    }
+
+    #[test]
     fn test_inject_without_trace_state() {
         let ctx = TraceContext::new(); // No trace_state
 
@@ -569,6 +627,28 @@ mod tests {
 
         assert!(headers.contains_key(TRACEPARENT_HEADER));
         assert!(!headers.contains_key(TRACESTATE_HEADER));
+    }
+
+    #[test]
+    fn test_inject_overwrites_case_variants_and_removes_stale_trace_state() {
+        let ctx = TraceContext::new();
+
+        let mut headers = HashMap::new();
+        headers.insert("Traceparent".to_string(), "stale-traceparent".to_string());
+        headers.insert("TraceState".to_string(), "vendor=stale".to_string());
+
+        inject_trace_context(&ctx, &mut headers);
+
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers.get(TRACEPARENT_HEADER).unwrap(),
+            &ctx.to_traceparent()
+        );
+        assert!(
+            !headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case(TRACESTATE_HEADER))
+        );
     }
 
     #[test]

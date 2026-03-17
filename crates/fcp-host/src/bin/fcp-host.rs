@@ -2091,12 +2091,48 @@ async fn signal_handler_loop(
     state: Arc<AppState>,
     shutdown_tx: fcp_async_core::channel::watch::Sender<bool>,
 ) {
-    use asupersync::signal::{sighup, sigint, sigterm};
+    use fcp_async_core::signal::{sighup, sigint, sigterm};
     use futures_util::FutureExt;
 
-    let mut sighup_stream = sighup().expect("register SIGHUP handler");
-    let mut sigterm_stream = sigterm().expect("register SIGTERM handler");
-    let mut sigint_stream = sigint().expect("register SIGINT handler");
+    let mut sighup_stream = match sighup() {
+        Ok(stream) => stream,
+        Err(err) => {
+            tracing::error!(
+                event = "signal_registration_failed",
+                signal = "SIGHUP",
+                error = %err,
+                "failed to register SIGHUP handler; initiating shutdown"
+            );
+            let _ = shutdown_tx.send(true);
+            return;
+        }
+    };
+    let mut sigterm_stream = match sigterm() {
+        Ok(stream) => stream,
+        Err(err) => {
+            tracing::error!(
+                event = "signal_registration_failed",
+                signal = "SIGTERM",
+                error = %err,
+                "failed to register SIGTERM handler; initiating shutdown"
+            );
+            let _ = shutdown_tx.send(true);
+            return;
+        }
+    };
+    let mut sigint_stream = match sigint() {
+        Ok(stream) => stream,
+        Err(err) => {
+            tracing::error!(
+                event = "signal_registration_failed",
+                signal = "SIGINT",
+                error = %err,
+                "failed to register SIGINT handler; initiating shutdown"
+            );
+            let _ = shutdown_tx.send(true);
+            return;
+        }
+    };
 
     loop {
         let sighup_recv = sighup_stream.recv().fuse();
@@ -2157,9 +2193,16 @@ async fn signal_handler_loop(
 ) {
     // On non-Unix platforms, wait for Ctrl+C through the native asupersync
     // signal shim instead of the tokio bridge.
-    asupersync::signal::ctrl_c()
-        .await
-        .expect("register Ctrl+C handler");
+    if let Err(err) = asupersync::signal::ctrl_c().await {
+        tracing::error!(
+            event = "signal_registration_failed",
+            signal = "CTRL_C",
+            error = %err,
+            "failed to register Ctrl+C handler; initiating shutdown"
+        );
+        let _ = shutdown_tx.send(true);
+        return;
+    }
     tracing::info!(event = "ctrl_c_received", "initiating graceful shutdown");
     let _ = shutdown_tx.send(true);
 }

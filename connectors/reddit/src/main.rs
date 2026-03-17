@@ -33,13 +33,20 @@ fn execute_request(connector: &mut RedditConnector, line: &str) -> serde_json::V
     fcp_async_core::runtime::block_on_sync(handle_message(connector, line)).unwrap_or_else(|e| {
         json!({
             "jsonrpc": "2.0",
-            "id": null,
+            "id": request_id_from_line(line).unwrap_or(serde_json::Value::Null),
             "error": {
                 "code": "FCP-9001",
                 "message": format!("Runtime error: {e}")
             }
         })
     })
+}
+
+fn request_id_from_line(line: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()?
+        .get("id")
+        .cloned()
 }
 
 fn write_response<W: Write>(writer: &mut W, response: &serde_json::Value) -> Result<()> {
@@ -93,10 +100,7 @@ async fn handle_message(connector: &mut RedditConnector, message: &str) -> serde
         Err(err) => json!({
             "jsonrpc": "2.0",
             "id": id,
-            "error": {
-                "code": -32000,
-                "message": err.to_string()
-            }
+            "error": err.to_response()
         }),
     }
 }
@@ -150,7 +154,7 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 7);
-        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(response["error"]["code"], "FCP-1002");
         assert!(
             response["error"]["message"]
                 .as_str()
@@ -168,7 +172,7 @@ mod tests {
         );
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert!(response["id"].is_null());
+        assert_eq!(response["id"], 1);
         assert_eq!(response["error"]["code"], "FCP-9001");
         assert!(
             response["error"]["message"]

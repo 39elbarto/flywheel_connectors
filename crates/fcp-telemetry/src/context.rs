@@ -116,6 +116,9 @@ mod hex_16 {
         }
         let mut arr = [0u8; 16];
         arr.copy_from_slice(&bytes);
+        if arr == [0u8; 16] {
+            return Err(serde::de::Error::custom("trace_id cannot be all zeros"));
+        }
         Ok(arr)
     }
 }
@@ -142,8 +145,26 @@ mod hex_8 {
         }
         let mut arr = [0u8; 8];
         arr.copy_from_slice(&bytes);
+        if arr == [0u8; 8] {
+            return Err(serde::de::Error::custom("span_id cannot be all zeros"));
+        }
         Ok(arr)
     }
+}
+
+fn is_lowercase_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn ensure_nonzero_id<const N: usize>(mut id: [u8; N]) -> [u8; N] {
+    if id.iter().all(|&byte| byte == 0) {
+        if let Some(last) = id.last_mut() {
+            *last = 1;
+        }
+    }
+    id
 }
 
 impl TraceContext {
@@ -154,8 +175,8 @@ impl TraceContext {
     pub fn generate() -> Self {
         let mut rng = rand::rng();
         Self {
-            trace_id: rng.random(),
-            span_id: rng.random(),
+            trace_id: ensure_nonzero_id(rng.random()),
+            span_id: ensure_nonzero_id(rng.random()),
             trace_flags: TRACE_FLAG_SAMPLED,
             trace_state: None,
         }
@@ -169,7 +190,7 @@ impl TraceContext {
         let mut rng = rand::rng();
         Self {
             trace_id: self.trace_id,
-            span_id: rng.random(),
+            span_id: ensure_nonzero_id(rng.random()),
             trace_flags: self.trace_flags,
             trace_state: self.trace_state.clone(),
         }
@@ -177,10 +198,10 @@ impl TraceContext {
 
     /// Create from specific trace and span IDs.
     #[must_use]
-    pub const fn new(trace_id: [u8; TRACE_ID_SIZE], span_id: [u8; SPAN_ID_SIZE]) -> Self {
+    pub fn new(trace_id: [u8; TRACE_ID_SIZE], span_id: [u8; SPAN_ID_SIZE]) -> Self {
         Self {
-            trace_id,
-            span_id,
+            trace_id: ensure_nonzero_id(trace_id),
+            span_id: ensure_nonzero_id(span_id),
             trace_flags: TRACE_FLAG_SAMPLED,
             trace_state: None,
         }
@@ -248,6 +269,11 @@ impl TraceContext {
                 "trace_id must be 32 hex characters".to_string(),
             ));
         }
+        if !is_lowercase_hex(trace_id_hex) {
+            return Err(TraceContextError::InvalidFormat(
+                "trace_id must be lowercase hex".to_string(),
+            ));
+        }
         let trace_id_bytes = hex::decode(trace_id_hex)
             .map_err(|e| TraceContextError::InvalidFormat(e.to_string()))?;
         let mut trace_id = [0u8; TRACE_ID_SIZE];
@@ -267,6 +293,11 @@ impl TraceContext {
                 "span_id must be 16 hex characters".to_string(),
             ));
         }
+        if !is_lowercase_hex(span_id_hex) {
+            return Err(TraceContextError::InvalidFormat(
+                "span_id must be lowercase hex".to_string(),
+            ));
+        }
         let span_id_bytes = hex::decode(span_id_hex)
             .map_err(|e| TraceContextError::InvalidFormat(e.to_string()))?;
         let mut span_id = [0u8; SPAN_ID_SIZE];
@@ -284,6 +315,11 @@ impl TraceContext {
         if flags_hex.len() != 2 {
             return Err(TraceContextError::InvalidFormat(
                 "trace_flags must be 2 hex characters".to_string(),
+            ));
+        }
+        if !is_lowercase_hex(flags_hex) {
+            return Err(TraceContextError::InvalidFormat(
+                "trace_flags must be lowercase hex".to_string(),
             ));
         }
         let trace_flags = u8::from_str_radix(flags_hex, 16)
@@ -1019,6 +1055,20 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_context_from_traceparent_rejects_uppercase_trace_id() {
+        let traceparent = "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_trace_context_from_traceparent_rejects_uppercase_span_id() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00F067AA0BA902B7-01";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
     fn test_trace_context_from_traceparent_zero_trace_id() {
         let traceparent = "00-00000000000000000000000000000000-00f067aa0ba902b7-01";
         let result = TraceContext::from_traceparent(traceparent);
@@ -1315,6 +1365,13 @@ mod tests {
     #[test]
     fn test_trace_context_from_traceparent_invalid_flags_length() {
         let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_trace_context_from_traceparent_rejects_uppercase_flags() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-FF";
         let result = TraceContext::from_traceparent(traceparent);
         assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
     }
@@ -1767,6 +1824,13 @@ mod tests {
         let err: Box<dyn std::error::Error> =
             Box::new(TraceContextError::InvalidFormat("test".to_string()));
         assert!(err.to_string().contains("Invalid traceparent format"));
+    }
+
+    #[test]
+    fn test_trace_context_new_normalizes_all_zero_ids() {
+        let ctx = TraceContext::new([0u8; TRACE_ID_SIZE], [0u8; SPAN_ID_SIZE]);
+        assert_ne!(ctx.trace_id, [0u8; TRACE_ID_SIZE]);
+        assert_ne!(ctx.span_id, [0u8; SPAN_ID_SIZE]);
     }
 
     #[test]

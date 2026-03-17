@@ -634,7 +634,10 @@ fn retry_after_zero_ms_is_valid() {
 #[test]
 fn http_retry_config_defaults_are_sane() {
     let config = HttpRetryConfig::default();
-    assert!(config.max_retries > 0, "must have at least 1 retry");
+    assert_eq!(
+        config.max_retries, 3,
+        "default retry count should stay stable"
+    );
     assert!(
         config.initial_delay_ms > 0,
         "initial delay must be positive"

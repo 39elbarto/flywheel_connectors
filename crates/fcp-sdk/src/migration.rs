@@ -529,11 +529,17 @@ impl HttpRetryConfig {
     /// Convert to a [`RetryPolicy`].
     #[must_use]
     pub fn to_retry_policy(&self) -> RetryPolicy {
+        let max_attempts = if self.max_retries == u32::MAX {
+            None
+        } else {
+            Some(self.max_retries + 1)
+        };
+
         RetryPolicy::new()
             .with_base_backoff_ms(self.initial_delay_ms)
             .with_max_backoff_ms(self.max_delay_ms)
             .with_jitter_enabled(self.jitter_enabled)
-            .with_max_attempts(Some(self.max_retries.saturating_add(1)))
+            .with_max_attempts(max_attempts)
     }
 }
 
@@ -1394,7 +1400,7 @@ mod tests {
             jitter_enabled: true,
         };
         let policy = config.to_retry_policy();
-        assert_eq!(policy.max_attempts, Some(u32::MAX));
+        assert!(policy.max_attempts.is_none());
         assert_eq!(policy.base_backoff_ms, u64::MAX);
     }
 

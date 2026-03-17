@@ -2014,6 +2014,15 @@ pub mod bytes {
     pub use asupersync::bytes::{Buf, BufMut, Bytes, BytesMut};
 }
 
+/// Signal handling re-exports from asupersync.
+pub mod signal {
+    #[cfg(unix)]
+    pub use asupersync::signal::{Signal, sighup, sigint, sigterm};
+
+    #[cfg(not(unix))]
+    pub use asupersync::signal::ctrl_c;
+}
+
 #[derive(Debug)]
 struct CancellationState {
     sender: channel::watch::Sender<bool>,

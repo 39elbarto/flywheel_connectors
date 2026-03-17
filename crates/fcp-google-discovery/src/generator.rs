@@ -112,8 +112,12 @@ pub struct GoogleMcpToolDescriptor {
     pub approval_mode: Option<ApprovalMode>,
     /// Whether the tool requires confirmation.
     pub requires_confirmation: bool,
-    /// Whether simulate/preflight is expected to be supported.
-    pub supports_simulate: bool,
+    /// Whether simulate/preflight support is authoritatively known.
+    ///
+    /// Generated Google artifacts do not have live host evidence, so this stays
+    /// `None` unless a future source can prove it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_simulate: Option<bool>,
     /// Required OAuth scopes from method + policy union.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_scopes: Vec<String>,
@@ -195,8 +199,12 @@ pub struct GoogleManifestOperationFragment {
     pub approval_mode: Option<ApprovalMode>,
     /// Explicit confirm requirement.
     pub requires_confirmation: bool,
-    /// Supports simulate/preflight.
-    pub supports_simulate: bool,
+    /// Whether simulate/preflight support is authoritatively known.
+    ///
+    /// Generated Google artifacts do not have live host evidence, so this stays
+    /// `None` unless a future source can prove it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_simulate: Option<bool>,
     /// Required OAuth scopes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_scopes: Vec<String>,
@@ -345,8 +353,11 @@ fn build_mcp_tool_descriptor(
         safety_tier: operation.safety_tier,
         idempotency: operation.idempotency,
         approval_mode: operation.requires_approval,
-        requires_confirmation: operation.requires_approval.is_some(),
-        supports_simulate: true,
+        requires_confirmation: matches!(
+            operation.requires_approval,
+            Some(ApprovalMode::Policy | ApprovalMode::Interactive | ApprovalMode::ElevationToken)
+        ),
+        supports_simulate: None,
         required_scopes: required_scopes.to_vec(),
         policy_notes: rule.notes.clone(),
         ai_hints,
@@ -402,8 +413,11 @@ fn build_manifest_operation_fragment(
         safety_tier: operation.safety_tier,
         idempotency: operation.idempotency,
         approval_mode: operation.requires_approval,
-        requires_confirmation: operation.requires_approval.is_some(),
-        supports_simulate: true,
+        requires_confirmation: matches!(
+            operation.requires_approval,
+            Some(ApprovalMode::Policy | ApprovalMode::Interactive | ApprovalMode::ElevationToken)
+        ),
+        supports_simulate: None,
         required_scopes: required_scopes.to_vec(),
         policy_notes: rule.notes.clone(),
     }
@@ -1488,6 +1502,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generated_artifacts_leave_supports_simulate_unknown_without_live_evidence() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid service id");
+        let normalized = normalize_snapshot_bytes(
+            &service,
+            GMAIL_FIXTURE.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize fixture");
+        let policy = default_google_policy_catalog();
+
+        let generated =
+            generate_google_service_artifacts(&normalized.snapshot, &policy).expect("generation");
+
+        assert!(
+            generated
+                .mcp_tools
+                .iter()
+                .all(|tool| tool.supports_simulate.is_none())
+        );
+        assert!(
+            generated
+                .manifest_fragment
+                .operations
+                .iter()
+                .all(|operation| operation.supports_simulate.is_none())
+        );
+    }
+
+    #[test]
+    fn mcp_tool_descriptor_approval_mode_none_does_not_require_confirmation() {
+        let operation = OperationInfo {
+            id: OperationId::new("gmail.users.messages.list")
+                .expect("test operation id should be valid"),
+            summary: "List messages".to_string(),
+            description: Some("List user messages".to_string()),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "object"}),
+            capability: CapabilityId::from_static("gmail.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint::default(),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        };
+        let rule = GoogleOperationPolicyRule {
+            operation_pattern: "gmail.users.messages.list".to_string(),
+            capability: "gmail.read".to_string(),
+            risk_level: PolicyRiskLevel::Low,
+            safety_tier: PolicySafetyTier::Safe,
+            approval_mode: PolicyApprovalMode::None,
+            required_scopes: vec![],
+            notes: vec![],
+        };
+
+        let descriptor = build_mcp_tool_descriptor(&operation, &rule, &[]);
+
+        assert_eq!(descriptor.approval_mode, Some(ApprovalMode::None));
+        assert!(!descriptor.requires_confirmation);
+    }
+
+    #[test]
+    fn manifest_fragment_approval_mode_none_does_not_require_confirmation() {
+        let operation = OperationInfo {
+            id: OperationId::new("gmail.users.messages.list")
+                .expect("test operation id should be valid"),
+            summary: "List messages".to_string(),
+            description: Some("List user messages".to_string()),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "object"}),
+            capability: CapabilityId::from_static("gmail.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint::default(),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        };
+        let rule = GoogleOperationPolicyRule {
+            operation_pattern: "gmail.users.messages.list".to_string(),
+            capability: "gmail.read".to_string(),
+            risk_level: PolicyRiskLevel::Low,
+            safety_tier: PolicySafetyTier::Safe,
+            approval_mode: PolicyApprovalMode::None,
+            required_scopes: vec![],
+            notes: vec![],
+        };
+
+        let fragment = build_manifest_operation_fragment(&operation, &rule, &[]);
+
+        assert_eq!(fragment.approval_mode, Some(ApprovalMode::None));
+        assert!(!fragment.requires_confirmation);
+    }
+
     // ── GoogleMcpToolDescriptor serde ─────────────────────────────────
 
     #[test]
@@ -1503,21 +1613,27 @@ mod tests {
             idempotency: IdempotencyClass::Strict,
             approval_mode: None,
             requires_confirmation: false,
-            supports_simulate: true,
+            supports_simulate: None,
             required_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
             policy_notes: vec![],
             ai_hints: None,
         };
 
         let json = serde_json::to_string(&descriptor).expect("serialize");
+        let value: Value = serde_json::from_str(&json).expect("descriptor json");
         let roundtripped: GoogleMcpToolDescriptor =
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(roundtripped.name, descriptor.name);
         assert_eq!(roundtripped.description, descriptor.description);
         assert_eq!(roundtripped.required_scopes, descriptor.required_scopes);
+        assert_eq!(roundtripped.supports_simulate, None);
         assert!(matches!(roundtripped.risk_level, RiskLevel::Low));
         assert!(matches!(roundtripped.safety_tier, SafetyTier::Safe));
         assert!(matches!(roundtripped.idempotency, IdempotencyClass::Strict));
+        assert!(
+            value.get("supports_simulate").is_none(),
+            "unknown simulate support should stay omitted"
+        );
     }
 
     // ── GoogleManifestFragment serde ──────────────────────────────────
@@ -1538,13 +1654,14 @@ mod tests {
                 idempotency: IdempotencyClass::Strict,
                 approval_mode: None,
                 requires_confirmation: false,
-                supports_simulate: true,
+                supports_simulate: None,
                 required_scopes: vec![],
                 policy_notes: vec![],
             }],
         };
 
         let json = serde_json::to_string(&fragment).expect("serialize");
+        let value: Value = serde_json::from_str(&json).expect("fragment json");
         let roundtripped: GoogleManifestFragment =
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(roundtripped.connector_id, fragment.connector_id);
@@ -1552,6 +1669,11 @@ mod tests {
         assert_eq!(
             roundtripped.operations[0].operation_id,
             "gmail.users.messages.list"
+        );
+        assert_eq!(roundtripped.operations[0].supports_simulate, None);
+        assert!(
+            value["operations"][0].get("supports_simulate").is_none(),
+            "unknown simulate support should stay omitted"
         );
     }
 

@@ -145,6 +145,13 @@ impl<T> MetadataField<T> {
     }
 }
 
+fn declared_metadata_field<T>(value: Option<T>) -> MetadataField<T> {
+    match value {
+        Some(value) => MetadataField::Known(value),
+        None => MetadataField::Unknown,
+    }
+}
+
 impl<T: Serialize> Serialize for MetadataField<T> {
     fn serialize<S: serde::Serializer>(
         &self,
@@ -1647,7 +1654,15 @@ impl DiscoveredConnector {
                 );
             }
         };
+        Self::from_parsed_manifest(slug, manifest_path, &manifest)
+    }
 
+    #[allow(clippy::too_many_lines)]
+    fn from_parsed_manifest(
+        slug: &str,
+        manifest_path: &Path,
+        manifest: &ConnectorManifest,
+    ) -> Result<Self> {
         let inventory_entry = CONNECTOR_INVENTORY.iter().find(|entry| entry.name == slug);
         let cohort = inventory_entry.map_or_else(
             || ConnectorCohort::Other.as_str().to_owned(),
@@ -1711,21 +1726,17 @@ impl DiscoveredConnector {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let connector_rate_limits = manifest
-            .rate_limits
-            .as_ref()
-            .map(|rate_limits| {
-                rate_limits
-                    .pools
-                    .iter()
-                    .map(|pool| RateLimitSummary {
-                        scope: pool.id.clone(),
-                        requests: pool.requests,
-                        window: human_window_ms(pool.window_ms),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let connector_rate_limits = manifest.rate_limits.as_ref().map(|rate_limits| {
+            rate_limits
+                .pools
+                .iter()
+                .map(|pool| RateLimitSummary {
+                    scope: pool.id.clone(),
+                    requests: pool.requests,
+                    window: human_window_ms(pool.window_ms),
+                })
+                .collect::<Vec<_>>()
+        });
         let connector_id = manifest.connector.id.as_str().to_owned();
         let connector_name = manifest.connector.name.clone();
         let connector_version = manifest.connector.version.to_string();
@@ -1736,12 +1747,16 @@ impl DiscoveredConnector {
             .iter()
             .map(|archetype| archetype.as_str().to_owned())
             .collect::<Vec<_>>();
+        let summary_archetypes =
+            declared_metadata_field((!archetypes.is_empty()).then_some(archetypes.clone()));
+        let connector_rate_limits = declared_metadata_field(connector_rate_limits.clone());
+        let connector_archetypes_schema = serde_json::to_value(summary_archetypes.as_known())?;
         let summary = ConnectorSummary {
             id: connector_id.clone(),
             name: connector_name.clone(),
             version: connector_version.clone(),
             description: connector_description.clone(),
-            archetypes: MetadataField::Known(archetypes.clone()),
+            archetypes: summary_archetypes,
             state: ConnectorState::Unknown,
             operation_count: operations.len(),
             max_risk,
@@ -1770,7 +1785,7 @@ impl DiscoveredConnector {
                 "name": &connector_name,
                 "version": &connector_version,
                 "description": &connector_description,
-                "archetypes": archetypes,
+                "archetypes": connector_archetypes_schema,
                 "format": &runtime_format,
                 "state_model": state_model_json,
             },
@@ -1805,7 +1820,7 @@ impl DiscoveredConnector {
                 operations: operation_summaries,
                 config_schema: MetadataField::Unknown,
                 health: MetadataField::Unknown,
-                rate_limits: MetadataField::Known(connector_rate_limits),
+                rate_limits: connector_rate_limits,
             },
             zones,
             capabilities,
@@ -2211,18 +2226,17 @@ fn discovered_connector_from_toml(
         .and_then(|state| state.get("model"))
         .and_then(toml::Value::as_str)
         .map(std::borrow::ToOwned::to_owned);
-    let archetypes = normalize_archetype_labels_from_toml(
-        connector
-            .get("archetypes")
-            .and_then(toml::Value::as_array)
-            .map(|values| {
+    let archetypes = connector
+        .get("archetypes")
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            normalize_archetype_labels_from_toml(
                 values
                     .iter()
                     .filter_map(toml::Value::as_str)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-    );
+                    .collect::<Vec<_>>(),
+            )
+        });
 
     let namespace = connector_id
         .strip_prefix("fcp.")
@@ -2258,29 +2272,40 @@ fn discovered_connector_from_toml(
         .and_then(toml::Value::as_table)
         .map(|events| events.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let has_events = !declared_topics.is_empty()
-        || document
-            .get("event_caps")
-            .and_then(|caps| caps.get("streaming"))
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false)
-        || document
-            .get("event_caps")
-            .and_then(|caps| caps.get("replay"))
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false);
+    let declared_streaming = document
+        .get("event_caps")
+        .and_then(|caps| caps.get("streaming"))
+        .and_then(toml::Value::as_bool);
+    let declared_replay = document
+        .get("event_caps")
+        .and_then(|caps| caps.get("replay"))
+        .and_then(toml::Value::as_bool);
+    // Degraded TOML fallback should only claim "no events" when both booleans
+    // are explicitly false; missing event metadata must remain unknown.
+    let has_events = if !declared_topics.is_empty()
+        || declared_streaming == Some(true)
+        || declared_replay == Some(true)
+    {
+        MetadataField::Known(true)
+    } else if declared_streaming == Some(false) && declared_replay == Some(false) {
+        MetadataField::Known(false)
+    } else {
+        MetadataField::Unknown
+    };
     let supported_zones = extract_supported_zones_from_toml(document.get("zones"));
+    let summary_archetypes = declared_metadata_field(archetypes.clone());
+    let connector_archetypes_schema = serde_json::to_value(summary_archetypes.as_known())?;
 
     let summary = ConnectorSummary {
         id: connector_id.clone(),
         name: connector_name.clone(),
         version: connector_version.clone(),
         description: connector_description.clone(),
-        archetypes: MetadataField::Known(archetypes.clone()),
+        archetypes: summary_archetypes,
         state: ConnectorState::Unknown,
         operation_count: operations.len(),
         max_risk,
-        has_events: MetadataField::Known(has_events),
+        has_events,
     };
     let operation_summaries = operations
         .iter()
@@ -2316,7 +2341,7 @@ fn discovered_connector_from_toml(
             "name": &connector_name,
             "version": &connector_version,
             "description": &connector_description,
-            "archetypes": archetypes,
+            "archetypes": connector_archetypes_schema,
             "format": &runtime_format,
             "state_model": state_model_json,
         },
@@ -2956,7 +2981,7 @@ pub fn evaluate_introspection(
         || introspection
             .get("archetype")
             .and_then(Value::as_str)
-            .is_some_and(|archetype| !archetype.is_empty());
+            .is_some_and(|archetype| !archetype.is_empty() && archetype != "unknown");
     let summary = SummaryReadiness {
         has_canonical_id: id_parts.len() >= 3,
         has_display_name: !connector_id.is_empty(),
@@ -5825,6 +5850,35 @@ mod tests {
     }
 
     #[test]
+    fn connector_with_unknown_archetype_string_keeps_archetypes_false() {
+        let introspection = json!({
+            "archetype": "unknown",
+            "operations": [
+                {
+                    "id": "op1",
+                    "summary": "s",
+                    "input_schema": {},
+                    "output_schema": {},
+                    "capability": "c",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "none",
+                    "ai_hints": { "when_to_use": "w", "examples": ["e"] }
+                }
+            ]
+        });
+
+        let verdict = evaluate_introspection(
+            "archetype:fcp2:1.0",
+            "connectors/archetype",
+            ConnectorCohort::Knowledge,
+            &introspection,
+        );
+
+        assert!(!verdict.areas.summary.has_archetypes);
+    }
+
+    #[test]
     fn connector_with_explicit_rate_limits_marks_rate_limit_readiness_true() {
         let introspection = json!({
             "operations": [
@@ -7349,6 +7403,212 @@ burst = 5
         assert!(
             echo.get("network").is_none(),
             "legacy network aliases should still normalize away"
+        );
+    }
+
+    #[test]
+    fn parsed_manifest_discovery_without_declared_rate_limits_keeps_unknown_metadata() {
+        let raw = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.truthful"
+name = "Truthful Connector"
+version = "0.1.0"
+description = "No synthetic defaults"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "cursor"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = ["network.dns"]
+optional = []
+forbidden = []
+
+[provides.operations.echo]
+description = "Echo"
+capability = "truthful.echo"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#;
+
+        let manifest = parse_manifest_for_discovery(raw, Path::new("truthful-manifest.toml"))
+            .expect("manifest should parse for discovery");
+        let discovered = DiscoveredConnector::from_parsed_manifest(
+            "truthful",
+            Path::new("connectors/truthful/manifest.toml"),
+            &manifest,
+        )
+        .expect("parsed manifest should convert into discovery model");
+
+        assert_eq!(discovered.detail.summary.archetypes.status_tag(), "known");
+        assert_eq!(
+            discovered.detail.summary.archetypes.as_known().cloned(),
+            Some(vec!["operational".to_owned()])
+        );
+        assert_eq!(discovered.detail.rate_limits.status_tag(), "unknown");
+        assert_eq!(
+            discovered.connector_schema["connector"]["archetypes"],
+            serde_json::json!(["operational"])
+        );
+        assert_eq!(discovered.connector_schema["rate_limits"], Value::Null);
+    }
+
+    #[test]
+    fn toml_fallback_without_declared_archetypes_keeps_unknown_metadata() {
+        let document: toml::Value = toml::from_str(
+            r#"
+[connector]
+id = "fcp.truthful-fallback"
+name = "Truthful Fallback"
+version = "0.1.0"
+description = "Fallback manifest with missing metadata"
+format = "wasi"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = []
+optional = []
+forbidden = []
+
+[provides.operations.echo]
+description = "Echo"
+capability = "truthful.echo"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#,
+        )
+        .expect("fallback document should parse");
+
+        let discovered = discovered_connector_from_toml(
+            "truthful-fallback",
+            Path::new("connectors/truthful-fallback/manifest.toml"),
+            &document,
+            "strict manifest parsing failed",
+        )
+        .expect("fallback discovery should succeed");
+
+        assert_eq!(discovered.detail.summary.archetypes.status_tag(), "unknown");
+        assert_eq!(discovered.detail.rate_limits.status_tag(), "unknown");
+        assert_eq!(discovered.detail.summary.has_events.status_tag(), "unknown");
+        assert_eq!(
+            discovered.connector_schema["connector"]["archetypes"],
+            Value::Null
+        );
+        assert_eq!(discovered.connector_schema["rate_limits"], Value::Null);
+    }
+
+    #[test]
+    fn toml_fallback_with_explicit_false_event_caps_keeps_known_false_events() {
+        let document: toml::Value = toml::from_str(
+            r#"
+[connector]
+id = "fcp.truthful-fallback-events"
+name = "Truthful Fallback Events"
+version = "0.1.0"
+description = "Fallback manifest with explicit event metadata"
+format = "wasi"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = []
+optional = []
+forbidden = []
+
+[event_caps]
+streaming = false
+replay = false
+
+[provides.operations.echo]
+description = "Echo"
+capability = "truthful.echo"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#,
+        )
+        .expect("fallback document should parse");
+
+        let discovered = discovered_connector_from_toml(
+            "truthful-fallback-events",
+            Path::new("connectors/truthful-fallback-events/manifest.toml"),
+            &document,
+            "strict manifest parsing failed",
+        )
+        .expect("fallback discovery should succeed");
+
+        assert_eq!(discovered.detail.summary.has_events.status_tag(), "known");
+        assert_eq!(
+            discovered.detail.summary.has_events.as_known(),
+            Some(&false)
         );
     }
 

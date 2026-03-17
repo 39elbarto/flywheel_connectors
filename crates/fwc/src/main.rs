@@ -4593,10 +4593,7 @@ fn host_tool_when_to_use(tool: &HostToolDescriptor) -> String {
         .as_ref()
         .map(|hints| hints.when_to_use.trim())
         .filter(|when_to_use| !when_to_use.is_empty())
-        .map_or_else(
-            || "Host introspection did not include `when_to_use` guidance.".to_owned(),
-            std::borrow::ToOwned::to_owned,
-        )
+        .map_or_else(String::new, std::borrow::ToOwned::to_owned)
 }
 
 fn host_tool_common_mistakes(tool: &HostToolDescriptor) -> Vec<String> {
@@ -4727,10 +4724,9 @@ fn host_discovered_operation(
         },
         input_schema: tool.input_schema.clone(),
         output_schema: tool.output_schema.clone(),
-        approval_mode: tool.approval_mode.map_or_else(
-            || "none".to_owned(),
-            |mode| host_approval_mode_label(mode).to_owned(),
-        ),
+        approval_mode: tool.approval_mode.map_or_else(String::new, |mode| {
+            host_approval_mode_label(mode).to_owned()
+        }),
         when_to_use: host_tool_when_to_use(tool),
         common_mistakes: host_tool_common_mistakes(tool),
         examples: host_tool_example_strings(tool),
@@ -30340,6 +30336,45 @@ depends_on = ["missing"]
         assert_eq!(summary_entry["requires_approval"], false);
         assert!(!operation.summary.requires_approval);
         assert_eq!(operation.approval_mode, "none");
+    }
+
+    #[test]
+    fn host_live_tool_views_keep_missing_approval_mode_unknown() {
+        let introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        let mut tool = introspection
+            .tools
+            .iter()
+            .find(|tool| tool.name == "github.get_issue")
+            .expect("get_issue tool should exist")
+            .clone();
+        tool.approval_mode = None;
+        tool.requires_confirmation = false;
+
+        let operation = host_discovered_operation(&tool, introspection.rate_limits.as_ref());
+
+        assert_eq!(operation.approval_mode, "");
+        assert!(!operation.summary.requires_approval);
+    }
+
+    #[test]
+    fn host_live_tool_views_keep_missing_when_to_use_unknown() {
+        let introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        let mut tool = introspection
+            .tools
+            .iter()
+            .find(|tool| tool.name == "github.get_issue")
+            .expect("get_issue tool should exist")
+            .clone();
+        tool.ai_hints = None;
+
+        let operation = host_discovered_operation(&tool, introspection.rate_limits.as_ref());
+
+        assert_eq!(host_tool_when_to_use(&tool), "");
+        assert_eq!(operation.when_to_use, "");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::{
     readiness::{DiscoveredConnector, DiscoveredOperation},
@@ -55,6 +55,19 @@ pub struct SearchFilters {
     pub idempotent_only: bool,
     /// Zone filter.
     pub zone: Option<String>,
+}
+
+impl SearchFilters {
+    fn has_active_filters(&self) -> bool {
+        self.connector.is_some()
+            || self.capability.is_some()
+            || self.risk_max.is_some()
+            || self.safety_max.is_some()
+            || self.archetype.is_some()
+            || self.category.is_some()
+            || self.idempotent_only
+            || self.zone.is_some()
+    }
 }
 
 /// Risk level ceiling for filtering.
@@ -144,6 +157,7 @@ pub fn search_operations(
     filters: &SearchFilters,
 ) -> Vec<SearchResult> {
     let tokens = tokenize(query);
+    let faceted_only = query.trim().is_empty() && filters.has_active_filters();
     let mut results = Vec::new();
 
     for connector in connectors {
@@ -161,9 +175,9 @@ pub fn search_operations(
             let (score, reasons) = score_operation(connector, operation, &tokens);
             let total = score + connector_bonus;
 
-            if total > 0 || (tokens.is_empty() && !query.is_empty()) {
-                // Faceted-only search (no keywords but filters applied) returns all
-                // matching operations with base score of 1.
+            if total > 0 || faceted_only {
+                // Faceted-only search (blank query with active filters) returns
+                // all matching operations with base score of 1.
                 let final_score = if total > 0 { total } else { 1 };
                 results.push(SearchResult {
                     connector_slug: connector.slug.clone(),
@@ -464,17 +478,17 @@ mod tests {
                     version: "0.1.0".to_owned(),
                     description: format!("FCP connector for {slug}"),
                     archetypes: crate::readiness::MetadataField::Known(vec![
-                        "operational".to_owned(),
+                        "operational".to_owned()
                     ]),
                     state: ConnectorState::Unknown,
                     operation_count: ops.len(),
                     max_risk: "medium".to_owned(),
-                    has_events: crate::readiness::MetadataField::Known(false),
+                    has_events: crate::readiness::MetadataField::Unknown,
                 },
                 operations: op_summaries,
                 config_schema: crate::readiness::MetadataField::Unknown,
                 health: crate::readiness::MetadataField::Unknown,
-                rate_limits: crate::readiness::MetadataField::Known(vec![]),
+                rate_limits: crate::readiness::MetadataField::Unknown,
             },
             zones: json!({}),
             capabilities: json!({}),
@@ -505,17 +519,17 @@ mod tests {
                 safety_tier: safety.to_owned(),
                 idempotency: "strict".to_owned(),
                 requires_approval: false,
-                supports_simulate: crate::readiness::MetadataField::Known(true),
+                supports_simulate: crate::readiness::MetadataField::Unknown,
             },
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
-            approval_mode: "none".to_owned(),
+            approval_mode: String::new(),
             when_to_use: when_to_use.to_owned(),
             common_mistakes: vec![],
             examples: vec![],
             related: vec![],
             network_constraints: None,
-            rate_limits: Some(vec![]),
+            rate_limits: None,
         }
     }
 
@@ -596,11 +610,9 @@ mod tests {
         );
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "github.create_issue");
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"exact_id_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"exact_id_match".to_owned()));
     }
 
     #[test]
@@ -610,11 +622,9 @@ mod tests {
         assert!(!results.is_empty());
         // slack.send_message has "team" in when_to_use
         assert_eq!(results[0].operation_id, "slack.send_message");
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"when_to_use_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"when_to_use_match".to_owned()));
     }
 
     #[test]
@@ -706,11 +716,9 @@ mod tests {
         };
         let results = search_operations(&connectors, "create", &filters);
         assert!(!results.is_empty());
-        assert!(
-            results
-                .iter()
-                .all(|r| matches!(r.risk_level.as_str(), "low" | "medium"))
-        );
+        assert!(results
+            .iter()
+            .all(|r| matches!(r.risk_level.as_str(), "low" | "medium")));
     }
 
     #[test]
@@ -734,11 +742,9 @@ mod tests {
         };
         let results = search_operations(&connectors, "list", &filters);
         assert!(!results.is_empty());
-        assert!(
-            results
-                .iter()
-                .all(|r| matches!(r.idempotency.as_str(), "strict" | "best_effort"))
-        );
+        assert!(results
+            .iter()
+            .all(|r| matches!(r.idempotency.as_str(), "strict" | "best_effort")));
     }
 
     #[test]
@@ -750,10 +756,16 @@ mod tests {
         };
         // Empty query with filters should return all read operations.
         let results = search_operations(&connectors, "", &filters);
-        assert!(
-            results.is_empty(),
-            "empty query returns nothing even with filters"
-        );
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.capability.contains("read")));
+        assert!(results.iter().all(|r| r.score == 1));
+    }
+
+    #[test]
+    fn punctuation_only_query_does_not_degenerate_into_filterless_match_all() {
+        let connectors = sample_connectors();
+        let results = search_operations(&connectors, "!!!", &SearchFilters::default());
+        assert!(results.is_empty());
     }
 
     #[test]
@@ -793,11 +805,9 @@ mod tests {
         let results = search_operations(&connectors, "send_mesage", &SearchFilters::default());
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "slack.send_message");
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"fuzzy_id_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"fuzzy_id_match".to_owned()));
     }
 
     #[test]
@@ -806,11 +816,9 @@ mod tests {
         let results = search_operations(&connectors, "mesage", &SearchFilters::default());
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "slack.send_message");
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"fuzzy_id_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"fuzzy_id_match".to_owned()));
     }
 
     #[test]
@@ -820,11 +828,9 @@ mod tests {
         let results = search_operations(&connectors, "open_tiket", &SearchFilters::default());
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "github.create_issue");
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"fuzzy_alias_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"fuzzy_alias_match".to_owned()));
     }
 
     #[test]
@@ -988,11 +994,9 @@ mod tests {
             vec!["Forgetting to set labels for triage".to_owned()];
         let results = search_operations(&connectors, "triage", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"common_mistakes_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"common_mistakes_match".to_owned()));
     }
 
     #[test]
@@ -1190,11 +1194,9 @@ mod tests {
         let connectors = vec![stub_connector("github", vec![op])];
         let results = search_operations(&connectors, "github_issue", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"partial_alias_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"partial_alias_match".to_owned()));
     }
 
     #[test]
@@ -1202,11 +1204,9 @@ mod tests {
         let connectors = sample_connectors();
         let results = search_operations(&connectors, "write", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"capability_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"capability_match".to_owned()));
     }
 
     #[test]
@@ -2033,11 +2033,9 @@ mod tests {
         let connectors = vec![stub_connector("t", vec![op])];
         let results = search_operations(&connectors, "lookup", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"partial_alias_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"partial_alias_match".to_owned()));
     }
 
     #[test]
@@ -2047,11 +2045,9 @@ mod tests {
         let connectors = vec![stub_connector("t", vec![op])];
         let results = search_operations(&connectors, "quick_lokup", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(
-            results[0]
-                .match_reasons
-                .contains(&"fuzzy_alias_match".to_owned())
-        );
+        assert!(results[0]
+            .match_reasons
+            .contains(&"fuzzy_alias_match".to_owned()));
     }
 
     // ── Multiple connectors with mixed ops ─────────────────────────
@@ -2086,11 +2082,9 @@ mod tests {
             ..Default::default()
         };
         let results = search_operations(&connectors, "op", &filters);
-        assert!(
-            results
-                .iter()
-                .all(|r| matches!(r.safety_tier.as_str(), "safe" | "risky"))
-        );
+        assert!(results
+            .iter()
+            .all(|r| matches!(r.safety_tier.as_str(), "safe" | "risky")));
     }
 
     // ── results_to_json detailed field tests ───────────────────────

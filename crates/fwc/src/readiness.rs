@@ -2420,7 +2420,7 @@ fn discovered_operation_from_toml(
     let approval_mode = operation
         .get("requires_approval")
         .and_then(toml::Value::as_str)
-        .unwrap_or("none")
+        .unwrap_or("")
         .to_owned();
     let idempotency = operation
         .get("idempotency")
@@ -7649,7 +7649,7 @@ output_schema = { type = "object" }
     }
 
     #[test]
-    fn discovered_operation_from_toml_without_approval_metadata_keeps_requirement_false() {
+    fn discovered_operation_from_toml_without_approval_metadata_keeps_mode_unknown() {
         let manifest: toml::Value = toml::from_str(
             r#"
 [provides.operations.echo]
@@ -7680,7 +7680,7 @@ output_schema = { type = "object" }
         )
         .expect("discovery fallback should parse operation");
 
-        assert_eq!(discovered.approval_mode, "none");
+        assert_eq!(discovered.approval_mode, "");
         assert!(!discovered.summary.requires_approval);
         assert!(discovered.operation_info().requires_approval.is_none());
     }

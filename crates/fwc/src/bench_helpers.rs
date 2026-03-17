@@ -11,15 +11,15 @@ mod tests {
     use std::hint::black_box;
     use std::time::{Duration, Instant};
 
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     use crate::batch::{BatchInputs, BatchPlan, BatchSummary, ItemResult, ItemStatus, OnError};
-    use crate::e2e_scenario::{ScenarioStep, topological_sort_steps};
+    use crate::e2e_scenario::{topological_sort_steps, ScenarioStep};
     use crate::pipe::{
         apply_mapping, parse_map_expression, parse_pipeline_definition,
         validate_pipeline_definition,
     };
-    use crate::pipeline_cond::{PipelineContext, evaluate_condition, parse_condition};
+    use crate::pipeline_cond::{evaluate_condition, parse_condition, PipelineContext};
     use crate::readiness::{
         ConnectorDetail, ConnectorState, ConnectorSummary, DiscoveredConnector,
         DiscoveredOperation, MetadataField, OperationSummary,
@@ -28,7 +28,7 @@ mod tests {
         closest_matches, command_alias, levenshtein, resolve_command, typo_correction,
     };
     use crate::schema_nav;
-    use crate::search::{SearchFilters, search_operations};
+    use crate::search::{search_operations, SearchFilters};
 
     // ── Target thresholds (informational) ─────────────────────────────────
 
@@ -143,17 +143,17 @@ mod tests {
                 safety_tier: "safe".to_owned(),
                 idempotency: "strict".to_owned(),
                 requires_approval: false,
-                supports_simulate: MetadataField::Known(true),
+                supports_simulate: MetadataField::Unknown,
             },
             input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
             output_schema: json!({"type": "object"}),
-            approval_mode: "none".to_owned(),
+            approval_mode: String::new(),
             when_to_use: format!("Use {id} to perform this operation."),
             common_mistakes: vec![],
             examples: vec![],
             related: vec![],
             network_constraints: None,
-            rate_limits: Some(vec![]),
+            rate_limits: None,
         }
     }
 
@@ -180,16 +180,16 @@ mod tests {
                     name: format!("{slug} Connector"),
                     version: "1.0.0".to_owned(),
                     description: format!("FCP connector for {slug}"),
-                    archetypes: MetadataField::Known(vec!["operational".to_owned()]),
+                    archetypes: MetadataField::Unknown,
                     state: ConnectorState::Unknown,
                     operation_count: ops.len(),
                     max_risk: "medium".to_owned(),
-                    has_events: MetadataField::Known(false),
+                    has_events: MetadataField::Unknown,
                 },
                 operations: op_summaries,
                 config_schema: MetadataField::Unknown,
                 health: MetadataField::Unknown,
-                rate_limits: MetadataField::Known(vec![]),
+                rate_limits: MetadataField::Unknown,
             },
             zones: json!({}),
             capabilities: json!({}),

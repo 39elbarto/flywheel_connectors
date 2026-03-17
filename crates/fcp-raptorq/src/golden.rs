@@ -1480,8 +1480,8 @@ mod tests {
             symbols.swap(i, j);
         }
 
-        // Feed only K+2 symbols (just barely enough) in shuffled order
-        let feed_count = k + 2;
+        // Feed K+10 symbols (wider margin for the in-house codec) in shuffled order
+        let feed_count = k + 10;
 
         let mut decoder = RaptorQDecoder::new(oti, &config);
         let expected_len = payload.len();

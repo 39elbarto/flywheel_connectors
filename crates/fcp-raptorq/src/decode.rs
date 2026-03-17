@@ -958,10 +958,15 @@ mod tests {
             let task_controller = controller.clone();
 
             let decode_task = fcp_async_core::task::spawn(async move {
+                // Feed fewer source symbols than K so the decoder never
+                // reconstructs, and stay within the 1MB buffer limit
+                // (10_000 * 64 = 640 KB < 1 MB). The loop runs long enough
+                // (312 yield points at interval 32) for cancellation to
+                // propagate through context.run's biased select.
                 let mut decoder =
                     RaptorQDecoder::with_expected_symbols(50_000, 3_200_000, 64, &test_config());
                 let symbols: Vec<(u32, Vec<u8>)> =
-                    (0..50_000).map(|esi| (esi, vec![0u8; 64])).collect();
+                    (0..10_000).map(|esi| (esi, vec![0u8; 64])).collect();
                 task_controller
                     .decode_with_context(&task_context, &mut decoder, symbols)
                     .await
@@ -983,7 +988,10 @@ mod tests {
                 .await
                 .expect("decode task should join")
                 .expect_err("cancellation after acquire should fail decode");
-            assert!(matches!(err, DecodeError::Cancelled));
+            assert!(
+                matches!(err, DecodeError::Cancelled),
+                "expected Cancelled, got {err:?}"
+            );
             assert_eq!(controller.active_count(), 0);
             assert!(controller.has_capacity());
             let _permit = controller

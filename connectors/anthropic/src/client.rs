@@ -466,8 +466,15 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> AnthropicError {
 const MAX_SSE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<StreamEvent>> {
+    parse_sse_chunks(response.bytes_stream())
+}
+
+fn parse_sse_chunks<S>(stream: S) -> impl Stream<Item = AnthropicResult<StreamEvent>>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>>,
+{
     async_stream::stream! {
-        let mut stream = response.bytes_stream();
+        let mut stream = Box::pin(stream);
         let mut buffer = Vec::new();
 
         while let Some(chunk) = stream.next().await {
@@ -481,6 +488,13 @@ fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<St
 
             buffer.extend_from_slice(&chunk);
 
+            // Process complete SSE events
+            while let Some(event_bytes) = take_next_sse_event(&mut buffer) {
+                if let Some(event) = parse_sse_event_bytes(&event_bytes) {
+                    yield event;
+                }
+            }
+
             if buffer.len() > MAX_SSE_BUFFER_BYTES {
                 yield Err(AnthropicError::Api {
                     error_type: "sse_buffer_overflow".into(),
@@ -490,13 +504,6 @@ fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<St
                     status_code: None,
                 });
                 return;
-            }
-
-            // Process complete SSE events
-            while let Some(event_bytes) = take_next_sse_event(&mut buffer) {
-                if let Some(event) = parse_sse_event_bytes(&event_bytes) {
-                    yield event;
-                }
             }
         }
 
@@ -598,6 +605,7 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
 mod tests {
     use super::*;
     use fcp_testkit::LogCapture;
+    use futures_util::stream;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -904,6 +912,20 @@ mod tests {
             }
             _ => panic!("expected Error"),
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn parse_sse_chunks_allows_large_chunk_when_delimited_remainder_stays_within_limit() {
+        let mut chunk = b"event: ping\ndata: {\"type\":\"ping\"}\n\n".to_vec();
+        chunk.extend(std::iter::repeat_n(b'x', MAX_SSE_BUFFER_BYTES));
+
+        let events: Vec<_> = parse_sse_chunks(stream::iter(vec![Ok(Bytes::from(chunk))]))
+            .collect()
+            .await;
+
+        assert_eq!(events.len(), 1, "expected only the delimited ping event");
+        let event = events.into_iter().next().unwrap().unwrap();
+        assert!(matches!(event, StreamEvent::Ping));
     }
 
     #[fcp_async_core::runtime::test]

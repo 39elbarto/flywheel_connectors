@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-
 use crate::{
     client::{AnthropicAuth, AnthropicClient, DEFAULT_BASE_URL},
     error::AnthropicError,
@@ -740,9 +739,13 @@ impl AnthropicConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1034,8 +1037,55 @@ impl AnthropicConnector {
             tool_id: String,
             tool_name: String,
             tool_input_json: String,
+            closed: bool,
         }
-        let mut blocks: Vec<BlockAccumulator> = Vec::new();
+
+        #[allow(clippy::items_after_statements)]
+        fn invalid_stream_error(message: impl Into<String>) -> FcpError {
+            FcpError::External {
+                service: "anthropic".into(),
+                message: message.into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            }
+        }
+
+        #[allow(clippy::items_after_statements)]
+        fn block_slot(index: u32) -> Result<usize, FcpError> {
+            usize::try_from(index).map_err(|_| {
+                invalid_stream_error(format!(
+                    "Anthropic stream block index {index} does not fit into usize"
+                ))
+            })
+        }
+
+        #[allow(clippy::items_after_statements)]
+        fn stop_reason_value(reason: crate::types::StopReason) -> Result<String, FcpError> {
+            match serde_json::to_value(reason) {
+                Ok(serde_json::Value::String(value)) => Ok(value),
+                Ok(other) => Err(invalid_stream_error(format!(
+                    "Anthropic stop reason serialized to non-string value: {other}"
+                ))),
+                Err(error) => Err(invalid_stream_error(format!(
+                    "Failed to serialize Anthropic stop reason: {error}"
+                ))),
+            }
+        }
+
+        #[allow(clippy::items_after_statements)]
+        fn parse_tool_input_json(raw: &str) -> Result<serde_json::Value, FcpError> {
+            if raw.is_empty() {
+                return Ok(json!({}));
+            }
+            serde_json::from_str(raw).map_err(|error| {
+                invalid_stream_error(format!(
+                    "Anthropic stream emitted invalid tool input JSON: {error}"
+                ))
+            })
+        }
+
+        let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
 
         while let Some(event_result) = stream.next().await {
             let event = event_result.map_err(|e: AnthropicError| e.to_fcp_error())?;
@@ -1046,37 +1096,72 @@ impl AnthropicConnector {
                     response_model = msg.model;
                     usage = msg.usage;
                 }
-                crate::types::StreamEvent::ContentBlockStart { content_block, .. } => {
-                    match content_block {
-                        crate::types::ContentBlockStartData::Text { text } => {
-                            blocks.push(BlockAccumulator {
-                                block_type: "text".into(),
-                                text,
-                                tool_id: String::new(),
-                                tool_name: String::new(),
-                                tool_input_json: String::new(),
-                            });
-                        }
+                crate::types::StreamEvent::ContentBlockStart {
+                    index,
+                    content_block,
+                } => {
+                    let block_index = block_slot(index)?;
+                    if blocks.len() <= block_index {
+                        blocks.resize_with(block_index + 1, || None);
+                    }
+                    if blocks[block_index].is_some() {
+                        return Err(invalid_stream_error(format!(
+                            "Anthropic stream reopened content block at index {index}"
+                        )));
+                    }
+                    let block = match content_block {
+                        crate::types::ContentBlockStartData::Text { text } => BlockAccumulator {
+                            block_type: "text".into(),
+                            text,
+                            tool_id: String::new(),
+                            tool_name: String::new(),
+                            tool_input_json: String::new(),
+                            closed: false,
+                        },
                         crate::types::ContentBlockStartData::ToolUse { id, name, .. } => {
-                            blocks.push(BlockAccumulator {
+                            BlockAccumulator {
                                 block_type: "tool_use".into(),
                                 text: String::new(),
                                 tool_id: id,
                                 tool_name: name,
                                 tool_input_json: String::new(),
-                            });
+                                closed: false,
+                            }
                         }
-                    }
+                    };
+                    blocks[block_index] = Some(block);
                 }
-                crate::types::StreamEvent::ContentBlockDelta { delta, .. } => {
-                    if let Some(block) = blocks.last_mut() {
-                        match delta {
-                            crate::types::ContentDelta::TextDelta { text } => {
-                                block.text.push_str(&text);
+                crate::types::StreamEvent::ContentBlockDelta { index, delta } => {
+                    let block_index = block_slot(index)?;
+                    let block = blocks
+                        .get_mut(block_index)
+                        .and_then(Option::as_mut)
+                        .ok_or_else(|| {
+                            invalid_stream_error(format!(
+                                "Anthropic stream delta referenced unknown content block at index {index}"
+                            ))
+                        })?;
+                    if block.closed {
+                        return Err(invalid_stream_error(format!(
+                            "Anthropic stream delta arrived after content block stop at index {index}"
+                        )));
+                    }
+                    match delta {
+                        crate::types::ContentDelta::TextDelta { text } => {
+                            if block.block_type != "text" {
+                                return Err(invalid_stream_error(format!(
+                                    "Anthropic stream sent text delta for non-text block at index {index}"
+                                )));
                             }
-                            crate::types::ContentDelta::InputJsonDelta { partial_json } => {
-                                block.tool_input_json.push_str(&partial_json);
+                            block.text.push_str(&text);
+                        }
+                        crate::types::ContentDelta::InputJsonDelta { partial_json } => {
+                            if block.block_type != "tool_use" {
+                                return Err(invalid_stream_error(format!(
+                                    "Anthropic stream sent tool JSON delta for non-tool block at index {index}"
+                                )));
                             }
+                            block.tool_input_json.push_str(&partial_json);
                         }
                     }
                 }
@@ -1085,13 +1170,28 @@ impl AnthropicConnector {
                     usage: delta_usage,
                 } => {
                     if let Some(sr) = delta.stop_reason {
-                        stop_reason = Some(format!("{sr:?}").to_lowercase());
+                        stop_reason = Some(stop_reason_value(sr)?);
                     }
                     usage.output_tokens = delta_usage.output_tokens;
                 }
-                crate::types::StreamEvent::ContentBlockStop { .. }
-                | crate::types::StreamEvent::MessageStop
-                | crate::types::StreamEvent::Ping => {}
+                crate::types::StreamEvent::ContentBlockStop { index } => {
+                    let block_index = block_slot(index)?;
+                    let block = blocks
+                        .get_mut(block_index)
+                        .and_then(Option::as_mut)
+                        .ok_or_else(|| {
+                            invalid_stream_error(format!(
+                                "Anthropic stream stopped unknown content block at index {index}"
+                            ))
+                        })?;
+                    if block.closed {
+                        return Err(invalid_stream_error(format!(
+                            "Anthropic stream stopped content block twice at index {index}"
+                        )));
+                    }
+                    block.closed = true;
+                }
+                crate::types::StreamEvent::MessageStop | crate::types::StreamEvent::Ping => {}
                 crate::types::StreamEvent::Error { error } => {
                     return Err(FcpError::External {
                         service: "anthropic".into(),
@@ -1110,25 +1210,30 @@ impl AnthropicConnector {
         // Build content blocks
         let content_blocks: Vec<serde_json::Value> = blocks
             .iter()
+            .filter_map(Option::as_ref)
             .map(|b| {
                 if b.block_type == "tool_use" {
-                    let parsed_input: serde_json::Value =
-                        serde_json::from_str(&b.tool_input_json).unwrap_or(json!({}));
-                    json!({"type": "tool_use", "id": b.tool_id, "name": b.tool_name, "input": parsed_input})
+                    parse_tool_input_json(&b.tool_input_json).map(|parsed_input| {
+                        json!({"type": "tool_use", "id": b.tool_id, "name": b.tool_name, "input": parsed_input})
+                    })
                 } else {
-                    json!({"type": "text", "text": b.text})
+                    Ok(json!({"type": "text", "text": b.text}))
                 }
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let text_content: String = blocks
             .iter()
+            .filter_map(Option::as_ref)
             .filter(|b| b.block_type == "text")
             .map(|b| b.text.as_str())
             .collect::<Vec<_>>()
             .join("");
 
-        let has_tool_calls = blocks.iter().any(|b| b.block_type == "tool_use");
+        let has_tool_calls = blocks
+            .iter()
+            .filter_map(Option::as_ref)
+            .any(|b| b.block_type == "tool_use");
         let chunk_count = content_blocks.len();
 
         Ok(json!({

@@ -1538,6 +1538,7 @@ async fn message_stream_invoke_full_response() {
     // Verify assembled response
     assert_eq!(result["id"], "msg_stream_inv_001");
     assert_eq!(result["content"], "Streamed response");
+    assert_eq!(result["stop_reason"], "end_turn");
     assert_eq!(result["streamed"], true);
     assert_eq!(result["usage"]["input_tokens"], 20);
     assert_eq!(result["usage"]["output_tokens"], 8);
@@ -1567,6 +1568,149 @@ async fn message_stream_invoke_full_response() {
     // Cost should be present
     let cost = result["cost_usd"].as_f64().unwrap();
     assert!(cost >= 0.0, "cost should be non-negative");
+}
+
+/// Streaming via `handle_invoke` must apply deltas to the block index Anthropic sent,
+/// not just the most recently started block.
+#[fcp_async_core::test]
+async fn message_stream_invoke_honors_interleaved_block_indices() {
+    let mock_server = MockServer::start().await;
+
+    let sse_body = build_sse_body(&[
+        (
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_stream_inv_002",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {"input_tokens": 30, "output_tokens": 0}
+                }
+            }),
+        ),
+        (
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        ),
+        (
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tool_stream_inv_001",
+                    "name": "search",
+                    "input": {}
+                }
+            }),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}),
+        ),
+        (
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"city\": \"Paris\""}
+            }),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " world"}}),
+        ),
+        (
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "}"}
+            }),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 1}),
+        ),
+        (
+            "message_delta",
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+                "usage": {"input_tokens": 30, "output_tokens": 12}
+            }),
+        ),
+        ("message_stop", json!({"type": "message_stop"})),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": {
+                "messages": [{"role": "user", "content": "Stream test"}],
+                "max_tokens": 256,
+                "tools": [{
+                    "name": "search",
+                    "description": "Search the web",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }]
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("streaming invoke should succeed");
+
+    assert_eq!(result["id"], "msg_stream_inv_002");
+    assert_eq!(result["content"], "Hello world");
+    assert_eq!(result["streamed"], true);
+    assert_eq!(result["stop_reason"], "tool_use");
+    assert_eq!(result["usage"]["input_tokens"], 30);
+    assert_eq!(result["usage"]["output_tokens"], 12);
+
+    let blocks = result["content_blocks"]
+        .as_array()
+        .expect("should have content_blocks");
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0], json!({"type": "text", "text": "Hello world"}));
+    assert_eq!(
+        blocks[1],
+        json!({
+            "type": "tool_use",
+            "id": "tool_stream_inv_001",
+            "name": "search",
+            "input": {"city": "Paris"}
+        })
+    );
+
+    let provenance = &result["provenance"];
+    assert_eq!(provenance["has_tool_calls"], true);
+    assert_eq!(provenance["chunk_count"], 2);
 }
 
 // ============================================================================
@@ -2640,6 +2784,108 @@ async fn stream_tool_use_via_connector_invoke() {
     assert_eq!(blocks[0]["type"], "tool_use");
     assert_eq!(blocks[0]["name"], "search");
     assert_eq!(blocks[0]["input"]["query"], "test");
+}
+
+/// Streaming tool use with malformed accumulated JSON must fail closed instead of
+/// silently degrading to an empty input object.
+#[fcp_async_core::test]
+async fn stream_tool_use_via_connector_invoke_rejects_malformed_input_json() {
+    let mock_server = MockServer::start().await;
+
+    let sse_body = build_sse_body(&[
+        (
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_stool_bad_001",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {"input_tokens": 30, "output_tokens": 0}
+                }
+            }),
+        ),
+        (
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tool_inv_bad_001",
+                    "name": "search",
+                    "input": {}
+                }
+            }),
+        ),
+        (
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"query\": \"test\""}
+            }),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            "message_delta",
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+                "usage": {"input_tokens": 30, "output_tokens": 12}
+            }),
+        ),
+        ("message_stop", json!({"type": "message_stop"})),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": {
+                "messages": [{"role": "user", "content": "Search test"}],
+                "tools": [{
+                    "name": "search",
+                    "description": "Search the web",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                }]
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("malformed streaming tool JSON should fail");
+
+    match err {
+        fcp_core::FcpError::External { message, .. } => {
+            assert!(
+                message.contains("invalid tool input JSON"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
 }
 
 /// Streaming error via connector invoke returns FcpError::External.

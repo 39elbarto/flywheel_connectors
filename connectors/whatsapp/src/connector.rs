@@ -378,7 +378,8 @@ impl FcpConnector for WhatsAppConnector {
         } else {
             HealthSnapshot::degraded("not configured")
         };
-        snapshot.uptime_ms = self.started_at.elapsed().as_millis() as u64;
+        snapshot.uptime_ms =
+            u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snapshot
     }
 

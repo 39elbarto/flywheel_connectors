@@ -80,8 +80,11 @@ impl SseEvent {
     }
 }
 
+#[cfg(test)]
+const DEFAULT_MAX_DATA_BYTES: usize = 10 * 1024 * 1024;
+
 /// SSE parser state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SseParser {
     /// Buffer for incomplete data.
     buffer: BytesMut,
@@ -97,12 +100,29 @@ struct SseParser {
     last_event_id: Option<String>,
     /// Total bytes accumulated in `data_lines` (`DoS` protection).
     data_bytes_len: usize,
+    /// Maximum `data:` payload bytes retained for an in-progress event.
+    max_data_bytes: usize,
 }
 
 impl SseParser {
     /// Create a new parser.
+    #[cfg(test)]
     fn new() -> Self {
-        Self::default()
+        Self::with_max_data_bytes(DEFAULT_MAX_DATA_BYTES)
+    }
+
+    /// Create a new parser with a specific retained payload limit.
+    fn with_max_data_bytes(max_data_bytes: usize) -> Self {
+        Self {
+            buffer: BytesMut::new(),
+            event_type: None,
+            data_lines: Vec::new(),
+            event_id: None,
+            retry: None,
+            last_event_id: None,
+            data_bytes_len: 0,
+            max_data_bytes,
+        }
     }
 
     /// Parse incoming data and return complete events.
@@ -161,7 +181,7 @@ impl SseParser {
             "event" => self.event_type = Some(value.to_string()),
             "data" => {
                 let val_len = value.len();
-                if self.data_bytes_len.saturating_add(val_len) <= 10 * 1024 * 1024 {
+                if self.data_bytes_len.saturating_add(val_len) <= self.max_data_bytes {
                     self.data_lines.push(value.to_string());
                     self.data_bytes_len += val_len;
                 }
@@ -473,7 +493,7 @@ impl SseStream {
     fn new(body: ClientIncomingBody<ClientIo>, max_buffer_size: usize) -> Self {
         Self {
             inner: SseChunkStream::new(body),
-            parser: SseParser::new(),
+            parser: SseParser::with_max_data_bytes(max_buffer_size),
             pending_events: Vec::new(),
             max_buffer_size,
         }
@@ -1119,6 +1139,22 @@ mod tests {
         // Event dispatches, but not all data lines were accepted
         assert_eq!(events.len(), 1);
         assert!(events[0].data.len() <= 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_data_honors_custom_retained_limit() {
+        use std::fmt::Write;
+
+        let mut parser = SseParser::with_max_data_bytes(12 * 1024 * 1024);
+        let big_line = "a".repeat(11 * 1024 * 1024);
+        let mut input = String::new();
+        let _ = writeln!(input, "data: {big_line}");
+        input.push('\n');
+
+        let events = parser.parse(&Bytes::from(input));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data.len(), big_line.len());
     }
 
     #[test]

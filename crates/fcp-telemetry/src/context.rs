@@ -13,7 +13,10 @@
 //! - Optional tracestate for vendor-specific context
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 
 use parking_lot::{Mutex, RwLock};
 use rand::Rng;
@@ -58,9 +61,9 @@ struct StackContextGuard {
 }
 
 impl StackContextGuard {
-    fn push(ctx: TelemetryContext) -> Self {
+    fn push_arc(ctx: Arc<TelemetryContext>) -> Self {
         Self {
-            key: push_context(Arc::new(ctx)),
+            key: push_context(ctx),
         }
     }
 }
@@ -262,10 +265,12 @@ impl TraceContext {
     /// Format: `{version}-{trace-id}-{span-id}-{trace-flags}`
     #[must_use]
     pub fn to_traceparent(&self) -> String {
+        let trace_id = ensure_nonzero_id(self.trace_id);
+        let span_id = ensure_nonzero_id(self.span_id);
         format!(
             "00-{}-{}-{:02x}",
-            hex::encode(self.trace_id),
-            hex::encode(self.span_id),
+            hex::encode(trace_id),
+            hex::encode(span_id),
             self.trace_flags
         )
     }
@@ -695,12 +700,33 @@ impl TelemetryContext {
 }
 
 /// Run a future with the given telemetry context.
-pub async fn with_context<F, T>(ctx: TelemetryContext, f: F) -> T
+pub fn with_context<F>(ctx: TelemetryContext, f: F) -> WithContext<F>
 where
-    F: std::future::Future<Output = T>,
+    F: Future,
 {
-    let _guard = StackContextGuard::push(ctx);
-    f.await
+    WithContext {
+        ctx: Arc::new(ctx),
+        inner: Box::pin(f),
+    }
+}
+
+/// Future wrapper that installs telemetry context only while polled.
+pub struct WithContext<F> {
+    ctx: Arc<TelemetryContext>,
+    inner: Pin<Box<F>>,
+}
+
+impl<F> Future for WithContext<F>
+where
+    F: Future,
+{
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        let _guard = StackContextGuard::push_arc(Arc::clone(&this.ctx));
+        this.inner.as_mut().poll(cx)
+    }
 }
 
 /// Get a clone of the current telemetry context.
@@ -1610,13 +1636,52 @@ mod tests {
             future.as_mut().poll(&mut task_context),
             Poll::Pending
         ));
-        assert_eq!(
-            current_context().and_then(|ctx| ctx.zone_id.clone()),
-            Some("dropped-zone".to_string())
-        );
+        assert!(current_context().is_none());
 
         drop(future);
 
+        assert!(current_context().is_none());
+    }
+
+    #[test]
+    fn test_with_context_interleaved_futures_keep_their_own_contexts() {
+        use std::future::poll_fn;
+        use std::task::{Context, Poll, Waker};
+
+        let mut outer = Box::pin(with_context(
+            TelemetryContext::new().zone_id("outer-zone"),
+            poll_fn(|_| {
+                assert_eq!(
+                    current_context().and_then(|ctx| ctx.zone_id.clone()),
+                    Some("outer-zone".to_string())
+                );
+                Poll::<()>::Pending
+            }),
+        ));
+        let mut inner = Box::pin(with_context(
+            TelemetryContext::new().zone_id("inner-zone"),
+            poll_fn(|_| {
+                assert_eq!(
+                    current_context().and_then(|ctx| ctx.zone_id.clone()),
+                    Some("inner-zone".to_string())
+                );
+                Poll::<()>::Pending
+            }),
+        ));
+
+        let waker = Waker::noop();
+        let mut task_context = Context::from_waker(waker);
+
+        assert!(matches!(
+            outer.as_mut().poll(&mut task_context),
+            Poll::Pending
+        ));
+        assert!(current_context().is_none());
+
+        assert!(matches!(
+            inner.as_mut().poll(&mut task_context),
+            Poll::Pending
+        ));
         assert!(current_context().is_none());
     }
 
@@ -1895,6 +1960,19 @@ mod tests {
         let ctx = TraceContext::new([0u8; TRACE_ID_SIZE], [0u8; SPAN_ID_SIZE]);
         assert_ne!(ctx.trace_id, [0u8; TRACE_ID_SIZE]);
         assert_ne!(ctx.span_id, [0u8; SPAN_ID_SIZE]);
+    }
+
+    #[test]
+    fn test_trace_context_to_traceparent_normalizes_mutated_zero_ids() {
+        let mut ctx = TraceContext::new([0xAB; TRACE_ID_SIZE], [0xCD; SPAN_ID_SIZE]);
+        ctx.trace_id = [0u8; TRACE_ID_SIZE];
+        ctx.span_id = [0u8; SPAN_ID_SIZE];
+
+        let traceparent = ctx.to_traceparent();
+        let parsed = TraceContext::from_traceparent(&traceparent).unwrap();
+
+        assert_ne!(parsed.trace_id, [0u8; TRACE_ID_SIZE]);
+        assert_ne!(parsed.span_id, [0u8; SPAN_ID_SIZE]);
     }
 
     #[test]

@@ -19,10 +19,16 @@ fn header_value_case_insensitive<'a, S: BuildHasher>(
     headers: &'a HashMap<String, String, S>,
     name: &str,
 ) -> Option<&'a str> {
-    headers
+    let mut matches = headers
         .iter()
-        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
+        .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name));
+    let (_, first_value) = matches.next()?;
+
+    if matches.all(|(_, value)| value == first_value) {
+        Some(first_value.as_str())
+    } else {
+        None
+    }
 }
 
 fn remove_headers_case_insensitive<S: BuildHasher>(
@@ -38,6 +44,21 @@ fn remove_headers_case_insensitive<S: BuildHasher>(
     for existing_name in matching_names {
         headers.remove(&existing_name);
     }
+}
+
+fn normalize_trace_header_id(
+    value: &str,
+    expected_len: usize,
+    generator: fn() -> String,
+) -> String {
+    if value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let normalized = value.to_ascii_lowercase();
+        if !is_all_zero_hex(&normalized) {
+            return normalized;
+        }
+    }
+
+    generator()
 }
 
 /// Extract trace context from headers (W3C Trace Context format).
@@ -138,9 +159,11 @@ impl TraceContext {
     /// Convert to traceparent header value.
     #[must_use]
     pub fn to_traceparent(&self) -> String {
+        let trace_id = normalize_trace_header_id(&self.trace_id, 32, generate_trace_id);
+        let parent_span_id = normalize_trace_header_id(&self.parent_span_id, 16, generate_span_id);
         format!(
             "00-{}-{}-{:02x}",
-            self.trace_id, self.parent_span_id, self.trace_flags
+            trace_id, parent_span_id, self.trace_flags
         )
     }
 
@@ -477,6 +500,19 @@ mod tests {
     }
 
     #[test]
+    fn test_to_traceparent_normalizes_mutated_uppercase_and_zero_ids() {
+        let mut ctx = TraceContext::new();
+        ctx.trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736".to_string();
+        ctx.parent_span_id = "0000000000000000".to_string();
+
+        let traceparent = ctx.to_traceparent();
+        let parsed = TraceContext::from_traceparent(&traceparent).unwrap();
+
+        assert_eq!(parsed.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_ne!(parsed.parent_span_id, "0000000000000000");
+    }
+
+    #[test]
     fn test_parse_traceparent_invalid_version() {
         let value = "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         assert!(TraceContext::from_traceparent(value).is_none());
@@ -680,6 +716,35 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert(TRACEPARENT_HEADER.to_string(), "invalid".to_string());
         assert!(extract_trace_context(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_rejects_conflicting_duplicate_traceparent_variants() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            TRACEPARENT_HEADER.to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert(
+            "Traceparent".to_string(),
+            "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01".to_string(),
+        );
+
+        assert!(extract_trace_context(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_drops_conflicting_duplicate_tracestate_variants() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            TRACEPARENT_HEADER.to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert(TRACESTATE_HEADER.to_string(), "vendor=fresh".to_string());
+        headers.insert("TraceState".to_string(), "vendor=stale".to_string());
+
+        let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
+        assert_eq!(ctx.trace_state, None);
     }
 
     #[test]

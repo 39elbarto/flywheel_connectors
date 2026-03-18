@@ -945,7 +945,7 @@ fn symbol_response_builder_basic() {
         SymbolResponseBuilder::new(test_object_id(1), test_zone(), test_zone_key_id(), 100)
             .build(10, 0);
     assert_eq!(response.object_id, test_object_id(1));
-    assert!(response.is_final); // no ESIs selected → final
+    assert!(!response.is_final); // symbols remain unsent
 }
 
 #[test]

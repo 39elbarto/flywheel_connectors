@@ -2277,7 +2277,7 @@ mod tests {
                 store.quarantine(obj1).unwrap();
 
                 let mut obj2 = test_object(2, 100, 2000);
-                obj2.zone_id = zone_a.clone();
+                obj2.zone_id = zone_a;
                 store.quarantine(obj2).unwrap();
 
                 // 2 objects in zone B (independent quota)
@@ -2286,7 +2286,7 @@ mod tests {
                 store.quarantine(obj3).unwrap();
 
                 let mut obj4 = test_object(4, 100, 2000);
-                obj4.zone_id = zone_b.clone();
+                obj4.zone_id = zone_b;
                 store.quarantine(obj4).unwrap();
 
                 // All 4 objects should exist — zones have independent quotas
@@ -2332,7 +2332,7 @@ mod tests {
 
                 // Zone B should still accept objects (independent)
                 let mut obj2 = test_object(2, 100, 2000);
-                obj2.zone_id = zone_b.clone();
+                obj2.zone_id = zone_b;
                 store.quarantine(obj2).unwrap();
 
                 assert!(store.contains(&ObjectId::from_bytes([1; 32])));
@@ -2340,7 +2340,7 @@ mod tests {
 
                 // Adding to zone A should evict from zone A only
                 let mut obj3 = test_object(3, 100, 3000);
-                obj3.zone_id = zone_a.clone();
+                obj3.zone_id = zone_a;
                 store.quarantine(obj3).unwrap();
 
                 assert!(!store.contains(&ObjectId::from_bytes([1; 32]))); // evicted from A

@@ -656,7 +656,7 @@ impl SymbolResponseBuilder {
         let sent_count = u32::try_from(self.selected_esis.len()).unwrap_or(u32::MAX);
         let already_sent = u32::try_from(already_sent).unwrap_or(u32::MAX);
         let total_sent = sent_count.saturating_add(already_sent);
-        let is_final = total_sent >= total_available || self.selected_esis.is_empty();
+        let is_final = total_sent >= total_available;
 
         // Response was bounded if we sent fewer new symbols than remain unsent
         let remaining = total_available.saturating_sub(already_sent);
@@ -2500,7 +2500,34 @@ mod tests {
         .build(100, 0);
 
         assert_eq!(response.symbol_count(), 0);
-        assert!(response.is_final);
+        assert!(!response.is_final);
+        assert!(response.was_bounded);
+    }
+
+    #[test]
+    fn response_builder_zero_budget_with_available_symbols_is_not_final() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        engine.register_available(object_id, 0..4);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(0, None),
+            is_authenticated: true,
+            max_response_symbols: 0,
+            has_proof_of_need: false,
+        };
+
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            0,
+        )
+        .add_from_repair_engine(&engine, &request, &HashSet::new())
+        .build(4, 0);
+
+        assert_eq!(response.symbol_count(), 0);
+        assert!(!response.is_final);
         assert!(response.was_bounded);
     }
 

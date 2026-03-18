@@ -209,11 +209,12 @@ impl GarbageCollector {
         let root_set = roots.all_roots();
 
         // 2. Mark phase: traverse refs from roots
+        let mut visited = HashSet::new();
         let mut live = HashSet::new();
         let mut queue: VecDeque<ObjectId> = root_set.into_iter().collect();
 
         while let Some(object_id) = queue.pop_front() {
-            if live.insert(object_id) {
+            if visited.insert(object_id) {
                 let header = store
                     .get_header(&object_id)
                     .await
@@ -223,6 +224,12 @@ impl GarbageCollector {
                         }
                         other => GcError::ObjectStore(other),
                     })?;
+
+                if header.zone_id != *zone_id {
+                    continue;
+                }
+
+                live.insert(object_id);
 
                 // Follow refs (NOT foreign_refs - those are handled by foreign zone's GC)
                 queue.extend(header.refs.iter().copied());
@@ -573,14 +580,27 @@ mod tests {
         "z:test".parse().unwrap()
     }
 
+    fn foreign_zone() -> ZoneId {
+        "z:foreign".parse().unwrap()
+    }
+
     fn test_object(id: u8, refs: Vec<u8>, retention: RetentionClass) -> StoredObject {
+        test_object_in_zone(&test_zone(), id, refs, retention)
+    }
+
+    fn test_object_in_zone(
+        zone_id: &ZoneId,
+        id: u8,
+        refs: Vec<u8>,
+        retention: RetentionClass,
+    ) -> StoredObject {
         StoredObject {
             object_id: ObjectId::from_bytes([id; 32]),
             header: ObjectHeader {
                 schema: SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0)),
-                zone_id: test_zone(),
+                zone_id: zone_id.clone(),
                 created_at: 1_000_000,
-                provenance: Provenance::new(test_zone()),
+                provenance: Provenance::new(zone_id.clone()),
                 refs: refs
                     .into_iter()
                     .map(|r| ObjectId::from_bytes([r; 32]))
@@ -592,6 +612,72 @@ mod tests {
             body: vec![0_u8; 100],
             storage: StorageMeta { retention },
         }
+    }
+
+    #[test]
+    fn gc_does_not_follow_foreign_zone_hops() {
+        run_store_test(
+            "gc_ignores_foreign_zone_hops",
+            "verify",
+            "gc",
+            6,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let gc = GarbageCollector::new(GcConfig::default());
+
+                let foreign_zone = foreign_zone();
+
+                store
+                    .put(test_object(1, vec![2], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object_in_zone(
+                        &foreign_zone,
+                        2,
+                        vec![3],
+                        RetentionClass::Ephemeral,
+                    ))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object(3, vec![], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+
+                let mut roots = GcRoots::new();
+                roots.set_checkpoint(ObjectId::from_bytes([1; 32]));
+
+                assert!(
+                    gc.would_collect(
+                        &ObjectId::from_bytes([3; 32]),
+                        &test_zone(),
+                        &roots,
+                        &store,
+                        0
+                    )
+                    .await
+                );
+
+                let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
+
+                assert_eq!(result.live, 1);
+                assert_eq!(result.evicted, 1);
+                assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
+                assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
+                assert!(!store.exists(&ObjectId::from_bytes([3; 32])).await);
+
+                StoreLogData {
+                    object_id: Some(ObjectId::from_bytes([3; 32])),
+                    details: Some(json!({
+                        "foreign_hop_ignored": true,
+                        "live": result.live,
+                        "evicted": result.evicted
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

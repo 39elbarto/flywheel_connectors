@@ -40,9 +40,9 @@ Each connector is scored on 10 binary criteria (present = 0, missing = weighted 
 | Risk Tier | Count | Connectors |
 |-----------|-------|------------|
 | 0 (Compliant) | 71 | See full table below |
-| 1-2 (Minor) | 7 | google-ai, homeassistant, kubernetes, plaid, qdrant, telegram, twitter |
+| 1-2 (Minor) | 10 | google-ai, homeassistant, kubernetes, plaid, qdrant, telegram, twitter, postgresql, redis, whisper |
 | 3-5 (Moderate) | 7 | discord, google-chat, google-docs, google-drive, google-sheets, slack, webhook-receiver |
-| 6+ (Critical) | 4 | postgresql, redis, vectordb, whisper |
+| 9 (Critical) | 1 | vectordb |
 
 ---
 
@@ -92,16 +92,23 @@ youtube, zapier, zendesk, google-admin-reports
 
 *discord/google-drive have higher effective gaps due to missing doctor + self_check. webhook-receiver missing runtime but has simpler lifecycle.
 
-### Critical Gaps (Gap 6+)
+### Critical Gaps (vectordb, Gap 9)
+
+| Connector | Manifest | ConnRS | ErrorMap | Runtime | OpInfo | Doctor | SelfChk | Simulate | Tests | LibRS | Gap |
+|-----------|----------|--------|----------|---------|--------|--------|---------|----------|-------|-------|-----|
+| vectordb | Y | N | Y | N | Y | N | N | N | N | Y | 9 |
+
+vectordb: most significant gaps in workspace (missing connector.rs, doctor, self_check, simulate, runtime, tests).
+
+### Test Coverage Gaps (Gap 2, quality risk)
 
 | Connector | Manifest | ConnRS | ErrorMap | Runtime | OpInfo | Doctor | SelfChk | Simulate | Tests | LibRS | Gap |
 |-----------|----------|--------|----------|---------|--------|--------|---------|----------|-------|-------|-----|
 | postgresql | Y | Y | Y | Y | Y | Y | Y | Y | N | Y | 2 |
 | redis | Y | Y | Y | Y | Y | Y | Y | Y | N | Y | 2 |
-| vectordb | Y | N | Y | N | Y | N | N | N | N | Y | 9 |
 | whisper | Y | Y | Y | Y | Y | Y | Y | Y | N | Y | 2 |
 
-*postgresql, redis, whisper: only missing tests (gap=2, moved here for test-quality risk). vectordb: most significant gaps in workspace.
+*These connectors are otherwise V3-compliant but have zero test blocks, making quality unverifiable.
 
 ---
 

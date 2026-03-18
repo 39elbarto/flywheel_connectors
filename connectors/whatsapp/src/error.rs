@@ -87,8 +87,12 @@ impl WhatsAppError {
             Self::Api { code, message, .. } => FcpError::External {
                 service: "whatsapp".into(),
                 message: format!("API error {code}: {message}"),
-                status_code: Some(*code as u16),
-                retryable: *code == 2 || *code >= 500,
+                // status_code is for HTTP status; API-level codes (e.g., 100, 2018001)
+                // only fit u16 when they originated from an HTTP status fallback
+                status_code: u16::try_from(*code).ok(),
+                // Meta API codes: 1=unknown, 2=temporary, 4=too many calls, 368=temp block
+                // Codes like 131000+ are WhatsApp-specific, not HTTP status codes
+                retryable: matches!(*code, 1 | 2 | 4 | 368),
                 retry_after: None,
             },
             Self::RateLimited { retry_after_ms } => FcpError::RateLimited {

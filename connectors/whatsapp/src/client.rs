@@ -241,14 +241,38 @@ impl WhatsAppClient {
 
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
+                    if status == 429 {
+                        let retry_after = resp
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .map(Duration::from_secs);
+                        return AttemptOutcome::Retryable {
+                            error: WhatsAppError::RateLimited {
+                                retry_after_ms: retry_after
+                                    .unwrap_or(Duration::from_secs(30))
+                                    .as_millis() as u64,
+                            },
+                            retry_after,
+                        };
+                    }
                     let text = resp.text().await.unwrap_or_default();
                     warn!(status, "WhatsApp profile request failed");
-                    return AttemptOutcome::Terminal(WhatsAppError::Api {
+                    let decision = classify_http_status(status, None);
+                    let err = WhatsAppError::Api {
                         code: u32::from(status),
                         message: text,
                         error_type: "HttpError".into(),
                         subcode: None,
-                    });
+                    };
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
                 }
 
                 match resp.json::<ProfileResponse>().await {

@@ -189,12 +189,16 @@ impl MattermostClient {
 
         let response = self.client.delete(&url).send().await.map_err(MattermostError::Http)?;
         let status = response.status().as_u16();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
 
         if (200..300).contains(&status) {
             Ok(())
         } else {
             let body = response.text().await.unwrap_or_default();
-            let request_id = None;
             Err(MattermostError::from_api_response(
                 status,
                 &body,

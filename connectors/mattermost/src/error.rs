@@ -45,9 +45,13 @@ pub enum MattermostError {
     #[error("configuration error: {0}")]
     Config(String),
 
-    /// Runtime / deadline error.
+    /// Runtime / deadline error (retryable, e.g. timeout).
     #[error("runtime error: {0}")]
     Runtime(String),
+
+    /// Request was intentionally cancelled (not retryable).
+    #[error("request cancelled")]
+    Cancelled,
 }
 
 pub type MattermostResult<T> = Result<T, MattermostError>;
@@ -60,6 +64,7 @@ impl MattermostError {
             self,
             Self::Http(_) | Self::RateLimited { .. } | Self::Runtime(_)
         )
+        // Note: Cancelled is intentionally NOT retryable
     }
 
     /// Suggested retry delay.
@@ -118,6 +123,9 @@ impl MattermostError {
             Self::Runtime(msg) => FcpError::Internal {
                 message: msg.clone(),
             },
+            Self::Cancelled => FcpError::Internal {
+                message: "request cancelled".into(),
+            },
         }
     }
 
@@ -148,7 +156,7 @@ impl ConnectorErrorMapping for MattermostError {
             AsyncError::Timeout { timeout_ms } => {
                 Self::Runtime(format!("request deadline exceeded after {timeout_ms}ms"))
             }
-            AsyncError::Cancelled => Self::Runtime("request cancelled".into()),
+            AsyncError::Cancelled => Self::Cancelled,
             other => Self::Runtime(other.to_string()),
         }
     }
@@ -320,7 +328,8 @@ mod tests {
     #[test]
     fn from_async_cancelled() {
         let err = MattermostError::from_async_error(AsyncError::Cancelled);
-        assert!(matches!(err, MattermostError::Runtime(_)));
+        assert!(matches!(err, MattermostError::Cancelled));
+        assert!(!err.is_retryable());
     }
 
     #[test]

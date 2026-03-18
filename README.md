@@ -16,11 +16,11 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 **This repository currently spans three layers:**
 
-1. **FCP specifications and design direction** — the mesh-native protocol model, security invariants, and the current FCP3 ownership/runtime contract
+1. **FCP specifications and design direction**: the mesh-native protocol model, security invariants, and the current FCP3 ownership/runtime contract
 
-2. **A real host-first Rust platform** — today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`
+2. **A real host-first Rust platform**: today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`
 
-3. **A complete connector workspace** — 89 production-quality connectors covering messaging, cloud, databases, AI providers, dev tools, productivity, and Google Workspace — all with typed operations, structured error mapping, and manifest-declared security policy
+3. **A complete connector workspace**: 89 production-quality connectors covering messaging, cloud, databases, AI providers, dev tools, productivity, and Google Workspace, all with typed operations, structured error mapping, and manifest-declared security policy
 
 **Current reality**: the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. The implemented operator surface today is primarily host-first (`fwc` -> `fcp-host` -> connector subprocesses), with the mesh-native data plane proven at the protocol and store layers.
 
@@ -49,7 +49,7 @@ The most mature operator surface today is the host-first `fwc` + `fcp-host` stac
 | **Mesh-Stored Policy Objects** | Zone definitions + policies are owner-signed mesh objects (auditable + rollbackable) |
 | **Capability Tokens (CWT/COSE)** | Provable authority with grant_object_ids; tokens are canonically CBOR-encoded and COSE-signed for interoperability |
 | **Threshold Owner Key** | FROST signing so no single device holds the complete owner private key |
-| **Threshold Secrets** | Shamir secret sharing with k-of-n across devices—never complete anywhere |
+| **Threshold Secrets** | Shamir secret sharing with k-of-n across devices; never complete on any single machine |
 | **Secretless Connectors** | Egress proxy can inject credentials so connectors never see raw API keys by default |
 | **Computation Migration** | Operations execute on the optimal device automatically |
 | **Offline Access** | Measurable availability SLOs via ObjectPlacementPolicy and background repair |
@@ -61,41 +61,41 @@ The most mature operator surface today is the host-first `fwc` + `fcp-host` stac
 ### Quick Example
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           PERSONAL MESH                                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│   ┌──────────┐      ┌──────────┐      ┌──────────┐                      │
-│   │ Desktop  │◄────►│  Laptop  │◄────►│  Phone   │  ← Tailscale mesh    │
-│   │ MeshNode │      │ MeshNode │      │ MeshNode │                      │
-│   └────┬─────┘      └────┬─────┘      └────┬─────┘                      │
-│        │                 │                 │                             │
-│        ▼                 ▼                 ▼                             │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │                    SYMBOL DISTRIBUTION                           │   │
-│   │  Object: gmail-inbox-2026-01   K=100 symbols distributed        │   │
-│   │  Desktop: [1,5,12,23,...]  Laptop: [2,8,15,...]  Phone: [3,9,...]│   │
-│   │  Any 100 symbols → full reconstruction                          │   │
-│   └─────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-│   Agent Request                                                          │
-│       │                                                                  │
-│       ▼                                                                  │
-│   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐               │
-│   │ Zone Check  │────►│  Cap Check  │────►│  Connector  │               │
-│   │ z:private?  │     │ gmail.read? │     │   Gmail     │               │
-│   │ (crypto+ACL)│     │ (signed)    │     │ (sandboxed) │               │
-│   └─────────────┘     └─────────────┘     └─────────────┘               │
-│         │                   │                   │                        │
-│         ▼                   ▼                   ▼                        │
-│   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │  Revocation Check → Receipt Generation → Audit Event Logged     │   │
-│   └─────────────────────────────────────────────────────────────────┘   │
-│                                                  │                       │
-│                                                  ▼                       │
-│                                           Gmail API                      │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              PERSONAL MESH                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   ┌──────────┐      ┌──────────┐      ┌──────────┐                         │
+│   │ Desktop  │◄────►│  Laptop  │◄────►│  Phone   │  ← Tailscale mesh      │
+│   │ MeshNode │      │ MeshNode │      │ MeshNode │                         │
+│   └────┬─────┘      └────┬─────┘      └────┬─────┘                         │
+│        │                 │                 │                                │
+│        ▼                 ▼                 ▼                                │
+│   ┌─────────────────────────────────────────────────────────────────────┐  │
+│   │                    SYMBOL DISTRIBUTION                              │  │
+│   │  Object: gmail-inbox-2026-01   K=100 symbols distributed           │  │
+│   │  Desktop: [1,5,12,23,...]  Laptop: [2,8,15,...]  Phone: [3,9,...] │  │
+│   │  Any 100 symbols → full reconstruction                             │  │
+│   └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│   Agent Request                                                             │
+│       │                                                                     │
+│       ▼                                                                     │
+│   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐                  │
+│   │ Zone Check  │────►│  Cap Check  │────►│  Connector  │                  │
+│   │ z:private?  │     │ gmail.read? │     │   Gmail     │                  │
+│   │ (crypto+ACL)│     │ (signed)    │     │ (sandboxed) │                  │
+│   └─────────────┘     └─────────────┘     └─────────────┘                  │
+│         │                   │                   │                           │
+│         ▼                   ▼                   ▼                           │
+│   ┌─────────────────────────────────────────────────────────────────────┐  │
+│   │  Revocation Check → Receipt Generation → Audit Event Logged        │  │
+│   └─────────────────────────────────────────────────────────────────────┘  │
+│                                                  │                          │
+│                                                  ▼                          │
+│                                           Gmail API                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -110,10 +110,10 @@ This project emerged from the Agent Flywheel ecosystem, where AI coding agents c
 4. **Binary Offline**: No connectivity = no access
 
 FCP addresses these through:
-- **Zones as cryptographic universes**—if the Gmail-read capability doesn't exist in a zone, it cannot be invoked, regardless of what an agent says
-- **Mesh-native architecture**—your devices collectively ARE the system
-- **Symbol-first protocol**—data availability is probabilistic, not binary
-- **Revocation as first-class primitive**—compromised devices can be removed and keys rotated
+- **Zones as cryptographic universes**: if the Gmail-read capability doesn't exist in a zone, it cannot be invoked, regardless of what an agent says
+- **Mesh-native architecture**: your devices collectively ARE the system
+- **Symbol-first protocol**: data availability is probabilistic, not binary
+- **Revocation as first-class primitive**: compromised devices can be removed and keys rotated
 
 ---
 
@@ -159,7 +159,7 @@ These are **hard requirements** that FCP enforces mechanically:
 1. **Single-Zone Binding**: A connector instance MUST bind to exactly one zone for its lifetime
 2. **Default Deny**: If a capability is not explicitly granted to a zone, it MUST be impossible to invoke
 3. **No Cross-Connector Calling**: Connectors MUST NOT call other connectors directly; all composition happens through the mesh
-4. **Threshold Secret Distribution**: Secrets use Shamir sharing—never complete on any single device
+4. **Threshold Secret Distribution**: Secrets use Shamir sharing; never complete on any single device
 5. **Revocation Enforcement**: Tokens, keys, and operations MUST check revocation before use
 6. **Auditable Everything**: Every operation produces a signed receipt and audit event
 7. **Cryptographic Authority Chain**: All authority flows from owner key through verifiable signature chains
@@ -259,30 +259,30 @@ Symbol Approach:
 ### Frame Format (FCPS)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       FCPS FRAME FORMAT (Symbol-Native)                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  Bytes 0-3:    Magic (0x46 0x43 0x50 0x53 = "FCPS")                         │
-│  Bytes 4-5:    Version (u16 LE)                                             │
-│  Bytes 6-7:    Flags (u16 LE)                                               │
-│  Bytes 8-11:   Symbol Count (u32 LE)                                        │
-│  Bytes 12-15:  Total Payload Length (u32 LE)                                │
-│  Bytes 16-47:  Object ID (32 bytes)                                         │
-│  Bytes 48-49:  Symbol Size (u16 LE, default 1024)                           │
-│  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
-│  Bytes 58-89:  Zone ID hash (32 bytes, BLAKE3; fixed-size)                  │
-│  Bytes 90-97:  Epoch ID (u64 LE)                                            │
-│  Bytes 98-105: Sender Instance ID (u64 LE, reboot-safety)                   │
-│  Bytes 106-113: Frame Seq (u64 LE, per-sender monotonic counter)            │
-│  Bytes 114+:   Symbol payloads (encrypted, concatenated)                    │
-│                                                                             │
-│  Fixed header: 114 bytes                                                    │
-│  NOTE: No separate checksum. Integrity provided by per-symbol AEAD tags     │
-│        and per-frame session MAC (AuthenticatedFcpsFrame).                  │
-│  Per-symbol nonce: derived as frame_seq || esi_le (deterministic)           │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    FCPS FRAME FORMAT (Symbol-Native)                      │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Bytes 0-3:     Magic (0x46 0x43 0x50 0x53 = "FCPS")                    │
+│  Bytes 4-5:     Version (u16 LE)                                         │
+│  Bytes 6-7:     Flags (u16 LE)                                           │
+│  Bytes 8-11:    Symbol Count (u32 LE)                                    │
+│  Bytes 12-15:   Total Payload Length (u32 LE)                            │
+│  Bytes 16-47:   Object ID (32 bytes)                                     │
+│  Bytes 48-49:   Symbol Size (u16 LE, default 1024)                       │
+│  Bytes 50-57:   Zone Key ID (8 bytes, for rotation)                      │
+│  Bytes 58-89:   Zone ID hash (32 bytes, BLAKE3; fixed-size)              │
+│  Bytes 90-97:   Epoch ID (u64 LE)                                        │
+│  Bytes 98-105:  Sender Instance ID (u64 LE, reboot-safety)               │
+│  Bytes 106-113: Frame Seq (u64 LE, per-sender monotonic counter)         │
+│  Bytes 114+:    Symbol payloads (encrypted, concatenated)                │
+│                                                                          │
+│  Fixed header: 114 bytes                                                 │
+│  NOTE: No separate checksum. Integrity via per-symbol AEAD tags          │
+│        and per-frame session MAC (AuthenticatedFcpsFrame).               │
+│  Per-symbol nonce: derived as frame_seq || esi_le (deterministic)        │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Session Authentication
@@ -296,7 +296,7 @@ High-throughput symbol delivery uses per-session authentication (not per-frame s
 
 **Crypto Suite Negotiation**: Initiator proposes supported suites; responder selects. Suite1 uses HMAC-SHA256 (broad compatibility), Suite2 uses BLAKE3 (performance). This avoids Poly1305 single-use constraints while enabling future algorithm agility.
 
-**Session Rekey Triggers**: Sessions automatically rekey after configurable thresholds—frames (default: 1B), elapsed time (default: 24h), or cumulative bytes (default: 1 TiB)—to bound key exposure and avoid pathological long-lived sessions.
+**Session Rekey Triggers**: Sessions automatically rekey after configurable thresholds: frames (default: 1B), elapsed time (default: 24h), or cumulative bytes (default: 1 TiB). This bounds key exposure and prevents pathological long-lived sessions.
 
 This amortizes Ed25519 signature cost over many frames while preserving cryptographic attribution and preventing nonce reuse across senders.
 
@@ -308,77 +308,77 @@ While FCPS handles high-throughput symbol delivery, FCPC provides reliable, orde
 
 ## Mesh Architecture
 
-Every device is a MeshNode—collectively, they ARE the Hub.
+Every device is a MeshNode. Collectively, they ARE the Hub.
 
 ### MeshNode Components
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              MESHNODE                                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Tailscale Identity                                                  │    │
-│  │  • Stable node ID (unforgeable WireGuard keys)                      │    │
-│  │  • Node signing/encryption/issuance keys with owner attestation     │    │
-│  │  • ACL tags for zone mapping                                         │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Symbol Store                                                        │    │
-│  │  • Local symbol storage with node-local retention classes            │    │
-│  │  • Quarantine store for unreferenced objects (bounded; not gossiped) │    │
-│  │  • XOR filters + IBLT for efficient gossip reconciliation           │    │
-│  │  • Reachability-based garbage collection                             │    │
-│  │  • ObjectPlacementPolicy enforcement for availability SLOs          │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Capability & Revocation Registry                                    │    │
-│  │  • Zone keyrings for deterministic key selection by zone_key_id     │    │
-│  │  • Trust anchors (owner key, attested node keys)                    │    │
-│  │  • Monotonic seq numbers for O(1) freshness checks                  │    │
-│  │  • ZoneCheckpoint checkpoints for fast sync                           │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Connector State Manager                                             │    │
-│  │  • Externalized connector state as mesh objects                     │    │
-│  │  • Single-writer semantics via execution leases with fencing tokens │    │
-│  │  • Multi-writer CRDT support (LWW-Map, OR-Set, counters)            │    │
-│  │  • Safe failover and migration for stateful connectors              │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Execution Planner                                                   │    │
-│  │  • Device profiles (CPU, GPU, memory, battery)                       │    │
-│  │  • Connector availability and version requirements                   │    │
-│  │  • Secret reconstruction cost estimation                             │    │
-│  │  • Symbol locality scoring, DERP penalty                            │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Repair Controller                                                   │    │
-│  │  • Background symbol coverage evaluation                            │    │
-│  │  • Automatic repair toward ObjectPlacementPolicy targets            │    │
-│  │  • Rebalancing after device churn or offline periods                │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Egress Proxy                                                        │    │
-│  │  • Connector network access via capability-gated IPC                │    │
-│  │  • CIDR deny defaults (localhost, private, tailnet ranges)          │    │
-│  │  • SNI enforcement, SPKI pinning                                    │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Audit Chain                                                         │    │
-│  │  • Hash-linked audit events per zone with monotonic seq             │    │
-│  │  • Quorum-signed audit heads for tamper evidence                    │    │
-│  │  • Operation receipts for idempotency                                │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                               MESHNODE                                   │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Tailscale Identity                                                │  │
+│  │  • Stable node ID (unforgeable WireGuard keys)                    │  │
+│  │  • Node signing/encryption/issuance keys with owner attestation   │  │
+│  │  • ACL tags for zone mapping                                      │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Symbol Store                                                      │  │
+│  │  • Local symbol storage with node-local retention classes          │  │
+│  │  • Quarantine store for unreferenced objects (bounded)             │  │
+│  │  • XOR filters + IBLT for efficient gossip reconciliation         │  │
+│  │  • Reachability-based garbage collection                          │  │
+│  │  • ObjectPlacementPolicy enforcement for availability SLOs        │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Capability & Revocation Registry                                  │  │
+│  │  • Zone keyrings for deterministic key selection by zone_key_id   │  │
+│  │  • Trust anchors (owner key, attested node keys)                  │  │
+│  │  • Monotonic seq numbers for O(1) freshness checks                │  │
+│  │  • ZoneCheckpoint checkpoints for fast sync                       │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Connector State Manager                                           │  │
+│  │  • Externalized connector state as mesh objects                   │  │
+│  │  • Single-writer semantics via execution leases + fencing tokens  │  │
+│  │  • Multi-writer CRDT support (LWW-Map, OR-Set, counters)          │  │
+│  │  • Safe failover and migration for stateful connectors            │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Execution Planner                                                 │  │
+│  │  • Device profiles (CPU, GPU, memory, battery)                    │  │
+│  │  • Connector availability and version requirements                │  │
+│  │  • Secret reconstruction cost estimation                          │  │
+│  │  • Symbol locality scoring, DERP penalty                          │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Repair Controller                                                 │  │
+│  │  • Background symbol coverage evaluation                          │  │
+│  │  • Automatic repair toward ObjectPlacementPolicy targets          │  │
+│  │  • Rebalancing after device churn or offline periods              │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Egress Proxy                                                      │  │
+│  │  • Connector network access via capability-gated IPC              │  │
+│  │  • CIDR deny defaults (localhost, private, tailnet ranges)        │  │
+│  │  • SNI enforcement, SPKI pinning                                  │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Audit Chain                                                       │  │
+│  │  • Hash-linked audit events per zone with monotonic seq           │  │
+│  │  • Quorum-signed audit heads for tamper evidence                  │  │
+│  │  • Operation receipts for idempotency                             │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Transport Priority
@@ -413,44 +413,44 @@ Device removal triggers revocation + zone key rotation + secret resharing.
 Every FCP connector is a single executable with embedded metadata:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                        FCP BINARY                               │
-├────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │                    MANIFEST SECTION                       │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐                │  │
-│  │  │  Metadata       │  │  Capabilities   │                │  │
-│  │  │  - Name         │  │  - Required     │                │  │
-│  │  │  - Version      │  │  - Optional     │                │  │
-│  │  │  - Author       │  │  - Forbidden    │                │  │
-│  │  └─────────────────┘  └─────────────────┘                │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐                │  │
-│  │  │  Zone Policy    │  │  Sandbox Config │                │  │
-│  │  │  - Home zone    │  │  - Memory limit │                │  │
-│  │  │  - Allowed      │  │  - CPU limit    │                │  │
-│  │  │  - Tailscale tag│  │  - FS access    │                │  │
-│  │  └─────────────────┘  └─────────────────┘                │  │
-│  │  ┌─────────────────┐                                      │  │
-│  │  │  AI Hints       │  ← Agent-readable operation docs     │  │
-│  │  │  - Operations   │                                      │  │
-│  │  │  - Examples     │                                      │  │
-│  │  │  - Safety notes │                                      │  │
-│  │  └─────────────────┘                                      │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │                    CODE SECTION                           │  │
-│  │  - FCP protocol implementation                            │  │
-│  │  - Capability negotiation                                 │  │
-│  │  - External API clients                                   │  │
-│  │  - State management                                       │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │                   SIGNATURE SECTION                       │  │
-│  │  - Ed25519 signature over manifest + code                 │  │
-│  │  - Reproducible build attestation                         │  │
-│  │  - Registry provenance chain                              │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                          FCP BINARY                          │
+├──────────────────────────────────────────────────────────────┤
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  MANIFEST SECTION                                      │  │
+│  │  ┌─────────────────┐  ┌─────────────────┐             │  │
+│  │  │  Metadata       │  │  Capabilities   │             │  │
+│  │  │  - Name         │  │  - Required     │             │  │
+│  │  │  - Version      │  │  - Optional     │             │  │
+│  │  │  - Author       │  │  - Forbidden    │             │  │
+│  │  └─────────────────┘  └─────────────────┘             │  │
+│  │  ┌─────────────────┐  ┌─────────────────┐             │  │
+│  │  │  Zone Policy    │  │  Sandbox Config │             │  │
+│  │  │  - Home zone    │  │  - Memory limit │             │  │
+│  │  │  - Allowed      │  │  - CPU limit    │             │  │
+│  │  │  - Tailscale tag│  │  - FS access    │             │  │
+│  │  └─────────────────┘  └─────────────────┘             │  │
+│  │  ┌─────────────────┐                                  │  │
+│  │  │  AI Hints       │  ← Agent-readable operation docs │  │
+│  │  │  - Operations   │                                  │  │
+│  │  │  - Examples     │                                  │  │
+│  │  │  - Safety notes │                                  │  │
+│  │  └─────────────────┘                                  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  CODE SECTION                                          │  │
+│  │  - FCP protocol implementation                        │  │
+│  │  - Capability negotiation                             │  │
+│  │  - External API clients                               │  │
+│  │  - State management                                   │  │
+│  └────────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  SIGNATURE SECTION                                     │  │
+│  │  - Ed25519 signature over manifest + code             │  │
+│  │  - Reproducible build attestation                     │  │
+│  │  - Registry provenance chain                          │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Sandbox Enforcement
@@ -493,7 +493,7 @@ ConnectorStateObject {
 
 **Periodic Snapshots**: Connectors emit `ConnectorStateSnapshot` objects at configurable intervals, enabling compaction of the state chain while preserving fork detection for singleton_writer connectors.
 
-**Local `$CONNECTOR_STATE` is a cache only**—the authoritative state lives as mesh objects. This enables:
+**Local `$CONNECTOR_STATE` is a cache only.** The authoritative state lives as mesh objects. This enables:
 
 - **Safe failover**: Another node can resume from last committed state
 - **Resumable polling**: Cursors survive node restarts and migrations
@@ -542,7 +542,7 @@ FCP defends against:
 
 ### Threshold Secrets
 
-Secrets use **Shamir's Secret Sharing** (not RaptorQ symbols—those can leak structure):
+Secrets use **Shamir's Secret Sharing** (not RaptorQ symbols, which can leak structure):
 
 ```
 Secret: API_KEY
@@ -702,10 +702,10 @@ Every connector follows the same structural contract: a `manifest.toml` declarin
 
 The 12 Google connectors share a discovery-pinned substrate (`fcp-google-discovery`) that provides:
 
-- **`GoogleAuthSelection`** — Unified config parsing: `access_token`, `credential_id`, or OAuth refresh
-- **`GoogleMaterializedAuth`** — Materialized auth with `BearerToken` and `CredentialReference` variants
-- **`GoogleRestExecutor`** — Shared HTTP executor with retry loops and structured error extraction
-- **Migration acceptance tests** — `migration_acceptance.rs` for Gmail, Calendar, and YouTube validates substrate integration
+- **`GoogleAuthSelection`**: unified config parsing for `access_token`, `credential_id`, or OAuth refresh
+- **`GoogleMaterializedAuth`**: materialized auth with `BearerToken` and `CredentialReference` variants
+- **`GoogleRestExecutor`**: shared HTTP executor with retry loops and structured error extraction
+- **Migration acceptance tests**: `migration_acceptance.rs` for Gmail, Calendar, and YouTube validates substrate integration
 
 All Google connectors use the same auth flow: `GoogleAuthSelection::from_connector_config()` -> `.materialize()` -> `Client::new_with_auth()`. This eliminates per-connector OAuth boilerplate and ensures consistent credential handling across the family.
 
@@ -751,7 +751,7 @@ Reconnecting ──(max retries)────> Unhealthy
 
 ## FWC: The Agent-First CLI
 
-`fwc` is the sole supported CLI for the Flywheel connector workspace. It provides 50+ commands across discovery, lifecycle, invocation, intent compilation, and workflow management — all with TOON-first output optimized for AI agent consumption.
+`fwc` is the sole supported CLI for the Flywheel connector workspace. It provides 50+ commands across discovery, lifecycle, invocation, intent compilation, and workflow management. Output defaults to TOON, a token-efficient format optimized for AI agent consumption.
 
 ### Quick Start
 
@@ -760,7 +760,7 @@ Reconnecting ──(max retries)────> Unhealthy
 cargo build -p fwc --bin fwc --release
 cp target/release/fwc ~/.local/bin/
 
-# Discover connectors (offline mode — no running fcp-host needed)
+# Discover connectors (offline mode, no running fcp-host needed)
 fwc list --offline
 fwc search "send message" --offline
 fwc show github --offline
@@ -790,7 +790,7 @@ fwc history --connector github --limit 20
 
 ### Output Formats
 
-`fwc` defaults to TOON — a token-efficient structured format designed for AI agents. Other formats are available:
+`fwc` defaults to TOON, a token-efficient structured format designed for AI agents. Other formats are available:
 
 ```bash
 fwc list --offline                    # TOON (default, compact)
@@ -813,7 +813,7 @@ Implementation details in `fcp-raptorq`:
 - Chunked objects via `ChunkedObjectManifest` for large payloads
 - BLAKE3 hash verification on reconstructed chunks
 - Admission control: concurrent decode limit (16), memory limits, duplicate rejection, timeouts
-- All arithmetic uses `checked_*` / `saturating_*` operations — no integer overflow panics
+- All arithmetic uses `checked_*` / `saturating_*` operations; no integer overflow panics
 
 ### Deterministic CBOR Serialization
 
@@ -869,10 +869,290 @@ The workspace contains 58,000+ tests across several test categories:
 | **Benchmarks** | `crates/fwc/benches/`, `crates/fcp-core/benches/` | Search, schema, pipeline, PCS performance |
 
 Key testing patterns:
-- **No real API calls in tests** — all external services are mocked via `wiremock`
-- **Deterministic test logging** — structured JSON log output with correlation IDs
-- **RFC test vectors** — Ed25519 (RFC 8032), HKDF (RFC 5869), X25519 (RFC 7748)
-- **Golden vector snapshots** — canonical CBOR, manifest hashes, protocol frames
+- **No real API calls in tests**: all external services are mocked via `wiremock`
+- **Deterministic test logging**: structured JSON log output with correlation IDs
+- **RFC test vectors**: Ed25519 (RFC 8032), HKDF (RFC 5869), X25519 (RFC 7748)
+- **Golden vector snapshots**: canonical CBOR, manifest hashes, protocol frames
+
+---
+
+## End-to-End Request Flow
+
+When an AI agent invokes a connector operation, this is the exact sequence:
+
+```
+Agent ──"search my Gmail for invoices"──> fwc plan
+                                            │
+                                            ▼
+                                    Intent Compiler
+                                    ├─ Resolve connector: gmail
+                                    ├─ Resolve operation: gmail.search_messages
+                                    ├─ Check capability: gmail.read
+                                    └─ Build: fwc invoke gmail search_messages --file payload.json
+                                            │
+                                            ▼
+                                    fwc invoke (CLI)
+                                    ├─ Resolve host context
+                                    ├─ Preflight: risk check + approval gate
+                                    └─ HTTP POST to fcp-host admin API
+                                            │
+                                            ▼
+                                    fcp-host (orchestrator)
+                                    ├─ 1. Verify capability token (COSE signature)
+                                    ├─ 2. Check token expiry (CWT nbf/exp)
+                                    ├─ 3. Check revocation (monotonic seq, O(1))
+                                    ├─ 4. Enforce zone policy (zone binding)
+                                    ├─ 5. Check rate limits (token bucket)
+                                    ├─ 6. Record audit event (hash-linked chain)
+                                    └─ 7. Dispatch to connector subprocess
+                                            │
+                                            ▼
+                                    Gmail Connector (sandboxed)
+                                    ├─ Validate input against JSON Schema
+                                    ├─ Acquire bearer token (from materialized auth)
+                                    ├─ HTTP GET via egress proxy
+                                    │   └─ Egress proxy enforces: HTTPS, gmail.googleapis.com, port 443
+                                    ├─ Parse response, map errors to FcpError
+                                    └─ Return result + operation receipt
+                                            │
+                                            ▼
+                                    fcp-host
+                                    ├─ Record receipt (idempotency key)
+                                    ├─ Append audit event with trace context
+                                    └─ Return structured result to fwc
+                                            │
+                                            ▼
+                                    fwc → TOON output → Agent
+```
+
+Every step is logged with W3C trace context (trace_id, span_id) for end-to-end distributed tracing.
+
+---
+
+## Connector Authoring API
+
+Building a new connector requires implementing the FCP connector contract. The `fwc new` scaffold generator creates the complete structure:
+
+```bash
+fwc new myservice --archetype request-response
+```
+
+This generates:
+
+```
+connectors/myservice/
+├── Cargo.toml          # Workspace member with fcp-sdk, fcp-core, fcp-async-core
+├── manifest.toml       # Capabilities, zones, rate limits, network constraints, sandbox
+├── src/
+│   ├── main.rs         # JSON-RPC stdin/stdout protocol loop
+│   ├── lib.rs          # Module declarations
+│   ├── connector.rs    # FCP lifecycle: configure, handshake, health, doctor, invoke
+│   ├── client.rs       # HTTP client with retry loops and auth handling
+│   ├── error.rs        # Error types + ConnectorErrorMapping impl
+│   ├── types.rs        # API request/response structs (serde)
+│   └── limits.rs       # Named constants for rate limits and validation bounds
+└── tests/
+    └── integration.rs  # Wiremock-based lifecycle and operation tests
+```
+
+### The Connector Lifecycle
+
+Every connector implements the same protocol loop via `main.rs`:
+
+```rust
+// Simplified — actual code uses the full JSON-RPC 2.0 envelope
+let result = match method {
+    "configure"  => connector.handle_configure(params).await,
+    "handshake"  => connector.handle_handshake(params).await,
+    "health"     => connector.handle_health().await,
+    "doctor"     => connector.handle_doctor().await,
+    "self_check" => connector.handle_self_check().await,
+    "introspect" => connector.handle_introspect().await,
+    "invoke"     => connector.handle_invoke(params).await,
+    "simulate"   => connector.handle_simulate(params).await,
+    "shutdown"   => connector.handle_shutdown(params).await,
+    _ => Err(FcpError::InvalidRequest { .. }),
+};
+```
+
+### Error Mapping Contract
+
+Every connector error type bridges to the FCP error taxonomy:
+
+```rust
+#[derive(Error, Debug)]
+pub enum MyServiceError {
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("API error ({status_code}): {message}")]
+    Api { status_code: u16, message: String },
+
+    #[error("Rate limited")]
+    RateLimited { retry_after_ms: u64 },
+}
+
+impl ConnectorErrorMapping for MyServiceError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                status_code: 408,
+                message: format!("deadline exceeded after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Api {
+                status_code: 0,
+                message: "request cancelled".into(),
+            },
+            other => Self::Api {
+                status_code: 0,
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError { /* map each variant */ }
+    fn is_retryable(&self) -> bool { /* 429, 5xx = true */ }
+    fn retry_after(&self) -> Option<Duration> { /* from RateLimited */ }
+}
+```
+
+### Manifest Declaration
+
+Each connector's `manifest.toml` declares its security boundary:
+
+```toml
+[connector]
+id = "fcp.myservice"
+name = "MyService Connector"
+version = "0.1.0"
+archetypes = ["request-response"]
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_limit_mb = 128
+cpu_limit_percent = 25
+deny_exec = true
+
+[[provides]]
+id = "myservice.search"
+summary = "Search items"
+capability = "myservice.read"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["api.myservice.com"]
+allowed_ports = [443]
+require_tls = true
+
+[provides.rate_limit]
+pool_name = "myservice.read"
+requests = 100
+window = "60s"
+```
+
+---
+
+## Comparison: FCP vs. Alternatives
+
+| Feature | FCP | LangChain Tools | MCP (Model Context Protocol) | Custom API Gateway |
+|---------|-----|-----------------|-----------------------------|--------------------|
+| **Security model** | Zone-based cryptographic isolation with capability tokens | Trust-the-runtime (no isolation) | Server-declared capabilities (no crypto enforcement) | API key + rate limiting |
+| **Connector isolation** | Per-connector sandboxes (seccomp/WASI) | Shared process memory | Separate server processes | Separate services |
+| **Offline support** | Symbol-based availability with SLO repair | None | None | None |
+| **Credential handling** | Secretless via egress proxy injection | In-memory, shared context | Server-managed | Vault / env vars |
+| **Audit trail** | Hash-linked chain with quorum-signed heads | Logging only | Logging only | Centralized logs |
+| **Multi-device** | Mesh-native with fountain code distribution | Single process | Client-server | Load balancer |
+| **Revocation** | First-class objects with O(1) freshness | N/A | N/A | API key rotation |
+| **Agent UX** | TOON-first CLI with intent compilation | Python SDK | JSON-RPC | REST API |
+| **Connector count** | 89 production connectors | ~50 community tools | Varies by server | Custom per service |
+| **Supply chain** | Ed25519 signatures, in-toto/SLSA attestations | pip install | npm install | Docker images |
+
+FCP is heavier than MCP or LangChain tools. That weight buys cryptographic isolation, mesh distribution, and auditability. For single-machine prototyping, MCP is simpler. For production agent operations where security matters, FCP provides guarantees the alternatives cannot.
+
+---
+
+## Cryptographic Key Derivation
+
+FCP uses a structured key hierarchy to prevent cross-purpose key reuse:
+
+```
+Owner Key (Ed25519, threshold via FROST)
+    │
+    ├── sign NodeKeyAttestation (binds node_id → signing_key, encryption_key, issuance_key)
+    ├── sign ZoneKeyManifest   (distributes zone symmetric keys via HPKE sealing)
+    ├── sign DeviceEnrollment  (admits new nodes)
+    └── sign RevocationObject  (invalidates any of the above)
+
+Per-Node Keys:
+    Node Signing Key (Ed25519)  → signs frames, gossip, receipts
+    Node Encryption Key (X25519) → receives HPKE-sealed zone keys
+    Node Issuance Key (Ed25519)  → mints capability tokens (separately revocable)
+
+Per-Zone Keys:
+    Zone Encryption Key (ChaCha20-Poly1305)
+        │
+        ├── HKDF("FCP2-ZONE-KEY" ‖ zone_id) → zone subkey
+        ├── HKDF(zone_key ‖ sender_instance_id) → per-sender subkey (reboot-safe)
+        └── Per-symbol nonce: frame_seq ‖ ESI (deterministic, no coordination)
+
+Per-Session Keys (from X25519 ECDH):
+    Shared secret → HKDF with both nonces
+        ├── k_mac_i2r  (initiator→responder MAC key)
+        ├── k_mac_r2i  (responder→initiator MAC key)
+        └── k_ctx      (control plane AEAD key)
+```
+
+Key principles:
+- **No key reuse across purposes**: signing, encryption, issuance, and session keys are all separate
+- **Sender isolation**: per-sender subkeys incorporate `sender_instance_id`, preventing nonce collision across senders and across reboots
+- **Deterministic nonces**: symbol nonces are `frame_seq ‖ ESI`, eliminating coordination overhead
+- **Separate revocability**: issuance keys can be revoked without affecting a node's signing or encryption capabilities
+
+---
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FWC_FORMAT` | Default output format (`toon`, `json`, `table`, `csv`, `markdown`) | `toon` |
+| `FCP_HOST` | Default fcp-host endpoint URL | None (requires `--host` or context) |
+| `FCP_ZONE` | Default zone for operations | None |
+| `RUST_LOG` | Standard Rust logging filter | `info` |
+| `FCP_CONFIG_DIR` | FCP configuration directory | `~/.fcp` |
+| `FCP_CONNECTOR_STATE` | Connector state directory | `$FCP_CONFIG_DIR/state` |
+
+---
+
+## Acknowledgments
+
+Built with:
+- [Rust](https://www.rust-lang.org/) (nightly, 2024 edition) — the entire platform
+- [ed25519-dalek](https://github.com/dalek-cryptography/ed25519-dalek) + [x25519-dalek](https://github.com/dalek-cryptography/x25519-dalek) — cryptographic signatures and key exchange
+- [chacha20poly1305](https://github.com/RustCrypto/AEADs) — AEAD symmetric encryption
+- [blake3](https://github.com/BLAKE3-team/BLAKE3) — fast cryptographic hashing
+- [coset](https://github.com/nickovs/coset) — COSE token construction and verification
+- [ciborium](https://github.com/enarx/ciborium) — CBOR serialization
+- [raptorq](https://github.com/cberner/raptorq) — fountain code encoding/decoding
+- [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client for connector API calls
+- [wiremock](https://github.com/LukeMathWalker/wiremock-rs) — HTTP mocking for all 58,000+ tests
+- [clap](https://github.com/clap-rs/clap) — CLI argument parsing for `fwc`
+- [serde](https://github.com/serde-rs/serde) + [serde_json](https://github.com/serde-rs/json) — serialization throughout
+- [tracing](https://github.com/tokio-rs/tracing) — structured logging and observability
+- [Tailscale](https://tailscale.com/) — mesh networking, identity, and ACL enforcement
+- [Asupersync](https://github.com/nickovs/asupersync) — native async runtime (replacing Tokio in production paths)
+
+Developed using multi-agent coding swarms: Claude Code (Opus 4.6), Codex (GPT-5.2), and Gemini coordinating via [MCP Agent Mail](https://github.com/Dicklesworthstone/agent_mail_mcp), [Beads](https://github.com/Dicklesworthstone/beads_rust) issue tracking, and [NTM](https://github.com/Dicklesworthstone/named_tmux_manager) session orchestration. Specification refined through 12+ rounds of [APR](https://github.com/Dicklesworthstone/automated_plan_reviser_pro) with GPT Pro 5.2.
 
 ---
 
@@ -1318,6 +1598,177 @@ apr integrate 5 -c  # Copy integration prompt to clipboard
 
 ---
 
+## Rate Limiting Architecture
+
+`fcp-ratelimit` provides three complementary algorithms. Each connector declares rate limit pools in its manifest; the host enforces them before dispatching operations.
+
+| Algorithm | Use Case | State | Thread Safety |
+|-----------|----------|-------|---------------|
+| **Token Bucket** | Steady-state rate limiting with burst tolerance | Atomic u32 + Mutex for refill timestamp | Lock-free consume via CAS loop |
+| **Sliding Window** | Precise request counting over a time window | Mutex-guarded VecDeque of timestamps | Single Mutex, cleanup on access |
+| **Leaky Bucket** | Smooth output rate with configurable drain | Mutex-guarded f64 level + leak rate | Leak on every access |
+
+Token bucket refill uses a phase-preserving algorithm: `last_refill = now - (elapsed % refill_interval)`. This avoids both drift accumulation and burst-after-idle issues. Clock jumps (backward or forward) are handled via `saturating_duration_since`, which returns zero for backward jumps, so no tokens are erroneously added.
+
+Jitter in retry backoff uses the range `[0.5x, 1.5x)` of the base delay via `random_float().mul_add(1.0, 0.5)`, preventing thundering herds when many connectors retry simultaneously.
+
+---
+
+## Egress Proxy
+
+Every connector's network access passes through the egress proxy. The proxy enforces manifest-declared network constraints at the connection level. Connectors cannot reach hosts they haven't declared.
+
+```
+Connector ──HTTP request──> Egress Proxy
+                              │
+                              ├─ 1. CIDR deny list (localhost, private, tailnet)
+                              ├─ 2. Host allowlist (from manifest network_constraints)
+                              ├─ 3. Port allowlist (from manifest)
+                              ├─ 4. TLS requirement enforcement
+                              ├─ 5. SNI verification (hostname matches)
+                              ├─ 6. Optional SPKI pinning (certificate pinning)
+                              ├─ 7. DNS response limit
+                              ├─ 8. Credential injection (secretless mode)
+                              │     └─ X-FCP-Credential-Id header → proxy resolves to bearer token
+                              └─ 9. Audit event logged
+                              │
+                              ▼
+                         External API
+```
+
+Default CIDR deny ranges: `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (tailnet), `169.254.0.0/16` (link-local), `::1/128`, `fc00::/7`.
+
+Connectors in `credential_id` mode never see raw API keys. The egress proxy resolves the credential reference and injects the bearer token into the outgoing request. If the connector process is compromised, the attacker has no credentials to exfiltrate.
+
+---
+
+## Webhook Delivery System
+
+`fcp-webhook` handles inbound webhook reception from external services (GitHub, Stripe, Slack, etc.) with three layers of protection:
+
+**Signature verification** (timing-safe):
+- HMAC-SHA256 with `mac.verify_slice()` (constant-time comparison via the `hmac` crate)
+- HMAC-SHA1 for legacy providers
+- Ed25519 for providers that support it
+- Secrets redacted in Debug output (`[REDACTED]`)
+
+**Replay protection**:
+- Deterministic event IDs: `SHA256(provider ‖ 0x00 ‖ event_type ‖ 0x00 ‖ body)`, so the same input always produces the same ID
+- Atomic claim via RwLock: `check_replay()` verifies, then `claim_event()` atomically checks-and-records under write lock
+- TTL-based cleanup (default 24 hours) with periodic garbage collection
+
+**Provider-specific parsing**:
+- Slack: Unwraps `event_callback` envelope to extract inner `event.type` (e.g., `message` instead of `event_callback`)
+- GitHub: Extracts `X-GitHub-Delivery` header as event ID; falls back to deterministic ID if missing
+- Generic: Configurable header extraction with fallback chain
+
+---
+
+## Bootstrap Ceremony
+
+First-run setup for a new FCP mesh uses a multi-phase ceremony with crash recovery:
+
+```
+Phase 1: Time Validation
+    └─ NTP drift check (5-min error threshold, 30-sec warning)
+
+Phase 2: Genesis
+    ├─ Generate 256-bit entropy (OsRng)
+    ├─ Derive BIP39 recovery phrase (24 words)
+    ├─ Derive owner keypair from recovery phrase
+    ├─ Create genesis object (canonical CBOR, signed)
+    └─ Atomic file write (temp → fsync → rename)
+
+Phase 3: Node Key Generation
+    ├─ Generate node signing key (Ed25519)
+    ├─ Generate node encryption key (X25519)
+    ├─ Generate node issuance key (Ed25519)
+    └─ Owner signs NodeKeyAttestation
+
+Phase 4: Zone Initialization
+    ├─ Generate zone symmetric keys
+    ├─ Create ZoneKeyManifest (HPKE-sealed per node)
+    └─ Initialize audit chain (genesis event)
+```
+
+Crash recovery: A lock file tracks the current phase. If the process crashes and restarts, it detects the lock and resumes from the last completed phase rather than re-running the ceremony.
+
+Recovery phrases use `zeroize::ZeroizeOnDrop`, so entropy is zeroed from memory when the `RecoveryPhrase` struct is dropped. Constant-time comparison via `subtle::ConstantTimeEq` prevents timing side-channel attacks during phrase verification.
+
+Cold recovery reconstructs the owner keypair from the recovery phrase and re-derives all zone keys. Objects created after the original genesis that haven't been replicated will be lost; the tool documents this and warns during recovery.
+
+---
+
+## MCP Tool Export
+
+`fwc serve-mcp` exposes discovered connectors as MCP (Model Context Protocol) tools over stdio JSON-RPC, allowing any MCP-compatible AI agent to use FCP connectors directly:
+
+```bash
+# Serve all connectors as MCP tools (requires running fcp-host)
+fwc serve-mcp --host http://127.0.0.1:8787
+
+# Serve specific connectors only
+fwc serve-mcp --host http://127.0.0.1:8787 github slack gmail
+
+# Offline tool schema export (for agent configuration)
+fwc export-tools --offline --format mcp --json
+fwc export-tools --offline --format claude github
+fwc export-tools --offline --format openai --risk-max medium --output tools.json
+```
+
+Export formats: `mcp` (MCP tool schema), `claude` (Claude tool_use format), `openai` (OpenAI function calling format). The `--risk-max` filter excludes operations above a risk threshold, preventing agents from accidentally invoking dangerous operations.
+
+---
+
+## Operational Pipelines and Recipes
+
+`fwc` supports multi-step operation composition via pipelines and recipes:
+
+**Pipes** chain two operations where the output of A feeds the input of B:
+```bash
+fwc pipe github:issues.list slack:messages.send \
+    --map 'issue.title -> text' \
+    --map 'issue.url -> blocks[0].url'
+```
+
+**Pipelines** are TOML-defined multi-step workflows with dependency ordering:
+```bash
+fwc pipeline list
+fwc pipeline validate .fwc/pipelines/notify-on-new-issues.toml
+fwc pipeline dry-run .fwc/pipelines/notify-on-new-issues.toml --param owner=octocat
+fwc pipeline run .fwc/pipelines/notify-on-new-issues.toml --param owner=octocat
+```
+
+**Recipes** are bundled, reusable pipeline templates:
+```bash
+fwc recipe list
+fwc recipe show github-pr-review-notify
+fwc recipe dry-run github-pr-review-notify
+fwc recipe export github-pr-review-notify > .fwc/pipelines/custom.toml
+```
+
+**Batch operations** execute heterogeneous operations from a JSONL file with dependency ordering:
+```bash
+fwc batch-file operations.jsonl --dry-run
+fwc batch-file operations.jsonl --approve
+```
+
+---
+
+## Post-Compromise Security (PCS) Zones
+
+Sensitive zones can use MLS/TreeKEM-based post-compromise security, where compromise of a device triggers automatic key rotation that heals the group's forward secrecy:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| **Static** | Zone key set once, rotated manually | Low-sensitivity zones, `z:public` |
+| **Epoch-Based** | Key rotates on membership changes | Standard zones, `z:work`, `z:private` |
+| **Continuous** | Key rotates on every N operations | High-sensitivity, `z:owner` |
+
+`PcsGroupState` tracks the current epoch, member set, and key management mode. When a device is removed (revocation), the remaining members execute a TreeKEM update that produces a new epoch key the removed device cannot derive. Benchmarked at ~2.6us per epoch advance and ~3.5us per removal rekey for groups of 3-10 members.
+
+---
+
 ## Limitations
 
 Honest about what FCP doesn't do yet:
@@ -1349,13 +1800,13 @@ Honest about what FCP doesn't do yet:
 Each connector is a standalone binary with its own manifest, capabilities, and sandbox policy. This eliminates shared-memory vulnerabilities, enables per-connector resource limits, and makes supply-chain verification tractable (you sign one binary, not a runtime + plugin combination).
 
 **Q: Why RaptorQ instead of regular file transfer?**
-Fountain codes eliminate retransmit coordination. Any K' symbols reconstruct the original — no packet is special. This enables multipath aggregation (symbols from any device contribute equally), natural offline resilience (partial availability = partial reconstruction), and DoS resistance (attackers can't target "important" packets).
+Fountain codes eliminate retransmit coordination. Any K' symbols reconstruct the original; no packet is special. This enables multipath aggregation (symbols from any device contribute equally), natural offline resilience (partial availability = partial reconstruction), and DoS resistance (attackers can't target "important" packets).
 
 **Q: Why Tailscale as the transport layer?**
 Tailscale provides unforgeable WireGuard keys (identity), NAT traversal (connectivity), and ACLs (authorization) in one layer. FCP maps zones to Tailscale tags, giving cryptographic network isolation without managing a separate PKI.
 
 **Q: Can I use FCP without the mesh?**
-Yes. The host-first stack (`fwc` + `fcp-host`) works standalone on a single machine. The mesh layer adds multi-device distribution, offline resilience, and symbol-based data availability — but none of that is required for basic connector operation.
+Yes. The host-first stack (`fwc` + `fcp-host`) works standalone on a single machine. The mesh layer adds multi-device distribution, offline resilience, and symbol-based data availability, but none of that is required for basic connector operation.
 
 **Q: Why TOON output by default instead of JSON?**
 TOON (Token-Optimized Output Notation) is 2-5x more token-efficient than JSON for AI agent consumption. Every `fwc` command also supports `--json` for full-fidelity structured output, plus `--format table|csv|tsv|markdown` for human consumption.

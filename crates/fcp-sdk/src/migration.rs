@@ -431,6 +431,20 @@ impl RetryLoop {
     pub async fn execute<T, E, F, Fut>(
         ctx: &ExecutionContext,
         policy: &RetryPolicy,
+        operation: F,
+    ) -> Result<T, E>
+    where
+        E: ConnectorErrorMapping,
+        F: FnMut(u32) -> Fut,
+        Fut: std::future::Future<Output = AttemptOutcome<T, E>>,
+    {
+        Self::execute_from_attempt(ctx, policy, 0, operation).await
+    }
+
+    async fn execute_from_attempt<T, E, F, Fut>(
+        ctx: &ExecutionContext,
+        policy: &RetryPolicy,
+        start_attempt: u32,
         mut operation: F,
     ) -> Result<T, E>
     where
@@ -438,7 +452,7 @@ impl RetryLoop {
         F: FnMut(u32) -> Fut,
         Fut: std::future::Future<Output = AttemptOutcome<T, E>>,
     {
-        let mut attempt: u32 = 0;
+        let mut attempt = start_attempt;
         let mut last_error: Option<E> = None;
 
         loop {
@@ -486,8 +500,11 @@ impl RetryLoop {
                         return Err(E::from_async_error(async_err));
                     }
 
+                    let Some(next_attempt) = attempt.checked_add(1) else {
+                        return Err(error);
+                    };
                     last_error = Some(error);
-                    attempt = attempt.saturating_add(1);
+                    attempt = next_attempt;
                 }
             }
         }
@@ -1682,6 +1699,48 @@ mod tests {
             assert_eq!(result.unwrap(), "unlimited works");
         })
         .expect("runtime should execute unlimited-attempts test");
+    }
+
+    #[test]
+    fn retry_loop_unlimited_attempts_stop_at_u32_max_without_repeating_attempt() {
+        use std::sync::{Arc, Mutex};
+
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let policy = RetryPolicy::new()
+                .with_max_attempts(None)
+                .with_base_backoff_ms(0)
+                .with_jitter_enabled(false);
+            let seen_attempts = Arc::new(Mutex::new(Vec::new()));
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute_from_attempt(&ctx, &policy, u32::MAX - 1, {
+                    let seen_attempts = Arc::clone(&seen_attempts);
+                    move |attempt| {
+                        let seen_attempts = Arc::clone(&seen_attempts);
+                        async move {
+                            seen_attempts.lock().unwrap().push(attempt);
+                            AttemptOutcome::Retryable {
+                                error: TestError::Transient(format!("attempt {attempt}")),
+                                retry_after: None,
+                            }
+                        }
+                    }
+                })
+                .await;
+
+            match result.unwrap_err() {
+                TestError::Transient(message) => {
+                    assert!(message.contains(&u32::MAX.to_string()));
+                }
+                other => panic!("expected Transient, got {other:?}"),
+            }
+            assert_eq!(
+                seen_attempts.lock().unwrap().as_slice(),
+                &[u32::MAX - 1, u32::MAX]
+            );
+        })
+        .expect("runtime should stop unlimited retries at the u32 attempt ceiling");
     }
 
     // -- NEW: ConnectorErrorMapping trait coverage -----------------------------

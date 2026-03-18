@@ -90,7 +90,9 @@ pub struct RetryPolicy {
     pub max_backoff_ms: u64,
     /// Whether to add deterministic jitter to backoff delays.
     pub jitter_enabled: bool,
-    /// Maximum total attempts, including the initial call. None means unlimited.
+    /// Maximum total attempts, including the initial call.
+    ///
+    /// `None` means unlimited within the representable `u32` attempt space.
     pub max_attempts: Option<u32>,
 }
 
@@ -179,6 +181,12 @@ impl RetryPolicy {
         decision: RetryDecision,
         retry_after_hint: Option<Duration>,
     ) -> Option<Duration> {
+        // Attempt numbers are exposed as `u32`, so there is no representable
+        // retry after the final `u32::MAX` attempt.
+        if attempt == u32::MAX {
+            return None;
+        }
+
         if let Some(max_attempts) = self.max_attempts {
             if attempt.saturating_add(1) >= max_attempts {
                 return None;
@@ -977,6 +985,19 @@ mod tests {
         // max_attempts=1: only one attempt. After it fails, no delay needed.
         assert!(p.next_delay(0, RetryDecision::Backoff, None).is_none());
         assert!(p.next_delay(1, RetryDecision::Backoff, None).is_none());
+    }
+
+    #[test]
+    fn next_delay_at_u32_max_returns_none_even_when_unlimited() {
+        let p = RetryPolicy::new().with_max_attempts(None);
+        assert!(
+            p.next_delay(u32::MAX, RetryDecision::Immediate, None)
+                .is_none()
+        );
+        assert!(
+            p.next_delay(u32::MAX, RetryDecision::Backoff, None)
+                .is_none()
+        );
     }
 
     #[test]

@@ -260,23 +260,26 @@ impl MysqlConnector {
     /// Handle introspect request.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let operations = operations_info();
-        serde_json::to_value(json!({
+        Ok(json!({
             "connector_id": "mysql",
             "version": "0.1.0",
             "archetypes": ["database"],
-            "operations": operations.iter().map(|op| json!({
-                "id": op.id.as_str(),
-                "summary": op.summary,
-                "safety_tier": format!("{:?}", op.safety_tier),
-                "risk_level": format!("{:?}", op.risk_level),
-                "idempotency": format!("{:?}", op.idempotency),
-                "capability": op.capability.as_str(),
-            })).collect::<Vec<_>>(),
+            "operations": operations.iter().map(|op| {
+                // Use serde serialization for enum values to get canonical snake_case
+                let safety = serde_json::to_value(&op.safety_tier).unwrap_or(json!("unknown"));
+                let risk = serde_json::to_value(&op.risk_level).unwrap_or(json!("unknown"));
+                let idem = serde_json::to_value(&op.idempotency).unwrap_or(json!("unknown"));
+                json!({
+                    "id": op.id.as_str(),
+                    "summary": op.summary,
+                    "safety_tier": safety,
+                    "risk_level": risk,
+                    "idempotency": idem,
+                    "capability": op.capability.as_str(),
+                })
+            }).collect::<Vec<_>>(),
             "operation_count": operations.len(),
         }))
-        .map_err(|e| FcpError::Internal {
-            message: format!("Failed to serialize introspection: {e}"),
-        })
     }
 
     /// Handle invoke request.

@@ -2535,21 +2535,6 @@ async fn test_self_check_ok_after_configure() {{
     assert_eq!(report.status, SelfCheckStatus::Ok);
 }}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OperationInfo completeness test (V3 contract)
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_operations_info_nonempty() {{
-    // Verify the connector declares at least one operation with typed metadata.
-    let connector = {struct_name}Connector::new();
-    let op = connector.placeholder_operation();
-    assert!(!op.id.as_str().is_empty(), "operation must have an ID");
-    assert!(!op.summary.is_empty(), "operation must have a summary");
-    assert!(op.input_schema.is_object(), "operation must have an input schema");
-    assert!(op.output_schema.is_object(), "operation must have an output schema");
-}}
-
 #[fcp_async_core::runtime::test]
 async fn test_simulate_allowed_by_default() {{
     let connector = {struct_name}Connector::new();

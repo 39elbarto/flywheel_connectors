@@ -341,7 +341,7 @@ New connector authors should study the exemplar for their archetype before start
     [ ] shutdown() called in shutdown handler
 [ ] RetryLoop for all HTTP calls (no hand-rolled loops)
 [ ] Typed OperationInfo for every operation
-    [ ] Correct SafetyTier (Safe/Risky/Dangerous/Critical)
+    [ ] Correct SafetyTier (Safe/Risky/Dangerous/Critical/Forbidden)
     [ ] Correct RiskLevel (Low/Medium/High/Critical)
     [ ] Correct IdempotencyClass (None/BestEffort/Strict)
     [ ] Input and output JSON Schemas

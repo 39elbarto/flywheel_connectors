@@ -283,15 +283,12 @@ pub fn assert_doctor_response_valid(response: &Value) {
 ///
 /// Panics if the response doesn't indicate ready.
 pub fn assert_self_check_ready(response: &Value) {
-    let ready = response
-        .get("ready")
-        .and_then(Value::as_bool)
-        .or_else(|| {
-            response
-                .get("status")
-                .and_then(Value::as_str)
-                .map(|s| s == "ready" || s == "healthy" || s == "ok")
-        });
+    let ready = response.get("ready").and_then(Value::as_bool).or_else(|| {
+        response
+            .get("status")
+            .and_then(Value::as_str)
+            .map(|s| s == "ready" || s == "healthy" || s == "ok")
+    });
     assert_eq!(
         ready,
         Some(true),
@@ -303,11 +300,18 @@ pub fn assert_self_check_ready(response: &Value) {
 ///
 /// # Panics
 ///
-/// Panics if the response indicates ready.
+/// Panics if the response indicates ready via either `ready: true`
+/// or `status` being one of `"ready"`, `"healthy"`, `"ok"`.
 pub fn assert_self_check_not_ready(response: &Value) {
     let ready = response
         .get("ready")
         .and_then(Value::as_bool)
+        .or_else(|| {
+            response
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|s| s == "ready" || s == "healthy" || s == "ok")
+        })
         .unwrap_or(false);
     assert!(
         !ready,
@@ -357,10 +361,7 @@ impl LifecycleTracker {
     ///
     /// Panics if there are no transitions or the last one doesn't match.
     pub fn assert_last_transition(&self, from: &str, to: &str) {
-        let last = self
-            .transitions
-            .last()
-            .expect("No transitions recorded");
+        let last = self.transitions.last().expect("No transitions recorded");
         assert_eq!(
             (last.0.as_str(), last.1.as_str()),
             (from, to),
@@ -383,8 +384,7 @@ impl LifecycleTracker {
             expected.len(),
             self.transitions.len()
         );
-        for (i, ((from, to), (ef, et))) in
-            self.transitions.iter().zip(expected.iter()).enumerate()
+        for (i, ((from, to), (ef, et))) in self.transitions.iter().zip(expected.iter()).enumerate()
         {
             assert_eq!(
                 (from.as_str(), to.as_str()),
@@ -467,9 +467,15 @@ mod tests {
     #[test]
     fn test_doctor_report_assertions() {
         let checks = vec![
-            DoctorCheckBuilder::new("a").status(CheckStatus::Pass).build(),
-            DoctorCheckBuilder::new("b").status(CheckStatus::Pass).build(),
-            DoctorCheckBuilder::new("c").status(CheckStatus::Warn).build(),
+            DoctorCheckBuilder::new("a")
+                .status(CheckStatus::Pass)
+                .build(),
+            DoctorCheckBuilder::new("b")
+                .status(CheckStatus::Pass)
+                .build(),
+            DoctorCheckBuilder::new("c")
+                .status(CheckStatus::Warn)
+                .build(),
         ];
         let report = DoctorCheckReport::from_checks(checks);
 
@@ -505,6 +511,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Expected self-check to indicate not-ready")]
+    fn test_self_check_not_ready_rejects_ready_status_aliases() {
+        assert_self_check_not_ready(&serde_json::json!({"status": "ok"}));
+    }
+
+    #[test]
     fn test_lifecycle_tracker() {
         let mut tracker = LifecycleTracker::new();
         tracker.record("init", "configured");
@@ -523,10 +535,18 @@ mod tests {
     #[test]
     fn test_count_by_status() {
         let checks = vec![
-            DoctorCheckBuilder::new("a").status(CheckStatus::Pass).build(),
-            DoctorCheckBuilder::new("b").status(CheckStatus::Pass).build(),
-            DoctorCheckBuilder::new("c").status(CheckStatus::Warn).build(),
-            DoctorCheckBuilder::new("d").status(CheckStatus::Fail).build(),
+            DoctorCheckBuilder::new("a")
+                .status(CheckStatus::Pass)
+                .build(),
+            DoctorCheckBuilder::new("b")
+                .status(CheckStatus::Pass)
+                .build(),
+            DoctorCheckBuilder::new("c")
+                .status(CheckStatus::Warn)
+                .build(),
+            DoctorCheckBuilder::new("d")
+                .status(CheckStatus::Fail)
+                .build(),
         ];
         let report = DoctorCheckReport::from_checks(checks);
         assert_eq!(report.count_by_status(&CheckStatus::Pass), 2);
@@ -537,9 +557,15 @@ mod tests {
     #[test]
     fn test_failures_and_warnings() {
         let checks = vec![
-            DoctorCheckBuilder::new("ok").status(CheckStatus::Pass).build(),
-            DoctorCheckBuilder::new("warn1").status(CheckStatus::Warn).build(),
-            DoctorCheckBuilder::new("fail1").status(CheckStatus::Fail).build(),
+            DoctorCheckBuilder::new("ok")
+                .status(CheckStatus::Pass)
+                .build(),
+            DoctorCheckBuilder::new("warn1")
+                .status(CheckStatus::Warn)
+                .build(),
+            DoctorCheckBuilder::new("fail1")
+                .status(CheckStatus::Fail)
+                .build(),
         ];
         let report = DoctorCheckReport::from_checks(checks);
         assert_eq!(report.failures().len(), 1);

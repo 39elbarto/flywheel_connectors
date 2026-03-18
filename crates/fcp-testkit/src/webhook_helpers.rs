@@ -16,9 +16,9 @@
 //! assert!(!signature.is_empty());
 //! ```
 
+use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
-use hmac::{Hmac, Mac};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -84,8 +84,9 @@ pub fn github_signature(secret: &str, payload: &[u8]) -> String {
 /// Stripe uses `t=<timestamp>,v1=<hex>` format in the `Stripe-Signature` header.
 #[must_use]
 pub fn stripe_signature(secret: &str, payload: &[u8], timestamp: i64) -> String {
-    let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
-    let sig = sign_hmac_sha256(secret, signed_payload.as_bytes());
+    let mut signed_payload = format!("{timestamp}.").into_bytes();
+    signed_payload.extend_from_slice(payload);
+    let sig = sign_hmac_sha256(secret, &signed_payload);
     format!("t={timestamp},v1={sig}")
 }
 
@@ -159,8 +160,7 @@ impl WebhookPayloadBuilder {
     pub fn sign_github(mut self, secret: &str) -> Self {
         let body = self.body.as_deref().unwrap_or_default();
         let sig = github_signature(secret, body);
-        self.headers
-            .push(("X-Hub-Signature-256".to_string(), sig));
+        self.headers.push(("X-Hub-Signature-256".to_string(), sig));
         self.headers
             .push(("X-GitHub-Event".to_string(), self.event_type.clone()));
         self
@@ -206,12 +206,49 @@ pub fn assert_webhook_signature_valid(
         .find(|(k, _)| k.eq_ignore_ascii_case(header_name))
         .unwrap_or_else(|| panic!("Missing webhook signature header: {header_name}"));
 
-    // Strip common prefixes for verification
-    let sig_hex = sig_header
-        .1
-        .strip_prefix("sha256=")
-        .or_else(|| sig_header.1.strip_prefix("v0="))
-        .unwrap_or(&sig_header.1);
+    let sig_hex = match header_name.to_ascii_lowercase().as_str() {
+        "stripe-signature" => {
+            let mut timestamp = None;
+            let mut signatures = Vec::new();
+            for part in sig_header.1.split(',') {
+                if let Some(ts) = part.strip_prefix("t=") {
+                    timestamp = ts.parse::<i64>().ok();
+                } else if let Some(sig) = part.strip_prefix("v1=") {
+                    signatures.push(sig);
+                }
+            }
+
+            let timestamp = timestamp.unwrap_or_else(|| {
+                panic!(
+                    "Stripe signature header missing timestamp: {}",
+                    sig_header.1
+                )
+            });
+            assert!(
+                !signatures.is_empty(),
+                "Stripe signature header missing v1 signature: {}",
+                sig_header.1
+            );
+
+            let mut signed_payload = format!("{timestamp}.").into_bytes();
+            signed_payload.extend_from_slice(payload);
+
+            assert!(
+                signatures.iter().any(|signature| verify_hmac_sha256(
+                    secret,
+                    &signed_payload,
+                    signature
+                )),
+                "Webhook signature verification failed for header {header_name}"
+            );
+            return;
+        }
+        _ => sig_header
+            .1
+            .strip_prefix("sha256=")
+            .or_else(|| sig_header.1.strip_prefix("v0="))
+            .unwrap_or(&sig_header.1),
+    };
 
     assert!(
         verify_hmac_sha256(secret, payload, sig_hex),
@@ -291,10 +328,7 @@ mod tests {
             .build();
         assert_eq!(payload.event_type, "push");
         assert!(!payload.body.is_empty());
-        assert!(payload
-            .headers
-            .iter()
-            .any(|(k, _)| k == "Content-Type"));
+        assert!(payload.headers.iter().any(|(k, _)| k == "Content-Type"));
     }
 
     #[test]
@@ -305,14 +339,13 @@ mod tests {
             .sign_github(secret)
             .build();
 
-        assert!(payload
-            .headers
-            .iter()
-            .any(|(k, _)| k == "X-Hub-Signature-256"));
-        assert!(payload
-            .headers
-            .iter()
-            .any(|(k, _)| k == "X-GitHub-Event"));
+        assert!(
+            payload
+                .headers
+                .iter()
+                .any(|(k, _)| k == "X-Hub-Signature-256")
+        );
+        assert!(payload.headers.iter().any(|(k, _)| k == "X-GitHub-Event"));
 
         assert_webhook_signature_valid(
             &payload.headers,
@@ -331,10 +364,34 @@ mod tests {
             .sign_stripe(secret, ts)
             .build();
 
-        assert!(payload
-            .headers
-            .iter()
-            .any(|(k, _)| k == "Stripe-Signature"));
+        assert!(payload.headers.iter().any(|(k, _)| k == "Stripe-Signature"));
+        assert_webhook_signature_valid(&payload.headers, "Stripe-Signature", secret, &payload.body);
+    }
+
+    #[test]
+    fn test_stripe_signature_uses_raw_payload_bytes() {
+        let secret = "whsec_test123";
+        let ts = 1_700_000_000;
+        let payload = vec![0xf0, 0x28, 0x8c, 0x28];
+        let sig = stripe_signature(secret, &payload, ts);
+
+        let headers = vec![("Stripe-Signature".to_string(), sig)];
+        assert_webhook_signature_valid(&headers, "Stripe-Signature", secret, &payload);
+    }
+
+    #[test]
+    fn test_stripe_signature_accepts_any_valid_v1_value() {
+        let secret = "whsec_test123";
+        let ts = 1_700_000_000;
+        let payload = br#"{"id":"evt_123"}"#.to_vec();
+        let valid_sig = stripe_signature(secret, &payload, ts);
+        let valid_sig = valid_sig
+            .strip_prefix(&format!("t={ts},v1="))
+            .expect("generated Stripe signature should include timestamp and v1 digest");
+        let header_value = format!("t={ts},v1=invalid,v1={valid_sig}");
+        let headers = vec![("Stripe-Signature".to_string(), header_value)];
+
+        assert_webhook_signature_valid(&headers, "Stripe-Signature", secret, &payload);
     }
 
     #[test]
@@ -360,7 +417,12 @@ mod tests {
             .with_header("X-Custom", "value")
             .build();
         assert_eq!(payload.body, b"raw body content");
-        assert!(payload.headers.iter().any(|(k, v)| k == "X-Custom" && v == "value"));
+        assert!(
+            payload
+                .headers
+                .iter()
+                .any(|(k, v)| k == "X-Custom" && v == "value")
+        );
     }
 
     #[test]

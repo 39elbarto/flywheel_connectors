@@ -239,7 +239,7 @@ pub fn assert_evidence_all_zone_scoped(collector: &EvidenceCollector) {
 ///
 /// Panics if any secret pattern is found in the serialized evidence.
 pub fn assert_evidence_no_secrets(collector: &EvidenceCollector, patterns: &[&str]) {
-    let serialized = format!("{:?}", collector);
+    let serialized = format!("{collector:?}");
     for pattern in patterns {
         assert!(
             !serialized.contains(pattern),

@@ -10,12 +10,13 @@
 //!
 //! let secret = "whsec_test123";
 //! let payload = WebhookPayloadBuilder::new("issue.created")
-//!     .with_json_body(serde_json::json!({"action": "opened"}))
+//!     .with_json_body(&serde_json::json!({"action": "opened"}))
 //!     .build();
 //! let signature = sign_hmac_sha256(secret, &payload.body);
 //! assert!(!signature.is_empty());
 //! ```
 
+use serde_json::Value;
 use sha2::Sha256;
 use hmac::{Hmac, Mac};
 
@@ -132,7 +133,7 @@ impl WebhookPayloadBuilder {
 
     /// Set a JSON body for the webhook payload.
     #[must_use]
-    pub fn with_json_body(mut self, value: Value) -> Self {
+    pub fn with_json_body(mut self, value: &Value) -> Self {
         self.body = Some(value.to_string().into_bytes());
         self.headers
             .push(("Content-Type".to_string(), "application/json".to_string()));
@@ -286,7 +287,7 @@ mod tests {
     #[test]
     fn test_webhook_payload_builder_basic() {
         let payload = WebhookPayloadBuilder::new("push")
-            .with_json_body(serde_json::json!({"ref": "main"}))
+            .with_json_body(&serde_json::json!({"ref": "main"}))
             .build();
         assert_eq!(payload.event_type, "push");
         assert!(!payload.body.is_empty());
@@ -300,7 +301,7 @@ mod tests {
     fn test_webhook_payload_builder_github_signed() {
         let secret = "gh-webhook-secret";
         let payload = WebhookPayloadBuilder::new("issues")
-            .with_json_body(serde_json::json!({"action": "opened"}))
+            .with_json_body(&serde_json::json!({"action": "opened"}))
             .sign_github(secret)
             .build();
 
@@ -326,7 +327,7 @@ mod tests {
         let secret = "whsec_test123";
         let ts = 1_700_000_000;
         let payload = WebhookPayloadBuilder::new("payment_intent.succeeded")
-            .with_json_body(serde_json::json!({"id": "pi_123"}))
+            .with_json_body(&serde_json::json!({"id": "pi_123"}))
             .sign_stripe(secret, ts)
             .build();
 

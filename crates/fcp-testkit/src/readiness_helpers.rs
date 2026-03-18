@@ -249,8 +249,7 @@ pub fn assert_doctor_no_failures(report: &DoctorCheckReport) {
     let failures = report.failures();
     assert!(
         failures.is_empty(),
-        "Expected no failures but got: {:?}",
-        failures
+        "Expected no failures but got: {failures:?}",
     );
 }
 
@@ -329,7 +328,7 @@ pub struct LifecycleTracker {
 impl LifecycleTracker {
     /// Create a new lifecycle tracker.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             transitions: Vec::new(),
         }

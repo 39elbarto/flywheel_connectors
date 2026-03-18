@@ -92,7 +92,7 @@ pub struct QueryResultBuilder {
 impl QueryResultBuilder {
     /// Create a new empty query result builder.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -117,7 +117,7 @@ impl QueryResultBuilder {
 
     /// Set rows affected count (for mutations).
     #[must_use]
-    pub fn rows_affected(mut self, count: u64) -> Self {
+    pub const fn rows_affected(mut self, count: u64) -> Self {
         self.rows_affected = Some(count);
         self.is_mutation = true;
         self
@@ -125,7 +125,7 @@ impl QueryResultBuilder {
 
     /// Mark as a mutation query.
     #[must_use]
-    pub fn mutation(mut self) -> Self {
+    pub const fn mutation(mut self) -> Self {
         self.is_mutation = true;
         self
     }
@@ -228,7 +228,7 @@ pub struct TrackedQuery {
 impl QueryTracker {
     /// Create a new query tracker.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             queries: Vec::new(),
         }
@@ -312,7 +312,7 @@ pub fn assert_query_row_count(result: &MockQueryResult, expected: usize) {
 ///
 /// # Panics
 ///
-/// Panics if rows_affected doesn't match or is not set.
+/// Panics if `rows_affected` doesn't match or is not set.
 pub fn assert_rows_affected(result: &MockQueryResult, expected: u64) {
     let actual = result
         .rows_affected

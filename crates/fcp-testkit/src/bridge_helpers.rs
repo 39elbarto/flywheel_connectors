@@ -84,7 +84,7 @@ pub struct BridgeConnectionTracker {
 impl BridgeConnectionTracker {
     /// Create a new tracker.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             events: Vec::new(),
             state: BridgeState::Disconnected,
@@ -224,7 +224,7 @@ pub fn mock_bridge_discovery(targets: &[(&str, &str)]) -> Value {
 
 /// Build a mock bridge command response.
 #[must_use]
-pub fn mock_bridge_command_response(id: u64, result: Value) -> Value {
+pub fn mock_bridge_command_response(id: u64, result: &Value) -> Value {
     json!({
         "id": id,
         "result": result,
@@ -245,7 +245,7 @@ pub fn mock_bridge_error_response(id: u64, code: i64, message: &str) -> Value {
 
 /// Build a mock bridge event (unsolicited server-sent message).
 #[must_use]
-pub fn mock_bridge_event(method: &str, params: Value) -> Value {
+pub fn mock_bridge_event(method: &str, params: &Value) -> Value {
     json!({
         "method": method,
         "params": params,
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn mock_bridge_command_response_format() {
-        let resp = mock_bridge_command_response(42, json!({"status": "ok"}));
+        let resp = mock_bridge_command_response(42, &json!({"status": "ok"}));
         assert_eq!(resp["id"], 42);
         assert_eq!(resp["result"]["status"], "ok");
     }
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn mock_bridge_event_format() {
-        let evt = mock_bridge_event("Page.loadEventFired", json!({"timestamp": 123.0}));
+        let evt = mock_bridge_event("Page.loadEventFired", &json!({"timestamp": 123.0}));
         assert_eq!(evt["method"], "Page.loadEventFired");
     }
 

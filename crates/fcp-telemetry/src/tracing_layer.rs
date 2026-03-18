@@ -25,15 +25,17 @@ fn header_value_case_insensitive<'a, S: BuildHasher>(
         .map(|(_, value)| value.as_str())
 }
 
-fn remove_header_case_insensitive<S: BuildHasher>(
+fn remove_headers_case_insensitive<S: BuildHasher>(
     headers: &mut HashMap<String, String, S>,
     name: &str,
 ) {
-    if let Some(existing_name) = headers
+    let matching_names = headers
         .keys()
-        .find(|header_name| header_name.eq_ignore_ascii_case(name))
+        .filter(|header_name| header_name.eq_ignore_ascii_case(name))
         .cloned()
-    {
+        .collect::<Vec<_>>();
+
+    for existing_name in matching_names {
         headers.remove(&existing_name);
     }
 }
@@ -54,9 +56,9 @@ pub fn inject_trace_context<S: BuildHasher>(
     ctx: &TraceContext,
     headers: &mut HashMap<String, String, S>,
 ) {
-    remove_header_case_insensitive(headers, TRACEPARENT_HEADER);
+    remove_headers_case_insensitive(headers, TRACEPARENT_HEADER);
     headers.insert(TRACEPARENT_HEADER.to_string(), ctx.to_traceparent());
-    remove_header_case_insensitive(headers, TRACESTATE_HEADER);
+    remove_headers_case_insensitive(headers, TRACESTATE_HEADER);
     if let Some(ref state) = ctx.trace_state {
         headers.insert(TRACESTATE_HEADER.to_string(), state.clone());
     }
@@ -630,24 +632,40 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_overwrites_case_variants_and_removes_stale_trace_state() {
-        let ctx = TraceContext::new();
+    fn test_inject_overwrites_all_case_variants_and_removes_stale_trace_state() {
+        let mut ctx = TraceContext::new();
+        ctx.trace_state = Some("vendor=fresh".to_string());
 
         let mut headers = HashMap::new();
         headers.insert("Traceparent".to_string(), "stale-traceparent".to_string());
+        headers.insert("TRACEPARENT".to_string(), "stale-traceparent-2".to_string());
         headers.insert("TraceState".to_string(), "vendor=stale".to_string());
+        headers.insert("TRACESTATE".to_string(), "vendor=stale-2".to_string());
 
         inject_trace_context(&ctx, &mut headers);
 
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2);
         assert_eq!(
             headers.get(TRACEPARENT_HEADER).unwrap(),
             &ctx.to_traceparent()
         );
-        assert!(
-            !headers
+        assert_eq!(
+            headers.get(TRACESTATE_HEADER).unwrap(),
+            ctx.trace_state.as_ref().unwrap()
+        );
+        assert_eq!(
+            headers
                 .keys()
-                .any(|name| name.eq_ignore_ascii_case(TRACESTATE_HEADER))
+                .filter(|name| name.eq_ignore_ascii_case(TRACEPARENT_HEADER))
+                .count(),
+            1
+        );
+        assert!(
+            headers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case(TRACESTATE_HEADER))
+                .count()
+                == 1
         );
     }
 

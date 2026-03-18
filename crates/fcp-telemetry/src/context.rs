@@ -53,6 +53,24 @@ fn pop_context(key: &str) {
     }
 }
 
+struct StackContextGuard {
+    key: String,
+}
+
+impl StackContextGuard {
+    fn push(ctx: TelemetryContext) -> Self {
+        Self {
+            key: push_context(Arc::new(ctx)),
+        }
+    }
+}
+
+impl Drop for StackContextGuard {
+    fn drop(&mut self) {
+        pop_context(&self.key);
+    }
+}
+
 /// W3C Trace Context size constants.
 pub const TRACE_ID_SIZE: usize = 16;
 /// W3C Span ID size in bytes.
@@ -681,10 +699,8 @@ pub async fn with_context<F, T>(ctx: TelemetryContext, f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    let key = push_context(Arc::new(ctx));
-    let result = f.await;
-    pop_context(&key);
-    result
+    let _guard = StackContextGuard::push(ctx);
+    f.await
 }
 
 /// Get a clone of the current telemetry context.
@@ -1575,6 +1591,32 @@ mod tests {
         .await;
 
         // After scope ends, context should not be available
+        assert!(current_context().is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_with_context_drop_cleans_up_context() {
+        use std::future::{Future, pending};
+        use std::task::{Context, Poll, Waker};
+
+        let mut future = std::pin::pin!(with_context(
+            TelemetryContext::new().zone_id("dropped-zone"),
+            pending::<()>()
+        ));
+        let waker = Waker::noop();
+        let mut task_context = Context::from_waker(waker);
+
+        assert!(matches!(
+            future.as_mut().poll(&mut task_context),
+            Poll::Pending
+        ));
+        assert_eq!(
+            current_context().and_then(|ctx| ctx.zone_id.clone()),
+            Some("dropped-zone".to_string())
+        );
+
+        drop(future);
+
         assert!(current_context().is_none());
     }
 

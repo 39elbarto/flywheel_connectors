@@ -1,0 +1,39 @@
+[package]
+name = "fcp-mattermost"
+description = "Mattermost self-hosted collaboration connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_mattermost"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-mattermost"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-core = { path = "../../crates/fcp-core" }
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-sdk = { path = "../../crates/fcp-sdk" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true

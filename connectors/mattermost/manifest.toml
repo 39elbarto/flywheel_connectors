@@ -1,0 +1,259 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:83032732650d5dd374f8edfd3c299ec224d6ab8d8c16003af596fb0021cf7003"
+
+[connector]
+id = "fcp.mattermost"
+name = "Mattermost Connector"
+version = "0.1.0"
+description = "Self-hosted collaboration connector for Mattermost messaging"
+archetypes = ["operational", "bidirectional"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "system.privileged"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+deny_exec = true
+deny_ptrace = true
+
+# ── Read Operations ──
+
+[provides.operations."mattermost.get_me"]
+description = "Get the authenticated user's profile"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_me".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_me".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_me".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_user"]
+description = "Get a user by ID"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_user".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_user".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_user".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_my_teams"]
+description = "List teams the user belongs to"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_my_teams".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_my_teams".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_my_teams".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_channel"]
+description = "Get a channel by ID"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_channel".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_channel".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_channel".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_post"]
+description = "Get a post by ID"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_post".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_post".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_posts_for_channel"]
+description = "List posts in a channel (paginated)"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_posts_for_channel".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_posts_for_channel".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_posts_for_channel".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.search_posts"]
+description = "Search posts in a team"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.search_posts".input_schema]
+type = "object"
+
+[provides.operations."mattermost.search_posts".output_schema]
+type = "object"
+
+[provides.operations."mattermost.search_posts".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+# ── Write Operations ──
+
+[provides.operations."mattermost.create_post"]
+description = "Send a message to a channel"
+capability = "mattermost.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."mattermost.create_post".input_schema]
+type = "object"
+
+[provides.operations."mattermost.create_post".output_schema]
+type = "object"
+
+[provides.operations."mattermost.create_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.create_post".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."mattermost.delete_post"]
+description = "Delete a post (irreversible)"
+capability = "mattermost.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.delete_post".input_schema]
+type = "object"
+
+[provides.operations."mattermost.delete_post".output_schema]
+type = "object"
+
+[provides.operations."mattermost.delete_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.delete_post".rate_limit]
+max = 10
+per_ms = 60000

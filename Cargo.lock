@@ -3244,6 +3244,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-mattermost"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-mcp-bridge"
 version = "0.1.0"
 dependencies = [
@@ -3381,6 +3401,24 @@ dependencies = [
 
 [[package]]
 name = "fcp-mongodb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-mysql"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4419,6 +4457,27 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "fcp-whatsapp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "hex",
+ "hmac",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

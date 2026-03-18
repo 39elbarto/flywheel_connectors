@@ -176,9 +176,21 @@ impl MysqlConnector {
     }
 
     /// Handle health check.
+    ///
+    /// Reports truthful health: actually probes the database when configured
+    /// rather than merely reporting config presence.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
-        let status = if configured { "healthy" } else { "not_configured" };
+
+        let status = if let Some(ref client) = self.client {
+            match client.health_check().await {
+                Ok(true) => "healthy",
+                Ok(false) => "degraded",
+                Err(_) => "degraded",
+            }
+        } else {
+            "not_configured"
+        };
 
         Ok(json!({
             "status": status,

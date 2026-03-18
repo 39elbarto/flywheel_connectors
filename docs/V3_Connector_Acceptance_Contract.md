@@ -131,7 +131,7 @@ The contract answers two questions:
 | `BestEffort` | Deduplication attempted but not guaranteed | Permitted for `Safe` and `Risky` operations |
 | `Strict` | Exactly-once via idempotency key + receipt tracking | Required for `Dangerous` operations; recommended for `Risky` |
 
-**Hard rule**: `Dangerous` + `IdempotencyClass::None` is a conformance violation.
+**Hard rule**: `Dangerous` + `IdempotencyClass::None` or `Dangerous` + `IdempotencyClass::BestEffort` is a conformance violation. Dangerous operations MUST use `Strict`.
 
 ---
 

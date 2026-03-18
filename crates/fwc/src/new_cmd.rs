@@ -2536,20 +2536,18 @@ async fn test_self_check_ok_after_configure() {{
 }}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Introspection completeness tests (V3 contract)
+// OperationInfo completeness test (V3 contract)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_introspection_has_operations() {{
-    let mut connector = {struct_name}Connector::new();
-    connector.configure(serde_json::json!({{}})).await.expect("configure");
-    connector.handshake(base_handshake()).await.expect("handshake");
-
-    let introspection = connector.introspect().await.expect("introspect");
-    let ops = introspection.get("operations")
-        .and_then(|v| v.as_array())
-        .expect("introspection should have operations array");
-    assert!(!ops.is_empty(), "introspection must declare at least one operation");
+#[test]
+fn test_operations_info_nonempty() {{
+    // Verify the connector declares at least one operation with typed metadata.
+    let connector = {struct_name}Connector::new();
+    let op = connector.placeholder_operation();
+    assert!(!op.id.as_str().is_empty(), "operation must have an ID");
+    assert!(!op.summary.is_empty(), "operation must have a summary");
+    assert!(op.input_schema.is_object(), "operation must have an input schema");
+    assert!(op.output_schema.is_object(), "operation must have an output schema");
 }}
 
 #[fcp_async_core::runtime::test]

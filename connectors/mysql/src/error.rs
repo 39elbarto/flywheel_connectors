@@ -102,12 +102,9 @@ impl MysqlError {
                 retryable: true,
                 retry_after: None,
             },
-            Self::Auth(msg) => FcpError::External {
-                service: "mysql".into(),
+            Self::Auth(msg) => FcpError::Unauthorized {
+                code: 2001,
                 message: msg.clone(),
-                status_code: Some(401),
-                retryable: false,
-                retry_after: None,
             },
             Self::Query(msg) => FcpError::External {
                 service: "mysql".into(),
@@ -151,12 +148,9 @@ impl MysqlError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::RateLimited { retry_after_ms } => FcpError::External {
-                service: "mysql".into(),
-                message: format!("Rate limited, retry after {retry_after_ms}ms"),
-                status_code: Some(429),
-                retryable: true,
-                retry_after: self.retry_after(),
+            Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+                violation: None,
             },
             Self::Api {
                 status_code,
@@ -271,6 +265,13 @@ mod tests {
     }
 
     #[test]
+    fn auth_error_maps_to_unauthorized() {
+        let err = MysqlError::Auth("access denied".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { .. }));
+    }
+
+    #[test]
     fn permission_denied_maps_to_403() {
         let err = MysqlError::PermissionDenied("SELECT command denied".into());
         let fcp = err.to_fcp_error();
@@ -279,6 +280,18 @@ mod tests {
                 assert_eq!(status_code, Some(403));
             }
             _ => panic!("expected External error"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_maps_to_fcp_rate_limited() {
+        let err = MysqlError::RateLimited { retry_after_ms: 2000 };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 2000);
+            }
+            _ => panic!("expected RateLimited error, got {fcp:?}"),
         }
     }
 

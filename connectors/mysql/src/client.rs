@@ -231,6 +231,15 @@ impl MysqlClient {
             return Ok(body);
         }
 
+        // Extract Retry-After header before consuming the body
+        let retry_after_ms = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|secs| secs * 1000)
+            .unwrap_or(1000);
+
         // Try to parse error body
         let body_text = resp.text().await.unwrap_or_default();
         if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&body_text) {
@@ -242,7 +251,7 @@ impl MysqlClient {
                 StatusCode::UNAUTHORIZED => Err(MysqlError::Auth(message)),
                 StatusCode::FORBIDDEN => Err(MysqlError::PermissionDenied(message)),
                 StatusCode::TOO_MANY_REQUESTS => {
-                    Err(MysqlError::RateLimited { retry_after_ms: 1000 })
+                    Err(MysqlError::RateLimited { retry_after_ms })
                 }
                 StatusCode::CONFLICT => Err(MysqlError::ConstraintViolation(message)),
                 _ => Err(MysqlError::Api {
@@ -250,6 +259,11 @@ impl MysqlClient {
                     message,
                 }),
             };
+        }
+
+        // Fallback: no parseable error body
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(MysqlError::RateLimited { retry_after_ms });
         }
 
         Err(MysqlError::Api {

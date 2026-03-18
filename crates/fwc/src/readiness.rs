@@ -82,7 +82,7 @@ impl MetadataProvenance {
 /// Serialises as an object with `status` + optional `value` so consumers
 /// never have to guess whether a missing JSON key means "unknown" or
 /// "not applicable."
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MetadataField<T> {
     /// The field has a verified value.
     Known(T),

@@ -22588,9 +22588,12 @@ mod tests {
 
     use super::{
         Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog, LiveAuthArgs,
-        PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput, PrepareCliError,
-        ResolvedHostConfig, catalog, execute, host_discovered_connector, host_mcp_tool_definitions,
-        mcp_tool_invoke_args, normalize_args, prepare_cli, serve_mcp,
+        MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
+        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog, execute,
+        host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
+        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
+        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output,
+        prepare_cli, serve_mcp,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
@@ -30500,7 +30503,7 @@ depends_on = ["missing"]
 
         assert!(pipeline_dry_run_can_materialize_output(&tool));
 
-        let metadata = live_pipeline_operation_metadata(&BTreeMap::from([(
+        let metadata = live_pipeline_operation_metadata(&StdBTreeMap::from([(
             "lookup".to_owned(),
             ResolvedHostOperation {
                 connector,

@@ -211,6 +211,11 @@ impl SseParser {
     fn last_event_id(&self) -> Option<&str> {
         self.last_event_id.as_deref()
     }
+
+    /// Bytes currently retained for the in-progress event.
+    fn retained_bytes(&self) -> usize {
+        self.buffer.len().saturating_add(self.data_bytes_len)
+    }
 }
 
 /// SSE client configuration.
@@ -496,9 +501,10 @@ impl Stream for SseStream {
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(data))) => {
                 // Check buffer size
-                if this.parser.buffer.len() + data.len() > *this.max_buffer_size {
+                let retained_bytes = this.parser.retained_bytes();
+                if retained_bytes.saturating_add(data.len()) > *this.max_buffer_size {
                     return Poll::Ready(Some(Err(StreamError::BufferOverflow {
-                        size: this.parser.buffer.len() + data.len(),
+                        size: retained_bytes.saturating_add(data.len()),
                         limit: *this.max_buffer_size,
                     })));
                 }
@@ -1113,6 +1119,24 @@ mod tests {
         // Event dispatches, but not all data lines were accepted
         assert_eq!(events.len(), 1);
         assert!(events[0].data.len() <= 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_retained_bytes_counts_payload_and_raw_buffer() {
+        let mut parser = SseParser::new();
+
+        let events = parser.parse(&Bytes::from("data: hello\n"));
+        assert!(events.is_empty());
+        assert_eq!(parser.retained_bytes(), "hello".len());
+
+        let events = parser.parse(&Bytes::from("data: world"));
+        assert!(events.is_empty());
+        assert_eq!(parser.retained_bytes(), "hello".len() + "data: world".len());
+
+        let events = parser.parse(&Bytes::from("\n\n"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "hello\nworld");
+        assert_eq!(parser.retained_bytes(), 0);
     }
 
     // ── SseParser: multiple sequential parses ───────────────────────────

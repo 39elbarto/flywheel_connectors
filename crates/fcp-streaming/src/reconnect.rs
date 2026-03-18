@@ -94,17 +94,15 @@ impl ReconnectConfig {
             .initial_delay
             .as_secs_f64()
             .mul_add(self.backoff_multiplier.powi(exponent), 0.0);
-        let capped = base.min(self.max_delay.as_secs_f64());
-
-        let delay = if self.jitter {
+        let jittered = if self.jitter {
             // Add jitter (0.5x to 1.5x)
             let jitter = random_float().mul_add(1.0, 0.5);
-            capped * jitter
+            base * jitter
         } else {
-            capped
+            base
         };
 
-        Duration::from_secs_f64(delay)
+        Duration::from_secs_f64(jittered.min(self.max_delay.as_secs_f64()))
     }
 }
 
@@ -360,6 +358,19 @@ mod tests {
         let delay = config.delay_for_attempt(0);
         assert!(delay >= Duration::from_millis(500));
         assert!(delay <= Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn test_delay_with_jitter_still_respects_max_delay() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(10))
+            .with_max_delay(Duration::from_secs(5))
+            .with_backoff_multiplier(1.0)
+            .with_jitter(true);
+
+        for _ in 0..20 {
+            assert_eq!(config.delay_for_attempt(0), Duration::from_secs(5));
+        }
     }
 
     #[test]

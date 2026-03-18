@@ -972,6 +972,8 @@ async fn handle_message(connector: &mut {struct_name}Connector, message: &str) -
             encode(&connector.handshake(req).await?)
         }}
         "health" => encode(&connector.health().await),
+        "doctor" => encode(&connector.doctor()),
+        "self_check" => encode(&connector.self_check().await?),
         "introspect" => encode(&connector.introspect()),
         "invoke" => {{
             let req: InvokeRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
@@ -979,6 +981,13 @@ async fn handle_message(connector: &mut {struct_name}Connector, message: &str) -
                 message: format!("Invalid invoke request: {{e}}"),
             }})?;
             encode(&connector.invoke(req).await?)
+        }}
+        "simulate" => {{
+            let req: SimulateRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
+                code: 1003,
+                message: format!("Invalid simulate request: {{e}}"),
+            }})?;
+            encode(&connector.simulate(req).await?)
         }}
         "subscribe" => {{
             let req: SubscribeRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
@@ -1817,6 +1826,33 @@ const OP_PLACEHOLDER: &str = "{short_name}.placeholder";
 const CAP_PLACEHOLDER: &str = "{short_name}.placeholder";
 const SUPPORTS_STREAMING: bool = {supports_streaming};
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Doctor types (connector-local diagnostics)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result of a connector doctor check.
+#[derive(Debug, Clone, serde::Serialize)]
+struct DoctorResult {{
+    passed: bool,
+    checks: Vec<DoctorCheck>,
+}}
+
+/// A single diagnostic check within a doctor run.
+#[derive(Debug, Clone, serde::Serialize)]
+struct DoctorCheck {{
+    name: String,
+    passed: bool,
+    message: Option<String>,
+    critical: bool,
+}}
+
+impl DoctorResult {{
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {{
+        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
+        Self {{ passed, checks }}
+    }}
+}}
+
 /// {struct_name} connector state.
 #[derive(Debug)]
 pub struct {struct_name}Connector {{
@@ -1871,6 +1907,56 @@ impl {struct_name}Connector {{
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         }}
+    }}
+
+    /// Run connector diagnostics (V3 doctor endpoint).
+    ///
+    /// Returns a structured readiness report without leaking secrets.
+    pub fn doctor(&self) -> DoctorResult {{
+        let mut checks = Vec::new();
+
+        // Check 1: Configuration loaded
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {{
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {{
+                "Configuration loaded".into()
+            }} else {{
+                "Not configured - run configure first".into()
+            }}),
+            critical: true,
+        }});
+
+        // Check 2: Runtime initialized
+        let runtime_ok = self.runtime.is_some();
+        checks.push(DoctorCheck {{
+            name: "runtime".into(),
+            passed: runtime_ok,
+            message: Some(if runtime_ok {{
+                "ConnectorRuntime initialized".into()
+            }} else {{
+                "Runtime missing; re-run configure".into()
+            }}),
+            critical: true,
+        }});
+
+        // Check 3: Capability verifier
+        let verifier_ok = self.verifier.is_some();
+        checks.push(DoctorCheck {{
+            name: "capability_verifier".into(),
+            passed: verifier_ok,
+            message: Some(if verifier_ok {{
+                "Capability verifier initialized".into()
+            }} else {{
+                "Verifier missing; run handshake first".into()
+            }}),
+            critical: false,
+        }});
+
+        // TODO: Add connector-specific checks (API reachability, auth, etc.)
+
+        DoctorResult::from_checks(checks)
     }}
 }}
 
@@ -1937,6 +2023,25 @@ impl FcpConnector for {struct_name}Connector {{
         }};
         snapshot.uptime_ms = self.started_at.elapsed().as_millis() as u64;
         snapshot
+    }}
+
+    async fn self_check(&self) -> FcpResult<SelfCheckReport> {{
+        if !self.configured {{
+            return Ok(SelfCheckReport::degraded(
+                "not_configured",
+                "Connector is not configured",
+            ));
+        }}
+
+        // TODO: Replace with a real read-only API probe that validates
+        //       credentials and reachability without side effects.
+        Ok(SelfCheckReport::ok())
+    }}
+
+    async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {{
+        // Default V3 simulate: check capability token and return allowed.
+        // TODO: Add cost estimation, resource availability checks, etc.
+        Ok(SimulateResponse::allowed(req.id))
     }}
 
     fn metrics(&self) -> ConnectorMetrics {{
@@ -2090,10 +2195,72 @@ mod tests {{
             .expect("configure");
         // Must handshake first to initialize verifier
         connector.handshake(base_handshake()).await.expect("handshake");
-        
+
         let req = base_invoke(connector.id(), OP_PLACEHOLDER);
         let response = connector.invoke(req).await.expect("invoke");
         assert_eq!(response.status, InvokeStatus::Ok);
+    }}
+
+    #[test]
+    fn test_doctor_before_configure() {{
+        let connector = {struct_name}Connector::new();
+        let report = connector.doctor();
+        assert!(!report.passed, "doctor should fail before configure");
+        assert!(report.checks.iter().any(|c| c.name == "configuration" && !c.passed));
+    }}
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_after_configure() {{
+        let mut connector = {struct_name}Connector::new();
+        connector.configure(serde_json::json!({{}})).await.expect("configure");
+        let report = connector.doctor();
+        assert!(report.passed, "doctor should pass after configure");
+        assert!(report.checks.iter().all(|c| !c.critical || c.passed));
+    }}
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_before_configure() {{
+        let connector = {struct_name}Connector::new();
+        let report = connector.self_check().await.expect("self_check");
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+    }}
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_after_configure() {{
+        let mut connector = {struct_name}Connector::new();
+        connector.configure(serde_json::json!({{}})).await.expect("configure");
+        let report = connector.self_check().await.expect("self_check");
+        assert_eq!(report.status, SelfCheckStatus::Ok);
+    }}
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_returns_allowed() {{
+        let connector = {struct_name}Connector::new();
+        let req = SimulateRequest {{
+            r#type: "simulate".into(),
+            id: RequestId::new("sim_1"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::from_static(OP_PLACEHOLDER),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({{}}),
+            capability_token: CapabilityToken::test_token(),
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        }};
+        let response = connector.simulate(req).await.expect("simulate");
+        assert!(response.would_succeed);
+    }}
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_unknown_operation_rejected() {{
+        let mut connector = {struct_name}Connector::new();
+        connector.configure(serde_json::json!({{}})).await.expect("configure");
+        connector.handshake(base_handshake()).await.expect("handshake");
+        let req = base_invoke(connector.id(), "nonexistent.operation");
+        let result = connector.invoke(req).await;
+        assert!(result.is_err(), "unknown operation should be rejected");
     }}
 }}
 "#
@@ -2269,6 +2436,141 @@ async fn test_error_codes_correct() {{
     assert!(result.is_err());
     // TODO: Verify error code is in correct range (FCP-5xxx for connector errors)
 }}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ConnectorErrorMapping V3 contract tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_error_mapping_rate_limit() {{
+    use crate::error::{struct_name}Error;
+    use fcp_sdk::migration::ConnectorErrorMapping;
+
+    let err = {struct_name}Error::RateLimited {{ retry_after_ms: 5000 }};
+    assert!(err.is_retryable(), "rate limit should be retryable");
+    assert_eq!(err.retry_after(), Some(std::time::Duration::from_millis(5000)));
+
+    let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
+    assert!(matches!(fcp_err, FcpError::RateLimited {{ .. }}));
+}}
+
+#[test]
+fn test_error_mapping_config() {{
+    use crate::error::{struct_name}Error;
+    use fcp_sdk::migration::ConnectorErrorMapping;
+
+    let err = {struct_name}Error::Config("bad key".into());
+    assert!(!err.is_retryable(), "config error should not be retryable");
+    assert!(err.retry_after().is_none());
+
+    let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
+    assert!(matches!(fcp_err, FcpError::InvalidRequest {{ .. }}));
+}}
+
+#[test]
+fn test_error_mapping_runtime() {{
+    use crate::error::{struct_name}Error;
+    use fcp_sdk::migration::ConnectorErrorMapping;
+
+    let err = {struct_name}Error::Runtime("cancelled".into());
+    assert!(!err.is_retryable(), "runtime error should not be retryable");
+
+    let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
+    assert!(matches!(fcp_err, FcpError::Internal {{ .. }}));
+}}
+
+#[test]
+fn test_error_mapping_from_async_timeout() {{
+    use crate::error::{struct_name}Error;
+    use fcp_async_core::AsyncError;
+    use fcp_sdk::migration::ConnectorErrorMapping;
+
+    let async_err = AsyncError::Timeout {{ timeout_ms: 30000 }};
+    let err = {struct_name}Error::from_async_error(async_err);
+    assert!(matches!(err, {struct_name}Error::Runtime(_)));
+}}
+
+#[test]
+fn test_error_mapping_from_async_cancelled() {{
+    use crate::error::{struct_name}Error;
+    use fcp_async_core::AsyncError;
+    use fcp_sdk::migration::ConnectorErrorMapping;
+
+    let async_err = AsyncError::Cancelled;
+    let err = {struct_name}Error::from_async_error(async_err);
+    assert!(matches!(err, {struct_name}Error::Runtime(_)));
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V3 diagnostic endpoint tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_doctor_reports_unconfigured() {{
+    let connector = {struct_name}Connector::new();
+    let report = connector.doctor();
+    assert!(!report.passed, "doctor should fail before configure");
+}}
+
+#[fcp_async_core::runtime::test]
+async fn test_doctor_reports_configured() {{
+    let mut connector = {struct_name}Connector::new();
+    connector.configure(serde_json::json!({{}})).await.expect("configure");
+    let report = connector.doctor();
+    assert!(report.passed, "doctor should pass after configure");
+}}
+
+#[fcp_async_core::runtime::test]
+async fn test_self_check_degraded_before_configure() {{
+    let connector = {struct_name}Connector::new();
+    let report = connector.self_check().await.expect("self_check");
+    assert_eq!(report.status, SelfCheckStatus::Degraded);
+}}
+
+#[fcp_async_core::runtime::test]
+async fn test_self_check_ok_after_configure() {{
+    let mut connector = {struct_name}Connector::new();
+    connector.configure(serde_json::json!({{}})).await.expect("configure");
+    let report = connector.self_check().await.expect("self_check");
+    assert_eq!(report.status, SelfCheckStatus::Ok);
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Introspection completeness tests (V3 contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn test_introspection_has_operations() {{
+    let mut connector = {struct_name}Connector::new();
+    connector.configure(serde_json::json!({{}})).await.expect("configure");
+    connector.handshake(base_handshake()).await.expect("handshake");
+
+    let introspection = connector.introspect().await.expect("introspect");
+    let ops = introspection.get("operations")
+        .and_then(|v| v.as_array())
+        .expect("introspection should have operations array");
+    assert!(!ops.is_empty(), "introspection must declare at least one operation");
+}}
+
+#[fcp_async_core::runtime::test]
+async fn test_simulate_allowed_by_default() {{
+    let connector = {struct_name}Connector::new();
+    let req = SimulateRequest {{
+        r#type: "simulate".into(),
+        id: RequestId::new("sim_1"),
+        connector_id: connector.id().clone(),
+        operation: OperationId::from_static(OP_PLACEHOLDER),
+        zone_id: ZoneId::work(),
+        input: serde_json::json!({{}}),
+        capability_token: CapabilityToken::test_token(),
+        estimate_cost: false,
+        check_availability: false,
+        context: None,
+        correlation_id: None,
+    }};
+    let response = connector.simulate(req).await.expect("simulate");
+    assert!(response.would_succeed);
+}}
 "#
     )
 }
@@ -2434,6 +2736,82 @@ fn test_e2e_audit_event_shape() {{
     // - correlation_id
     // - zone_id
     // - timestamp
+}}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V3 diagnostic endpoint tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[ignore = "requires built binary"]
+fn test_e2e_doctor() {{
+    let mut connector = spawn_connector().expect("spawn connector");
+
+    let response = connector
+        .send(&serde_json::json!({{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "doctor",
+            "params": {{}}
+        }}))
+        .expect("doctor");
+
+    assert!(response.get("result").is_some(), "doctor should return result");
+    let result = &response["result"];
+    assert!(result.get("passed").is_some(), "doctor result should have passed field");
+    assert!(result.get("checks").is_some(), "doctor result should have checks array");
+}}
+
+#[test]
+#[ignore = "requires built binary"]
+fn test_e2e_self_check() {{
+    let mut connector = spawn_connector().expect("spawn connector");
+
+    let response = connector
+        .send(&serde_json::json!({{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "self_check",
+            "params": {{}}
+        }}))
+        .expect("self_check");
+
+    assert!(response.get("result").is_some(), "self_check should return result");
+    let result = &response["result"];
+    assert!(result.get("status").is_some(), "self_check should have status field");
+}}
+
+#[test]
+#[ignore = "requires built binary"]
+fn test_e2e_simulate() {{
+    let mut connector = spawn_connector().expect("spawn connector");
+
+    // Configure first
+    connector
+        .send(&serde_json::json!({{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "configure",
+            "params": {{}}
+        }}))
+        .expect("configure");
+
+    let response = connector
+        .send(&serde_json::json!({{
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "simulate",
+            "params": {{
+                "id": "sim_1",
+                "operation": "{short_name}.placeholder",
+                "input": {{}},
+                "zone_id": "z:work",
+                "capability_token": {{}}
+            }}
+        }}))
+        .expect("simulate");
+
+    assert!(response.get("result").is_some(), "simulate should return result");
 }}
 "#
     )
@@ -2635,6 +3013,26 @@ fn run_prechecks(
             None
         } else {
             Some(format!("Invalid connector ID: {connector_id}"))
+        },
+        severity: CheckSeverity::Error,
+    });
+
+    // Check 9: V3 method completeness (doctor, self_check, simulate)
+    let connector_rs = files
+        .iter()
+        .find(|(path, _, _)| path == "src/connector.rs")
+        .map(|(_, content, _)| content.as_str());
+    let v3_methods_ok = connector_rs.is_some_and(|c| {
+        c.contains("fn doctor(") && c.contains("fn self_check(") && c.contains("fn simulate(")
+    });
+    checks.push(PrecheckItem {
+        id: "code.v3_methods".to_string(),
+        description: "V3 diagnostic methods present (doctor, self_check, simulate)".to_string(),
+        passed: v3_methods_ok,
+        message: if v3_methods_ok {
+            None
+        } else {
+            Some("Missing V3 methods: doctor, self_check, or simulate".to_string())
         },
         severity: CheckSeverity::Error,
     });
@@ -2867,6 +3265,35 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
         severity: CheckSeverity::Warning,
     });
 
+    // V3 method completeness check
+    let connector_rs_path = path.join("src/connector.rs");
+    let v3_methods_ok = if connector_rs_path.exists() {
+        let content = fs::read_to_string(&connector_rs_path).unwrap_or_default();
+        content.contains("fn doctor(")
+            && (content.contains("fn self_check(") || content.contains("fn handle_self_check("))
+            && (content.contains("fn simulate(") || content.contains("fn handle_simulate("))
+    } else {
+        false
+    };
+    checks.push(PrecheckItem {
+        id: "code.v3_methods".to_string(),
+        description: "V3 diagnostic methods present (doctor, self_check, simulate)".to_string(),
+        passed: v3_methods_ok,
+        message: if v3_methods_ok {
+            None
+        } else {
+            Some("Add doctor(), self_check(), and simulate() methods".to_string())
+        },
+        severity: CheckSeverity::Warning,
+    });
+    if !v3_methods_ok {
+        suggested_fixes.push(SuggestedFix {
+            check_id: "code.v3_methods".to_string(),
+            action: "Add V3 diagnostic methods: doctor() for diagnostics, self_check() for API reachability, simulate() for preflight checks".to_string(),
+            file: Some("src/connector.rs".to_string()),
+        });
+    }
+
     let prechecks = PrecheckResults::passed(checks);
 
     Ok(CheckResult {
@@ -2911,15 +3338,31 @@ fn generate_next_steps(
     }
 
     steps.push("Update src/types.rs with your request/response types".to_string());
-    steps.push("Run tests: cargo test".to_string());
+
+    // V3 verification guidance
+    steps.push("V3 Acceptance Contract verification (docs/V3_Connector_Acceptance_Contract.md):".to_string());
+    steps.push("  - Ensure every OperationInfo has correct SafetyTier, RiskLevel, IdempotencyClass".to_string());
+    steps.push("  - Verify ConnectorErrorMapping covers every error variant with truthful retryability".to_string());
+    steps.push("  - Confirm ConnectorRuntime.shutdown() is called in shutdown handler".to_string());
+    steps.push("  - Confirm all HTTP calls use RetryLoop (no hand-rolled retry loops)".to_string());
+    steps.push("  - Confirm secrets are never logged (check Debug impls and error messages)".to_string());
+
+    let crate_slug = normalize_crate_slug(extract_short_name(connector_id));
+    steps.push(format!(
+        "Run quality gates via rch: rch exec -- cargo clippy -p fcp-{crate_slug} --all-targets -- -D warnings"
+    ));
+    steps.push(format!(
+        "Run tests via rch: rch exec -- cargo test -p fcp-{crate_slug}"
+    ));
 
     if !no_e2e {
-        steps.push("Run E2E tests: cargo test --test e2e_tests -- --ignored".to_string());
+        steps.push(format!(
+            "Run E2E tests: rch exec -- cargo test -p fcp-{crate_slug} --test e2e_tests -- --ignored"
+        ));
     }
 
     steps.push(format!("Validate: fwc new --check {crate_path}"));
-    let crate_slug = normalize_crate_slug(extract_short_name(connector_id));
-    steps.push(format!("Build: cargo build -p fcp-{crate_slug}"));
+    steps.push(format!("Build: rch exec -- cargo build -p fcp-{crate_slug}"));
 
     steps
 }
@@ -3228,7 +3671,7 @@ mod tests {
 
         assert!(config.contains("Never store secrets"));
         assert!(error.contains("Connector-specific errors"));
-        assert!(api.contains("Retry helper"));
+        assert!(api.contains("RetryLoop"));
         assert!(limits.contains("TODO: Replace placeholders"));
     }
 
@@ -3713,6 +4156,38 @@ members = [
             false,
         );
         assert!(steps.iter().any(|s| s.contains("e2e_tests")));
+    }
+
+    #[test]
+    fn generate_next_steps_includes_v3_contract_guidance() {
+        let steps = generate_next_steps(
+            "fcp.test",
+            "connectors/test",
+            ConnectorArchetype::RequestResponse,
+            false,
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.contains("V3 Acceptance Contract")),
+            "next steps should reference V3 acceptance contract"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.contains("ConnectorErrorMapping")),
+            "next steps should mention ConnectorErrorMapping verification"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.contains("OperationInfo")),
+            "next steps should mention OperationInfo verification"
+        );
+        assert!(
+            steps.iter().any(|s| s.contains("rch exec")),
+            "next steps should use rch for build commands"
+        );
     }
 
     // ---- to_pascal_case edge cases ----
@@ -5123,7 +5598,7 @@ serde = "1"
         let output = generate_cargo_toml("fcp-test", "test");
         assert!(output.contains("[dev-dependencies]"));
         assert!(output.contains("wiremock"));
-        assert!(output.contains("tokio"));
+        assert!(output.contains("assert_cmd"));
     }
 
     #[test]

@@ -57,6 +57,11 @@ mod mock_server;
 pub mod supervisor_examples;
 pub mod coverage_rules;
 mod tracing_config;
+pub mod webhook_helpers;
+pub mod readiness_helpers;
+pub mod database_helpers;
+pub mod bridge_helpers;
+pub mod evidence_helpers;
 
 pub use assertions::*;
 pub use async_harness::*;

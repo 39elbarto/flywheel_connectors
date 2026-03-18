@@ -1,0 +1,93 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.whatsapp"
+name = "WhatsApp Business"
+version = "0.1.0"
+description = "WhatsApp Business API connector for sending messages, templates, and managing business profiles"
+archetype = "operational"
+homepage = "https://developers.facebook.com/docs/whatsapp/cloud-api"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:private"]
+allowed_targets = ["z:private"]
+tailscale_tag = "tag:fcp-private"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.send_text]
+summary = "Send a text message"
+capability = "whatsapp.send"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.send_text.network_constraints]
+host_allow = ["graph.facebook.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.send_text.ai_hints]
+when_to_use = "When you need to send a plain text message to a WhatsApp user"
+
+[provides.operations.send_template]
+summary = "Send a template message"
+capability = "whatsapp.send"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.send_template.network_constraints]
+host_allow = ["graph.facebook.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.send_template.ai_hints]
+when_to_use = "When sending business-initiated messages outside the 24h conversation window"
+
+[provides.operations.get_profile]
+summary = "Get WhatsApp Business profile"
+capability = "whatsapp.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_profile.network_constraints]
+host_allow = ["graph.facebook.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.get_profile.ai_hints]
+when_to_use = "When you need to check or display the business profile"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

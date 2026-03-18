@@ -1599,9 +1599,9 @@ mod tests {
         use std::future::{Future, pending};
         use std::task::{Context, Poll, Waker};
 
-        let mut future = std::pin::pin!(with_context(
+        let mut future = Box::pin(with_context(
             TelemetryContext::new().zone_id("dropped-zone"),
-            pending::<()>()
+            pending::<()>(),
         ));
         let waker = Waker::noop();
         let mut task_context = Context::from_waker(waker);

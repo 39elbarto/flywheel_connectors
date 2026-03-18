@@ -418,37 +418,37 @@ Every FCP connector is a single executable with embedded metadata:
 ├──────────────────────────────────────────────────────────────┤
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │  MANIFEST SECTION                                      │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐             │  │
-│  │  │  Metadata       │  │  Capabilities   │             │  │
-│  │  │  - Name         │  │  - Required     │             │  │
-│  │  │  - Version      │  │  - Optional     │             │  │
-│  │  │  - Author       │  │  - Forbidden    │             │  │
-│  │  └─────────────────┘  └─────────────────┘             │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐             │  │
-│  │  │  Zone Policy    │  │  Sandbox Config │             │  │
-│  │  │  - Home zone    │  │  - Memory limit │             │  │
-│  │  │  - Allowed      │  │  - CPU limit    │             │  │
-│  │  │  - Tailscale tag│  │  - FS access    │             │  │
-│  │  └─────────────────┘  └─────────────────┘             │  │
-│  │  ┌─────────────────┐                                  │  │
-│  │  │  AI Hints       │  ← Agent-readable operation docs │  │
-│  │  │  - Operations   │                                  │  │
-│  │  │  - Examples     │                                  │  │
-│  │  │  - Safety notes │                                  │  │
-│  │  └─────────────────┘                                  │  │
+│  │  ┌─────────────────┐  ┌─────────────────┐              │  │
+│  │  │  Metadata       │  │  Capabilities   │              │  │
+│  │  │  - Name         │  │  - Required     │              │  │
+│  │  │  - Version      │  │  - Optional     │              │  │
+│  │  │  - Author       │  │  - Forbidden    │              │  │
+│  │  └─────────────────┘  └─────────────────┘              │  │
+│  │  ┌─────────────────┐  ┌─────────────────┐              │  │
+│  │  │  Zone Policy    │  │  Sandbox Config │              │  │
+│  │  │  - Home zone    │  │  - Memory limit │              │  │
+│  │  │  - Allowed      │  │  - CPU limit    │              │  │
+│  │  │  - Tailscale tag│  │  - FS access    │              │  │
+│  │  └─────────────────┘  └─────────────────┘              │  │
+│  │  ┌─────────────────┐                                   │  │
+│  │  │  AI Hints       │  ← Agent-readable operation docs  │  │
+│  │  │  - Operations   │                                   │  │
+│  │  │  - Examples     │                                   │  │
+│  │  │  - Safety notes │                                   │  │
+│  │  └─────────────────┘                                   │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │  CODE SECTION                                          │  │
-│  │  - FCP protocol implementation                        │  │
-│  │  - Capability negotiation                             │  │
-│  │  - External API clients                               │  │
-│  │  - State management                                   │  │
+│  │  - FCP protocol implementation                         │  │
+│  │  - Capability negotiation                              │  │
+│  │  - External API clients                                │  │
+│  │  - State management                                    │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │  SIGNATURE SECTION                                     │  │
-│  │  - Ed25519 signature over manifest + code             │  │
-│  │  - Reproducible build attestation                     │  │
-│  │  - Registry provenance chain                          │  │
+│  │  - Ed25519 signature over manifest + code              │  │
+│  │  - Reproducible build attestation                      │  │
+│  │  - Registry provenance chain                           │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```

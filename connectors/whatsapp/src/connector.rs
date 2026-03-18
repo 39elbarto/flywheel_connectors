@@ -159,9 +159,21 @@ impl WhatsAppConnector {
             });
 
             let allowed_hosts = ["graph.facebook.com"];
-            let host_ok = config.base_url.starts_with("http://localhost")
-                || config.base_url.starts_with("http://127.0.0.1")
-                || allowed_hosts.iter().any(|h| config.base_url.contains(h));
+            // Extract host from URL: skip scheme, take up to next '/' or ':'
+            let host_part = config
+                .base_url
+                .split("://")
+                .nth(1)
+                .unwrap_or("")
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .split(':')
+                .next()
+                .unwrap_or("");
+            let host_ok = host_part == "localhost"
+                || host_part == "127.0.0.1"
+                || allowed_hosts.iter().any(|h| host_part == *h);
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
                 passed: host_ok,
@@ -242,11 +254,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             description: Some("Sends a pre-approved template message to a WhatsApp user".into()),
             input_schema: json!({
                 "type": "object",
-                "required": ["to", "template_name", "language_code"],
+                "required": ["to", "template_name"],
                 "properties": {
                     "to": { "type": "string", "description": "Recipient phone number (E.164)" },
                     "template_name": { "type": "string", "description": "Approved template name" },
-                    "language_code": { "type": "string", "description": "e.g., en_US" },
+                    "language_code": { "type": "string", "description": "e.g., en_US (defaults to en_US)", "default": "en_US" },
                     "components": { "type": "array", "description": "Template parameter components" }
                 }
             }),
@@ -447,6 +459,22 @@ impl FcpConnector for WhatsAppConnector {
     }
 
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        let result = self.invoke_inner(req).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        Err(FcpError::StreamingNotSupported)
+    }
+
+    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
+        Err(FcpError::StreamingNotSupported)
+    }
+}
+
+impl WhatsAppConnector {
+    async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         let operation = req.operation.as_str();
 
         if let Some(verifier) = &self.verifier {
@@ -547,16 +575,7 @@ impl FcpConnector for WhatsAppConnector {
             }
         };
 
-        self.base.record_request(true);
         Ok(InvokeResponse::ok(req.id, output))
-    }
-
-    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
-        Err(FcpError::StreamingNotSupported)
-    }
-
-    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
-        Err(FcpError::StreamingNotSupported)
     }
 }
 

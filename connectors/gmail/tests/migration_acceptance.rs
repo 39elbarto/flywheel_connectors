@@ -9,11 +9,11 @@
 #![allow(clippy::too_many_lines)]
 
 use fcp_core::{CredentialId, FcpError};
+use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
 use fcp_google_discovery::{
     DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,
     normalize_snapshot_bytes, policy::GooglePolicyCatalog,
 };
-use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
 use fcp_manifest::ConnectorManifest;
 use serde_json::json;
 
@@ -60,10 +60,7 @@ fn gmail_auth_label_bearer() {
         !label.contains("secret"),
         "Auth label must not leak access token: {label}"
     );
-    assert!(
-        !label.is_empty(),
-        "Auth label should be non-empty"
-    );
+    assert!(!label.is_empty(), "Auth label should be non-empty");
 }
 
 #[test]
@@ -120,10 +117,7 @@ async fn gmail_introspect_operations_have_capability() {
     for op in ops {
         let id = op["id"].as_str().unwrap();
         let cap = op["capability"].as_str();
-        assert!(
-            cap.is_some(),
-            "Operation {id} is missing capability field"
-        );
+        assert!(cap.is_some(), "Operation {id} is missing capability field");
         assert!(
             !cap.unwrap().is_empty(),
             "Operation {id} has empty capability"
@@ -138,7 +132,12 @@ async fn gmail_introspect_write_ops_are_dangerous() {
     let ops = result["operations"].as_array().expect("operations array");
 
     // Verify write operations have at least medium risk (not low/safe).
-    let write_ops = ["gmail.send_message", "gmail.modify_message", "gmail.trash_message", "gmail.send_draft"];
+    let write_ops = [
+        "gmail.send_message",
+        "gmail.modify_message",
+        "gmail.trash_message",
+        "gmail.send_draft",
+    ];
     for op in ops {
         let id = op["id"].as_str().unwrap();
         if write_ops.contains(&id) {
@@ -158,8 +157,9 @@ async fn gmail_generated_operations_cover_connector_surface() {
     let service = DiscoveryServiceId::new("gmail", "v1").expect("valid gmail service id");
     let snapshot = normalize_snapshot_bytes(
         &service,
-        include_str!("../../../crates/fcp-google-discovery/data/fixtures/gmail_discovery.v1.json")
-            .as_bytes(),
+        include_bytes!(
+            "../../../crates/fcp-google-discovery/data/fixtures/gmail_discovery.v1.json"
+        ),
         DiscoveryEndpointKind::Standard,
         "https://example.test/discovery/gmail",
     )
@@ -200,7 +200,6 @@ async fn gmail_documents_intentional_deltas() {
     let connector = GmailConnector::new();
     let introspection = connector.handle_introspect().await.unwrap();
     let ops = introspection["operations"].as_array().unwrap();
-    let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
     // DELTA 1: Handwritten uses gmail-specific capability IDs
     // (e.g. "gmail.messages.read") while generated uses Discovery-derived
@@ -220,7 +219,9 @@ async fn gmail_documents_intentional_deltas() {
     // DELTA 2: sync_history is Gmail-connector-specific (not in Discovery).
     // It wraps the Gmail history API with lease/cursor semantics.
     assert!(
-        op_ids.contains(&"gmail.sync_history"),
+        ops.iter()
+            .filter_map(|op| op["id"].as_str())
+            .any(|id| id == "gmail.sync_history"),
         "sync_history is a connector-specific operation not in Discovery"
     );
 

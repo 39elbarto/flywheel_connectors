@@ -1685,9 +1685,13 @@ impl OpenAIConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -2158,7 +2162,10 @@ impl OpenAIConnector {
         }
 
         // Parse optional parameters
-        let n = input.get("n").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let n = input
+            .get("n")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
         let size: Option<ImageSize> = input
             .get("size")
             .and_then(|v| v.as_str())
@@ -3300,7 +3307,6 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "openai.chat" | "openai.simple_chat" | "openai.get_usage" => "openai.chat",
             "openai.embeddings" => "openai.embeddings",
             "openai.images.generate" => "openai.images",
             "openai.audio.transcribe" => "openai.audio.transcribe",

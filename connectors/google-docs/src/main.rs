@@ -24,7 +24,7 @@
     clippy::unused_async
 )]
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
 
 use anyhow::Result;
 use fcp_async_core::runtime::Builder;
@@ -46,12 +46,20 @@ fn main() -> Result<()> {
 fn run_fcp_loop() -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
+    run_fcp_loop_with_io(stdin.lock(), &mut stdout)
+}
+
+fn run_fcp_loop_with_io<R, W>(reader: R, stdout: &mut W) -> Result<()>
+where
+    R: std::io::Read,
+    W: Write,
+{
     let mut connector = DocsConnector::new();
     let runtime = Builder::new_multi_thread().enable_all().build()?;
 
-    for line in stdin.lock().lines() {
+    for line in BufReader::new(reader).lines() {
         let line = line?;
-        if line.is_empty() {
+        if should_skip_protocol_line(&line) {
             continue;
         }
         let response = runtime.block_on(async { handle_message(&mut connector, &line).await });
@@ -63,17 +71,25 @@ fn run_fcp_loop() -> Result<()> {
     Ok(())
 }
 
+fn should_skip_protocol_line(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
+fn parse_error_response(error: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": "FCP-1001",
+            "message": format!("Invalid JSON: {error}")
+        }
+    })
+}
+
 async fn handle_message(connector: &mut DocsConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
-        Err(e) => {
-            return serde_json::json!({
-                "error": {
-                    "code": "FCP-1001",
-                    "message": format!("Invalid JSON: {e}")
-                }
-            });
-        }
+        Err(e) => return parse_error_response(e),
     };
 
     let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -121,5 +137,79 @@ async fn handle_message(connector: &mut DocsConnector, message: &str) -> serde_j
             }
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Cursor, Read};
+
+    use super::*;
+
+    struct ErrorAfterBytes {
+        bytes: Cursor<Vec<u8>>,
+        fail_after: usize,
+    }
+
+    impl ErrorAfterBytes {
+        fn new(contents: &str, fail_after: usize) -> Self {
+            Self {
+                bytes: Cursor::new(contents.as_bytes().to_vec()),
+                fail_after,
+            }
+        }
+    }
+
+    impl Read for ErrorAfterBytes {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.bytes.position() as usize >= self.fail_after {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "simulated read failure",
+                ));
+            }
+
+            let remaining_before_failure = self.fail_after - self.bytes.position() as usize;
+            let max_len = remaining_before_failure.min(buf.len());
+            self.bytes.read(&mut buf[..max_len])
+        }
+    }
+
+    #[test]
+    fn protocol_loop_skips_whitespace_only_lines() {
+        assert!(should_skip_protocol_line(""));
+        assert!(should_skip_protocol_line(" \t "));
+        assert!(!should_skip_protocol_line("{\"jsonrpc\":\"2.0\"}"));
+    }
+
+    #[test]
+    fn protocol_loop_propagates_input_read_errors() {
+        let reader = ErrorAfterBytes::new("{\"jsonrpc\":\"2.0\",\"method\":\"health\"}\n", 8);
+        let mut output = Vec::new();
+
+        let error = run_fcp_loop_with_io(reader, &mut output)
+            .expect_err("input read failure should be returned");
+
+        assert!(
+            error.to_string().contains("simulated read failure"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[fcp_async_core::test]
+    async fn invalid_json_is_wrapped_in_jsonrpc_parse_error() {
+        let mut connector = DocsConnector::new();
+
+        let response = handle_message(&mut connector, "{").await;
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert!(response["id"].is_null());
+        assert_eq!(response["error"]["code"], "FCP-1001");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .expect("error message should be a string")
+                .contains("Invalid JSON")
+        );
     }
 }

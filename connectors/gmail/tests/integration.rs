@@ -35,9 +35,6 @@ use fcp_gmail::{client::GmailClient, connector::GmailConnector, error::GmailErro
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
     let cap = match op {
         "gmail.send_message" | "gmail.send_draft" => "gmail.send",
-        "gmail.get_message" | "gmail.list_messages" | "gmail.get_thread" | "gmail.list_labels" => {
-            "gmail.read"
-        }
         "gmail.sync_history" => "gmail.history.read",
         "gmail.modify_message" | "gmail.get_draft" => "gmail.write",
         "gmail.trash_message" => "gmail.delete",
@@ -929,17 +926,16 @@ async fn invoke_sync_history_persists_and_resumes_cursor() {
     assert_eq!(resumed["used_persisted_cursor"], true);
 }
 
-fn generated_approval_name(mode: Option<ApprovalMode>) -> &'static str {
+const fn generated_approval_name(mode: Option<ApprovalMode>) -> &'static str {
     match mode {
-        None => "none",
-        Some(ApprovalMode::None) => "none",
+        None | Some(ApprovalMode::None) => "none",
         Some(ApprovalMode::Policy) => "policy",
         Some(ApprovalMode::Interactive) => "interactive",
         Some(ApprovalMode::ElevationToken) => "elevation_token",
     }
 }
 
-fn manifest_approval_name(mode: ManifestApprovalMode) -> &'static str {
+const fn manifest_approval_name(mode: ManifestApprovalMode) -> &'static str {
     match mode {
         ManifestApprovalMode::None => "none",
         ManifestApprovalMode::Policy => "policy",
@@ -948,17 +944,20 @@ fn manifest_approval_name(mode: ManifestApprovalMode) -> &'static str {
     }
 }
 
-/// Shared Gmail generation now matches the canonical list/send/history metadata surface.
+/// Shared Gmail generation now matches the canonical list/send metadata surface.
 ///
 /// The remaining drift is that `sync_history` is still connector-local rather
-/// than represented in the handwritten manifest.
+/// than represented in the handwritten manifest, and it intentionally keeps a
+/// more granular `gmail.history.read` capability than the generated Discovery
+/// `gmail.users.messages.list_history` operation.
 #[fcp_async_core::runtime::test]
 async fn shared_generation_overlap_matches_canonical_gmail_metadata() {
     let service = DiscoveryServiceId::new("gmail", "v1").expect("valid gmail service id");
     let snapshot = normalize_snapshot_bytes(
         &service,
-        include_str!("../../../crates/fcp-google-discovery/data/fixtures/gmail_discovery.v1.json")
-            .as_bytes(),
+        include_bytes!(
+            "../../../crates/fcp-google-discovery/data/fixtures/gmail_discovery.v1.json"
+        ),
         DiscoveryEndpointKind::Standard,
         "https://example.test/discovery/gmail",
     )
@@ -996,7 +995,7 @@ async fn shared_generation_overlap_matches_canonical_gmail_metadata() {
     assert_eq!(manifest_list.capability.as_str(), generated_list.capability);
     assert_eq!(
         generated_approval_name(generated_list.approval_mode),
-        manifest_approval_name(manifest_list.requires_approval.clone())
+        manifest_approval_name(manifest_list.requires_approval)
     );
     assert_eq!(introspection_list["capability"], "gmail.read");
     assert!(introspection_list["requires_approval"].is_null());
@@ -1021,7 +1020,7 @@ async fn shared_generation_overlap_matches_canonical_gmail_metadata() {
     assert_eq!(manifest_send.capability.as_str(), generated_send.capability);
     assert_eq!(
         generated_approval_name(generated_send.approval_mode),
-        manifest_approval_name(manifest_send.requires_approval.clone())
+        manifest_approval_name(manifest_send.requires_approval)
     );
     assert_eq!(introspection_send["capability"], "gmail.send");
     assert_eq!(introspection_send["requires_approval"], "interactive");
@@ -1037,7 +1036,7 @@ async fn shared_generation_overlap_matches_canonical_gmail_metadata() {
         .find(|op| op["id"] == "gmail.sync_history")
         .expect("introspection history op");
 
-    assert_eq!(generated_history.capability, "gmail.history.read");
+    assert_eq!(generated_history.capability, "gmail.read");
     assert_eq!(introspection_history["capability"], "gmail.history.read");
     assert!(introspection_history["requires_approval"].is_null());
     assert!(

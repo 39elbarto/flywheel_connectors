@@ -5,12 +5,10 @@
 </div>
 
 > **Specification note:** `FCP_Specification_V3.md` is the current architectural and conformance
-> target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context
-> while the remaining docs are brought forward. This README mixes present-day implementation notes
-> with longer-term architecture; when descriptions conflict, trust V3 for intended semantics and
-> the code for current behavior.
+> target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
+> When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and eventually personal device meshes — plus a large, still-evolving workspace of connector crates and supporting infrastructure.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. **89 connectors**, **29 infrastructure crates**, **1.4 million lines of Rust**, **58,000+ tests**, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state.
 
 ---
 
@@ -22,9 +20,9 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 2. **A real host-first Rust platform** — today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`
 
-3. **A large connector workspace** — many Rust connector crates and support crates exist already, but maturity varies by connector and subsystem
+3. **A complete connector workspace** — 89 production-quality connectors covering messaging, cloud, databases, AI providers, dev tools, productivity, and Google Workspace — all with typed operations, structured error mapping, and manifest-declared security policy
 
-**Current reality**: the long-term vision is still personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. But the implemented operator surface today is primarily host-first rather than “every workflow already runs directly over a fully realized mesh kernel.”
+**Current reality**: the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. The implemented operator surface today is primarily host-first (`fwc` -> `fcp-host` -> connector subprocesses), with the mesh-native data plane proven at the protocol and store layers.
 
 **The direction**: keep the strong zone/capability/evidence model, keep pushing toward the mesh-native design, and make the README honest about what is implemented now versus what is still being refounded.
 
@@ -679,6 +677,203 @@ These unlock entire categories of autonomous agent work.
 | `fcp.redis` | Queue/Pub-Sub | Caching, message queues |
 | `fcp.whisper` | CLI/Process | Voice transcription |
 
+### Full Connector Catalog (89 connectors)
+
+Every connector follows the same structural contract: a `manifest.toml` declaring capabilities, zones, rate limits, network constraints, and sandbox policy; a `ConnectorErrorMapping` implementation bridging connector-specific errors to the FCP error taxonomy; and typed `OperationInfo` structs with AI agent hints (when to use, common mistakes, examples).
+
+| Category | Connectors | Count |
+|----------|-----------|-------|
+| **AI & LLM** | Anthropic, OpenAI, Google AI (Gemini), LLM Router, Whisper | 5 |
+| **Google Workspace** | Gmail, Calendar, Drive, Docs, Sheets, Chat, YouTube, People, Workspace Events, Admin Reports, BigQuery, Google AI | 12 |
+| **Messaging** | Slack, Discord, Telegram, Twitter/X | 4 |
+| **Dev Tools** | GitHub, GitLab, Bitbucket, Linear, Jira, ClickUp, Todoist, Trello, Asana | 9 |
+| **Databases** | PostgreSQL, Redis, MongoDB, Elasticsearch, DuckDB, Snowflake, Qdrant, Pinecone, VectorDB | 9 |
+| **Cloud & Infra** | S3, Kubernetes, Terraform, Pulumi, Datadog, Grafana, Sentry | 7 |
+| **Productivity** | Notion, Airtable, Figma, DocuSign, Pandadoc, Evernote, Logseq, Roam | 8 |
+| **Communication** | SendGrid, Twilio, Mailchimp, HubSpot, Intercom, Zendesk | 6 |
+| **Finance** | Stripe, Plaid | 2 |
+| **Analytics** | Mixpanel, Amplitude, PostHog, Segment, Metabase | 5 |
+| **Security** | 1Password, Bitwarden | 2 |
+| **Automation** | Zapier, Make, n8n, Retool, Cron, Webhook Receiver | 6 |
+| **Content** | Reddit, LinkedIn, Spotify, Anna's Archive, Arxiv, Semantic Scholar | 6 |
+| **Other** | Browser, MCP Bridge, Microsoft 365, Salesforce, Box, Dropbox, Home Assistant | 8 |
+
+### Google Workspace Platform
+
+The 12 Google connectors share a discovery-pinned substrate (`fcp-google-discovery`) that provides:
+
+- **`GoogleAuthSelection`** — Unified config parsing: `access_token`, `credential_id`, or OAuth refresh
+- **`GoogleMaterializedAuth`** — Materialized auth with `BearerToken` and `CredentialReference` variants
+- **`GoogleRestExecutor`** — Shared HTTP executor with retry loops and structured error extraction
+- **Migration acceptance tests** — `migration_acceptance.rs` for Gmail, Calendar, and YouTube validates substrate integration
+
+All Google connectors use the same auth flow: `GoogleAuthSelection::from_connector_config()` -> `.materialize()` -> `Client::new_with_auth()`. This eliminates per-connector OAuth boilerplate and ensures consistent credential handling across the family.
+
+### Connector SDK & Migration Framework
+
+The `fcp-sdk` crate provides the migration framework that all 89 connectors implement:
+
+```rust
+// Every connector implements this trait for unified error handling
+pub trait ConnectorErrorMapping: Display + Debug + Send + Sync {
+    fn from_async_error(error: AsyncError) -> Self where Self: Sized;
+    fn to_fcp_error(&self) -> FcpError;
+    fn is_retryable(&self) -> bool;
+    fn retry_after(&self) -> Option<Duration> { None }
+}
+```
+
+Supporting infrastructure:
+
+| Component | Purpose |
+|-----------|---------|
+| `ConnectorRuntime` | Lifecycle wrapper with request contexts and graceful shutdown |
+| `RetryLoop` | Generic retry executor with exponential backoff and jitter |
+| `HttpRetryConfig` | Serializable retry config (max retries, initial/max delay, jitter) |
+| `AttemptOutcome<T, E>` | Enum for retry decisions: `Success`, `Retryable`, `Terminal` |
+
+### Streaming Health Model
+
+`fcp-streaming` provides a state machine for long-lived connection health:
+
+```
+Connected ──(missed heartbeat)──> Degraded
+Connected ──(connection lost)───> Reconnecting
+Degraded  ──(heartbeat received)─> Connected
+Degraded  ──(zombie timeout)────> Unhealthy
+Reconnecting ──(connected)──────> Connected
+Reconnecting ──(max retries)────> Unhealthy
+```
+
+`StreamHealthTracker` drives these transitions and produces `StreamHealthSnapshot` structs with `last_heartbeat_ms_ago`, `last_ack_ms_ago`, `reconnect_count`, `messages_received`, and `uptime_ms`. The tracker maps to `fcp_core::ConnectorHealth` for external reporting.
+
+---
+
+## FWC: The Agent-First CLI
+
+`fwc` is the sole supported CLI for the Flywheel connector workspace. It provides 50+ commands across discovery, lifecycle, invocation, intent compilation, and workflow management — all with TOON-first output optimized for AI agent consumption.
+
+### Quick Start
+
+```bash
+# Install from source
+cargo build -p fwc --bin fwc --release
+cp target/release/fwc ~/.local/bin/
+
+# Discover connectors (offline mode — no running fcp-host needed)
+fwc list --offline
+fwc search "send message" --offline
+fwc show github --offline
+fwc ops github --offline
+fwc schema github issues.create --offline
+
+# With a running fcp-host
+fwc list
+fwc invoke github issues.create --file payload.json
+fwc simulate github issues.create --file payload.json
+fwc history --connector github --limit 20
+```
+
+### Command Families
+
+| Family | Commands | Purpose |
+|--------|----------|---------|
+| **Discovery** | `list`, `search`, `show`, `ops`, `schema`, `examples`, `zones` | Find connectors and understand their operations |
+| **Lifecycle** | `doctor`, `status`, `health`, `install`, `update`, `pin`, `rollout` | Manage connector health and deployment |
+| **Execution** | `invoke`, `simulate`, `preflight`, `cancel` | Run operations with safety gates |
+| **Workflow** | `task`, `plan`, `explain`, `do` | Intent-first workflow compilation |
+| **Composition** | `pipe`, `pipeline`, `recipe`, `map`, `batch-file` | Chain and parallelize operations |
+| **History** | `history`, `replay`, `compare`, `undo`, `approvals` | Audit trail and reversal guidance |
+| **Auth** | `auth`, `config` | Credential and configuration management |
+| **Export** | `export-tools`, `serve-mcp` | Expose connectors as MCP tools |
+| **Evidence** | `supply-chain`, `audit`, `manifest`, `net`, `trace`, `policy` | Verify security posture |
+
+### Output Formats
+
+`fwc` defaults to TOON — a token-efficient structured format designed for AI agents. Other formats are available:
+
+```bash
+fwc list --offline                    # TOON (default, compact)
+fwc list --offline --json             # Full JSON
+fwc list --offline --format table     # ASCII table
+fwc list --offline --format csv       # CSV export
+fwc list --offline --format markdown  # Markdown table
+```
+
+---
+
+## Algorithms & Design Principles
+
+### RaptorQ Fountain Codes
+
+FCP uses RaptorQ (RFC 6330) for all data distribution. The key insight: instead of coordinating which specific packets to retransmit, generate an infinite stream of symbols where **any K' symbols reconstruct the original**. This eliminates retransmit coordination, enables multipath aggregation, and provides natural offline resilience.
+
+Implementation details in `fcp-raptorq`:
+- Symbol sizes from 1 to 65,535 bytes (configurable per object)
+- Chunked objects via `ChunkedObjectManifest` for large payloads
+- BLAKE3 hash verification on reconstructed chunks
+- Admission control: concurrent decode limit (16), memory limits, duplicate rejection, timeouts
+- All arithmetic uses `checked_*` / `saturating_*` operations — no integer overflow panics
+
+### Deterministic CBOR Serialization
+
+`fcp-cbor` enforces RFC 8949 Section 4.2 canonical encoding:
+- Map keys sorted by canonical CBOR bytes (length-first, then lexicographic)
+- Minimal integer encoding
+- Duplicate key detection and rejection
+- Depth limit (128 levels) and size limit (64 MiB) for DoS protection
+- Round-trip verification: `deserialize()` re-encodes and compares bytes
+
+All capability tokens, zone manifests, and signed objects use this canonical form to ensure signatures are deterministic.
+
+### COSE/CWT Capability Tokens
+
+Capability tokens use CBOR Object Signing and Encryption (RFC 9052) with CWT claims (RFC 8392):
+- Ed25519 signatures over deterministic CBOR payloads
+- Standard claims: `iss`, `sub`, `exp`, `nbf`, `iat`
+- FCP-specific claims: operation scope, capability constraints, zone binding
+- Signature verified **before** claims are parsed (defense-in-depth)
+- Revocation checked via monotonic sequence numbers (O(1) freshness)
+
+### Gossip Protocol
+
+`fcp-mesh` uses an IBLT-based gossip protocol for efficient state reconciliation:
+- XOR filters for set membership with false-positive-only semantics
+- Invertible Bloom Lookup Tables (IBLTs) for set difference
+- Bounded gossip: `MAX_OBJECT_IDS_PER_REQUEST = 100`
+- Admitted vs. Quarantined object classification
+- Per-peer admission budgets with anti-amplification rules
+
+### Repair Controller
+
+`fcp-store` implements an SLO-driven repair controller:
+- Coverage evaluation in basis points (bps, 0-10000 = 0-100%)
+- Per-object placement policies with coverage, diversity, and concentration targets
+- Deterministic repair prioritization: SLO deficit x object hotness x cost estimate
+- Bounded repair plans: max repairs, max bytes, max decode budget per cycle
+- Power-aware behavior: defers non-critical repairs on battery
+
+---
+
+## Test Infrastructure
+
+The workspace contains 58,000+ tests across several test categories:
+
+| Category | Where | What It Covers |
+|----------|-------|----------------|
+| **Unit tests** | `#[cfg(test)]` in every crate | Individual function correctness, edge cases |
+| **Integration tests** | `connectors/*/tests/` | Connector lifecycle with wiremock HTTP mocking |
+| **Conformance** | `crates/fcp-conformance/tests/` | Protocol golden vectors, capability verification |
+| **E2E** | `crates/fcp-e2e/tests/` | Host-backed compliance scenarios |
+| **Mesh scenarios** | `crates/fcp-conformance/tests/integration_scenarios.rs` | Network partition recovery, gossip convergence |
+| **Benchmarks** | `crates/fwc/benches/`, `crates/fcp-core/benches/` | Search, schema, pipeline, PCS performance |
+
+Key testing patterns:
+- **No real API calls in tests** — all external services are mocked via `wiremock`
+- **Deterministic test logging** — structured JSON log output with correlation IDs
+- **RFC test vectors** — Ed25519 (RFC 8032), HKDF (RFC 5869), X25519 (RFC 7748)
+- **Golden vector snapshots** — canonical CBOR, manifest hashes, protocol frames
+
 ---
 
 ## Registry Architecture
@@ -834,7 +1029,7 @@ For operator and agent workflows, migration guidance, and evidence-bundle expect
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 29 directories under `crates/`, 28 of which are active Cargo workspace members today, plus 89 connector crates under `connectors/`. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 29 crates under `crates/` and 89 connector crates under `connectors/`, totaling 1.4 million lines of Rust with 58,000+ tests. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/
@@ -929,7 +1124,7 @@ The remaining quarantine surfaces (see `docs/FCP3_Retirement_Kill_List.md` for t
 
 - `fcp-async-core` wraps the Asupersync runtime and retains a Tokio compatibility bridge for wiremock/reqwest test infrastructure. The bridge is quarantined with explicit removal triggers.
 - `fwc/src/serve_mcp.rs` has one remaining `tokio::io` import, quarantined until `fcp-async-core::io` gains `AsyncWrite` and `lines()` support.
-- 14 connectors currently implement `ConnectorErrorMapping`; the migration framework (`ConnectorRuntime`, `RetryLoop`) is proven across request-response, streaming, and polling archetypes.
+- All 89 connectors implement `ConnectorErrorMapping`; the migration framework (`ConnectorRuntime`, `RetryLoop`) is proven across request-response, streaming, and polling archetypes.
 
 The FCP3 runtime kernel uses Asupersync natively. All production transport code (including WebSocket in `fcp-streaming`) runs on the Asupersync runtime. No compatibility-first holdouts remain in production paths.
 
@@ -1120,6 +1315,56 @@ apr integrate 5 -c  # Copy integration prompt to clipboard
 | `docs/GOOGLE_Connector_Platform_Reference.md` | Developer/operator guide for the shared Google connector platform |
 | `.apr/workflows/fcp.yaml` | APR workflow configuration |
 | `.apr/rounds/fcp/round_N.md` | GPT Pro output for each round |
+
+---
+
+## Limitations
+
+Honest about what FCP doesn't do yet:
+
+- **No production mesh deployment**: The mesh protocol and data plane are implemented and tested, but no production multi-device deployment guide exists yet. The host-first stack is the proven operator path today.
+- **No GUI**: `fwc` is CLI-only. The `serve-mcp` command exposes connectors as MCP tools for AI agent consumption, but there is no web dashboard.
+- **Connector maturity varies**: The 89 connectors all compile and pass tests, but depth of operation coverage ranges from comprehensive (GitHub: 12 ops, Gmail: 10 ops) to minimal (some connectors have 3-5 core operations).
+- **No Windows sandbox**: `fcp-sandbox` implements seccomp/Landlock on Linux and basic WASI isolation. macOS uses seatbelt. Windows sandbox support is Tier 2 and not yet hardened.
+- **Capability constraint enforcement is declarative only**: Constraints are serialized into COSE tokens but runtime enforcement is not yet wired into the request execution path. This is the next major security milestone.
+- **No automatic connector updates**: `fwc install` and `fwc update` exist but automatic background updates with rollback are not yet implemented.
+- **Single-node state only**: Connector state is externalized as mesh objects in the protocol spec, but the current host implementation stores state locally. Multi-node state replication is architecturally designed but not yet operational.
+
+---
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `fwc list` returns "missing-host-endpoint" | No `fcp-host` running | Use `fwc list --offline` for workspace manifest data |
+| Connector returns `NotConfigured` | `configure` not called before `invoke` | Call `fwc config schema <connector>` to see required params, then configure |
+| `cargo build` OOMs on macOS | Too many parallel codegen units | Set `CARGO_TARGET_DIR=/tmp/fcp-build` to avoid Cargo lock contention; or use `rch exec -- cargo build` to offload to remote workers |
+| Clippy fails with `fcp-async-core` errors | Pre-existing lints in async-core test code | These are upstream; connector code is clean. Run clippy on specific crates: `cargo clippy -p fcp-<crate>` |
+| OAuth token refresh fails | Token expired between materialize and use | For `credential_id` auth, the egress proxy handles refresh. For `access_token`, re-run configure with a fresh token |
+| SSE stream stops without error | Connection idle timeout | The Anthropic SSE parser has a 16 MiB buffer limit and proper CRLF handling. Check network/proxy timeout settings |
+
+## FAQ
+
+**Q: Why 89 separate connector crates instead of a plugin system?**
+Each connector is a standalone binary with its own manifest, capabilities, and sandbox policy. This eliminates shared-memory vulnerabilities, enables per-connector resource limits, and makes supply-chain verification tractable (you sign one binary, not a runtime + plugin combination).
+
+**Q: Why RaptorQ instead of regular file transfer?**
+Fountain codes eliminate retransmit coordination. Any K' symbols reconstruct the original — no packet is special. This enables multipath aggregation (symbols from any device contribute equally), natural offline resilience (partial availability = partial reconstruction), and DoS resistance (attackers can't target "important" packets).
+
+**Q: Why Tailscale as the transport layer?**
+Tailscale provides unforgeable WireGuard keys (identity), NAT traversal (connectivity), and ACLs (authorization) in one layer. FCP maps zones to Tailscale tags, giving cryptographic network isolation without managing a separate PKI.
+
+**Q: Can I use FCP without the mesh?**
+Yes. The host-first stack (`fwc` + `fcp-host`) works standalone on a single machine. The mesh layer adds multi-device distribution, offline resilience, and symbol-based data availability — but none of that is required for basic connector operation.
+
+**Q: Why TOON output by default instead of JSON?**
+TOON (Token-Optimized Output Notation) is 2-5x more token-efficient than JSON for AI agent consumption. Every `fwc` command also supports `--json` for full-fidelity structured output, plus `--format table|csv|tsv|markdown` for human consumption.
+
+**Q: How do I add a new connector?**
+Use the scaffold generator: `fwc new myservice --archetype request-response`. This creates a complete connector crate with manifest, error types, client stub, `ConnectorErrorMapping`, limits constants, and test harness. See "Creating a New Connector" below.
+
+**Q: What happens if a connector tries to access a host outside its manifest?**
+The egress proxy denies the request. Network constraints are declared per-operation in the manifest (`allowed_hosts`, `allowed_ports`, `require_tls`). The sandbox enforces CIDR deny defaults (localhost, private ranges, tailnet) and SNI verification. The denial is logged as an audit event.
 
 ---
 

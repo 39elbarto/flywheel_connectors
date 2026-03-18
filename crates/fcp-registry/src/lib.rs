@@ -4029,12 +4029,12 @@ sig = "base64:{sig_b64}"
                 let binary_hash = "sha256:abc";
                 let msg = signature_message(signing_bytes, binary_hash);
 
-                // Expected: u32le(5) || "hello" || u32le(10) || "sha256:abc"
-                assert_eq!(msg.len(), 4 + 5 + 4 + 10);
-                assert_eq!(&msg[..4], &5u32.to_le_bytes());
-                assert_eq!(&msg[4..9], b"hello");
-                assert_eq!(&msg[9..13], &10u32.to_le_bytes());
-                assert_eq!(&msg[13..], b"sha256:abc");
+                // Expected: u64le(5) || "hello" || u64le(10) || "sha256:abc"
+                assert_eq!(msg.len(), 8 + 5 + 8 + 10);
+                assert_eq!(&msg[..8], &5u64.to_le_bytes());
+                assert_eq!(&msg[8..13], b"hello");
+                assert_eq!(&msg[13..21], &10u64.to_le_bytes());
+                assert_eq!(&msg[21..], b"sha256:abc");
 
                 RegistryLogData {
                     reason_code: Some("signature_message_format_ok".to_string()),
@@ -4053,9 +4053,9 @@ sig = "base64:{sig_b64}"
             2,
             || async {
                 let msg = signature_message(b"", "");
-                assert_eq!(msg.len(), 8); // two u32le(0)
-                assert_eq!(&msg[..4], &0u32.to_le_bytes());
-                assert_eq!(&msg[4..], &0u32.to_le_bytes());
+                assert_eq!(msg.len(), 16); // two u64le(0)
+                assert_eq!(&msg[..8], &0u64.to_le_bytes());
+                assert_eq!(&msg[8..], &0u64.to_le_bytes());
 
                 RegistryLogData {
                     reason_code: Some("signature_message_empty_ok".to_string()),
@@ -7426,19 +7426,19 @@ trusted_builders = ["trusted-ci"]
                 let binary_hash = "sha256:abc123";
                 let msg = signature_message(signing_bytes, binary_hash);
 
-                // Message format: le_u32(signing_len) || signing_bytes || le_u32(hash_len) || hash_bytes
-                let signing_len = u32::from_le_bytes(msg[0..4].try_into().expect("4 bytes"));
+                // Message format: le_u64(signing_len) || signing_bytes || le_u64(hash_len) || hash_bytes
+                let signing_len = u64::from_le_bytes(msg[0..8].try_into().expect("8 bytes"));
                 assert_eq!(signing_len as usize, signing_bytes.len());
 
-                let hash_offset = 4 + signing_bytes.len();
-                let hash_len = u32::from_le_bytes(
-                    msg[hash_offset..hash_offset + 4]
+                let hash_offset = 8 + signing_bytes.len();
+                let hash_len = u64::from_le_bytes(
+                    msg[hash_offset..hash_offset + 8]
                         .try_into()
-                        .expect("4 bytes"),
+                        .expect("8 bytes"),
                 );
                 assert_eq!(hash_len as usize, binary_hash.len());
 
-                let total = 4 + signing_bytes.len() + 4 + binary_hash.len();
+                let total = 8 + signing_bytes.len() + 8 + binary_hash.len();
                 assert_eq!(msg.len(), total);
 
                 RegistryLogData::default()

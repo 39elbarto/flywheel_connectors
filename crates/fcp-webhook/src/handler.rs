@@ -333,6 +333,10 @@ impl DeadLetterQueue {
 
     /// Add an event to the dead letter queue.
     pub fn push(&self, mut event: WebhookEvent) {
+        if self.max_size == 0 {
+            return;
+        }
+
         event.metadata.status = DeliveryStatus::DeadLettered;
         let mut events = self.events.write();
         if events.len() >= self.max_size {
@@ -971,13 +975,12 @@ mod tests {
     #[test]
     fn test_dead_letter_queue_zero_capacity() {
         let dlq = DeadLetterQueue::new(0);
-        // Pushing to a zero-capacity DLQ: events.len() (0) >= max_size (0), so oldest is removed
-        // but vec is empty, so remove(0) would panic... let's test
-        // Actually, the check is events.len() >= self.max_size, with max_size=0 and empty vec
-        // 0 >= 0 is true, so it tries events.remove(0) on empty vec → panic
-        // Let's skip the push and just test empty state
+
+        dlq.push(crate::WebhookEvent::new("1", "test", "p"));
+
         assert!(dlq.is_empty());
         assert_eq!(dlq.len(), 0);
+        assert!(dlq.all().is_empty());
     }
 
     #[test]

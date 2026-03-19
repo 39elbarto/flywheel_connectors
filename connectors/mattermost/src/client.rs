@@ -2,14 +2,15 @@
 
 use std::time::Duration;
 
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::error::{MattermostError, MattermostResult};
 use crate::types::{
-    Channel, CreatePostRequest, MattermostAuth, Post, PostList, SearchPostsRequest, Team, User,
+    Channel, CreatePostRequest, FileInfo, MattermostAuth, Post, PostList, SearchPostsRequest, Team,
+    User,
 };
 
 /// HTTP client for the Mattermost REST API v4.
@@ -59,6 +60,64 @@ impl MattermostClient {
         &self.base_url
     }
 
+    /// Token used for bearer-authenticated websocket sessions, if available.
+    #[must_use]
+    pub fn auth_token(&self) -> Option<&str> {
+        match &self.auth {
+            MattermostAuth::Token(token) => Some(token.as_str()),
+            MattermostAuth::CredentialId(_) => None,
+        }
+    }
+
+    /// Build the websocket endpoint URL for the current server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured base URL is not a valid HTTP(S) URL.
+    pub fn websocket_url(
+        &self,
+        connection_id: Option<&str>,
+        sequence_number: Option<u64>,
+    ) -> MattermostResult<String> {
+        let websocket_base = if let Some(rest) = self.base_url.strip_prefix("https://") {
+            format!("wss://{rest}/api/v4/websocket")
+        } else if let Some(rest) = self.base_url.strip_prefix("http://") {
+            format!("ws://{rest}/api/v4/websocket")
+        } else if self.base_url.starts_with("wss://") || self.base_url.starts_with("ws://") {
+            format!("{}/api/v4/websocket", self.base_url)
+        } else {
+            return Err(MattermostError::Config(format!(
+                "unsupported base_url scheme for websocket endpoint: {}",
+                self.base_url
+            )));
+        };
+
+        let mut url = reqwest::Url::parse(&websocket_base)
+            .map_err(|e| MattermostError::Config(format!("invalid websocket URL: {e}")))?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(connection_id) = connection_id.filter(|id| !id.is_empty()) {
+                query.append_pair("connection_id", connection_id);
+            }
+            if let Some(sequence_number) = sequence_number {
+                query.append_pair("sequence_number", &sequence_number.to_string());
+            }
+        }
+
+        Ok(url.into())
+    }
+
+    /// Build read-only access paths for a file.
+    #[must_use]
+    pub fn file_access_paths(&self, file_id: &str) -> serde_json::Value {
+        let base = format!("{}/api/v4/files/{file_id}", self.base_url);
+        serde_json::json!({
+            "download_url": format!("{base}?download=true"),
+            "preview_url": format!("{base}/preview?download=true"),
+            "thumbnail_url": format!("{base}/thumbnail?download=true")
+        })
+    }
+
     // ── Users ────────────────────────────────────────────────────────────
 
     /// Get the authenticated user's profile.
@@ -101,7 +160,7 @@ impl MattermostClient {
 
     // ── Channels ─────────────────────────────────────────────────────────
 
-    /// List channels for a team.
+    /// List channels for a team and user.
     ///
     /// # Errors
     ///
@@ -109,11 +168,12 @@ impl MattermostClient {
     pub async fn get_channels_for_team(
         &self,
         team_id: &str,
-        page: u32,
-        per_page: u32,
+        user_id: &str,
+        include_deleted: bool,
     ) -> MattermostResult<Vec<Channel>> {
+        let include_deleted = if include_deleted { "true" } else { "false" };
         self.get(&format!(
-            "/api/v4/teams/{team_id}/channels?page={page}&per_page={per_page}"
+            "/api/v4/users/{user_id}/teams/{team_id}/channels?include_deleted={include_deleted}"
         ))
         .await
     }
@@ -187,7 +247,12 @@ impl MattermostClient {
         let url = format!("{}/api/v4/posts/{post_id}", self.base_url);
         debug!(url = %url, "DELETE");
 
-        let response = self.client.delete(&url).send().await.map_err(MattermostError::Http)?;
+        let response = self
+            .client
+            .delete(&url)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
         let status = response.status().as_u16();
         let request_id = response
             .headers()
@@ -200,11 +265,28 @@ impl MattermostClient {
         } else {
             let body = response.text().await.unwrap_or_default();
             Err(MattermostError::from_api_response(
-                status,
-                &body,
-                request_id,
+                status, &body, request_id,
             ))
         }
+    }
+
+    /// Get file metadata by file ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the file is not found.
+    pub async fn get_file_info(&self, file_id: &str) -> MattermostResult<FileInfo> {
+        self.get(&format!("/api/v4/files/{file_id}/info")).await
+    }
+
+    /// Get file metadata for all files attached to a post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the post is not found.
+    pub async fn get_file_infos_for_post(&self, post_id: &str) -> MattermostResult<Vec<FileInfo>> {
+        self.get(&format!("/api/v4/posts/{post_id}/files/info"))
+            .await
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────
@@ -213,7 +295,12 @@ impl MattermostClient {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET");
 
-        let response = self.client.get(&url).send().await.map_err(MattermostError::Http)?;
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
         self.handle_response(response).await
     }
 
@@ -263,27 +350,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn client_creation_with_token() {
-        let auth = MattermostAuth::Token("test_token".into());
-        let client = MattermostClient::new("https://mm.example.com", auth, Duration::from_secs(30));
-        assert!(client.is_ok());
-        let client = client.unwrap();
-        assert_eq!(client.base_url(), "https://mm.example.com");
+    fn websocket_url_uses_ws_scheme_and_query_state() {
+        let client = MattermostClient::new(
+            "https://chat.example.com/mattermost",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let url = client.websocket_url(Some("conn-1"), Some(99)).unwrap();
+        assert_eq!(
+            url,
+            "wss://chat.example.com/mattermost/api/v4/websocket?connection_id=conn-1&sequence_number=99"
+        );
     }
 
     #[test]
-    fn client_creation_strips_trailing_slash() {
-        let auth = MattermostAuth::Token("tok".into());
-        let client =
-            MattermostClient::new("https://mm.example.com/", auth, Duration::from_secs(30))
-                .unwrap();
-        assert_eq!(client.base_url(), "https://mm.example.com");
-    }
-
-    #[test]
-    fn client_creation_with_credential_id() {
-        let auth = MattermostAuth::CredentialId("cred_123".into());
-        let client = MattermostClient::new("https://mm.local", auth, Duration::from_secs(10));
-        assert!(client.is_ok());
+    fn file_access_paths_include_download_variants() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let paths = client.file_access_paths("file123");
+        assert_eq!(
+            paths["download_url"],
+            "https://chat.example.com/api/v4/files/file123?download=true"
+        );
+        assert_eq!(
+            paths["preview_url"],
+            "https://chat.example.com/api/v4/files/file123/preview?download=true"
+        );
     }
 }

@@ -216,7 +216,7 @@ mod tests {
             retry_after_ms: 2000,
         };
         assert!(err.is_retryable());
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(2000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(2)));
     }
 
     #[test]
@@ -299,9 +299,7 @@ mod tests {
             retry_after_ms: 3000,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 3000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 3000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -309,7 +307,10 @@ mod tests {
     #[test]
     fn config_maps_to_fcp_invalid_request() {
         let err = MattermostError::Config("bad".into());
-        assert!(matches!(err.to_fcp_error(), FcpError::InvalidRequest { .. }));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { .. }
+        ));
     }
 
     #[test]
@@ -354,11 +355,8 @@ mod tests {
 
     #[test]
     fn from_api_response_404() {
-        let err = MattermostError::from_api_response(
-            404,
-            r#"{"message":"Resource not found"}"#,
-            None,
-        );
+        let err =
+            MattermostError::from_api_response(404, r#"{"message":"Resource not found"}"#, None);
         assert!(matches!(err, MattermostError::NotFound(_)));
     }
 

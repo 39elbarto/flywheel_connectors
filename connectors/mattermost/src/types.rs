@@ -1,6 +1,7 @@
 //! Mattermost API request and response types.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Mattermost connector configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,8 @@ pub struct Channel {
     pub header: String,
     #[serde(default)]
     pub purpose: String,
+    #[serde(default)]
+    pub delete_at: i64,
 }
 
 /// A Mattermost post (message).
@@ -103,6 +106,10 @@ pub struct Post {
     pub post_type: String,
     #[serde(default)]
     pub props: serde_json::Value,
+    #[serde(default)]
+    pub file_ids: Vec<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 /// Request for creating a post.
@@ -125,12 +132,143 @@ pub struct PostList {
     pub posts: std::collections::HashMap<String, Post>,
 }
 
+/// Request for fetching a thread rooted at a post.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetThreadRequest {
+    pub post_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_page: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_post: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_create_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_update_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_fetch_threads: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collapsed_threads: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collapsed_threads_extended: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updates_only: Option<bool>,
+}
+
 /// Search posts request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchPostsRequest {
     pub terms: String,
     #[serde(default)]
     pub is_or_search: bool,
+}
+
+/// Mattermost file metadata returned by the REST API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub id: String,
+    #[serde(rename = "user_id", default)]
+    pub creator_id: String,
+    #[serde(default)]
+    pub post_id: String,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub create_at: i64,
+    #[serde(default)]
+    pub update_at: i64,
+    #[serde(default)]
+    pub delete_at: i64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub extension: String,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub mime_type: String,
+    #[serde(default)]
+    pub width: i32,
+    #[serde(default)]
+    pub height: i32,
+    #[serde(default)]
+    pub has_preview_image: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub remote_id: Option<String>,
+}
+
+/// Mattermost reaction payload embedded in websocket events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reaction {
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub post_id: String,
+    #[serde(default)]
+    pub emoji_name: String,
+    #[serde(default)]
+    pub create_at: i64,
+}
+
+/// Thread metadata embedded in websocket thread update events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadResponse {
+    pub id: String,
+    #[serde(default)]
+    pub reply_count: i64,
+    #[serde(default)]
+    pub last_reply_at: i64,
+    #[serde(default)]
+    pub last_viewed_at: i64,
+    #[serde(default)]
+    pub unread_replies: i64,
+    #[serde(default)]
+    pub unread_mentions: i64,
+    #[serde(default)]
+    pub post: Option<Post>,
+}
+
+/// Broadcast scope attached to a websocket event.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MattermostWebSocketBroadcast {
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub team_id: String,
+}
+
+/// Server-sent Mattermost websocket frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MattermostWebSocketMessage {
+    #[serde(default)]
+    pub event: Option<String>,
+    #[serde(default)]
+    pub data: Value,
+    #[serde(default)]
+    pub broadcast: MattermostWebSocketBroadcast,
+    #[serde(default)]
+    pub seq: Option<u64>,
+    #[serde(default)]
+    pub seq_reply: Option<u64>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub error: Option<Value>,
+}
+
+/// File download payload returned by the connector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDownload {
+    pub file_id: String,
+    pub content_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    pub size_bytes: usize,
 }
 
 #[cfg(test)]
@@ -164,7 +302,8 @@ mod tests {
 
     #[test]
     fn team_deserialize() {
-        let json = r#"{"id": "t1", "name": "engineering", "display_name": "Engineering", "type": "O"}"#;
+        let json =
+            r#"{"id": "t1", "name": "engineering", "display_name": "Engineering", "type": "O"}"#;
         let team: Team = serde_json::from_str(json).unwrap();
         assert_eq!(team.team_type, "O");
     }
@@ -178,10 +317,11 @@ mod tests {
 
     #[test]
     fn post_deserialize() {
-        let json = r#"{"id": "p1", "channel_id": "c1", "user_id": "u1", "message": "Hello!", "create_at": 1700000000000}"#;
+        let json = r#"{"id": "p1", "channel_id": "c1", "user_id": "u1", "message": "Hello!", "create_at": 1700000000000, "file_ids": ["f1"]}"#;
         let post: Post = serde_json::from_str(json).unwrap();
         assert_eq!(post.message, "Hello!");
         assert_eq!(post.create_at, 1_700_000_000_000);
+        assert_eq!(post.file_ids, vec!["f1"]);
     }
 
     #[test]
@@ -226,5 +366,68 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["terms"], "test query");
         assert_eq!(json["is_or_search"], true);
+    }
+
+    #[test]
+    fn file_info_deserialize() {
+        let json = r#"{"id":"f1","user_id":"u1","post_id":"p1","channel_id":"c1","create_at":1,"update_at":2,"name":"report.txt","extension":"txt","size":42,"mime_type":"text/plain","archived":false}"#;
+        let file: FileInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(file.id, "f1");
+        assert_eq!(file.creator_id, "u1");
+        assert_eq!(file.name, "report.txt");
+    }
+
+    #[test]
+    fn thread_response_deserialize() {
+        let json = r#"{"id":"root1","reply_count":3,"last_reply_at":123,"post":{"id":"root1","channel_id":"c1","message":"root"}}"#;
+        let thread: ThreadResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(thread.id, "root1");
+        assert_eq!(thread.reply_count, 3);
+        assert_eq!(thread.post.as_ref().unwrap().channel_id, "c1");
+    }
+
+    #[test]
+    fn get_thread_request_serialize() {
+        let request = GetThreadRequest {
+            post_id: "root1".into(),
+            per_page: Some(30),
+            from_post: Some("cursor1".into()),
+            from_create_at: Some(11),
+            from_update_at: Some(12),
+            direction: Some("down".into()),
+            skip_fetch_threads: Some(true),
+            collapsed_threads: Some(true),
+            collapsed_threads_extended: Some(false),
+            updates_only: Some(true),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["post_id"], "root1");
+        assert_eq!(json["per_page"], 30);
+        assert_eq!(json["direction"], "down");
+        assert_eq!(json["skip_fetch_threads"], true);
+    }
+
+    #[test]
+    fn file_download_serialize() {
+        let payload = FileDownload {
+            file_id: "f1".into(),
+            content_base64: "aGVsbG8=".into(),
+            content_type: Some("text/plain".into()),
+            size_bytes: 5,
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["file_id"], "f1");
+        assert_eq!(json["content_base64"], "aGVsbG8=");
+        assert_eq!(json["content_type"], "text/plain");
+        assert_eq!(json["size_bytes"], 5);
+    }
+
+    #[test]
+    fn websocket_message_deserialize() {
+        let json = r#"{"event":"posted","data":{"post":"{\"id\":\"p1\",\"channel_id\":\"c1\",\"user_id\":\"u1\",\"message\":\"hello\"}","sender_name":"alice"},"broadcast":{"channel_id":"c1","team_id":"t1","user_id":"u2"},"seq":44}"#;
+        let message: MattermostWebSocketMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(message.event.as_deref(), Some("posted"));
+        assert_eq!(message.broadcast.channel_id, "c1");
+        assert_eq!(message.seq, Some(44));
     }
 }

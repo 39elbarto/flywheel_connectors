@@ -110,6 +110,52 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_team"]
+description = "Get a team by ID"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_team".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_team".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_team".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_channels_for_team"]
+description = "List channels available to a user within a team"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_channels_for_team".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_channels_for_team".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_channels_for_team".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
 [provides.operations."mattermost.get_channel"]
 description = "Get a channel by ID"
 capability = "mattermost.read"
@@ -148,6 +194,29 @@ type = "object"
 type = "object"
 
 [provides.operations."mattermost.get_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_thread"]
+description = "Get a thread by root or child post ID"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_thread".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_thread".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_thread".network_constraints]
 host_allow = ["*.example.com"]
 port_allow = [443, 8065]
 ip_allow = []
@@ -201,6 +270,155 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.get_file_info"]
+description = "Get file metadata and stable access paths by file ID"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_file_info".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_file_info".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_file_info".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_file_link"]
+description = "Get the public link for a file"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_file_link".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_file_link".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_file_link".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.download_file"]
+description = "Download a file body as base64 content"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.download_file".input_schema]
+type = "object"
+
+[provides.operations."mattermost.download_file".output_schema]
+type = "object"
+
+[provides.operations."mattermost.download_file".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.get_file_infos_for_post"]
+description = "List file metadata and access paths for all files attached to a post"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_file_infos_for_post".input_schema]
+type = "object"
+
+[provides.operations."mattermost.get_file_infos_for_post".output_schema]
+type = "object"
+
+[provides.operations."mattermost.get_file_infos_for_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+# ── Events ──
+
+[provides.events."mattermost.posted"]
+description = "Mattermost websocket post-created event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.post_edited"]
+description = "Mattermost websocket post-edited event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.post_deleted"]
+description = "Mattermost websocket post-deleted event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.reaction_added"]
+description = "Mattermost websocket reaction-added event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.reaction_removed"]
+description = "Mattermost websocket reaction-removed event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.thread_updated"]
+description = "Mattermost websocket thread-updated event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.channel_created"]
+description = "Mattermost websocket channel-created event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.channel_updated"]
+description = "Mattermost websocket channel-updated event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.channel_deleted"]
+description = "Mattermost websocket channel-deleted event"
+streaming = true
+replay = false
+
+[provides.events."mattermost.typing"]
+description = "Mattermost websocket typing indicator event"
+streaming = true
+replay = false
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 256
 
 # ── Write Operations ──
 

@@ -55,10 +55,12 @@ pub enum WhatsAppError {
 impl WhatsAppError {
     /// Whether this error is retryable.
     pub const fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Http(_) | Self::RateLimited { .. } | Self::Async(_)
-        )
+        match self {
+            Self::Http(_) | Self::RateLimited { .. } | Self::Async(_) => true,
+            // Meta API transient codes: 1=unknown, 2=temporary, 4=too many calls, 368=temp block
+            Self::Api { code, .. } => matches!(*code, 1 | 2 | 4 | 368),
+            _ => false,
+        }
     }
 
     /// Suggested retry-after delay.
@@ -90,9 +92,7 @@ impl WhatsAppError {
                 // status_code is for HTTP status; API-level codes (e.g., 100, 2018001)
                 // only fit u16 when they originated from an HTTP status fallback
                 status_code: u16::try_from(*code).ok(),
-                // Meta API codes: 1=unknown, 2=temporary, 4=too many calls, 368=temp block
-                // Codes like 131000+ are WhatsApp-specific, not HTTP status codes
-                retryable: matches!(*code, 1 | 2 | 4 | 368),
+                retryable: self.is_retryable(),
                 retry_after: None,
             },
             Self::RateLimited { retry_after_ms } => FcpError::RateLimited {

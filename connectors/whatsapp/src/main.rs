@@ -64,6 +64,7 @@ async fn handle_message(connector: &mut WhatsAppConnector, message: &str) -> ser
         Ok(v) => v,
         Err(e) => {
             return serde_json::json!({
+                "jsonrpc": "2.0",
                 "error": {
                     "code": "FCP-1001",
                     "message": format!("Invalid JSON: {e}")

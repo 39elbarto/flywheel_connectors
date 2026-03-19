@@ -96,6 +96,7 @@ members = [
     "connectors/algolia",
     "connectors/semanticscholar",
     "connectors/mattermost",
+    "connectors/teams",
     "connectors/whatsapp",
     "connectors/monday",
     "connectors/mailchimp",

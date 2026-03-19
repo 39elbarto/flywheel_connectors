@@ -6,5 +6,7 @@ pub mod client;
 pub mod connector;
 pub mod error;
 pub mod types;
+pub mod webhook;
 
 pub use connector::WhatsAppConnector;
+pub use webhook::WhatsAppWebhook;

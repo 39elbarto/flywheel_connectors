@@ -50,6 +50,10 @@ pub enum WhatsAppError {
     /// Configuration error.
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// Webhook signature verification failed.
+    #[error("Webhook error: {0}")]
+    Webhook(String),
 }
 
 impl WhatsAppError {
@@ -59,7 +63,12 @@ impl WhatsAppError {
             Self::Http(_) | Self::RateLimited { .. } | Self::Async(_) => true,
             // Meta API transient codes: 1=unknown, 2=temporary, 4=too many calls, 368=temp block
             Self::Api { code, .. } => matches!(*code, 1 | 2 | 4 | 368),
-            _ => false,
+            Self::Json(_)
+            | Self::Unauthorized(_)
+            | Self::InvalidPhoneNumber(_)
+            | Self::TemplateRejected(_)
+            | Self::Config(_)
+            | Self::Webhook(_) => false,
         }
     }
 
@@ -117,6 +126,10 @@ impl WhatsAppError {
             Self::Config(msg) => FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Configuration error: {msg}"),
+            },
+            Self::Webhook(msg) => FcpError::InvalidRequest {
+                code: 1007,
+                message: format!("Webhook error: {msg}"),
             },
         }
     }
@@ -238,6 +251,19 @@ mod tests {
     fn config_error_not_retryable() {
         let err = WhatsAppError::Config("missing token".into());
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn webhook_error_not_retryable() {
+        let err = WhatsAppError::Webhook("invalid signature".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn webhook_error_maps_to_invalid_request() {
+        let err = WhatsAppError::Webhook("bad payload".into());
+        let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
+        assert!(matches!(fcp_err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]

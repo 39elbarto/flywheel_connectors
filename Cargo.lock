@@ -4199,6 +4199,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-teams"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-telegram"
 version = "0.1.0"
 dependencies = [
@@ -4465,9 +4485,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "fcp-async-core",
  "fcp-core",
  "fcp-sdk",
+ "fcp-webhook",
  "hex",
  "hmac",
  "reqwest 0.13.2",

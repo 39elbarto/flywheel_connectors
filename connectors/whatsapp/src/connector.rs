@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, InvokeRequest, InvokeResponse, Introspection, OperationId,
+    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
@@ -17,6 +17,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::WhatsAppClient;
+use crate::types::BusinessProfile;
 use crate::webhook::WhatsAppWebhook;
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -216,7 +217,8 @@ impl WhatsAppConnector {
                 message: Some(if webhook_ok {
                     "Webhook handler configured (app_secret + verify_token)".into()
                 } else {
-                    "Webhook not configured (set app_secret and webhook_verify_token to enable)".into()
+                    "Webhook not configured (set app_secret and webhook_verify_token to enable)"
+                        .into()
                 }),
                 critical: false,
             });
@@ -455,7 +457,10 @@ impl FcpConnector for WhatsAppConnector {
 
         self.client = Some(client);
 
-        // Initialize webhook handler if app_secret and verify_token are configured
+        // Reset any prior webhook state before applying the new configuration.
+        self.webhook = None;
+
+        // Initialize webhook handler if app_secret and verify_token are configured.
         if let (Some(app_secret), Some(verify_token)) =
             (&config.app_secret, &config.webhook_verify_token)
         {
@@ -601,14 +606,12 @@ impl WhatsAppConnector {
             let required_cap = match operation {
                 OP_SEND_TEXT | OP_SEND_TEMPLATE => CapabilityId::from_static(CAP_SEND),
                 OP_GET_PROFILE => CapabilityId::from_static(CAP_READ),
-                OP_WEBHOOK_VERIFY | OP_WEBHOOK_RECEIVE => {
-                    CapabilityId::from_static(CAP_WEBHOOK)
-                }
+                OP_WEBHOOK_VERIFY | OP_WEBHOOK_RECEIVE => CapabilityId::from_static(CAP_WEBHOOK),
                 _ => {
                     return Err(FcpError::InvalidRequest {
                         code: 1004,
                         message: format!("Unknown operation: {operation}"),
-                    })
+                    });
                 }
             };
             verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
@@ -633,9 +636,14 @@ impl WhatsAppConnector {
                         message: "Missing 'text' field".into(),
                     },
                 )?;
+                let preview_url = req
+                    .input
+                    .get("preview_url")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 let resp = client
-                    .send_text_message(runtime, to, text)
+                    .send_text_message(runtime, to, text, preview_url)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
 
@@ -685,8 +693,14 @@ impl WhatsAppConnector {
                     .get_profile(runtime)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
+                let profile = resp.data.into_iter().next().unwrap_or(BusinessProfile {
+                    about: None,
+                    address: None,
+                    description: None,
+                    vertical: None,
+                });
 
-                serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
+                serde_json::to_value(profile).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize profile: {e}"),
                 })?
             }
@@ -696,14 +710,12 @@ impl WhatsAppConnector {
                     message: "Webhook not configured (set app_secret and webhook_verify_token)"
                         .into(),
                 })?;
-                let mode = req
-                    .input
-                    .get("hub_mode")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let mode = req.input.get("hub_mode").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'hub_mode' field".into(),
-                    })?;
+                    },
+                )?;
                 let token = req
                     .input
                     .get("hub_verify_token")
@@ -721,12 +733,12 @@ impl WhatsAppConnector {
                         message: "Missing 'hub_challenge' field".into(),
                     })?;
 
-                let result = webhook.verify_challenge(mode, token, challenge).map_err(
-                    |_| FcpError::Unauthorized {
+                let result = webhook
+                    .verify_challenge(mode, token, challenge)
+                    .map_err(|_| FcpError::Unauthorized {
                         code: 2002,
                         message: "Webhook challenge verification failed".into(),
-                    },
-                )?;
+                    })?;
                 json!({ "challenge": result })
             }
             OP_WEBHOOK_RECEIVE => {
@@ -748,22 +760,19 @@ impl WhatsAppConnector {
                         }
                     })?;
 
-                let body_str = req
-                    .input
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let body_str = req.input.get("body").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'body' field (must be raw JSON string)".into(),
-                    })?;
+                    },
+                )?;
 
-                let events =
-                    webhook
-                        .verify_and_parse(&headers, body_str.as_bytes())
-                        .map_err(|e| FcpError::InvalidRequest {
-                            code: 1007,
-                            message: format!("Webhook verification failed: {e}"),
-                        })?;
+                let events = webhook
+                    .verify_and_parse(&headers, body_str.as_bytes())
+                    .map_err(|e| FcpError::InvalidRequest {
+                        code: 1007,
+                        message: format!("Webhook verification failed: {e}"),
+                    })?;
 
                 // Apply replay detection to each event
                 let mut accepted = Vec::new();
@@ -786,7 +795,7 @@ impl WhatsAppConnector {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!("Unknown operation: {operation}"),
-                })
+                });
             }
         };
 
@@ -934,26 +943,36 @@ mod tests {
         let connector = WhatsAppConnector::new();
         let intro = connector.introspect();
         assert_eq!(intro.operations.len(), 5);
-        assert!(intro
-            .operations
-            .iter()
-            .any(|op| op.id.as_str() == OP_SEND_TEXT));
-        assert!(intro
-            .operations
-            .iter()
-            .any(|op| op.id.as_str() == OP_SEND_TEMPLATE));
-        assert!(intro
-            .operations
-            .iter()
-            .any(|op| op.id.as_str() == OP_GET_PROFILE));
-        assert!(intro
-            .operations
-            .iter()
-            .any(|op| op.id.as_str() == OP_WEBHOOK_VERIFY));
-        assert!(intro
-            .operations
-            .iter()
-            .any(|op| op.id.as_str() == OP_WEBHOOK_RECEIVE));
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_SEND_TEXT)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_SEND_TEMPLATE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_GET_PROFILE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_WEBHOOK_VERIFY)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_WEBHOOK_RECEIVE)
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1014,7 +1033,10 @@ mod tests {
     #[test]
     fn test_send_text_is_risky() {
         let ops = operations_info();
-        let send_text = ops.iter().find(|op| op.id.as_str() == OP_SEND_TEXT).unwrap();
+        let send_text = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_SEND_TEXT)
+            .unwrap();
         assert_eq!(send_text.safety_tier, SafetyTier::Risky);
         assert_eq!(send_text.idempotency, IdempotencyClass::None);
     }
@@ -1043,9 +1065,7 @@ mod tests {
         // WhatsApp is request-response, not streaming
         let connector = WhatsAppConnector::new();
         let intro = connector.introspect();
-        assert!(
-            !intro.event_caps.as_ref().unwrap().streaming
-        );
+        assert!(!intro.event_caps.as_ref().unwrap().streaming);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1070,6 +1090,31 @@ mod tests {
             "access_token": "test_token"
         });
         connector.configure(config).await.unwrap();
+        assert!(connector.webhook.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconfigure_without_webhook_clears_existing_handler() {
+        let mut connector = WhatsAppConnector::new();
+        connector
+            .configure(json!({
+                "phone_number_id": "123456",
+                "access_token": "test_token",
+                "app_secret": "test_app_secret",
+                "webhook_verify_token": "test_verify_token"
+            }))
+            .await
+            .unwrap();
+        assert!(connector.webhook.is_some());
+
+        connector
+            .configure(json!({
+                "phone_number_id": "123456",
+                "access_token": "test_token"
+            }))
+            .await
+            .unwrap();
+
         assert!(connector.webhook.is_none());
     }
 
@@ -1167,12 +1212,15 @@ mod tests {
             webhook_verify_token: Some("token".into()),
         });
         connector.client = Some(
-            WhatsAppClient::new(&default_base_url(), "123", "tok", HttpRetryConfig::default())
-                .unwrap(),
+            WhatsAppClient::new(
+                &default_base_url(),
+                "123",
+                "tok",
+                HttpRetryConfig::default(),
+            )
+            .unwrap(),
         );
-        connector.runtime = Some(ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default(),
-        ));
+        connector.runtime = Some(ConnectorRuntime::new(ConnectorRuntimeConfig::default()));
         let report = connector.doctor();
         assert!(report.passed);
         let webhook_check = report.checks.iter().find(|c| c.name == "webhook").unwrap();

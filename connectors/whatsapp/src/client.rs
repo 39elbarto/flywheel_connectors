@@ -58,13 +58,17 @@ impl WhatsAppClient {
         runtime: &ConnectorRuntime,
         to: &str,
         text: &str,
+        preview_url: bool,
     ) -> WhatsAppResult<SendMessageResponse> {
         let body = json!({
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
             "to": to,
             "type": "text",
-            "text": { "body": text }
+            "text": {
+                "body": text,
+                "preview_url": preview_url,
+            }
         });
 
         self.send_message(runtime, &body).await
@@ -107,10 +111,7 @@ impl WhatsAppClient {
         runtime: &ConnectorRuntime,
         body: &serde_json::Value,
     ) -> WhatsAppResult<SendMessageResponse> {
-        let url = format!(
-            "{}/{}/messages",
-            self.base_url, self.phone_number_id
-        );
+        let url = format!("{}/{}/messages", self.base_url, self.phone_number_id);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body_clone = body.clone();
@@ -130,10 +131,12 @@ impl WhatsAppClient {
                     .await
                 {
                     Ok(r) => r,
-                    Err(e) => return AttemptOutcome::Retryable {
-                        error: WhatsAppError::Http(e),
-                        retry_after: None,
-                    },
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: WhatsAppError::Http(e),
+                            retry_after: None,
+                        };
+                    }
                 };
 
                 let status = resp.status().as_u16();
@@ -208,10 +211,7 @@ impl WhatsAppClient {
     /// # Errors
     ///
     /// Returns an error if the API call fails.
-    pub async fn get_profile(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> WhatsAppResult<ProfileResponse> {
+    pub async fn get_profile(&self, runtime: &ConnectorRuntime) -> WhatsAppResult<ProfileResponse> {
         let url = format!(
             "{}/{}/whatsapp_business_profile",
             self.base_url, self.phone_number_id
@@ -233,10 +233,12 @@ impl WhatsAppClient {
                     .await
                 {
                     Ok(r) => r,
-                    Err(e) => return AttemptOutcome::Retryable {
-                        error: WhatsAppError::Http(e),
-                        retry_after: None,
-                    },
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: WhatsAppError::Http(e),
+                            retry_after: None,
+                        };
+                    }
                 };
 
                 if !resp.status().is_success() {
@@ -252,7 +254,8 @@ impl WhatsAppClient {
                             error: WhatsAppError::RateLimited {
                                 retry_after_ms: retry_after
                                     .unwrap_or(Duration::from_secs(30))
-                                    .as_millis() as u64,
+                                    .as_millis()
+                                    as u64,
                             },
                             retry_after,
                         };

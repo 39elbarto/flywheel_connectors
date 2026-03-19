@@ -137,8 +137,8 @@ impl WhatsAppWebhook {
         self.verifier.verify(body, signature)?;
 
         // Parse notification envelope
-        let notification: WebhookNotification =
-            serde_json::from_slice(body).map_err(|e| WebhookError::InvalidPayload(e.to_string()))?;
+        let notification: WebhookNotification = serde_json::from_slice(body)
+            .map_err(|e| WebhookError::InvalidPayload(e.to_string()))?;
 
         if notification.object != "whatsapp_business_account" {
             return Err(WebhookError::InvalidPayload(format!(
@@ -486,7 +486,10 @@ mod tests {
         let wh = make_webhook();
         let result = wh.verify_challenge("subscribe", "wrong_token", "challenge_abc");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), WebhookError::InvalidSignature));
+        assert!(matches!(
+            result.unwrap_err(),
+            WebhookError::InvalidSignature
+        ));
     }
 
     #[test]
@@ -569,8 +572,7 @@ mod tests {
         let body = serde_json::to_vec(&sample_text_notification()).unwrap();
         let headers = HashMap::from([(
             "x-hub-signature-256".to_string(),
-            "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-                .to_string(),
+            "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
         )]);
 
         let result = wh.verify_and_parse(&headers, &body);
@@ -703,11 +705,10 @@ mod tests {
 
     #[test]
     fn dlq_capacity_limit() {
-        let wh = WhatsAppWebhook::new(TEST_SECRET, TEST_VERIFY_TOKEN.to_string())
-            .with_dlq_capacity(3);
+        let wh =
+            WhatsAppWebhook::new(TEST_SECRET, TEST_VERIFY_TOKEN.to_string()).with_dlq_capacity(3);
         for i in 0..5 {
-            let event =
-                WebhookEvent::new(format!("cap_{i}"), "message.text", "whatsapp");
+            let event = WebhookEvent::new(format!("cap_{i}"), "message.text", "whatsapp");
             wh.dead_letter(event);
         }
         // FIFO eviction: oldest evicted first
@@ -769,7 +770,11 @@ mod tests {
         let events = wh.verify_and_parse(&headers, &body).unwrap();
         let payload = &events[0].payload;
         assert_eq!(
-            payload.get("metadata").unwrap().get("phone_number_id").unwrap(),
+            payload
+                .get("metadata")
+                .unwrap()
+                .get("phone_number_id")
+                .unwrap(),
             "PHONE_NUMBER_ID"
         );
         assert_eq!(

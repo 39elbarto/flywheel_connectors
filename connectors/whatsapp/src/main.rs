@@ -139,7 +139,7 @@ async fn handle_message(connector: &mut WhatsAppConnector, message: &str) -> ser
                     })?;
                 connector.shutdown(req).await?;
                 Ok(serde_json::json!({ "status": "shutdown_accepted" }))
-        }
+            }
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,
                 message: format!("Unknown method: {method}"),

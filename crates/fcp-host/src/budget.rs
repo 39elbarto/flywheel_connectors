@@ -2058,8 +2058,7 @@ mod tests {
 
     #[test]
     fn budget_report_request_deserialize_empty_object() {
-        let parsed: BudgetReportRequest =
-            serde_json::from_str("{}").expect("deserialize empty");
+        let parsed: BudgetReportRequest = serde_json::from_str("{}").expect("deserialize empty");
         assert!(parsed.zone_id.is_none());
     }
 
@@ -2596,8 +2595,7 @@ mod tests {
     async fn budget_policy_engine_preflight_zone_without_policy_allows() {
         let engine = BudgetPolicyEngine::new();
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1")
-                .expect("connector id"),
+            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -2761,8 +2759,7 @@ mod tests {
             .unwrap();
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1")
-                .expect("connector id"),
+            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -2770,7 +2767,9 @@ mod tests {
         };
         let response = engine.evaluate_preflight(&request).await;
         assert!(response.allowed);
-        let status = response.budget_status.expect("budget_status should be populated");
+        let status = response
+            .budget_status
+            .expect("budget_status should be populated");
         assert_eq!(status.zone_id, zone);
         assert_eq!(status.budgets[0].used, 30);
     }
@@ -2890,8 +2889,7 @@ mod tests {
             .unwrap();
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1")
-                .expect("connector id"),
+            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -2975,24 +2973,14 @@ mod tests {
             }],
         };
         // Insert in non-alphabetical order
-        engine
-            .upsert_policy(ZoneId::work(), policy.clone())
-            .await;
-        engine
-            .upsert_policy(ZoneId::owner(), policy.clone())
-            .await;
-        engine
-            .upsert_policy(ZoneId::private(), policy)
-            .await;
+        engine.upsert_policy(ZoneId::work(), policy.clone()).await;
+        engine.upsert_policy(ZoneId::owner(), policy.clone()).await;
+        engine.upsert_policy(ZoneId::private(), policy).await;
 
         let report = engine.report(None).await;
         assert_eq!(report.zones.len(), 3);
         // Zones should be sorted alphabetically
-        let zone_ids: Vec<&str> = report
-            .zones
-            .iter()
-            .map(|z| z.zone_id.as_str())
-            .collect();
+        let zone_ids: Vec<&str> = report.zones.iter().map(|z| z.zone_id.as_str()).collect();
         let mut sorted = zone_ids.clone();
         sorted.sort_unstable();
         assert_eq!(zone_ids, sorted);

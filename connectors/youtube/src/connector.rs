@@ -924,9 +924,13 @@ impl YouTubeConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1184,10 +1188,7 @@ impl YouTubeConnector {
         }))
     }
 
-    async fn invoke_get_analytics(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_analytics(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel_id = require_str(&input, "channel_id")?;
         let max_videos = input
@@ -1205,10 +1206,7 @@ impl YouTubeConnector {
         })
     }
 
-    async fn invoke_upload_video(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_upload_video(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let title = require_str(&input, "title")?;
         let description = require_str(&input, "description")?;
@@ -1217,14 +1215,11 @@ impl YouTubeConnector {
             .and_then(|v| v.as_str())
             .unwrap_or("private");
         let video_data = require_str(&input, "video_data_base64")?;
-        let tags: Option<Vec<String>> = input
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            });
+        let tags: Option<Vec<String>> = input.get("tags").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        });
         let category_id = input.get("category_id").and_then(|v| v.as_str());
 
         let result = client
@@ -1338,7 +1333,9 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "youtube.post_comment" | "youtube.upload_caption" | "youtube.upload_video" => "youtube.write",
+            "youtube.post_comment" | "youtube.upload_caption" | "youtube.upload_video" => {
+                "youtube.write"
+            }
             _ => "youtube.read",
         };
         let now = Utc::now();

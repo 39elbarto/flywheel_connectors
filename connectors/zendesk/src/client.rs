@@ -497,17 +497,13 @@ impl ZendeskClient {
 
                         // For DELETE with 204 No Content, return empty object
                         if status == StatusCode::NO_CONTENT {
-                            return AttemptOutcome::Success(
-                                serde_json::json!({ "deleted": true }),
-                            );
+                            return AttemptOutcome::Success(serde_json::json!({ "deleted": true }));
                         }
 
                         match response.text().await {
                             Ok(body) => match serde_json::from_str(&body) {
                                 Ok(data) => AttemptOutcome::Success(data),
-                                Err(e) => {
-                                    AttemptOutcome::Terminal(ZendeskError::Serialization(e))
-                                }
+                                Err(e) => AttemptOutcome::Terminal(ZendeskError::Serialization(e)),
                             },
                             Err(e) => AttemptOutcome::Terminal(ZendeskError::Http(e)),
                         }

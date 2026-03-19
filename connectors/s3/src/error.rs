@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
@@ -132,7 +132,6 @@ impl S3Error {
 
 /// Result type for S3 operations.
 pub type S3Result<T> = Result<T, S3Error>;
-
 
 impl ConnectorErrorMapping for S3Error {
     fn from_async_error(error: AsyncError) -> Self {

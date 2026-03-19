@@ -431,9 +431,9 @@ impl PineconeClient {
                             let message = api_err
                                 .as_ref()
                                 .and_then(|e| {
-                                    e.message
-                                        .clone()
-                                        .or_else(|| e.error.as_ref().and_then(|d| d.message.clone()))
+                                    e.message.clone().or_else(|| {
+                                        e.error.as_ref().and_then(|d| d.message.clone())
+                                    })
                                 })
                                 .unwrap_or_else(|| format!("HTTP {status}: {body}"));
                             return AttemptOutcome::Terminal(PineconeError::Api {
@@ -780,9 +780,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/indexes"))
-            .respond_with(
-                ResponseTemplate::new(429).insert_header("retry-after", "1"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
             .mount(&mock_server)
             .await;
 

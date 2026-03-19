@@ -766,9 +766,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/collections"))
-            .respond_with(
-                ResponseTemplate::new(429).insert_header("retry-after", "1"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
             .mount(&mock_server)
             .await;
 

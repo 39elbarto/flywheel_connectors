@@ -141,14 +141,9 @@ pub struct BatchUpdateResponse {
 #[serde(rename_all = "camelCase")]
 pub enum Request {
     /// Insert text at a location.
-    InsertText {
-        location: Location,
-        text: String,
-    },
+    InsertText { location: Location, text: String },
     /// Delete content within a range.
-    DeleteContentRange {
-        range: Range,
-    },
+    DeleteContentRange { range: Range },
     /// Update text style within a range.
     UpdateTextStyle {
         range: Range,

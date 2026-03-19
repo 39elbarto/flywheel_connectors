@@ -284,7 +284,9 @@ mod tests {
 
     #[test]
     fn rate_limited_maps_to_fcp_rate_limited() {
-        let err = MysqlError::RateLimited { retry_after_ms: 2000 };
+        let err = MysqlError::RateLimited {
+            retry_after_ms: 2000,
+        };
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::RateLimited { retry_after_ms, .. } => {
@@ -312,7 +314,13 @@ mod tests {
     #[test]
     fn from_async_cancelled() {
         let err = MysqlError::from_async_error(AsyncError::Cancelled);
-        assert!(matches!(err, MysqlError::Api { status_code: 499, .. }));
+        assert!(matches!(
+            err,
+            MysqlError::Api {
+                status_code: 499,
+                ..
+            }
+        ));
     }
 
     #[test]

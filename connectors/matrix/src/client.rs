@@ -24,11 +24,7 @@ impl MatrixClient {
     ///
     /// # Errors
     /// Returns `MatrixError::Config` if the HTTP client cannot be built.
-    pub fn new(
-        homeserver_url: &str,
-        access_token: &str,
-        timeout: Duration,
-    ) -> MatrixResult<Self> {
+    pub fn new(homeserver_url: &str, access_token: &str, timeout: Duration) -> MatrixResult<Self> {
         let client = Client::builder()
             .timeout(timeout)
             .build()
@@ -96,10 +92,7 @@ impl MatrixClient {
     /// Returns `MatrixError` on transport or API errors.
     pub async fn join_room(&self, room_id_or_alias: &str) -> MatrixResult<serde_json::Value> {
         let encoded = urlencoded(room_id_or_alias);
-        let url = format!(
-            "{}/_matrix/client/v3/join/{encoded}",
-            self.homeserver_url
-        );
+        let url = format!("{}/_matrix/client/v3/join/{encoded}", self.homeserver_url);
         self.api_post(&url, &serde_json::json!({})).await
     }
 
@@ -188,10 +181,7 @@ impl MatrixClient {
     /// # Errors
     /// Returns `MatrixError` if the homeserver is unreachable.
     pub async fn health_check(&self) -> MatrixResult<()> {
-        let url = format!(
-            "{}/_matrix/client/v3/account/whoami",
-            self.homeserver_url
-        );
+        let url = format!("{}/_matrix/client/v3/account/whoami", self.homeserver_url);
         let resp = self
             .client
             .get(&url)
@@ -326,11 +316,15 @@ mod tests {
     async fn whoami_parses() {
         let mock = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/_matrix/client/v3/account/whoami"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "user_id": "@bot:matrix.org",
-                "device_id": "DEV1"
-            })))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/account/whoami",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "user_id": "@bot:matrix.org",
+                    "device_id": "DEV1"
+                })),
+            )
             .mount(&mock)
             .await;
 
@@ -344,9 +338,11 @@ mod tests {
         let mock = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/_matrix/client/v3/joined_rooms"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "joined_rooms": ["!a:m.org", "!b:m.org"]
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "joined_rooms": ["!a:m.org", "!b:m.org"]
+                })),
+            )
             .mount(&mock)
             .await;
 
@@ -359,14 +355,19 @@ mod tests {
     async fn send_message_returns_event_id() {
         let mock = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("PUT"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "event_id": "$new_event"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$new_event"
+                })),
+            )
             .mount(&mock)
             .await;
 
         let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
-        let resp = c.send_message("!room:m.org", "Hello", "m.text").await.unwrap();
+        let resp = c
+            .send_message("!room:m.org", "Hello", "m.text")
+            .await
+            .unwrap();
         assert_eq!(resp.event_id, "$new_event");
     }
 
@@ -375,10 +376,12 @@ mod tests {
         let mock = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/_matrix/client/v3/joined_rooms"))
-            .respond_with(wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "errcode": "M_UNKNOWN_TOKEN",
-                "error": "Unrecognised access token."
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "errcode": "M_UNKNOWN_TOKEN",
+                    "error": "Unrecognised access token."
+                })),
+            )
             .mount(&mock)
             .await;
 
@@ -412,10 +415,14 @@ mod tests {
     async fn health_check_ok() {
         let mock = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/_matrix/client/v3/account/whoami"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "user_id": "@bot:m.org"
-            })))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/account/whoami",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "user_id": "@bot:m.org"
+                })),
+            )
             .mount(&mock)
             .await;
 

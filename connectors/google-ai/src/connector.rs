@@ -962,9 +962,13 @@ impl GoogleAiConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1424,11 +1428,18 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "google-ai.generate_content" | "google-ai.generate_content_stream" => "google-ai.generate",
+            "google-ai.generate_content" | "google-ai.generate_content_stream" => {
+                "google-ai.generate"
+            }
             "google-ai.embed_content" | "google-ai.batch_embed_contents" => "google-ai.embed",
-            "google-ai.count_tokens" | "google-ai.list_models" | "google-ai.get_model" => "google-ai.models",
-            "google-ai.tuning.create" | "google-ai.tuning.list" | "google-ai.tuning.get"
-            | "google-ai.tuning.get_operation" | "google-ai.tuning.cancel" => "google-ai.tuning",
+            "google-ai.count_tokens" | "google-ai.list_models" | "google-ai.get_model" => {
+                "google-ai.models"
+            }
+            "google-ai.tuning.create"
+            | "google-ai.tuning.list"
+            | "google-ai.tuning.get"
+            | "google-ai.tuning.get_operation"
+            | "google-ai.tuning.cancel" => "google-ai.tuning",
             "google-ai.get_usage" => "google-ai.usage",
             _ => "google-ai.generate",
         };

@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Stripe API error.
@@ -107,7 +107,6 @@ impl StripeError {
         }
     }
 }
-
 
 impl ConnectorErrorMapping for StripeError {
     fn from_async_error(error: AsyncError) -> Self {

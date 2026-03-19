@@ -8,7 +8,6 @@ use fcp_core::{
 use serde_json::json;
 use tracing::{info, instrument};
 
-
 use crate::{
     client::{AnnasArchiveClient, DEFAULT_BASE_URL},
     error::AnnasArchiveError,

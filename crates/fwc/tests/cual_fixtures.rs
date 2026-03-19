@@ -535,11 +535,13 @@ fn operation_inputs_and_api_responses_match_tool_schemas() {
         &github_tools["github.create_issue"].input_schema,
     )
     .expect("valid github.create_issue input should match schema");
-    assert!(validate_schema(
-        &invalid_issue_input,
-        &github_tools["github.create_issue"].input_schema,
-    )
-    .is_err());
+    assert!(
+        validate_schema(
+            &invalid_issue_input,
+            &github_tools["github.create_issue"].input_schema,
+        )
+        .is_err()
+    );
     validate_schema(
         &valid_send_message,
         &slack_tools["slack.send_message"].input_schema,
@@ -700,7 +702,11 @@ fn host_integration_fixture_matrix_covers_required_archetypes_and_modes() {
         .iter()
         .map(|fixture| fixture.id.clone())
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), catalog.fixtures.len(), "fixture ids must be unique");
+    assert_eq!(
+        ids.len(),
+        catalog.fixtures.len(),
+        "fixture ids must be unique"
+    );
 
     let connectors = catalog
         .fixtures
@@ -740,18 +746,24 @@ fn host_integration_fixture_matrix_covers_required_archetypes_and_modes() {
             HostIntegrationAuthScope::MultiProfile | HostIntegrationAuthScope::TenantScoped
         )
     }));
-    assert!(catalog
-        .fixtures
-        .iter()
-        .any(|fixture| fixture.reversibility == OperationReversibility::Irreversible));
-    assert!(catalog
-        .fixtures
-        .iter()
-        .any(|fixture| fixture.reversibility == OperationReversibility::Reversible));
-    assert!(catalog
-        .fixtures
-        .iter()
-        .all(|fixture| fixture.readiness == FixtureReadiness::LiveRuntime));
+    assert!(
+        catalog
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.reversibility == OperationReversibility::Irreversible)
+    );
+    assert!(
+        catalog
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.reversibility == OperationReversibility::Reversible)
+    );
+    assert!(
+        catalog
+            .fixtures
+            .iter()
+            .all(|fixture| fixture.readiness == FixtureReadiness::LiveRuntime)
+    );
 }
 
 #[test]

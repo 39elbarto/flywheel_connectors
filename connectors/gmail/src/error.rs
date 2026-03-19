@@ -2,10 +2,10 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
-use thiserror::Error;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
+use thiserror::Error;
 
 /// Gmail-specific errors.
 #[derive(Error, Debug)]

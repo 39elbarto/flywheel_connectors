@@ -110,7 +110,10 @@ impl ConnectorErrorMapping for RouterError {
     }
 
     fn is_retryable(&self) -> bool {
-        matches!(self, Self::ProviderError { .. } | Self::AllProvidersFailed { .. })
+        matches!(
+            self,
+            Self::ProviderError { .. } | Self::AllProvidersFailed { .. }
+        )
     }
 
     fn retry_after(&self) -> Option<Duration> {

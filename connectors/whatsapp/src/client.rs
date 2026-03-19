@@ -301,17 +301,26 @@ impl WhatsAppClient {
             .send()
             .await
             .map_err(WhatsAppError::Http)?;
+        let status = resp.status().as_u16();
 
-        if resp.status().is_success() || resp.status().as_u16() == 400 {
+        if resp.status().is_success() || status == 400 {
             // 400 is acceptable for health check (means API is reachable)
             Ok(())
-        } else if resp.status().as_u16() == 401 {
+        } else if status == 429 {
+            let retry_after_ms = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30)
+                * 1000;
+            Err(WhatsAppError::RateLimited { retry_after_ms })
+        } else if status == 401 {
             Err(WhatsAppError::Unauthorized("Invalid access token".into()))
         } else {
-            let status = resp.status().as_u16();
             Err(WhatsAppError::Api {
                 code: u32::from(status),
-                message: "Health check failed".into(),
+                message: format!("Health check failed with HTTP {status}"),
                 error_type: "HealthCheckError".into(),
                 subcode: None,
             })

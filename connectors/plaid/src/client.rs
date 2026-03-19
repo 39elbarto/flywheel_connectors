@@ -326,23 +326,16 @@ impl PlaidClient {
 
                         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                             let body = response.text().await.unwrap_or_default();
-                            let api_err: Option<PlaidApiError> =
-                                serde_json::from_str(&body).ok();
+                            let api_err: Option<PlaidApiError> = serde_json::from_str(&body).ok();
                             let message = api_err
                                 .as_ref()
                                 .and_then(|e| e.error_message.clone())
-                                .unwrap_or_else(|| {
-                                    format!("Authentication failed: HTTP {status}")
-                                });
+                                .unwrap_or_else(|| format!("Authentication failed: HTTP {status}"));
                             return AttemptOutcome::Terminal(PlaidError::Api {
                                 message,
                                 status_code: Some(status.as_u16()),
-                                error_type: api_err
-                                    .as_ref()
-                                    .and_then(|e| e.error_type.clone()),
-                                error_code: api_err
-                                    .as_ref()
-                                    .and_then(|e| e.error_code.clone()),
+                                error_type: api_err.as_ref().and_then(|e| e.error_type.clone()),
+                                error_code: api_err.as_ref().and_then(|e| e.error_code.clone()),
                             });
                         }
 
@@ -379,15 +372,12 @@ impl PlaidClient {
 
                         if !status.is_success() {
                             let body = response.text().await.unwrap_or_default();
-                            let api_err: Option<PlaidApiError> =
-                                serde_json::from_str(&body).ok();
+                            let api_err: Option<PlaidApiError> = serde_json::from_str(&body).ok();
                             let (message, error_type, error_code) = api_err
                                 .as_ref()
                                 .map(|e| {
                                     (
-                                        e.error_message
-                                            .clone()
-                                            .unwrap_or(format!("HTTP {status}")),
+                                        e.error_message.clone().unwrap_or(format!("HTTP {status}")),
                                         e.error_type.clone(),
                                         e.error_code.clone(),
                                     )
@@ -404,9 +394,7 @@ impl PlaidClient {
                         match response.text().await {
                             Ok(body) => match serde_json::from_str(&body) {
                                 Ok(data) => AttemptOutcome::Success(data),
-                                Err(e) => {
-                                    AttemptOutcome::Terminal(PlaidError::Serialization(e))
-                                }
+                                Err(e) => AttemptOutcome::Terminal(PlaidError::Serialization(e)),
                             },
                             Err(e) => AttemptOutcome::Terminal(PlaidError::Http(e)),
                         }

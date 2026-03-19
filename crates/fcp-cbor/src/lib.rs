@@ -345,7 +345,7 @@ fn canonicalize_map(
 
     let mut scratch = Vec::new();
     let mut with_keys = Vec::with_capacity(entries.len());
-    
+
     for (mut key, mut value) in std::mem::take(entries) {
         canonicalize_value_in_place(&mut key, depth)?;
         canonicalize_value_in_place(&mut value, depth)?;

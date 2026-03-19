@@ -6326,20 +6326,25 @@ fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
     })
 }
 
-fn mesh_offline_availability_fact(
-    zone_supported: Option<bool>,
-    has_local_mirror: bool,
-) -> Value {
+fn mesh_offline_availability_fact(zone_supported: Option<bool>, has_local_mirror: bool) -> Value {
     let state = match (zone_supported, has_local_mirror) {
         (Some(false), _) => "unavailable-for-requested-zone",
         (_, true) => "offline-but-mirrored",
         _ => "offline-planning-only",
     };
     let explanation = match (zone_supported, has_local_mirror) {
-        (Some(false), _) => "Workspace manifests say the requested zone is not declared for this connector, so this offline plan is unavailable for that zone.",
-        (_, true) => "A mesh-mirrored copy of this connector is available locally. Offline operations should work but the mirror may be stale.",
-        (Some(true), false) => "Workspace manifests support the requested zone, but this remains an offline planning view rather than proof of live host availability.",
-        (None, false) => "Workspace manifests can support planning, but they do not prove live install state or current mesh coverage.",
+        (Some(false), _) => {
+            "Workspace manifests say the requested zone is not declared for this connector, so this offline plan is unavailable for that zone."
+        }
+        (_, true) => {
+            "A mesh-mirrored copy of this connector is available locally. Offline operations should work but the mirror may be stale."
+        }
+        (Some(true), false) => {
+            "Workspace manifests support the requested zone, but this remains an offline planning view rather than proof of live host availability."
+        }
+        (None, false) => {
+            "Workspace manifests can support planning, but they do not prove live install state or current mesh coverage."
+        }
     };
     json!({
         "state": state,
@@ -6698,11 +6703,8 @@ fn mesh_availability_dispatch(
     // Check if a local mirror exists (e.g., from a mesh peer replication).
     // In offline mode we only have workspace manifests, so mirror detection is
     // based on whether a local artifact path exists for this connector.
-    let has_local_mirror = std::path::Path::new(&format!(
-        ".fcp/mirrors/{}.wasm",
-        connector.slug
-    ))
-    .exists();
+    let has_local_mirror =
+        std::path::Path::new(&format!(".fcp/mirrors/{}.wasm", connector.slug)).exists();
     let availability_fact = mesh_offline_availability_fact(zone_supported, has_local_mirror);
     let offline_readiness = json!({
         "state": match zone_supported {
@@ -22592,8 +22594,8 @@ mod tests {
         PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog, execute,
         host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
         host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
-        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output,
-        prepare_cli, serve_mcp,
+        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        serve_mcp,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;

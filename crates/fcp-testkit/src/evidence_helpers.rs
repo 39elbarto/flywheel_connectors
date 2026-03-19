@@ -311,17 +311,23 @@ pub fn assert_decision_recorded(
     subject: &str,
     expected_approved: bool,
 ) {
-    let found = collector
-        .decisions
-        .iter()
-        .find(|d| d.subject == subject);
+    let found = collector.decisions.iter().find(|d| d.subject == subject);
     assert!(found.is_some(), "no decision found for subject '{subject}'");
     let decision = found.expect("checked above");
     assert_eq!(
-        decision.approved, expected_approved,
+        decision.approved,
+        expected_approved,
         "decision for '{subject}' was {}, expected {}",
-        if decision.approved { "approved" } else { "denied" },
-        if expected_approved { "approved" } else { "denied" }
+        if decision.approved {
+            "approved"
+        } else {
+            "denied"
+        },
+        if expected_approved {
+            "approved"
+        } else {
+            "denied"
+        }
     );
 }
 

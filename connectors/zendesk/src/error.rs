@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Zendesk API error.
@@ -103,7 +103,6 @@ impl ZendeskError {
         }
     }
 }
-
 
 impl ConnectorErrorMapping for ZendeskError {
     fn from_async_error(error: AsyncError) -> Self {

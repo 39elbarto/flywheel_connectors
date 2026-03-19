@@ -370,9 +370,13 @@ impl YouTubeClient {
 
         // Step 1: Get channel info including uploads playlist.
         let channel_resp = self.get_channel(channel_id).await?;
-        let channel = channel_resp.items.into_iter().next().ok_or(YouTubeError::NotFound {
-            resource: format!("channel:{channel_id}"),
-        })?;
+        let channel = channel_resp
+            .items
+            .into_iter()
+            .next()
+            .ok_or(YouTubeError::NotFound {
+                resource: format!("channel:{channel_id}"),
+            })?;
 
         let uploads_playlist = channel
             .content_details
@@ -453,7 +457,10 @@ impl YouTubeClient {
                 view_count: views,
                 like_count: likes,
                 comment_count: comments,
-                duration: video.content_details.as_ref().and_then(|cd| cd.duration.clone()),
+                duration: video
+                    .content_details
+                    .as_ref()
+                    .and_then(|cd| cd.duration.clone()),
             });
         }
 
@@ -622,7 +629,10 @@ impl YouTubeClient {
             let redacted_url = redact_key(url);
             debug!(url = %redacted_url, method = http_method, "request");
 
-            match self.execute_once(http_method, url, body, response_mode).await {
+            match self
+                .execute_once(http_method, url, body, response_mode)
+                .await
+            {
                 Ok(response) => AttemptOutcome::Success(response),
                 Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
                     retry_after: e.retry_after(),

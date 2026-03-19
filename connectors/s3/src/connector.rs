@@ -760,9 +760,13 @@ impl S3Connector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1143,7 +1147,10 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "s3.get_object" | "s3.head_object" | "s3.list_objects" | "s3.list_buckets"
+            "s3.get_object"
+            | "s3.head_object"
+            | "s3.list_objects"
+            | "s3.list_buckets"
             | "s3.generate_presigned_url" => "s3.read",
             "s3.put_object" | "s3.create_bucket" | "s3.copy_object" => "s3.write",
             "s3.delete_object" | "s3.delete_bucket" => "s3.delete",

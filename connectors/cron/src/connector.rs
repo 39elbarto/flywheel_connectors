@@ -16,7 +16,6 @@ use serde_json::json;
 use tracing::{info, instrument};
 use uuid::Uuid;
 
-
 use crate::error::CronError;
 use crate::types::{Execution, Schedule, validate_cron_expression};
 

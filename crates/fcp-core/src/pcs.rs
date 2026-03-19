@@ -21,9 +21,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use fcp_crypto::{
-    CryptoError, X25519PublicKey, X25519SecretKey, hkdf_sha256_array,
-};
+use fcp_crypto::{CryptoError, X25519PublicKey, X25519SecretKey, hkdf_sha256_array};
 use serde::{Deserialize, Serialize};
 
 use crate::{TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyId};
@@ -306,8 +304,7 @@ impl PcsGroupState {
         // Rebuild index after removal.
         self.member_index.clear();
         for (i, m) in self.members.iter().enumerate() {
-            self.member_index
-                .insert(m.node_id.as_str().to_string(), i);
+            self.member_index.insert(m.node_id.as_str().to_string(), i);
         }
 
         // Inject fresh entropy from the removed member's leaf position
@@ -507,10 +504,7 @@ fn derive_epoch_zone_key_id(
 }
 
 /// Derive the next epoch secret from the current one (forward ratchet).
-fn derive_next_epoch_secret(
-    current_secret: &[u8; 32],
-    next_epoch: u64,
-) -> PcsResult<[u8; 32]> {
+fn derive_next_epoch_secret(current_secret: &[u8; 32], next_epoch: u64) -> PcsResult<[u8; 32]> {
     let mut info = Vec::with_capacity(PCS_DOMAIN.len() + 14 + 8);
     info.extend_from_slice(PCS_DOMAIN);
     info.extend_from_slice(b"EPOCH-ADVANCE|");
@@ -882,7 +876,10 @@ mod tests {
         let new_member = make_member("overflow-node", PCS_MAX_GROUP_SIZE as u32);
 
         let result = group.add_member(new_member);
-        assert!(matches!(result.unwrap_err(), PcsError::GroupTooLarge { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            PcsError::GroupTooLarge { .. }
+        ));
     }
 
     #[test]
@@ -925,11 +922,8 @@ mod tests {
         let post_recovery_key = group.derive_zone_key().unwrap();
 
         // Compromised node tries standard ratchet with its known secret.
-        let attempted = derive_next_epoch_secret(
-            &compromised_secret,
-            pre_compromise_epoch + 1,
-        )
-        .unwrap();
+        let attempted =
+            derive_next_epoch_secret(&compromised_secret, pre_compromise_epoch + 1).unwrap();
         let attempted_key =
             derive_epoch_zone_key(&group.zone_id, &attempted, group.current_epoch()).unwrap();
 
@@ -1289,6 +1283,9 @@ mod tests {
         let mut ring = crate::ZoneKeyRing::new(group.zone_id.clone());
         ring.insert_zone_key(zone_key_id, zone_key);
         assert!(ring.set_active_zone_key(zone_key_id));
-        assert_eq!(ring.active_zone_key().unwrap().as_bytes(), zone_key.as_bytes());
+        assert_eq!(
+            ring.active_zone_key().unwrap().as_bytes(),
+            zone_key.as_bytes()
+        );
     }
 }

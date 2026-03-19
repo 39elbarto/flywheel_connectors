@@ -41,9 +41,7 @@ impl AdminReportsError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_secs } => {
-                Some(Duration::from_secs(*retry_after_secs))
-            }
+            Self::RateLimited { retry_after_secs } => Some(Duration::from_secs(*retry_after_secs)),
             _ => None,
         }
     }
@@ -146,12 +144,23 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(AdminReportsError::RateLimited { retry_after_secs: 5 }.is_retryable());
+        assert!(
+            AdminReportsError::RateLimited {
+                retry_after_secs: 5
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
-        assert!(AdminReportsError::Api { status_code: 500, message: "err".into() }.is_retryable());
+        assert!(
+            AdminReportsError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -164,7 +173,11 @@ mod tests {
 
     #[test]
     fn to_fcp_error_rate_limited() {
-        match (AdminReportsError::RateLimited { retry_after_secs: 30 }).to_fcp_error() {
+        match (AdminReportsError::RateLimited {
+            retry_after_secs: 30,
+        })
+        .to_fcp_error()
+        {
             FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }

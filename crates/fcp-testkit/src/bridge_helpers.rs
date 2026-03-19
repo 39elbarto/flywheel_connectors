@@ -417,9 +417,10 @@ pub fn assert_bridge_no_errors(tracker: &BridgeConnectionTracker) {
 ///
 /// Panics if there are no connect events, or the first occurred after the timeout.
 pub fn assert_bridge_connected_within(tracker: &BridgeConnectionTracker, timeout: Duration) {
-    let first_connect = tracker.events().iter().find(|e| {
-        matches!(e.kind, BridgeEventKind::Connect(_))
-    });
+    let first_connect = tracker
+        .events()
+        .iter()
+        .find(|e| matches!(e.kind, BridgeEventKind::Connect(_)));
     assert!(first_connect.is_some(), "no connect event found");
     let first = tracker.events().first().expect("events not empty");
     let connect = first_connect.expect("connect event");
@@ -580,7 +581,13 @@ mod tests {
         tracker.record_message_received("b");
         tracker.record_disconnect();
         assert_eq!(tracker.events().len(), 4);
-        assert!(matches!(tracker.events()[0].kind, BridgeEventKind::Connect(_)));
-        assert!(matches!(tracker.events()[3].kind, BridgeEventKind::Disconnect));
+        assert!(matches!(
+            tracker.events()[0].kind,
+            BridgeEventKind::Connect(_)
+        ));
+        assert!(matches!(
+            tracker.events()[3].kind,
+            BridgeEventKind::Disconnect
+        ));
     }
 }

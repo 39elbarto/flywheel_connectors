@@ -3605,14 +3605,7 @@ mod tests {
         // Dev override allows this.
         let d1 = format!("blake3-256:{}", "1".repeat(64));
         let dev = gate
-            .verify_at(
-                &test_connector_id(),
-                "dev",
-                &d1,
-                None,
-                None,
-                test_time(),
-            )
+            .verify_at(&test_connector_id(), "dev", &d1, None, None, test_time())
             .unwrap();
         assert!(dev.allowed);
 
@@ -3785,7 +3778,13 @@ mod tests {
         let sbom = valid_sbom();
 
         let outcome = gate
-            .verify(&test_connector_id(), "1.0.0", &digest, Some(&att), Some(&sbom))
+            .verify(
+                &test_connector_id(),
+                "1.0.0",
+                &digest,
+                Some(&att),
+                Some(&sbom),
+            )
             .unwrap();
 
         assert!(outcome.allowed);

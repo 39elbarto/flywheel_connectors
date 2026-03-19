@@ -319,7 +319,9 @@ impl ResilienceLayer {
     /// Ensure a connector has initialized resilience state.
     pub fn ensure_connector(&self, connector_id: &ConnectorId) {
         let mut entries = lock_unpoisoned(&self.health_router.entries);
-        entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config.health));
+        entries
+            .entry(connector_id.clone())
+            .or_insert_with(|| HealthEntry::new(&self.config.health));
     }
 
     /// Override the manual base load used by the shedder.
@@ -632,14 +634,20 @@ impl ResilienceLayer {
     fn connector_state(&self, connector_id: &ConnectorId) -> Arc<ConnectorState> {
         // Fast path: try to get the existing state with a read lock
         {
-            let states = self.connectors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let states = self
+                .connectors
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(state) = states.get(connector_id) {
                 return Arc::clone(state);
             }
         }
 
         // Slow path: upgrade to write lock and insert if missing
-        let mut states = self.connectors.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut states = self
+            .connectors
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Arc::clone(
             states
                 .entry(connector_id.clone())
@@ -986,7 +994,9 @@ impl HealthRouter {
     fn can_route(&self, connector_id: &ConnectorId) -> RoutingDecision {
         let mut entries = lock_unpoisoned(&self.entries);
         let decision = {
-            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
+            let entry = entries
+                .entry(connector_id.clone())
+                .or_insert_with(|| HealthEntry::new(&self.config));
             match &entry.status {
                 ConnectorHealth::Healthy => RoutingDecision::Allow,
                 ConnectorHealth::Degraded { reason } => RoutingDecision::AllowDegraded {
@@ -1015,7 +1025,9 @@ impl HealthRouter {
     fn record_success(&self, connector_id: &ConnectorId, latency: Duration) {
         let mut entries = lock_unpoisoned(&self.entries);
         {
-            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
+            let entry = entries
+                .entry(connector_id.clone())
+                .or_insert_with(|| HealthEntry::new(&self.config));
 
             entry.consecutive_failures = 0;
             entry.consecutive_successes = entry.consecutive_successes.saturating_add(1);
@@ -1029,7 +1041,9 @@ impl HealthRouter {
     fn record_failure(&self, connector_id: &ConnectorId, reason: &str) {
         let mut entries = lock_unpoisoned(&self.entries);
         {
-            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
+            let entry = entries
+                .entry(connector_id.clone())
+                .or_insert_with(|| HealthEntry::new(&self.config));
 
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.consecutive_successes = 0;
@@ -1042,7 +1056,9 @@ impl HealthRouter {
     fn record_timeout(&self, connector_id: &ConnectorId, timeout: Duration, latency: Duration) {
         let mut entries = lock_unpoisoned(&self.entries);
         {
-            let entry = entries.entry(connector_id.clone()).or_insert_with(|| HealthEntry::new(&self.config));
+            let entry = entries
+                .entry(connector_id.clone())
+                .or_insert_with(|| HealthEntry::new(&self.config));
 
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.consecutive_successes = 0;
@@ -1243,13 +1259,13 @@ impl LatencyEwma {
             Some(current) => {
                 let alpha = u128::from(self.alpha_per_mille).min(u128::from(MAX_PER_MILLE));
                 let retained = u128::from(MAX_PER_MILLE).saturating_sub(alpha);
-                
+
                 let current_128 = u128::from(current);
                 let sample_128 = u128::from(sample_millis);
-                
-                let new_value = ((current_128 * retained) + (sample_128 * alpha))
-                    / u128::from(MAX_PER_MILLE);
-                    
+
+                let new_value =
+                    ((current_128 * retained) + (sample_128 * alpha)) / u128::from(MAX_PER_MILLE);
+
                 u64::try_from(new_value).unwrap_or(u64::MAX)
             }
         });
@@ -3366,10 +3382,9 @@ mod tests {
 
     #[test]
     fn failure_predicate_timeouts_only_does_not_match_success() {
-        assert!(!FailurePredicate::TimeoutsOnly.matches(
-            OutcomeKind::Success,
-            Duration::from_secs(100)
-        ));
+        assert!(
+            !FailurePredicate::TimeoutsOnly.matches(OutcomeKind::Success, Duration::from_secs(100))
+        );
     }
 
     #[test]
@@ -3919,9 +3934,7 @@ mod tests {
     #[test]
     fn resilience_error_display_all_variants_nonempty() {
         let variants: Vec<ResilienceError<&str>> = vec![
-            ResilienceError::LoadShed {
-                load_per_mille: 0,
-            },
+            ResilienceError::LoadShed { load_per_mille: 0 },
             ResilienceError::Unhealthy {
                 reason: String::new(),
             },

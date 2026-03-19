@@ -36,9 +36,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         "twilio.send_message" => "twilio.message",
         "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => "twilio.voice",
         "twilio.whatsapp_send" | "twilio.whatsapp_send_template" => "twilio.whatsapp",
-        "twilio.conversation.create" | "twilio.conversation.message.send" => {
-            "twilio.conversations"
-        }
+        "twilio.conversation.create" | "twilio.conversation.message.send" => "twilio.conversations",
         "twilio.conversation.participant.add" | "twilio.conversation.participant.remove" => {
             "twilio.conversations.participants"
         }

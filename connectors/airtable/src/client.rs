@@ -113,8 +113,7 @@ impl AirtableClient {
             max_delay_ms: 60_000,
             total_requests: AtomicU64::new(0),
             runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default()
-                    .with_request_timeout(Duration::from_secs(30)),
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
             retry_config: HttpRetryConfig {
                 max_retries: 2,

@@ -568,17 +568,14 @@ fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionT
     for op in operations {
         let mut degree = 0;
         let op_id = op.id.as_str();
-        
+
         for dep in &op.depends_on {
             if id_set.contains(dep.as_str()) {
                 degree += 1;
-                dependents
-                    .entry(dep.as_str())
-                    .or_default()
-                    .push(op_id);
+                dependents.entry(dep.as_str()).or_default().push(op_id);
             }
         }
-        
+
         *in_degree.entry(op_id).or_default() += degree;
     }
 
@@ -1640,10 +1637,7 @@ mod tests {
     fn batch_operation_zone_omitted_when_none_in_json() {
         let operation = op("a", "tool", &[]);
         let json = serde_json::to_string(&operation).unwrap();
-        assert!(
-            !json.contains("zone"),
-            "zone should be skipped when None"
-        );
+        assert!(!json.contains("zone"), "zone should be skipped when None");
     }
 
     #[test]
@@ -1968,10 +1962,7 @@ mod tests {
         let plan = executor.plan(&req).unwrap();
         assert_eq!(plan.depth(), 3);
         assert_eq!(plan.max_width(), 5);
-        assert_eq!(
-            plan.tiers[1].operation_ids,
-            vec!["a", "b", "c", "d", "e"]
-        );
+        assert_eq!(plan.tiers[1].operation_ids, vec!["a", "b", "c", "d", "e"]);
     }
 
     // ── Cycle detection extended ──
@@ -2887,9 +2878,8 @@ mod tests {
 
     #[test]
     fn no_cycle_wide_fan_in() {
-        let mut ops: Vec<BatchOperation> = (0..10)
-            .map(|i| op(&format!("src{i}"), "t", &[]))
-            .collect();
+        let mut ops: Vec<BatchOperation> =
+            (0..10).map(|i| op(&format!("src{i}"), "t", &[])).collect();
         let deps: Vec<String> = (0..10).map(|i| format!("src{i}")).collect();
         let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
         ops.push(op("sink", "t", &dep_refs));
@@ -2907,12 +2897,8 @@ mod tests {
 
     #[test]
     fn topological_tiers_sorted_within_tier() {
-        let tiers = topological_tiers(&[
-            op("z", "t", &[]),
-            op("a", "t", &[]),
-            op("m", "t", &[]),
-        ])
-        .unwrap();
+        let tiers =
+            topological_tiers(&[op("z", "t", &[]), op("a", "t", &[]), op("m", "t", &[])]).unwrap();
         assert_eq!(tiers[0].operation_ids, vec!["a", "m", "z"]);
     }
 
@@ -2985,10 +2971,7 @@ mod tests {
     fn validate_duplicate_deps_in_single_op_passes() {
         let executor = BatchExecutor::new();
         // An op can list the same dependency twice — no validation against that
-        let req = simple_request(vec![
-            op("a", "t", &[]),
-            op("b", "t", &["a", "a"]),
-        ]);
+        let req = simple_request(vec![op("a", "t", &[]), op("b", "t", &["a", "a"])]);
         assert!(executor.validate(&req).is_ok());
     }
 
@@ -3444,12 +3427,7 @@ mod tests {
         let resp = executor
             .execute_sync(&req, |_| Ok(serde_json::json!([1, 2, 3])))
             .unwrap();
-        let arr = resp.results[0]
-            .output
-            .as_ref()
-            .unwrap()
-            .as_array()
-            .unwrap();
+        let arr = resp.results[0].output.as_ref().unwrap().as_array().unwrap();
         assert_eq!(arr.len(), 3);
     }
 

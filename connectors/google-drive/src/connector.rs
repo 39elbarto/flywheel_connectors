@@ -5,15 +5,15 @@ use std::sync::Arc;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SessionId, SimulateRequest, SimulateResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
+    SimulateRequest, SimulateResponse,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DriveClient, DEFAULT_BASE_URL},
+    client::{DEFAULT_BASE_URL, DriveClient},
     error::DriveError,
 };
 
@@ -41,13 +41,12 @@ impl DriveConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let selection =
-            GoogleAuthSelection::from_connector_config(&params).map_err(|error| {
-                FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Invalid Google auth configuration: {error}"),
-                }
-            })?;
+        let selection = GoogleAuthSelection::from_connector_config(&params).map_err(|error| {
+            FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid Google auth configuration: {error}"),
+            }
+        })?;
 
         let materialized =
             selection
@@ -498,10 +497,7 @@ impl DriveConnector {
         Ok(json!({ "file": file }))
     }
 
-    async fn invoke_download_file(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_download_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_id = require_str(&input, "file_id")?;
 
@@ -516,10 +512,7 @@ impl DriveConnector {
         }))
     }
 
-    async fn invoke_create_folder(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_folder(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let name = require_str(&input, "name")?;
         let parent_id = input.get("parent_id").and_then(|v| v.as_str());

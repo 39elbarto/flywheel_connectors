@@ -309,7 +309,13 @@ mod tests {
     fn from_graph_response_500_generic() {
         let body = r#"{"error":{"code":"InternalServerError","message":"Oops."}}"#;
         let err = TeamsError::from_graph_response(500, body);
-        assert!(matches!(err, TeamsError::Graph { status_code: 500, .. }));
+        assert!(matches!(
+            err,
+            TeamsError::Graph {
+                status_code: 500,
+                ..
+            }
+        ));
     }
 
     #[test]

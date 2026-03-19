@@ -490,8 +490,7 @@ mod tests {
         for (env, expected_json) in variants {
             let json = serde_json::to_string(&env).expect("serialize");
             assert_eq!(json, expected_json, "variant {env:?}");
-            let back: ScenarioEnvironment =
-                serde_json::from_str(&json).expect("deserialize");
+            let back: ScenarioEnvironment = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(back, env);
         }
     }
@@ -538,9 +537,7 @@ mod tests {
         });
         finalize_scenario(&mut script);
         match &script.outcome {
-            ScenarioOutcome::Degraded {
-                passed, failed, ..
-            } => {
+            ScenarioOutcome::Degraded { passed, failed, .. } => {
                 assert_eq!(*passed, 1);
                 assert_eq!(*failed, 1);
             }

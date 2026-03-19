@@ -87,8 +87,7 @@ impl AmplitudeClient {
             auth,
             base_url: url,
             runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default()
-                    .with_request_timeout(Duration::from_secs(30)),
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
             retry_config: HttpRetryConfig {
                 max_retries: 2,

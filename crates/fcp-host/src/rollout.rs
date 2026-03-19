@@ -533,16 +533,17 @@ where
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            
-            let entry = state.entry(connector_id.clone()).or_insert_with(|| {
-                ConnectorRuntimeState {
-                    failure_streak: 0,
-                    crash_detector: CrashLoopDetector::new(
-                        self.config.crash_loop_threshold,
-                        self.config.crash_loop_window_secs,
-                    ),
-                }
-            });
+
+            let entry =
+                state
+                    .entry(connector_id.clone())
+                    .or_insert_with(|| ConnectorRuntimeState {
+                        failure_streak: 0,
+                        crash_detector: CrashLoopDetector::new(
+                            self.config.crash_loop_threshold,
+                            self.config.crash_loop_window_secs,
+                        ),
+                    });
 
             if observation.invocation_succeeded {
                 entry.failure_streak = 0;
@@ -3437,8 +3438,8 @@ mod tests {
         let policy = rollout_policy();
         r.canary_policy = to_canary_policy(&policy);
         // Move time far past max canary duration
-        let far_future =
-            r.state_changed_at + chrono::Duration::seconds(i64::from(r.canary_policy.max_canary_duration_secs) + 1);
+        let far_future = r.state_changed_at
+            + chrono::Duration::seconds(i64::from(r.canary_policy.max_canary_duration_secs) + 1);
         // Use a policy where success thresholds are very high so promotion doesn't fire
         let strict_policy = RolloutPolicy::builder()
             .canary_percent(5)
@@ -3469,8 +3470,8 @@ mod tests {
         }
         let policy = rollout_policy();
         r.canary_policy = to_canary_policy(&policy);
-        let far_future =
-            r.state_changed_at + chrono::Duration::seconds(i64::from(r.canary_policy.max_canary_duration_secs) + 1);
+        let far_future = r.state_changed_at
+            + chrono::Duration::seconds(i64::from(r.canary_policy.max_canary_duration_secs) + 1);
         let no_auto_policy = RolloutPolicy::builder()
             .canary_percent(5)
             .min_canary_duration_secs(10)
@@ -4338,7 +4339,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(o.evidence.self_check_status, SelfCheckStatus::Degraded);
-        assert_eq!(o.evidence.self_check_reason_code.as_deref(), Some("slow_db"));
+        assert_eq!(
+            o.evidence.self_check_reason_code.as_deref(),
+            Some("slow_db")
+        );
     }
 
     #[fcp_async_core::runtime::test]

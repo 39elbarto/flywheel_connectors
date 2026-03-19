@@ -416,7 +416,10 @@ mod tests {
         });
         let policy = RedactionPolicy::default();
         let redacted = redact_json(json, &policy);
-        assert_eq!(redacted["level1"]["level2"]["level3"]["secret"], "[REDACTED]");
+        assert_eq!(
+            redacted["level1"]["level2"]["level3"]["secret"],
+            "[REDACTED]"
+        );
     }
 
     #[test]
@@ -660,10 +663,7 @@ mod tests {
 
     #[test]
     fn redacted_in_vec_debug() {
-        let secrets = vec![
-            Redacted::new("key1"),
-            Redacted::new("key2"),
-        ];
+        let secrets = vec![Redacted::new("key1"), Redacted::new("key2")];
         let dbg = format!("{secrets:?}");
         assert!(!dbg.contains("key1"));
         assert!(!dbg.contains("key2"));
@@ -775,10 +775,21 @@ mod tests {
     fn policy_all_default_patterns_match() {
         let policy = RedactionPolicy::default();
         let expected = [
-            "token", "secret", "password", "api_key", "apikey",
-            "access_token", "refresh_token", "client_secret",
-            "private_key", "credential", "bearer", "auth",
-            "passphrase", "signing_key", "encryption_key",
+            "token",
+            "secret",
+            "password",
+            "api_key",
+            "apikey",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "private_key",
+            "credential",
+            "bearer",
+            "auth",
+            "passphrase",
+            "signing_key",
+            "encryption_key",
         ];
         for pattern in &expected {
             assert!(
@@ -1199,7 +1210,10 @@ mod tests {
         let redacted = redact_json(json, &policy);
         let obj = redacted.as_object().unwrap();
         for (_, v) in obj {
-            assert_eq!(v, "[REDACTED]", "all sensitive fields should be redacted regardless of value type");
+            assert_eq!(
+                v, "[REDACTED]",
+                "all sensitive fields should be redacted regardless of value type"
+            );
         }
     }
 

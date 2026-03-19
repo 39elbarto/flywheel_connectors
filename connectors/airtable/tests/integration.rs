@@ -27,8 +27,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         | "airtable.update_records"
         | "airtable.upsert_records"
         | "airtable.replace_record" => "airtable.write",
-        "airtable.delete_record"
-        | "airtable.delete_records" => "airtable.delete",
+        "airtable.delete_record" | "airtable.delete_records" => "airtable.delete",
         "airtable.create_webhook"
         | "airtable.list_webhooks"
         | "airtable.delete_webhook"
@@ -55,25 +54,29 @@ async fn setup_handshake(
     capabilities: &[&str],
 ) {
     let verifying_key = signing_key.verifying_key();
-    let mapped_caps: Vec<&str> = capabilities.iter().map(|&op| match op {
-        "airtable.create_record"
-        | "airtable.create_records"
-        | "airtable.update_record"
-        | "airtable.update_records"
-        | "airtable.upsert_records"
-        | "airtable.replace_record" => "airtable.write",
-        "airtable.delete_record"
-        | "airtable.delete_records" => "airtable.delete",
-        "airtable.create_webhook"
-        | "airtable.list_webhooks"
-        | "airtable.delete_webhook"
-        | "airtable.list_webhook_payloads"
-        | "airtable.refresh_webhook"
-        | "airtable.set_webhook_notifications" => "airtable.webhooks.manage",
-        "airtable.read" | "airtable.write" | "airtable.webhooks.manage" | "airtable.delete" => op,
-        "airtable.nonexistent" => op,
-        _ => "airtable.read",
-    }).collect();
+    let mapped_caps: Vec<&str> = capabilities
+        .iter()
+        .map(|&op| match op {
+            "airtable.create_record"
+            | "airtable.create_records"
+            | "airtable.update_record"
+            | "airtable.update_records"
+            | "airtable.upsert_records"
+            | "airtable.replace_record" => "airtable.write",
+            "airtable.delete_record" | "airtable.delete_records" => "airtable.delete",
+            "airtable.create_webhook"
+            | "airtable.list_webhooks"
+            | "airtable.delete_webhook"
+            | "airtable.list_webhook_payloads"
+            | "airtable.refresh_webhook"
+            | "airtable.set_webhook_notifications" => "airtable.webhooks.manage",
+            "airtable.read" | "airtable.write" | "airtable.webhooks.manage" | "airtable.delete" => {
+                op
+            }
+            "airtable.nonexistent" => op,
+            _ => "airtable.read",
+        })
+        .collect();
 
     connector
         .handle_handshake(json!({

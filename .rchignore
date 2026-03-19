@@ -1,3 +1,9 @@
 .claude/
 .codex-targets/
 .beads/
+**/.beads/
+**/.br_recovery/
+**/.br_history/
+.beads/recovery_*/
+.beads/recovery_manual_*/
+.beads/beads.db.rebuild*

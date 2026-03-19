@@ -513,8 +513,7 @@ mod tests {
     fn connector_error_mapping_timeout() {
         use fcp_async_core::AsyncError;
         use fcp_sdk::migration::ConnectorErrorMapping;
-        let err =
-            HomeAssistantError::from_async_error(AsyncError::Timeout { timeout_ms: 2000 });
+        let err = HomeAssistantError::from_async_error(AsyncError::Timeout { timeout_ms: 2000 });
         assert!(matches!(
             err,
             HomeAssistantError::Api {
@@ -532,10 +531,7 @@ mod tests {
         let err = HomeAssistantError::from_async_error(AsyncError::Cancelled);
         assert!(matches!(
             err,
-            HomeAssistantError::Api {
-                status_code: 0,
-                ..
-            }
+            HomeAssistantError::Api { status_code: 0, .. }
         ));
     }
 

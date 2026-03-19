@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, InvokeRequest, InvokeResponse, Introspection, OperationId,
+    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
@@ -166,9 +166,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to join a room before sending messages".into(),
-                common_mistakes: vec![
-                    "Room IDs start with !, aliases start with #".into(),
-                ],
+                common_mistakes: vec!["Room IDs start with !, aliases start with #".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_LEAVE_ROOM)],
             },
@@ -304,10 +302,11 @@ impl FcpConnector for MatrixConnector {
             MatrixAuth::CredentialId { .. } => "",
         };
 
-        let client = MatrixClient::new(&config.homeserver_url, token, timeout)
-            .map_err(|e| FcpError::Internal {
+        let client = MatrixClient::new(&config.homeserver_url, token, timeout).map_err(|e| {
+            FcpError::Internal {
                 message: format!("Failed to create Matrix client: {e}"),
-            })?;
+            }
+        })?;
 
         self.client = Some(client);
         self.config = Some(config);
@@ -377,9 +376,15 @@ impl FcpConnector for MatrixConnector {
             Ok(()) => Ok(SelfCheckReport::ok()),
             Err(err) => {
                 if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded("self_check_retryable", err.to_string()))
+                    Ok(SelfCheckReport::degraded(
+                        "self_check_retryable",
+                        err.to_string(),
+                    ))
                 } else {
-                    Ok(SelfCheckReport::failed("self_check_failed", err.to_string()))
+                    Ok(SelfCheckReport::failed(
+                        "self_check_failed",
+                        err.to_string(),
+                    ))
                 }
             }
         }
@@ -446,7 +451,7 @@ impl MatrixConnector {
                     return Err(FcpError::InvalidRequest {
                         code: 1004,
                         message: format!("Unknown operation: {operation}"),
-                    })
+                    });
                 }
             };
             verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
@@ -462,15 +467,31 @@ impl MatrixConnector {
                 json!({ "rooms": rooms })
             }
             OP_CREATE_ROOM => {
-                let name = req.input.get("name").and_then(|v| v.as_str()).map(String::from);
-                let topic = req.input.get("topic").and_then(|v| v.as_str()).map(String::from);
+                let name = req
+                    .input
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let topic = req
+                    .input
+                    .get("topic")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let invite: Vec<String> = req
                     .input
                     .get("invite")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
-                let visibility = req.input.get("visibility").and_then(|v| v.as_str()).map(String::from);
-                let preset = req.input.get("preset").and_then(|v| v.as_str()).map(String::from);
+                let visibility = req
+                    .input
+                    .get("visibility")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let preset = req
+                    .input
+                    .get("preset")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
                 let create_req = CreateRoomRequest {
                     name,
@@ -480,7 +501,10 @@ impl MatrixConnector {
                     visibility,
                     preset,
                 };
-                let resp = client.create_room(&create_req).await.map_err(|e| e.to_fcp_error())?;
+                let resp = client
+                    .create_room(&create_req)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 json!({ "room_id": resp.room_id })
             }
             OP_JOIN_ROOM => {
@@ -490,7 +514,10 @@ impl MatrixConnector {
             }
             OP_LEAVE_ROOM => {
                 let room_id = require_str(&req.input, "room_id")?;
-                client.leave_room(room_id).await.map_err(|e| e.to_fcp_error())?;
+                client
+                    .leave_room(room_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 json!({ "status": "left" })
             }
             OP_SEND_MESSAGE => {
@@ -530,7 +557,7 @@ impl MatrixConnector {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!("Unknown operation: {operation}"),
-                })
+                });
             }
         };
 
@@ -557,14 +584,20 @@ mod tests {
     #[test]
     fn send_message_is_risky() {
         let ops = operations_info();
-        let send = ops.iter().find(|op| op.id.as_str() == OP_SEND_MESSAGE).unwrap();
+        let send = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_SEND_MESSAGE)
+            .unwrap();
         assert_eq!(send.safety_tier, SafetyTier::Risky);
     }
 
     #[test]
     fn read_ops_are_safe() {
         let ops = operations_info();
-        let rooms = ops.iter().find(|op| op.id.as_str() == OP_JOINED_ROOMS).unwrap();
+        let rooms = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_JOINED_ROOMS)
+            .unwrap();
         assert_eq!(rooms.safety_tier, SafetyTier::Safe);
     }
 

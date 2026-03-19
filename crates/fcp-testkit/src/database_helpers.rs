@@ -19,7 +19,7 @@
 //! assert_query_row_count(&result, 2);
 //! ```
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mock Query Results
@@ -349,7 +349,11 @@ pub fn assert_no_raw_queries(tracker: &QueryTracker) {
     assert!(
         !tracker.has_raw_queries(),
         "Expected all queries to be parameterized but found {} raw queries: {:?}",
-        tracker.queries().iter().filter(|q| !q.parameterized).count(),
+        tracker
+            .queries()
+            .iter()
+            .filter(|q| !q.parameterized)
+            .count(),
         tracker
             .queries()
             .iter()

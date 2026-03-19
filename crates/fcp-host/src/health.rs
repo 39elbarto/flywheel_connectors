@@ -89,11 +89,9 @@ impl HealthState {
                 merged.extend(b.iter().cloned());
                 Self::Degraded { reasons: merged }
             }
-            (Self::Degraded { reasons }, _) | (_, Self::Degraded { reasons }) => {
-                Self::Degraded {
-                    reasons: reasons.clone(),
-                }
-            }
+            (Self::Degraded { reasons }, _) | (_, Self::Degraded { reasons }) => Self::Degraded {
+                reasons: reasons.clone(),
+            },
             _ => Self::Healthy,
         }
     }
@@ -267,7 +265,10 @@ impl ConnectorHealth {
     pub fn to_health_state(&self) -> HealthState {
         if self.crash_loop {
             HealthState::Unhealthy {
-                reasons: vec![format!("{}: crash loop ({} restarts)", self.connector_id, self.restart_count)],
+                reasons: vec![format!(
+                    "{}: crash loop ({} restarts)",
+                    self.connector_id, self.restart_count
+                )],
             }
         } else if self.last_check_passed == Some(false) {
             HealthState::Degraded {
@@ -630,11 +631,7 @@ impl HealthAggregator {
     /// Report health for a named component.
     pub fn report_component(&mut self, health: ComponentHealth) {
         // Update existing or insert new.
-        if let Some(existing) = self
-            .components
-            .iter_mut()
-            .find(|c| c.name == health.name)
-        {
+        if let Some(existing) = self.components.iter_mut().find(|c| c.name == health.name) {
             *existing = health;
         } else {
             self.components.push(health);
@@ -704,23 +701,24 @@ impl HealthAggregator {
         // Roll up component health.
         for component in &self.components {
             // Consecutive failures escalation.
-            let component_state = if component.consecutive_failures >= self.config.unhealthy_threshold {
-                HealthState::Unhealthy {
-                    reasons: vec![format!(
-                        "{}: {} consecutive failures",
-                        component.name, component.consecutive_failures
-                    )],
-                }
-            } else if component.consecutive_failures >= self.config.degraded_threshold {
-                HealthState::Degraded {
-                    reasons: vec![format!(
-                        "{}: {} consecutive failures",
-                        component.name, component.consecutive_failures
-                    )],
-                }
-            } else {
-                component.state.clone()
-            };
+            let component_state =
+                if component.consecutive_failures >= self.config.unhealthy_threshold {
+                    HealthState::Unhealthy {
+                        reasons: vec![format!(
+                            "{}: {} consecutive failures",
+                            component.name, component.consecutive_failures
+                        )],
+                    }
+                } else if component.consecutive_failures >= self.config.degraded_threshold {
+                    HealthState::Degraded {
+                        reasons: vec![format!(
+                            "{}: {} consecutive failures",
+                            component.name, component.consecutive_failures
+                        )],
+                    }
+                } else {
+                    component.state.clone()
+                };
             overall = overall.merge(&component_state);
         }
 
@@ -1184,9 +1182,7 @@ mod tests {
     #[test]
     fn aggregator_component_failures_escalation() {
         let mut agg = HealthAggregator::new("1.0.0", HealthConfig::default());
-        agg.report_component(
-            ComponentHealth::healthy("enforcement").with_failures(3),
-        );
+        agg.report_component(ComponentHealth::healthy("enforcement").with_failures(3));
         let status = agg.evaluate();
         // 3 failures >= unhealthy_threshold (3) → unhealthy
         assert!(status.status.is_unhealthy());
@@ -1195,9 +1191,7 @@ mod tests {
     #[test]
     fn aggregator_component_degraded_threshold() {
         let mut agg = HealthAggregator::new("1.0.0", HealthConfig::default());
-        agg.report_component(
-            ComponentHealth::healthy("enforcement").with_failures(1),
-        );
+        agg.report_component(ComponentHealth::healthy("enforcement").with_failures(1));
         let status = agg.evaluate();
         // 1 failure >= degraded_threshold (1) → degraded
         assert!(status.status.is_degraded());
@@ -1448,7 +1442,9 @@ mod tests {
 
     #[test]
     fn severity_ordering() {
-        assert!(HealthState::Healthy.severity() < HealthState::Degraded { reasons: vec![] }.severity());
+        assert!(
+            HealthState::Healthy.severity() < HealthState::Degraded { reasons: vec![] }.severity()
+        );
         assert!(
             HealthState::Degraded { reasons: vec![] }.severity()
                 < HealthState::Unhealthy { reasons: vec![] }.severity()
@@ -2014,8 +2010,7 @@ mod tests {
 
     #[test]
     fn aggregator_custom_thresholds() {
-        let config = HealthConfig::default()
-            .with_unhealthy_threshold(10);
+        let config = HealthConfig::default().with_unhealthy_threshold(10);
         let mut agg = HealthAggregator::new("1.0.0", config);
         // 5 failures < custom unhealthy(10) → degraded (>= degraded(1))
         agg.report_component(ComponentHealth::healthy("test").with_failures(5));

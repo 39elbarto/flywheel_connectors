@@ -2101,10 +2101,7 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: CancelReason = serde_json::from_str(&json).unwrap();
-        if let CancelReason::ResourceLimit {
-            current, limit, ..
-        } = parsed
-        {
+        if let CancelReason::ResourceLimit { current, limit, .. } = parsed {
             assert_eq!(current, limit);
         } else {
             panic!("expected ResourceLimit");
@@ -2120,10 +2117,7 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: CancelReason = serde_json::from_str(&json).unwrap();
-        if let CancelReason::ResourceLimit {
-            current, limit, ..
-        } = parsed
-        {
+        if let CancelReason::ResourceLimit { current, limit, .. } = parsed {
             assert!(current > limit);
         } else {
             panic!("expected ResourceLimit");
@@ -2139,10 +2133,7 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: CancelReason = serde_json::from_str(&json).unwrap();
-        if let CancelReason::ResourceLimit {
-            current, limit, ..
-        } = parsed
-        {
+        if let CancelReason::ResourceLimit { current, limit, .. } = parsed {
             assert_eq!(current, 0);
             assert_eq!(limit, 0);
         } else {
@@ -2711,12 +2702,18 @@ mod tests {
         // Complete b, cancel a, then try to cancel b (too late)
         ctrl.complete("b");
         let resp_a = ctrl
-            .cancel(&cancel_request("a", CancelReason::UserRequested), fixed_now())
+            .cancel(
+                &cancel_request("a", CancelReason::UserRequested),
+                fixed_now(),
+            )
             .unwrap();
         assert_eq!(resp_a.outcome, CancellationOutcome::Cancelled);
 
         let resp_b = ctrl
-            .cancel(&cancel_request("b", CancelReason::UserRequested), fixed_now())
+            .cancel(
+                &cancel_request("b", CancelReason::UserRequested),
+                fixed_now(),
+            )
             .unwrap();
         assert_eq!(resp_b.outcome, CancellationOutcome::TooLate);
 
@@ -2840,11 +2837,8 @@ mod tests {
 
         ctrl.cancel(&cancel_request("op_t1", CancelReason::UserRequested), t1)
             .unwrap();
-        ctrl.cancel(
-            &cancel_request("op_t2", CancelReason::SessionClosing),
-            t2,
-        )
-        .unwrap();
+        ctrl.cancel(&cancel_request("op_t2", CancelReason::SessionClosing), t2)
+            .unwrap();
 
         let events = ctrl.audit_events();
         // Newest first

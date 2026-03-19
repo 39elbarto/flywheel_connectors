@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Plaid API error.
@@ -101,7 +101,6 @@ impl PlaidError {
         }
     }
 }
-
 
 impl ConnectorErrorMapping for PlaidError {
     fn from_async_error(error: AsyncError) -> Self {

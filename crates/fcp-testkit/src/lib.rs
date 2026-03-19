@@ -50,18 +50,18 @@
 
 mod assertions;
 mod async_harness;
+pub mod bridge_helpers;
+pub mod coverage_rules;
+pub mod database_helpers;
+pub mod evidence_helpers;
 pub mod fixtures;
 mod harness;
 mod log_scan;
 mod mock_server;
+pub mod readiness_helpers;
 pub mod supervisor_examples;
-pub mod coverage_rules;
 mod tracing_config;
 pub mod webhook_helpers;
-pub mod readiness_helpers;
-pub mod database_helpers;
-pub mod bridge_helpers;
-pub mod evidence_helpers;
 
 pub use assertions::*;
 pub use async_harness::*;

@@ -54,9 +54,7 @@ impl DriveError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_secs } => {
-                Some(Duration::from_secs(*retry_after_secs))
-            }
+            Self::RateLimited { retry_after_secs } => Some(Duration::from_secs(*retry_after_secs)),
             _ => None,
         }
     }
@@ -172,22 +170,41 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(DriveError::RateLimited { retry_after_secs: 5 }.is_retryable());
+        assert!(
+            DriveError::RateLimited {
+                retry_after_secs: 5
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
-        assert!(DriveError::Api { status_code: 500, message: "err".into() }.is_retryable());
+        assert!(
+            DriveError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
-        assert!(!DriveError::Api { status_code: 400, message: "bad".into() }.is_retryable());
+        assert!(
+            !DriveError::Api {
+                status_code: 400,
+                message: "bad".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = DriveError::RateLimited { retry_after_secs: 30 };
+        let err = DriveError::RateLimited {
+            retry_after_secs: 30,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -206,7 +223,9 @@ mod tests {
 
     #[test]
     fn to_fcp_error_file_not_found() {
-        let err = DriveError::FileNotFound { file_id: "abc".into() };
+        let err = DriveError::FileNotFound {
+            file_id: "abc".into(),
+        };
         match err.to_fcp_error() {
             FcpError::ResourceNotFound { resource } => assert_eq!(resource, "file:abc"),
             other => panic!("expected ResourceNotFound, got {other:?}"),
@@ -215,16 +234,17 @@ mod tests {
 
     #[test]
     fn to_fcp_error_api_429() {
-        let err = DriveError::Api { status_code: 429, message: "rate limited".into() };
+        let err = DriveError::Api {
+            status_code: 429,
+            message: "rate limited".into(),
+        };
         assert!(matches!(err.to_fcp_error(), FcpError::RateLimited { .. }));
     }
 
     #[test]
     fn to_fcp_error_quota_exceeded() {
         match DriveError::QuotaExceeded.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 0),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 0),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -245,7 +265,13 @@ mod tests {
         use fcp_async_core::AsyncError;
         use fcp_sdk::migration::ConnectorErrorMapping;
         let err = DriveError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
-        assert!(matches!(err, DriveError::Api { status_code: 408, .. }));
+        assert!(matches!(
+            err,
+            DriveError::Api {
+                status_code: 408,
+                ..
+            }
+        ));
         assert!(err.to_string().contains("5000"));
     }
 
@@ -268,14 +294,18 @@ mod tests {
     #[test]
     fn connector_error_mapping_is_retryable_delegates() {
         use fcp_sdk::migration::ConnectorErrorMapping;
-        let err = DriveError::RateLimited { retry_after_secs: 10 };
+        let err = DriveError::RateLimited {
+            retry_after_secs: 10,
+        };
         assert!(ConnectorErrorMapping::is_retryable(&err));
     }
 
     #[test]
     fn connector_error_mapping_retry_after_delegates() {
         use fcp_sdk::migration::ConnectorErrorMapping;
-        let err = DriveError::RateLimited { retry_after_secs: 60 };
+        let err = DriveError::RateLimited {
+            retry_after_secs: 60,
+        };
         assert_eq!(
             ConnectorErrorMapping::retry_after(&err),
             Some(Duration::from_secs(60))
@@ -285,10 +315,23 @@ mod tests {
     #[test]
     fn display_all_variants() {
         let _ = DriveError::Unauthorized.to_string();
-        let _ = DriveError::RateLimited { retry_after_secs: 5 }.to_string();
-        let _ = DriveError::FileNotFound { file_id: "x".into() }.to_string();
-        let _ = DriveError::Forbidden { message: "no".into() }.to_string();
+        let _ = DriveError::RateLimited {
+            retry_after_secs: 5,
+        }
+        .to_string();
+        let _ = DriveError::FileNotFound {
+            file_id: "x".into(),
+        }
+        .to_string();
+        let _ = DriveError::Forbidden {
+            message: "no".into(),
+        }
+        .to_string();
         let _ = DriveError::QuotaExceeded.to_string();
-        let _ = DriveError::Api { status_code: 500, message: "err".into() }.to_string();
+        let _ = DriveError::Api {
+            status_code: 500,
+            message: "err".into(),
+        }
+        .to_string();
     }
 }

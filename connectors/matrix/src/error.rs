@@ -264,7 +264,13 @@ mod tests {
     #[test]
     fn from_matrix_response_malformed() {
         let err = MatrixError::from_matrix_response(500, "not json");
-        assert!(matches!(err, MatrixError::Api { status_code: 500, .. }));
+        assert!(matches!(
+            err,
+            MatrixError::Api {
+                status_code: 500,
+                ..
+            }
+        ));
     }
 
     #[test]

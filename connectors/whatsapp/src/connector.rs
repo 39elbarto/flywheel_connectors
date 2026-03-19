@@ -600,27 +600,31 @@ impl FcpConnector for WhatsAppConnector {
 
 impl WhatsAppConnector {
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        self.base.check_ready()?;
         let operation = req.operation.as_str();
 
-        if let Some(verifier) = &self.verifier {
-            let required_cap = match operation {
-                OP_SEND_TEXT | OP_SEND_TEMPLATE => CapabilityId::from_static(CAP_SEND),
-                OP_GET_PROFILE => CapabilityId::from_static(CAP_READ),
-                OP_WEBHOOK_VERIFY | OP_WEBHOOK_RECEIVE => CapabilityId::from_static(CAP_WEBHOOK),
-                _ => {
-                    return Err(FcpError::InvalidRequest {
-                        code: 1004,
-                        message: format!("Unknown operation: {operation}"),
-                    });
-                }
-            };
-            verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
+            message: "Capability verifier missing after successful handshake".into(),
+        })?;
+        let required_cap = match operation {
+            OP_SEND_TEXT | OP_SEND_TEMPLATE => CapabilityId::from_static(CAP_SEND),
+            OP_GET_PROFILE => CapabilityId::from_static(CAP_READ),
+            OP_WEBHOOK_VERIFY | OP_WEBHOOK_RECEIVE => CapabilityId::from_static(CAP_WEBHOOK),
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
-        let runtime = self.runtime.as_ref().ok_or(FcpError::NotConfigured)?;
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
+            message: "Connector runtime missing after configure".into(),
+        })?;
+        let client = self.client.as_ref().ok_or(FcpError::Internal {
+            message: "WhatsApp client missing after configure".into(),
+        })?;
 
         let output = match operation {
             OP_SEND_TEXT => {
@@ -636,11 +640,13 @@ impl WhatsAppConnector {
                         message: "Missing 'text' field".into(),
                     },
                 )?;
-                let preview_url = req
-                    .input
-                    .get("preview_url")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let preview_url = match req.input.get("preview_url") {
+                    Some(value) => value.as_bool().ok_or(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Field 'preview_url' must be a boolean".into(),
+                    })?,
+                    None => false,
+                };
 
                 let resp = client
                     .send_text_message(runtime, to, text, preview_url)
@@ -667,16 +673,22 @@ impl WhatsAppConnector {
                         code: 1005,
                         message: "Missing 'template_name' field".into(),
                     })?;
-                let language_code = req
-                    .input
-                    .get("language_code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("en_US");
-                let components: Vec<serde_json::Value> = req
-                    .input
-                    .get("components")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
+                let language_code = match req.input.get("language_code") {
+                    Some(value) => value.as_str().ok_or(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Field 'language_code' must be a string".into(),
+                    })?,
+                    None => "en_US",
+                };
+                let components: Vec<serde_json::Value> = match req.input.get("components") {
+                    Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                        FcpError::InvalidRequest {
+                            code: 1005,
+                            message: format!("Invalid 'components' field: {error}"),
+                        }
+                    })?,
+                    None => Vec::new(),
+                };
 
                 let resp = client
                     .send_template_message(runtime, to, template_name, language_code, &components)
@@ -1116,6 +1128,23 @@ mod tests {
             .unwrap();
 
         assert!(connector.webhook.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_before_handshake_returns_not_handshaken() {
+        let mut connector = WhatsAppConnector::new();
+        connector
+            .configure(json!({
+                "phone_number_id": "123",
+                "access_token": "tok"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector
+            .invoke(base_invoke(connector.id(), OP_SEND_TEXT))
+            .await;
+        assert!(matches!(result, Err(FcpError::NotHandshaken)));
     }
 
     #[fcp_async_core::runtime::test]

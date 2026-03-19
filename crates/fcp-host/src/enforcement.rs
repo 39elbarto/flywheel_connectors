@@ -45,8 +45,8 @@ pub struct EnforcementConfig {
 impl Default for EnforcementConfig {
     fn default() -> Self {
         Self {
-            checkpoint_max_age_ms: 300_000,  // 5 minutes
-            revocation_max_age_ms: 600_000,  // 10 minutes
+            checkpoint_max_age_ms: 300_000, // 5 minutes
+            revocation_max_age_ms: 600_000, // 10 minutes
             critical_taint_flags: vec![
                 "pii".into(),
                 "phi".into(),
@@ -445,13 +445,19 @@ impl EnforcementDecision {
     /// Number of checks that returned `Allow`.
     #[must_use]
     pub fn allow_count(&self) -> usize {
-        self.checks_run.iter().filter(|c| c.outcome.is_allow()).count()
+        self.checks_run
+            .iter()
+            .filter(|c| c.outcome.is_allow())
+            .count()
     }
 
     /// Number of checks that were skipped.
     #[must_use]
     pub fn skip_count(&self) -> usize {
-        self.checks_run.iter().filter(|c| c.outcome.is_skip()).count()
+        self.checks_run
+            .iter()
+            .filter(|c| c.outcome.is_skip())
+            .count()
     }
 }
 
@@ -578,7 +584,9 @@ impl EnforcementCheck for CapabilityVerifyCheck {
         // Check if any claim matches the operation directly or as a prefix.
         let op = &ctx.operation;
         let has_matching_claim = ctx.capability_claims.iter().any(|claim| {
-            claim == op || op.starts_with(&format!("{claim}.")) || op.starts_with(&format!("{claim}/"))
+            claim == op
+                || op.starts_with(&format!("{claim}."))
+                || op.starts_with(&format!("{claim}/"))
         });
 
         if has_matching_claim {
@@ -586,9 +594,7 @@ impl EnforcementCheck for CapabilityVerifyCheck {
         } else {
             CheckOutcome::Deny {
                 reason_code: "CAPABILITY_NOT_GRANTED".into(),
-                explanation: format!(
-                    "no capability claim covers operation '{op}'"
-                ),
+                explanation: format!("no capability claim covers operation '{op}'"),
             }
         }
     }
@@ -665,9 +671,7 @@ impl EnforcementCheck for TaintApprovalCheck {
             if config.critical_taint_flags.contains(flag) && !approval_set.contains(flag.as_str()) {
                 return CheckOutcome::Deny {
                     reason_code: "TAINT_APPROVAL_MISSING".into(),
-                    explanation: format!(
-                        "critical taint flag '{flag}' requires an approval token"
-                    ),
+                    explanation: format!("critical taint flag '{flag}' requires an approval token"),
                 };
             }
         }
@@ -761,9 +765,7 @@ impl EnforcementCheck for RateLimitCheck {
             (Some(count), Some(limit)) if count < limit => CheckOutcome::Allow,
             (Some(count), Some(limit)) => CheckOutcome::Deny {
                 reason_code: "RATE_LIMIT_EXCEEDED".into(),
-                explanation: format!(
-                    "rate count {count} has reached limit {limit}"
-                ),
+                explanation: format!("rate count {count} has reached limit {limit}"),
             },
         }
     }
@@ -1011,8 +1013,7 @@ mod tests {
 
     #[test]
     fn config_builder_critical_taints() {
-        let config = EnforcementConfig::new()
-            .with_critical_taint_flags(vec!["custom".into()]);
+        let config = EnforcementConfig::new().with_critical_taint_flags(vec!["custom".into()]);
         assert_eq!(config.critical_taint_flags, vec!["custom"]);
     }
 
@@ -1561,7 +1562,11 @@ mod tests {
         config.add_zone_membership("agent-alpha", "zone-staging");
         let outcome = ZoneMembershipCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
-        if let CheckOutcome::Deny { reason_code, explanation } = &outcome {
+        if let CheckOutcome::Deny {
+            reason_code,
+            explanation,
+        } = &outcome
+        {
             assert_eq!(reason_code, "ZONE_MEMBERSHIP_DENIED");
             assert!(explanation.contains("agent-alpha"));
             assert!(explanation.contains("zone-prod"));
@@ -1653,7 +1658,11 @@ mod tests {
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
-        if let CheckOutcome::Deny { reason_code, explanation } = &outcome {
+        if let CheckOutcome::Deny {
+            reason_code,
+            explanation,
+        } = &outcome
+        {
             assert_eq!(reason_code, "CAPABILITY_NOT_GRANTED");
             assert!(explanation.contains("send_message"));
         }
@@ -1710,7 +1719,11 @@ mod tests {
         let config = EnforcementConfig::default();
         let outcome = CheckpointFreshnessCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
-        if let CheckOutcome::Deny { reason_code, explanation } = &outcome {
+        if let CheckOutcome::Deny {
+            reason_code,
+            explanation,
+        } = &outcome
+        {
             assert_eq!(reason_code, "CHECKPOINT_STALE");
             assert!(explanation.contains("500000"));
             assert!(explanation.contains("300000"));
@@ -1858,7 +1871,11 @@ mod tests {
         let config = EnforcementConfig::default();
         let outcome = TaintApprovalCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
-        if let CheckOutcome::Deny { reason_code, explanation } = &outcome {
+        if let CheckOutcome::Deny {
+            reason_code,
+            explanation,
+        } = &outcome
+        {
             assert_eq!(reason_code, "TAINT_APPROVAL_MISSING");
             assert!(explanation.contains("pii"));
         }
@@ -1901,8 +1918,7 @@ mod tests {
     fn taint_approval_custom_critical_flags() {
         let mut ctx = test_context();
         ctx.taint_flags = vec!["custom".into()];
-        let config = EnforcementConfig::new()
-            .with_critical_taint_flags(vec!["custom".into()]);
+        let config = EnforcementConfig::new().with_critical_taint_flags(vec!["custom".into()]);
         let outcome = TaintApprovalCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
     }
@@ -2038,7 +2054,11 @@ mod tests {
         let config = EnforcementConfig::default();
         let outcome = ConnectorManifestCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
-        if let CheckOutcome::Deny { reason_code, explanation } = &outcome {
+        if let CheckOutcome::Deny {
+            reason_code,
+            explanation,
+        } = &outcome
+        {
             assert_eq!(reason_code, "OPERATION_NOT_IN_MANIFEST");
             assert!(explanation.contains("delete_channel"));
         }
@@ -2282,7 +2302,12 @@ mod tests {
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
         assert_eq!(decision.checks_executed(), 1);
-        if let PipelineOutcome::Deny { check_name, reason_code, .. } = &decision.outcome {
+        if let PipelineOutcome::Deny {
+            check_name,
+            reason_code,
+            ..
+        } = &decision.outcome
+        {
             assert_eq!(check_name, "canonical_decode");
             assert_eq!(reason_code, "MISSING_CONNECTOR_ID");
         }
@@ -2401,7 +2426,12 @@ mod tests {
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
         assert_eq!(decision.checks_executed(), 9);
-        if let PipelineOutcome::Deny { check_name, reason_code, .. } = &decision.outcome {
+        if let PipelineOutcome::Deny {
+            check_name,
+            reason_code,
+            ..
+        } = &decision.outcome
+        {
             assert_eq!(check_name, "budget");
             assert_eq!(reason_code, "BUDGET_EXCEEDED");
         }
@@ -2486,7 +2516,9 @@ mod tests {
 
     struct AlwaysAllowCheck;
     impl EnforcementCheck for AlwaysAllowCheck {
-        fn name(&self) -> &'static str { "always_allow" }
+        fn name(&self) -> &'static str {
+            "always_allow"
+        }
         fn check(&self, _ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
             CheckOutcome::Allow
         }
@@ -2496,7 +2528,9 @@ mod tests {
         code: String,
     }
     impl EnforcementCheck for AlwaysDenyCheck {
-        fn name(&self) -> &'static str { "always_deny" }
+        fn name(&self) -> &'static str {
+            "always_deny"
+        }
         fn check(&self, _ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
             CheckOutcome::Deny {
                 reason_code: self.code.clone(),
@@ -2507,7 +2541,9 @@ mod tests {
 
     struct AlwaysSkipCheck;
     impl EnforcementCheck for AlwaysSkipCheck {
-        fn name(&self) -> &'static str { "always_skip" }
+        fn name(&self) -> &'static str {
+            "always_skip"
+        }
         fn check(&self, _ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
             CheckOutcome::Skip {
                 reason: "always skipped".into(),
@@ -2531,14 +2567,21 @@ mod tests {
     fn custom_check_deny_stops_pipeline() {
         let pipeline = EnforcementPipeline::with_checks(vec![
             Box::new(AlwaysAllowCheck),
-            Box::new(AlwaysDenyCheck { code: "CUSTOM".into() }),
+            Box::new(AlwaysDenyCheck {
+                code: "CUSTOM".into(),
+            }),
             Box::new(AlwaysAllowCheck),
         ]);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
         assert_eq!(decision.checks_executed(), 2);
-        if let PipelineOutcome::Deny { check_name, reason_code, .. } = &decision.outcome {
+        if let PipelineOutcome::Deny {
+            check_name,
+            reason_code,
+            ..
+        } = &decision.outcome
+        {
             assert_eq!(check_name, "always_deny");
             assert_eq!(reason_code, "CUSTOM");
         }
@@ -2574,8 +2617,12 @@ mod tests {
     #[test]
     fn custom_check_first_deny_recorded() {
         let pipeline = EnforcementPipeline::with_checks(vec![
-            Box::new(AlwaysDenyCheck { code: "FIRST".into() }),
-            Box::new(AlwaysDenyCheck { code: "SECOND".into() }),
+            Box::new(AlwaysDenyCheck {
+                code: "FIRST".into(),
+            }),
+            Box::new(AlwaysDenyCheck {
+                code: "SECOND".into(),
+            }),
         ]);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
@@ -2616,8 +2663,16 @@ mod tests {
         let decision = EnforcementDecision {
             outcome: PipelineOutcome::Allow,
             checks_run: vec![
-                CheckRecord { name: "a".into(), outcome: CheckOutcome::Allow, elapsed_ms: 0.1 },
-                CheckRecord { name: "b".into(), outcome: CheckOutcome::Allow, elapsed_ms: 0.2 },
+                CheckRecord {
+                    name: "a".into(),
+                    outcome: CheckOutcome::Allow,
+                    elapsed_ms: 0.1,
+                },
+                CheckRecord {
+                    name: "b".into(),
+                    outcome: CheckOutcome::Allow,
+                    elapsed_ms: 0.2,
+                },
             ],
             elapsed_ms: 0.3,
         };
@@ -2629,13 +2684,23 @@ mod tests {
         let decision = EnforcementDecision {
             outcome: PipelineOutcome::Allow,
             checks_run: vec![
-                CheckRecord { name: "a".into(), outcome: CheckOutcome::Allow, elapsed_ms: 0.0 },
                 CheckRecord {
-                    name: "b".into(),
-                    outcome: CheckOutcome::Skip { reason: "n/a".into() },
+                    name: "a".into(),
+                    outcome: CheckOutcome::Allow,
                     elapsed_ms: 0.0,
                 },
-                CheckRecord { name: "c".into(), outcome: CheckOutcome::Allow, elapsed_ms: 0.0 },
+                CheckRecord {
+                    name: "b".into(),
+                    outcome: CheckOutcome::Skip {
+                        reason: "n/a".into(),
+                    },
+                    elapsed_ms: 0.0,
+                },
+                CheckRecord {
+                    name: "c".into(),
+                    outcome: CheckOutcome::Allow,
+                    elapsed_ms: 0.0,
+                },
             ],
             elapsed_ms: 0.0,
         };
@@ -2713,8 +2778,7 @@ mod tests {
     fn taint_approval_empty_critical_flags_config() {
         let mut ctx = test_context();
         ctx.taint_flags = vec!["pii".into()];
-        let config = EnforcementConfig::new()
-            .with_critical_taint_flags(vec![]);
+        let config = EnforcementConfig::new().with_critical_taint_flags(vec![]);
         let outcome = TaintApprovalCheck.check(&ctx, &config);
         // No critical flags configured, so all taints are non-critical → allow.
         assert!(outcome.is_allow());
@@ -2825,9 +2889,11 @@ mod tests {
     fn enforcement_decision_clone() {
         let decision = EnforcementDecision {
             outcome: PipelineOutcome::Allow,
-            checks_run: vec![
-                CheckRecord { name: "a".into(), outcome: CheckOutcome::Allow, elapsed_ms: 0.1 },
-            ],
+            checks_run: vec![CheckRecord {
+                name: "a".into(),
+                outcome: CheckOutcome::Allow,
+                elapsed_ms: 0.1,
+            }],
             elapsed_ms: 0.1,
         };
         let cloned = decision.clone();
@@ -2920,8 +2986,16 @@ mod tests {
         let config = EnforcementConfig::default();
         assert!(config.critical_taint_flags.contains(&"pii".to_string()));
         assert!(config.critical_taint_flags.contains(&"phi".to_string()));
-        assert!(config.critical_taint_flags.contains(&"classified".to_string()));
-        assert!(config.critical_taint_flags.contains(&"financial".to_string()));
+        assert!(
+            config
+                .critical_taint_flags
+                .contains(&"classified".to_string())
+        );
+        assert!(
+            config
+                .critical_taint_flags
+                .contains(&"financial".to_string())
+        );
         assert_eq!(config.critical_taint_flags.len(), 4);
     }
 
@@ -3189,10 +3263,16 @@ mod tests {
     fn taint_approval_all_four_defaults_approved() {
         let mut ctx = test_context();
         ctx.taint_flags = vec![
-            "pii".into(), "phi".into(), "classified".into(), "financial".into(),
+            "pii".into(),
+            "phi".into(),
+            "classified".into(),
+            "financial".into(),
         ];
         ctx.approval_scopes = vec![
-            "pii".into(), "phi".into(), "classified".into(), "financial".into(),
+            "pii".into(),
+            "phi".into(),
+            "classified".into(),
+            "financial".into(),
         ];
         let config = EnforcementConfig::default();
         let outcome = TaintApprovalCheck.check(&ctx, &config);
@@ -3203,7 +3283,10 @@ mod tests {
     fn taint_approval_all_four_defaults_one_missing() {
         let mut ctx = test_context();
         ctx.taint_flags = vec![
-            "pii".into(), "phi".into(), "classified".into(), "financial".into(),
+            "pii".into(),
+            "phi".into(),
+            "classified".into(),
+            "financial".into(),
         ];
         ctx.approval_scopes = vec!["pii".into(), "phi".into(), "financial".into()];
         let config = EnforcementConfig::default();
@@ -3321,9 +3404,7 @@ mod tests {
 
     #[test]
     fn pipeline_single_allow_check() {
-        let pipeline = EnforcementPipeline::with_checks(vec![
-            Box::new(AlwaysAllowCheck),
-        ]);
+        let pipeline = EnforcementPipeline::with_checks(vec![Box::new(AlwaysAllowCheck)]);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
@@ -3334,9 +3415,9 @@ mod tests {
 
     #[test]
     fn pipeline_single_deny_check() {
-        let pipeline = EnforcementPipeline::with_checks(vec![
-            Box::new(AlwaysDenyCheck { code: "SOLO".into() }),
-        ]);
+        let pipeline = EnforcementPipeline::with_checks(vec![Box::new(AlwaysDenyCheck {
+            code: "SOLO".into(),
+        })]);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
@@ -3348,9 +3429,7 @@ mod tests {
 
     #[test]
     fn pipeline_single_skip_check() {
-        let pipeline = EnforcementPipeline::with_checks(vec![
-            Box::new(AlwaysSkipCheck),
-        ]);
+        let pipeline = EnforcementPipeline::with_checks(vec![Box::new(AlwaysSkipCheck)]);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
@@ -3364,7 +3443,9 @@ mod tests {
             Box::new(AlwaysSkipCheck),
             Box::new(AlwaysSkipCheck),
             Box::new(AlwaysSkipCheck),
-            Box::new(AlwaysDenyCheck { code: "LATE".into() }),
+            Box::new(AlwaysDenyCheck {
+                code: "LATE".into(),
+            }),
             Box::new(AlwaysAllowCheck),
         ]);
         let ctx = test_context();
@@ -3400,7 +3481,12 @@ mod tests {
         let cloned = o.clone();
         assert!(o.is_deny());
         assert!(cloned.is_deny());
-        if let PipelineOutcome::Deny { check_name, reason_code, explanation } = &cloned {
+        if let PipelineOutcome::Deny {
+            check_name,
+            reason_code,
+            explanation,
+        } = &cloned
+        {
             assert_eq!(check_name, "check");
             assert_eq!(reason_code, "code");
             assert_eq!(explanation, "detail");
@@ -3456,16 +3542,14 @@ mod tests {
                 reason_code: "y".into(),
                 explanation: "z".into(),
             },
-            checks_run: vec![
-                CheckRecord {
-                    name: "x".into(),
-                    outcome: CheckOutcome::Deny {
-                        reason_code: "y".into(),
-                        explanation: "z".into(),
-                    },
-                    elapsed_ms: 0.5,
+            checks_run: vec![CheckRecord {
+                name: "x".into(),
+                outcome: CheckOutcome::Deny {
+                    reason_code: "y".into(),
+                    explanation: "z".into(),
                 },
-            ],
+                elapsed_ms: 0.5,
+            }],
             elapsed_ms: 0.5,
         };
         let cloned = decision.clone();
@@ -3512,7 +3596,10 @@ mod tests {
         assert_eq!(ctx.budget_limit, cloned.budget_limit);
         assert_eq!(ctx.rate_count, cloned.rate_count);
         assert_eq!(ctx.rate_limit, cloned.rate_limit);
-        assert_eq!(ctx.manifest_allowed_operations, cloned.manifest_allowed_operations);
+        assert_eq!(
+            ctx.manifest_allowed_operations,
+            cloned.manifest_allowed_operations
+        );
     }
 
     // ── Pipeline with fully configured config passes all checks ──

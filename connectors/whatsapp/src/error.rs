@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::migration::{ConnectorErrorMapping, classify_http_status};
 use thiserror::Error;
 
 /// WhatsApp connector errors.
@@ -58,11 +58,20 @@ pub enum WhatsAppError {
 
 impl WhatsAppError {
     /// Whether this error is retryable.
-    pub const fn is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(_) | Self::RateLimited { .. } | Self::Async(_) => true,
             // Meta API transient codes: 1=unknown, 2=temporary, 4=too many calls, 368=temp block
-            Self::Api { code, .. } => matches!(*code, 1 | 2 | 4 | 368),
+            Self::Api {
+                code, error_type, ..
+            } => {
+                if matches!(error_type.as_str(), "HttpError" | "HealthCheckError") {
+                    return u16::try_from(*code)
+                        .ok()
+                        .is_some_and(|status| classify_http_status(status, None).is_retryable());
+                }
+                matches!(*code, 1 | 2 | 4 | 368)
+            }
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::InvalidPhoneNumber(_)
@@ -260,6 +269,17 @@ mod tests {
         let err = WhatsAppError::Webhook("bad payload".into());
         let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
         assert!(matches!(fcp_err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn health_check_http_status_can_be_retryable() {
+        let err = WhatsAppError::Api {
+            code: 503,
+            message: "Service unavailable".into(),
+            error_type: "HealthCheckError".into(),
+            subcode: None,
+        };
+        assert!(err.is_retryable());
     }
 
     #[test]

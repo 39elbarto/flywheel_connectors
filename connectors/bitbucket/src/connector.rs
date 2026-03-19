@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-
 use crate::{
     client::{BitbucketAuth, BitbucketClient, DEFAULT_BASE_URL},
     error::BitbucketError,

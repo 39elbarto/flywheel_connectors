@@ -175,9 +175,9 @@ impl PostgresError {
 impl ConnectorErrorMapping for PostgresError {
     fn from_async_error(error: AsyncError) -> Self {
         match error {
-            AsyncError::Timeout { timeout_ms } => Self::Timeout(format!(
-                "deadline exceeded after {timeout_ms}ms"
-            )),
+            AsyncError::Timeout { timeout_ms } => {
+                Self::Timeout(format!("deadline exceeded after {timeout_ms}ms"))
+            }
             AsyncError::Cancelled => Self::Api {
                 status_code: 499,
                 message: "request cancelled".into(),

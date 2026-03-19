@@ -619,13 +619,7 @@ mod tests {
         use fcp_async_core::AsyncError;
         use fcp_sdk::migration::ConnectorErrorMapping;
         let err = TwitterError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
-        assert!(matches!(
-            err,
-            TwitterError::Api {
-                status: 408,
-                ..
-            }
-        ));
+        assert!(matches!(err, TwitterError::Api { status: 408, .. }));
         assert!(err.to_string().contains("5000"));
     }
 

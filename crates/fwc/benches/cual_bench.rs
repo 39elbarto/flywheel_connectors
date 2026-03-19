@@ -48,7 +48,12 @@ fn stub_operation(id: &str, desc: &str) -> DiscoveredOperation {
 
 fn stub_connector(slug: &str, op_count: usize) -> DiscoveredConnector {
     let ops: Vec<DiscoveredOperation> = (0..op_count)
-        .map(|i| stub_operation(&format!("{slug}.op_{i}"), &format!("Operation {i} for {slug}")))
+        .map(|i| {
+            stub_operation(
+                &format!("{slug}.op_{i}"),
+                &format!("Operation {i} for {slug}"),
+            )
+        })
         .collect();
     let op_summaries: Vec<OperationSummary> = ops.iter().map(|o| o.summary.clone()).collect();
     DiscoveredConnector {
@@ -112,7 +117,11 @@ fn bench_search(c: &mut Criterion) {
     group.bench_function("search_1000_ops_keyword", |b| {
         let filters = SearchFilters::default();
         b.iter(|| {
-            search_operations(black_box(&connectors_1000), black_box("operation 5"), &filters)
+            search_operations(
+                black_box(&connectors_1000),
+                black_box("operation 5"),
+                &filters,
+            )
         });
     });
 
@@ -261,5 +270,10 @@ key = "value_{i}"
 
 // ── Criterion harness ─────────────────────────────────────────────────────
 
-criterion_group!(benches, bench_search, bench_schema_validation, bench_pipeline);
+criterion_group!(
+    benches,
+    bench_search,
+    bench_schema_validation,
+    bench_pipeline
+);
 criterion_main!(benches);

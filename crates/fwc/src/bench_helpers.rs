@@ -11,15 +11,15 @@ mod tests {
     use std::hint::black_box;
     use std::time::{Duration, Instant};
 
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use crate::batch::{BatchInputs, BatchPlan, BatchSummary, ItemResult, ItemStatus, OnError};
-    use crate::e2e_scenario::{topological_sort_steps, ScenarioStep};
+    use crate::e2e_scenario::{ScenarioStep, topological_sort_steps};
     use crate::pipe::{
         apply_mapping, parse_map_expression, parse_pipeline_definition,
         validate_pipeline_definition,
     };
-    use crate::pipeline_cond::{evaluate_condition, parse_condition, PipelineContext};
+    use crate::pipeline_cond::{PipelineContext, evaluate_condition, parse_condition};
     use crate::readiness::{
         ConnectorDetail, ConnectorState, ConnectorSummary, DiscoveredConnector,
         DiscoveredOperation, MetadataField, OperationSummary,
@@ -28,7 +28,7 @@ mod tests {
         closest_matches, command_alias, levenshtein, resolve_command, typo_correction,
     };
     use crate::schema_nav;
-    use crate::search::{search_operations, SearchFilters};
+    use crate::search::{SearchFilters, search_operations};
 
     // ── Target thresholds (informational) ─────────────────────────────────
 

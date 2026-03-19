@@ -117,9 +117,7 @@ impl MysqlClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             MysqlAuth::ApiKey(key) => req.bearer_auth(key),
-            MysqlAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            MysqlAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -130,7 +128,11 @@ impl MysqlClient {
         sql: &str,
         params: &[serde_json::Value],
     ) -> MysqlResult<serde_json::Value> {
-        debug!(sql_len = sql.len(), param_count = params.len(), "executing query");
+        debug!(
+            sql_len = sql.len(),
+            param_count = params.len(),
+            "executing query"
+        );
 
         let url = format!("{}/query", self.base_url);
         let body = json!({
@@ -150,7 +152,11 @@ impl MysqlClient {
         sql: &str,
         params: &[serde_json::Value],
     ) -> MysqlResult<serde_json::Value> {
-        debug!(sql_len = sql.len(), param_count = params.len(), "executing statement");
+        debug!(
+            sql_len = sql.len(),
+            param_count = params.len(),
+            "executing statement"
+        );
 
         let url = format!("{}/execute", self.base_url);
         let body = json!({
@@ -250,9 +256,7 @@ impl MysqlClient {
             return match status {
                 StatusCode::UNAUTHORIZED => Err(MysqlError::Auth(message)),
                 StatusCode::FORBIDDEN => Err(MysqlError::PermissionDenied(message)),
-                StatusCode::TOO_MANY_REQUESTS => {
-                    Err(MysqlError::RateLimited { retry_after_ms })
-                }
+                StatusCode::TOO_MANY_REQUESTS => Err(MysqlError::RateLimited { retry_after_ms }),
                 StatusCode::CONFLICT => Err(MysqlError::ConstraintViolation(message)),
                 _ => Err(MysqlError::Api {
                     status_code: status.as_u16(),
@@ -291,7 +295,9 @@ mod tests {
 
     #[test]
     fn auth_credential_id_shows_id() {
-        let auth = MysqlAuth::CredentialId(CredentialId::parse("550e8400-e29b-41d4-a716-446655440001").unwrap());
+        let auth = MysqlAuth::CredentialId(
+            CredentialId::parse("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+        );
         let debug_str = format!("{auth:?}");
         assert!(debug_str.contains("550e8400"));
     }
@@ -302,17 +308,16 @@ mod tests {
         assert_eq!(api_key.redacted_label(), "api_key:redacted");
         assert!(!api_key.is_secretless());
 
-        let cred = MysqlAuth::CredentialId(CredentialId::parse("550e8400-e29b-41d4-a716-446655440002").unwrap());
+        let cred = MysqlAuth::CredentialId(
+            CredentialId::parse("550e8400-e29b-41d4-a716-446655440002").unwrap(),
+        );
         assert!(cred.redacted_label().contains("550e8400"));
         assert!(cred.is_secretless());
     }
 
     #[test]
     fn client_creation_with_defaults() {
-        let client = MysqlClient::new(
-            MysqlAuth::ApiKey("test-key".into()),
-            None,
-        );
+        let client = MysqlClient::new(MysqlAuth::ApiKey("test-key".into()), None);
         assert!(client.is_ok());
     }
 
@@ -327,11 +332,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_auth() {
-        let client = MysqlClient::new(
-            MysqlAuth::ApiKey("super_secret_key".into()),
-            None,
-        )
-        .unwrap();
+        let client = MysqlClient::new(MysqlAuth::ApiKey("super_secret_key".into()), None).unwrap();
         let debug_str = format!("{client:?}");
         assert!(!debug_str.contains("super_secret_key"));
     }

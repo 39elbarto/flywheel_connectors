@@ -542,7 +542,9 @@ impl SpotifyConnector {
             .unwrap_or("track");
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let resp = client.search(query, types, limit).await?;
         Ok(json!({ "results": resp }))
     }
@@ -603,7 +605,9 @@ impl SpotifyConnector {
     ) -> Result<serde_json::Value, SpotifyError> {
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let resp = client.get_recently_played(limit).await?;
         let items = resp.get("items").cloned().unwrap_or_else(|| json!([]));
         Ok(json!({ "items": items }))
@@ -621,7 +625,9 @@ impl SpotifyConnector {
             .unwrap_or("medium_term");
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let resp = client.get_top_items(item_type, time_range, limit).await?;
         let items = resp.get("items").cloned().unwrap_or_else(|| json!([]));
         Ok(json!({ "items": items }))
@@ -642,7 +648,9 @@ impl SpotifyConnector {
             .unwrap_or("");
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let resp = client
             .get_recommendations(seed_artists, seed_genres, limit)
             .await?;
@@ -671,7 +679,9 @@ impl SpotifyConnector {
         let query = require_str(input, "query")?;
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let market = input.get("market").and_then(serde_json::Value::as_str);
         let resp = client.search_tracks(query, limit, market).await?;
         Ok(json!({ "results": resp }))
@@ -685,7 +695,9 @@ impl SpotifyConnector {
         let query = require_str(input, "query")?;
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let market = input.get("market").and_then(serde_json::Value::as_str);
         let resp = client.search_albums(query, limit, market).await?;
         Ok(json!({ "results": resp }))
@@ -699,7 +711,9 @@ impl SpotifyConnector {
         let query = require_str(input, "query")?;
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let market = input.get("market").and_then(serde_json::Value::as_str);
         let resp = client.search_artists(query, limit, market).await?;
         Ok(json!({ "results": resp }))
@@ -713,7 +727,9 @@ impl SpotifyConnector {
         let query = require_str(input, "query")?;
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let market = input.get("market").and_then(serde_json::Value::as_str);
         let resp = client.search_shows(query, limit, market).await?;
         Ok(json!({ "results": resp }))
@@ -727,7 +743,9 @@ impl SpotifyConnector {
         let query = require_str(input, "query")?;
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let market = input.get("market").and_then(serde_json::Value::as_str);
         let resp = client.search_episodes(query, limit, market).await?;
         Ok(json!({ "results": resp }))
@@ -754,10 +772,14 @@ impl SpotifyConnector {
         let show_id = require_str(input, "show_id")?;
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let offset = input
             .get("offset")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
         let market = input.get("market").and_then(serde_json::Value::as_str);
         let resp = client
             .get_show_episodes(show_id, limit, offset, market)
@@ -869,7 +891,9 @@ impl SpotifyConnector {
     ) -> Result<serde_json::Value, SpotifyError> {
         let volume_percent = input
             .get("volume_percent")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(50);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(50);
         let device_id = input.get("device_id").and_then(serde_json::Value::as_str);
         client.set_volume(volume_percent, device_id).await?;
         Ok(json!({ "volume_percent": volume_percent }))
@@ -926,10 +950,14 @@ impl SpotifyConnector {
     ) -> Result<serde_json::Value, SpotifyError> {
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let offset = input
             .get("offset")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
         let resp = client.get_saved_tracks(limit, offset).await?;
         Ok(json!({
             "items": resp.get("items").cloned().unwrap_or(serde_json::Value::Null),
@@ -974,10 +1002,14 @@ impl SpotifyConnector {
     ) -> Result<serde_json::Value, SpotifyError> {
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let offset = input
             .get("offset")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
         let resp = client.get_saved_albums(limit, offset).await?;
         Ok(json!({
             "items": resp.get("items").cloned().unwrap_or(serde_json::Value::Null),
@@ -1048,10 +1080,14 @@ impl SpotifyConnector {
         let playlist_id = require_str(input, "playlist_id")?;
         let limit = input
             .get("limit")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(20);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(20);
         let offset = input
             .get("offset")
-            .and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
         let resp = client
             .get_playlist_tracks(playlist_id, limit, offset)
             .await?;

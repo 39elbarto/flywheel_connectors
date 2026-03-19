@@ -12,8 +12,10 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, StatusCode, Url, header};
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop};
 
 use crate::{
     error::{AdminReportsError, AdminReportsResult},
@@ -271,7 +273,19 @@ impl AdminReportsClient {
     pub async fn health_check(&self) -> AdminReportsResult<()> {
         // Light check: list activities for "all" users, "admin" app, max 1.
         let _ = self
-            .list_activities("all", "admin", None, None, None, None, Some(1), None, None, None, None)
+            .list_activities(
+                "all",
+                "admin",
+                None,
+                None,
+                None,
+                None,
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+            )
             .await?;
         Ok(())
     }

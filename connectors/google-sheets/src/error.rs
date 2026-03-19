@@ -170,7 +170,12 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(SheetsError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            SheetsError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -243,7 +248,10 @@ mod tests {
         let err = SheetsError::InvalidRange {
             range: "Sheet1!ZZ:ZZ".into(),
         };
-        assert!(matches!(err.to_fcp_error(), FcpError::InvalidRequest { .. }));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { .. }
+        ));
     }
 
     #[test]

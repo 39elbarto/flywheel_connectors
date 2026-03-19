@@ -34,7 +34,9 @@ mod stream;
 mod websocket;
 
 pub use error::*;
-pub use health::{StreamHealthConfig, StreamHealthSnapshot, StreamHealthState, StreamHealthTracker};
+pub use health::{
+    StreamHealthConfig, StreamHealthSnapshot, StreamHealthState, StreamHealthTracker,
+};
 pub use reconnect::*;
 pub use sse::*;
 pub use stream::*;

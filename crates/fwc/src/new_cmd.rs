@@ -3323,12 +3323,23 @@ fn generate_next_steps(
     steps.push("Update src/types.rs with your request/response types".to_string());
 
     // V3 verification guidance
-    steps.push("V3 Acceptance Contract verification (docs/V3_Connector_Acceptance_Contract.md):".to_string());
-    steps.push("  - Ensure every OperationInfo has correct SafetyTier, RiskLevel, IdempotencyClass".to_string());
-    steps.push("  - Verify ConnectorErrorMapping covers every error variant with truthful retryability".to_string());
+    steps.push(
+        "V3 Acceptance Contract verification (docs/V3_Connector_Acceptance_Contract.md):"
+            .to_string(),
+    );
+    steps.push(
+        "  - Ensure every OperationInfo has correct SafetyTier, RiskLevel, IdempotencyClass"
+            .to_string(),
+    );
+    steps.push(
+        "  - Verify ConnectorErrorMapping covers every error variant with truthful retryability"
+            .to_string(),
+    );
     steps.push("  - Confirm ConnectorRuntime.shutdown() is called in shutdown handler".to_string());
     steps.push("  - Confirm all HTTP calls use RetryLoop (no hand-rolled retry loops)".to_string());
-    steps.push("  - Confirm secrets are never logged (check Debug impls and error messages)".to_string());
+    steps.push(
+        "  - Confirm secrets are never logged (check Debug impls and error messages)".to_string(),
+    );
 
     let crate_slug = normalize_crate_slug(extract_short_name(connector_id));
     steps.push(format!(
@@ -3345,7 +3356,9 @@ fn generate_next_steps(
     }
 
     steps.push(format!("Validate: fwc new --check {crate_path}"));
-    steps.push(format!("Build: rch exec -- cargo build -p fcp-{crate_slug}"));
+    steps.push(format!(
+        "Build: rch exec -- cargo build -p fcp-{crate_slug}"
+    ));
 
     steps
 }
@@ -4150,21 +4163,15 @@ members = [
             false,
         );
         assert!(
-            steps
-                .iter()
-                .any(|s| s.contains("V3 Acceptance Contract")),
+            steps.iter().any(|s| s.contains("V3 Acceptance Contract")),
             "next steps should reference V3 acceptance contract"
         );
         assert!(
-            steps
-                .iter()
-                .any(|s| s.contains("ConnectorErrorMapping")),
+            steps.iter().any(|s| s.contains("ConnectorErrorMapping")),
             "next steps should mention ConnectorErrorMapping verification"
         );
         assert!(
-            steps
-                .iter()
-                .any(|s| s.contains("OperationInfo")),
+            steps.iter().any(|s| s.contains("OperationInfo")),
             "next steps should mention OperationInfo verification"
         );
         assert!(

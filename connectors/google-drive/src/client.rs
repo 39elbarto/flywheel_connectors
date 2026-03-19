@@ -89,9 +89,9 @@ impl DriveClient {
     pub fn auth_redacted_label(&self) -> String {
         match &self.auth {
             GoogleMaterializedAuth::BearerToken { source, .. } => source.to_string(),
-            GoogleMaterializedAuth::CredentialReference {
-                credential_id, ..
-            } => format!("credential_id:{credential_id}"),
+            GoogleMaterializedAuth::CredentialReference { credential_id, .. } => {
+                format!("credential_id:{credential_id}")
+            }
         }
     }
 
@@ -299,18 +299,19 @@ impl DriveClient {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
-        RetryLoop::execute(&ctx, &policy, |attempt| {
-            async move {
-                debug!(attempt, method = http_method, "drive request");
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, method = http_method, "drive request");
 
-                match self.execute_once(http_method, url, body, response_mode).await {
-                    Ok(response) => AttemptOutcome::Success(response),
-                    Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
-                        retry_after: error.retry_after(),
-                        error,
-                    },
-                    Err(error) => AttemptOutcome::Terminal(error),
-                }
+            match self
+                .execute_once(http_method, url, body, response_mode)
+                .await
+            {
+                Ok(response) => AttemptOutcome::Success(response),
+                Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                    retry_after: error.retry_after(),
+                    error,
+                },
+                Err(error) => AttemptOutcome::Terminal(error),
             }
         })
         .await
@@ -384,7 +385,10 @@ impl DriveClient {
         request.response_mode = response_mode;
         request.auth = Some(&self.auth);
 
-        self.executor.execute(&request).await.map_err(map_rest_error)
+        self.executor
+            .execute(&request)
+            .await
+            .map_err(map_rest_error)
     }
 }
 
@@ -439,8 +443,16 @@ fn base64_encode(data: &[u8]) -> String {
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = u32::from(chunk[0]);
-        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
-        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
         let n = (b0 << 16) | (b1 << 8) | b2;
         result.push(CHARS[((n >> 18) & 63) as usize] as char);
         result.push(CHARS[((n >> 12) & 63) as usize] as char);

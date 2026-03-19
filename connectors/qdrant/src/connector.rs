@@ -859,9 +859,13 @@ impl QdrantConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1297,8 +1301,12 @@ mod tests {
         let cap = match op {
             "qdrant.list_collections" | "qdrant.collection_info" => "qdrant.collections.read",
             "qdrant.create_collection" | "qdrant.delete_collection" => "qdrant.collections.write",
-            "qdrant.search" | "qdrant.query_points" | "qdrant.batch_query_points"
-            | "qdrant.get_points" | "qdrant.scroll" | "qdrant.count" => "qdrant.points.read",
+            "qdrant.search"
+            | "qdrant.query_points"
+            | "qdrant.batch_query_points"
+            | "qdrant.get_points"
+            | "qdrant.scroll"
+            | "qdrant.count" => "qdrant.points.read",
             "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
             _ => "qdrant.collections.read",
         };

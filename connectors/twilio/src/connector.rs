@@ -1884,9 +1884,13 @@ impl TwilioConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -2014,7 +2018,10 @@ impl TwilioConnector {
             .get("page_size")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let page = input
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_messages(to, from, date_sent, page_size, page)
@@ -2033,7 +2040,10 @@ impl TwilioConnector {
             .get("page_size")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let page = input
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_media(message_sid, page_size, page)
@@ -2117,7 +2127,10 @@ impl TwilioConnector {
             .get("page_size")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let page = input
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
 
         let resp = client
             .list_calls(to, from, status, start_time, end_time, page_size, page)
@@ -2313,7 +2326,10 @@ impl TwilioConnector {
             .get("page_size")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page = input.get("page").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok());
+        let page = input
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
         let resp = client
             .whatsapp_list(to, from, date_sent, page_size, page)
             .await
@@ -2946,15 +2962,14 @@ mod tests {
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
             "twilio.send_message" => "twilio.message",
-            "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => {
-                "twilio.voice"
-            }
+            "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => "twilio.voice",
             "twilio.whatsapp_send" | "twilio.whatsapp_send_template" => "twilio.whatsapp",
             "twilio.conversation.create" | "twilio.conversation.message.send" => {
                 "twilio.conversations"
             }
-            "twilio.conversation.participant.add"
-            | "twilio.conversation.participant.remove" => "twilio.conversations.participants",
+            "twilio.conversation.participant.add" | "twilio.conversation.participant.remove" => {
+                "twilio.conversations.participants"
+            }
             "twilio.verify.send" | "twilio.verify.check" | "twilio.verify.cancel" => {
                 "twilio.verify"
             }

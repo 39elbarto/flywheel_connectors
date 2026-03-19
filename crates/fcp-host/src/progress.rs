@@ -1779,11 +1779,7 @@ mod tests {
         for i in 0..10 {
             let id = format!("op{i}");
             ctrl.start_tracking(&id, i as u64, "w", &zero_throttle_opts());
-            ctrl.record_update(
-                &id,
-                make_update("w", (i + 1) * 10, Some(100)),
-                fixed_now(),
-            );
+            ctrl.record_update(&id, make_update("w", (i + 1) * 10, Some(100)), fixed_now());
         }
         let agg = ctrl.aggregate();
         assert_eq!(agg.total_operations, 10);

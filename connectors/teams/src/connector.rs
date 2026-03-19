@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, InvokeRequest, InvokeResponse, Introspection, OperationId,
+    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
@@ -379,9 +379,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need to send a direct or group chat message".into(),
-                common_mistakes: vec![
-                    "Requires Chat.ReadWrite permission".into(),
-                ],
+                common_mistakes: vec!["Requires Chat.ReadWrite permission".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_LIST_CHATS)],
             },
@@ -453,25 +451,28 @@ impl FcpConnector for TeamsConnector {
         let timeout = Duration::from_millis(config.timeout_ms);
         let client = match &config.auth {
             TeamsAuth::AccessToken { access_token } => {
-                TeamsClient::new(&config.graph_base_url, access_token, timeout)
-                    .map_err(|e| FcpError::Internal {
+                TeamsClient::new(&config.graph_base_url, access_token, timeout).map_err(|e| {
+                    FcpError::Internal {
                         message: format!("Failed to create Teams client: {e}"),
-                    })?
+                    }
+                })?
             }
             TeamsAuth::CredentialId { .. } => {
                 // Secretless mode: empty token, egress proxy injects credentials
-                TeamsClient::new(&config.graph_base_url, "", timeout)
-                    .map_err(|e| FcpError::Internal {
+                TeamsClient::new(&config.graph_base_url, "", timeout).map_err(|e| {
+                    FcpError::Internal {
                         message: format!("Failed to create Teams client: {e}"),
-                    })?
+                    }
+                })?
             }
             TeamsAuth::ClientCredentials { .. } => {
                 // Client credentials require async token acquisition at invoke time
                 // For now, create with empty token; real impl would acquire here
-                TeamsClient::new(&config.graph_base_url, "", timeout)
-                    .map_err(|e| FcpError::Internal {
+                TeamsClient::new(&config.graph_base_url, "", timeout).map_err(|e| {
+                    FcpError::Internal {
                         message: format!("Failed to create Teams client: {e}"),
-                    })?
+                    }
+                })?
             }
         };
 
@@ -611,16 +612,14 @@ impl TeamsConnector {
 
         if let Some(verifier) = &self.verifier {
             let required_cap = match operation {
-                OP_LIST_TEAMS | OP_GET_TEAM | OP_LIST_CHANNELS | OP_GET_CHANNEL
-                | OP_LIST_CHATS | OP_LIST_CHAT_MSGS => CapabilityId::from_static(CAP_READ),
-                OP_SEND_CHANNEL_MSG | OP_SEND_CHAT_MSG => {
-                    CapabilityId::from_static(CAP_WRITE)
-                }
+                OP_LIST_TEAMS | OP_GET_TEAM | OP_LIST_CHANNELS | OP_GET_CHANNEL | OP_LIST_CHATS
+                | OP_LIST_CHAT_MSGS => CapabilityId::from_static(CAP_READ),
+                OP_SEND_CHANNEL_MSG | OP_SEND_CHAT_MSG => CapabilityId::from_static(CAP_WRITE),
                 _ => {
                     return Err(FcpError::InvalidRequest {
                         code: 1004,
                         message: format!("Unknown operation: {operation}"),
-                    })
+                    });
                 }
             };
             verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
@@ -632,10 +631,7 @@ impl TeamsConnector {
 
         let output = match operation {
             OP_LIST_TEAMS => {
-                let teams = client
-                    .list_my_teams()
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                let teams = client.list_my_teams().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "teams": teams })
             }
             OP_GET_TEAM => {
@@ -683,10 +679,7 @@ impl TeamsConnector {
                 json!({ "message_id": msg.id.unwrap_or_default() })
             }
             OP_LIST_CHATS => {
-                let chats = client
-                    .list_my_chats()
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                let chats = client.list_my_chats().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "chats": chats })
             }
             OP_SEND_CHAT_MSG => {
@@ -715,7 +708,7 @@ impl TeamsConnector {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!("Unknown operation: {operation}"),
-                })
+                });
             }
         };
 
@@ -743,18 +736,27 @@ mod tests {
     #[test]
     fn test_send_operations_are_risky() {
         let ops = operations_info();
-        let send_ch = ops.iter().find(|op| op.id.as_str() == OP_SEND_CHANNEL_MSG).unwrap();
+        let send_ch = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_SEND_CHANNEL_MSG)
+            .unwrap();
         assert_eq!(send_ch.safety_tier, SafetyTier::Risky);
         assert_eq!(send_ch.idempotency, IdempotencyClass::None);
 
-        let send_chat = ops.iter().find(|op| op.id.as_str() == OP_SEND_CHAT_MSG).unwrap();
+        let send_chat = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_SEND_CHAT_MSG)
+            .unwrap();
         assert_eq!(send_chat.safety_tier, SafetyTier::Risky);
     }
 
     #[test]
     fn test_read_operations_are_safe() {
         let ops = operations_info();
-        let list_teams = ops.iter().find(|op| op.id.as_str() == OP_LIST_TEAMS).unwrap();
+        let list_teams = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_LIST_TEAMS)
+            .unwrap();
         assert_eq!(list_teams.safety_tier, SafetyTier::Safe);
         assert_eq!(list_teams.idempotency, IdempotencyClass::Strict);
     }

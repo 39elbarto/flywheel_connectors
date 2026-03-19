@@ -22,7 +22,9 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
     let cap = match op {
         "gcal.list_calendars" => "gcal.calendars.read",
         "gcal.get_event" | "gcal.list_events" => "gcal.events.read",
-        "gcal.create_event" | "gcal.update_event" | "gcal.delete_event" | "gcal.quick_add" => "gcal.events.write",
+        "gcal.create_event" | "gcal.update_event" | "gcal.delete_event" | "gcal.quick_add" => {
+            "gcal.events.write"
+        }
         _ => "gcal.read",
     };
     let now = Utc::now();
@@ -370,7 +372,10 @@ async fn client_rate_limited_no_retry() {
     // (if the backoff sleep is interrupted by the request context deadline).
     let err = result.unwrap_err();
     assert!(
-        matches!(err, GoogleCalendarError::RateLimited { .. } | GoogleCalendarError::Api { .. }),
+        matches!(
+            err,
+            GoogleCalendarError::RateLimited { .. } | GoogleCalendarError::Api { .. }
+        ),
         "expected RateLimited or Api error, got: {err:?}"
     );
 }

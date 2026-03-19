@@ -148,8 +148,7 @@ impl TwitterApiClient {
                     initial_delay_ms: 1000,
                     max_delay_ms: 60_000,
                     runtime: ConnectorRuntime::new(
-                        ConnectorRuntimeConfig::default()
-                            .with_request_timeout(request_timeout),
+                        ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
                     ),
                     retry_config: HttpRetryConfig::default(),
                 })
@@ -166,8 +165,7 @@ impl TwitterApiClient {
                     initial_delay_ms: 1000,
                     max_delay_ms: 60_000,
                     runtime: ConnectorRuntime::new(
-                        ConnectorRuntimeConfig::default()
-                            .with_request_timeout(request_timeout),
+                        ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
                     ),
                     retry_config: HttpRetryConfig::default(),
                 })

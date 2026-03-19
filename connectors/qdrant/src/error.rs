@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 
 const REDACTED_TOKEN: &str = "[REDACTED]";
@@ -165,7 +165,6 @@ fn find_secret_end(input: &str, start: usize) -> usize {
 
     input.len()
 }
-
 
 impl ConnectorErrorMapping for QdrantError {
     fn from_async_error(error: AsyncError) -> Self {

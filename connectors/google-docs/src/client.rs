@@ -40,8 +40,7 @@ impl DocsClient {
             base_url: DEFAULT_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
             runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default()
-                    .with_request_timeout(Duration::from_secs(30)),
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
@@ -61,9 +60,9 @@ impl DocsClient {
     pub fn auth_redacted_label(&self) -> String {
         match &self.auth {
             GoogleMaterializedAuth::BearerToken { source, .. } => source.to_string(),
-            GoogleMaterializedAuth::CredentialReference {
-                credential_id, ..
-            } => format!("credential_id:{credential_id}"),
+            GoogleMaterializedAuth::CredentialReference { credential_id, .. } => {
+                format!("credential_id:{credential_id}")
+            }
         }
     }
 
@@ -143,10 +142,7 @@ impl DocsClient {
         self.handle_response(resp).await
     }
 
-    async fn handle_response<T: DeserializeOwned>(
-        &self,
-        resp: reqwest::Response,
-    ) -> DocsResult<T> {
+    async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> DocsResult<T> {
         let status = resp.status();
         if status.is_success() {
             return resp.json().await.map_err(DocsError::Http);
@@ -231,7 +227,13 @@ mod tests {
             code: 500,
             message: "internal".into(),
         });
-        assert!(matches!(err, DocsError::Api { status_code: 500, .. }));
+        assert!(matches!(
+            err,
+            DocsError::Api {
+                status_code: 500,
+                ..
+            }
+        ));
     }
 
     #[test]

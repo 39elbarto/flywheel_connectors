@@ -31,11 +31,15 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
     let now = Utc::now();
     let cap = match op {
         "browser.screenshot" | "browser.render_pdf" => "browser.capture",
-        "browser.extract_text" | "browser.extract_links" | "browser.wait_for_selector" => "browser.extract",
+        "browser.extract_text" | "browser.extract_links" | "browser.wait_for_selector" => {
+            "browser.extract"
+        }
         "browser.click" | "browser.fill_form" => "browser.interact",
         "browser.evaluate_js" => "browser.execute",
         "browser.get_cookies" | "browser.set_cookies" => "browser.cookies",
-        "browser.session.save" | "browser.session.restore" | "browser.session.describe" => "browser.sessions",
+        "browser.session.save" | "browser.session.restore" | "browser.session.describe" => {
+            "browser.sessions"
+        }
         "browser.set_proxy" | "browser.clear_proxy" => "browser.proxy",
         "browser.navigate" => "browser.navigate",
         _ => op,
@@ -84,17 +88,24 @@ fn generate_execution_approval_with_pattern(method_pattern: &str) -> fcp_core::A
 async fn setup_handshake(connector: &mut BrowserConnector, caps: &[&str]) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
-    let mapped_caps: Vec<&str> = caps.iter().map(|&op| match op {
-        "browser.screenshot" | "browser.render_pdf" => "browser.capture",
-        "browser.extract_text" | "browser.extract_links" | "browser.wait_for_selector" => "browser.extract",
-        "browser.click" | "browser.fill_form" => "browser.interact",
-        "browser.evaluate_js" => "browser.execute",
-        "browser.get_cookies" | "browser.set_cookies" => "browser.cookies",
-        "browser.session.save" | "browser.session.restore" | "browser.session.describe" => "browser.sessions",
-        "browser.set_proxy" | "browser.clear_proxy" => "browser.proxy",
-        "browser.navigate" => "browser.navigate",
-        _ => op,
-    }).collect();
+    let mapped_caps: Vec<&str> = caps
+        .iter()
+        .map(|&op| match op {
+            "browser.screenshot" | "browser.render_pdf" => "browser.capture",
+            "browser.extract_text" | "browser.extract_links" | "browser.wait_for_selector" => {
+                "browser.extract"
+            }
+            "browser.click" | "browser.fill_form" => "browser.interact",
+            "browser.evaluate_js" => "browser.execute",
+            "browser.get_cookies" | "browser.set_cookies" => "browser.cookies",
+            "browser.session.save" | "browser.session.restore" | "browser.session.describe" => {
+                "browser.sessions"
+            }
+            "browser.set_proxy" | "browser.clear_proxy" => "browser.proxy",
+            "browser.navigate" => "browser.navigate",
+            _ => op,
+        })
+        .collect();
 
     connector
         .handle_handshake(json!({

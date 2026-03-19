@@ -745,9 +745,13 @@ impl PineconeConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let intro = self.handle_introspect().await?;
-        let cap_str = intro.get("operations")
+        let cap_str = intro
+            .get("operations")
             .and_then(|ops| ops.as_array())
-            .and_then(|ops| ops.iter().find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation)))
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
             .and_then(|op| op.get("capability"))
             .and_then(|cap| cap.as_str())
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -826,15 +830,14 @@ impl PineconeConnector {
     async fn invoke_create_index(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let name = require_str(&input, "name")?;
-        let dimension =
-            input
-                .get("dimension")
-                .and_then(|v| v.as_u64())
-                .and_then(|v| u32::try_from(v).ok())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing required field: dimension".into(),
-                })?;
+        let dimension = input
+            .get("dimension")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: dimension".into(),
+            })?;
         let metric = input
             .get("metric")
             .and_then(|v| v.as_str())
@@ -1032,7 +1035,9 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "pinecone.list_indexes" | "pinecone.describe_index" | "pinecone.describe_index_stats" => "pinecone.indexes.read",
+            "pinecone.list_indexes"
+            | "pinecone.describe_index"
+            | "pinecone.describe_index_stats" => "pinecone.indexes.read",
             "pinecone.create_index" | "pinecone.delete_index" => "pinecone.indexes.write",
             "pinecone.query" | "pinecone.fetch" => "pinecone.vectors.read",
             "pinecone.upsert" | "pinecone.delete" => "pinecone.vectors.write",

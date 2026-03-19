@@ -2854,7 +2854,11 @@ mod tests {
             report: SelfCheckReport::failed("token_err", "token expired"),
         };
         let hints = repair_hints_for_self_check(&check);
-        assert!(hints.iter().any(|h| h.contains("secret") || h.contains("credential")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("secret") || h.contains("credential"))
+        );
     }
 
     #[test]
@@ -2864,7 +2868,11 @@ mod tests {
             report: SelfCheckReport::failed("policy_err", "policy violation"),
         };
         let hints = repair_hints_for_self_check(&check);
-        assert!(hints.iter().any(|h| h.contains("policy") || h.contains("approval")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("policy") || h.contains("approval"))
+        );
     }
 
     #[test]
@@ -2874,7 +2882,11 @@ mod tests {
             report: SelfCheckReport::failed("offline_err", "service is offline"),
         };
         let hints = repair_hints_for_self_check(&check);
-        assert!(hints.iter().any(|h| h.contains("reachability") || h.contains("availability")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("reachability") || h.contains("availability"))
+        );
     }
 
     #[test]
@@ -2885,7 +2897,11 @@ mod tests {
         };
         let hints = repair_hints_for_self_check(&check);
         assert!(hints.iter().any(|h| h.contains("timeout")));
-        assert!(hints.iter().any(|h| h.contains("hung") || h.contains("overloaded")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("hung") || h.contains("overloaded"))
+        );
     }
 
     #[test]
@@ -2896,7 +2912,11 @@ mod tests {
         };
         let hints = repair_hints_for_self_check(&check);
         assert!(hints.iter().any(|h| h.contains("installed")));
-        assert!(hints.iter().any(|h| h.contains("discovery") || h.contains("registered")));
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("discovery") || h.contains("registered"))
+        );
     }
 
     #[test]
@@ -3016,10 +3036,7 @@ mod tests {
         ];
         let actions = recommended_actions_from_checks(&checks);
         assert_eq!(actions.len(), 3);
-        assert_eq!(
-            actions.iter().filter(|a| *a == "shared hint").count(),
-            1
-        );
+        assert_eq!(actions.iter().filter(|a| *a == "shared hint").count(), 1);
     }
 
     // ── NEW: contains_any edge cases ──

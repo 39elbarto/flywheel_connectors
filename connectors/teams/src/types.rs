@@ -590,14 +590,8 @@ mod tests {
 
     #[test]
     fn default_config_urls() {
-        assert_eq!(
-            default_graph_url(),
-            "https://graph.microsoft.com/v1.0"
-        );
-        assert_eq!(
-            default_bot_url(),
-            "https://smba.trafficmanager.net"
-        );
+        assert_eq!(default_graph_url(), "https://graph.microsoft.com/v1.0");
+        assert_eq!(default_bot_url(), "https://smba.trafficmanager.net");
         assert_eq!(default_timeout_ms(), 30_000);
     }
 }

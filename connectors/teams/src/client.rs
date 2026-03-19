@@ -7,9 +7,7 @@ use std::time::Duration;
 use reqwest::Client;
 
 use crate::error::{TeamsError, TeamsResult};
-use crate::types::{
-    Channel, Chat, ChatMember, ChatMessage, GraphCollection, Team, TokenResponse,
-};
+use crate::types::{Channel, Chat, ChatMember, ChatMessage, GraphCollection, Team, TokenResponse};
 
 /// Minimal URL encoding for form body values.
 fn urlencoded(s: &str) -> String {
@@ -42,11 +40,7 @@ impl TeamsClient {
     ///
     /// # Errors
     /// Returns `TeamsError::Config` if the base URL is invalid.
-    pub fn new(
-        graph_base_url: &str,
-        access_token: &str,
-        timeout: Duration,
-    ) -> TeamsResult<Self> {
+    pub fn new(graph_base_url: &str, access_token: &str, timeout: Duration) -> TeamsResult<Self> {
         let client = Client::builder()
             .timeout(timeout)
             .build()
@@ -79,9 +73,7 @@ impl TeamsClient {
             .build()
             .map_err(|e| TeamsError::Config(format!("Failed to build HTTP client: {e}")))?;
 
-        let token_url = format!(
-            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-        );
+        let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
         let form_body = format!(
             "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
             urlencoded(client_id),
@@ -167,11 +159,7 @@ impl TeamsClient {
     ///
     /// # Errors
     /// Returns `TeamsError` on transport, auth, or API errors.
-    pub async fn get_channel(
-        &self,
-        team_id: &str,
-        channel_id: &str,
-    ) -> TeamsResult<Channel> {
+    pub async fn get_channel(&self, team_id: &str, channel_id: &str) -> TeamsResult<Channel> {
         let url = format!(
             "{}/teams/{team_id}/channels/{channel_id}",
             self.graph_base_url
@@ -364,25 +352,34 @@ mod tests {
 
     #[test]
     fn new_client_trims_trailing_slash() {
-        let client =
-            TeamsClient::new("https://graph.microsoft.com/v1.0/", "tok", Duration::from_secs(30))
-                .unwrap();
+        let client = TeamsClient::new(
+            "https://graph.microsoft.com/v1.0/",
+            "tok",
+            Duration::from_secs(30),
+        )
+        .unwrap();
         assert_eq!(client.graph_base_url(), "https://graph.microsoft.com/v1.0");
     }
 
     #[test]
     fn new_client_secretless_detection() {
-        let client =
-            TeamsClient::new("https://graph.microsoft.com/v1.0", "", Duration::from_secs(30))
-                .unwrap();
+        let client = TeamsClient::new(
+            "https://graph.microsoft.com/v1.0",
+            "",
+            Duration::from_secs(30),
+        )
+        .unwrap();
         assert!(client.is_secretless());
     }
 
     #[test]
     fn new_client_not_secretless() {
-        let client =
-            TeamsClient::new("https://graph.microsoft.com/v1.0", "tok", Duration::from_secs(30))
-                .unwrap();
+        let client = TeamsClient::new(
+            "https://graph.microsoft.com/v1.0",
+            "tok",
+            Duration::from_secs(30),
+        )
+        .unwrap();
         assert!(!client.is_secretless());
     }
 
@@ -497,12 +494,14 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/me/joinedTeams"))
-            .respond_with(wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "error": {
-                    "code": "InvalidAuthenticationToken",
-                    "message": "Access token has expired."
-                }
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "error": {
+                        "code": "InvalidAuthenticationToken",
+                        "message": "Access token has expired."
+                    }
+                })),
+            )
             .mount(&mock_server)
             .await;
 
@@ -541,12 +540,14 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/teams/nonexistent"))
-            .respond_with(wiremock::ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "error": {
-                    "code": "NotFound",
-                    "message": "Team not found."
-                }
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                    "error": {
+                        "code": "NotFound",
+                        "message": "Team not found."
+                    }
+                })),
+            )
             .mount(&mock_server)
             .await;
 
@@ -561,10 +562,12 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/me"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "user_1",
-                "displayName": "Test"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "user_1",
+                    "displayName": "Test"
+                })),
+            )
             .mount(&mock_server)
             .await;
 

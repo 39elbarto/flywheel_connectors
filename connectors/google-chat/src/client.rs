@@ -12,7 +12,7 @@ use tracing::{instrument, warn};
 use crate::error::{ChatError, ChatResult};
 use crate::types::{
     ApiErrorDetail, ApiErrorResponse, ListMembershipsResponse, ListMessagesResponse,
-    ListSpacesResponse, Message, Membership, Space,
+    ListSpacesResponse, Membership, Message, Space,
 };
 
 const DEFAULT_BASE_URL: &str = "https://chat.googleapis.com/v1";
@@ -43,8 +43,7 @@ impl ChatClient {
             base_url: DEFAULT_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
             runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default()
-                    .with_request_timeout(Duration::from_secs(30)),
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
@@ -64,9 +63,9 @@ impl ChatClient {
     pub fn auth_redacted_label(&self) -> String {
         match &self.auth {
             GoogleMaterializedAuth::BearerToken { source, .. } => source.to_string(),
-            GoogleMaterializedAuth::CredentialReference {
-                credential_id, ..
-            } => format!("credential_id:{credential_id}"),
+            GoogleMaterializedAuth::CredentialReference { credential_id, .. } => {
+                format!("credential_id:{credential_id}")
+            }
         }
     }
 
@@ -165,10 +164,7 @@ impl ChatClient {
         self.handle_response(resp).await
     }
 
-    async fn handle_response<T: DeserializeOwned>(
-        &self,
-        resp: reqwest::Response,
-    ) -> ChatResult<T> {
+    async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> ChatResult<T> {
         let status = resp.status();
         if status.is_success() {
             return resp.json().await.map_err(ChatError::Http);
@@ -253,7 +249,13 @@ mod tests {
             code: 500,
             message: "internal".into(),
         });
-        assert!(matches!(err, ChatError::Api { status_code: 500, .. }));
+        assert!(matches!(
+            err,
+            ChatError::Api {
+                status_code: 500,
+                ..
+            }
+        ));
     }
 
     #[test]

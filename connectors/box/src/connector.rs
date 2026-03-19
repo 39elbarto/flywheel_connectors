@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-
 use crate::{
     client::{BoxAuth, BoxClient, DEFAULT_BASE_URL, DEFAULT_UPLOAD_URL},
     error::BoxError,

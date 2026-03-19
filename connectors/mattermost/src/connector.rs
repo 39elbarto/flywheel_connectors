@@ -768,8 +768,27 @@ async fn invoke_create_post(
             code: 1003,
             message: format!("invalid create_post input: {e}"),
         })?;
+    validate_create_post_request(&create_req)?;
     let post = client.create_post(&create_req).await.map_err(map_mm_err)?;
     to_json(post)
+}
+
+fn validate_create_post_request(request: &CreatePostRequest) -> FcpResult<()> {
+    if request.channel_id.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "channel_id is required".into(),
+        });
+    }
+    if let Some(file_ids) = &request.file_ids
+        && file_ids.iter().any(|file_id| file_id.trim().is_empty())
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "file_ids must not contain empty values".into(),
+        });
+    }
+    Ok(())
 }
 
 async fn invoke_get_post(
@@ -2184,6 +2203,52 @@ mod tests {
             .find(|operation| operation.id.as_str() == "mattermost.create_post")
             .expect("create_post operation should exist");
         assert_eq!(op.input_schema["properties"]["file_ids"]["type"], "array");
+    }
+
+    #[test]
+    fn create_post_validation_rejects_blank_channel_id() {
+        let err = validate_create_post_request(&CreatePostRequest {
+            channel_id: "   ".into(),
+            message: "hello".into(),
+            root_id: None,
+            file_ids: None,
+            props: None,
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert_eq!(err.to_string(), "Invalid request: channel_id is required");
+    }
+
+    #[test]
+    fn create_post_validation_rejects_blank_file_ids() {
+        let err = validate_create_post_request(&CreatePostRequest {
+            channel_id: "channel-1".into(),
+            message: String::new(),
+            root_id: None,
+            file_ids: Some(vec!["file-1".into(), "   ".into()]),
+            props: None,
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert_eq!(
+            err.to_string(),
+            "Invalid request: file_ids must not contain empty values"
+        );
+    }
+
+    #[test]
+    fn create_post_validation_allows_attachment_only_posts() {
+        let result = validate_create_post_request(&CreatePostRequest {
+            channel_id: "channel-1".into(),
+            message: String::new(),
+            root_id: None,
+            file_ids: Some(vec!["file-1".into()]),
+            props: None,
+        });
+
+        assert!(result.is_ok());
     }
 
     #[test]

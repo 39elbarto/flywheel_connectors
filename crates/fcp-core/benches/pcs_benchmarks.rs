@@ -4,8 +4,8 @@
 //! as required by the PCS Zones acceptance criteria (6o25.5.1).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use fcp_core::pcs::{GroupMember, PcsGroupState};
 use fcp_core::ZoneId;
+use fcp_core::pcs::{GroupMember, PcsGroupState};
 use fcp_crypto::x25519::X25519SecretKey;
 use rand::RngCore;
 

@@ -108,10 +108,7 @@ async fn youtube_introspect_operations_have_capability() {
     for op in ops {
         let id = op["id"].as_str().unwrap();
         let cap = op["capability"].as_str();
-        assert!(
-            cap.is_some(),
-            "Operation {id} is missing capability field"
-        );
+        assert!(cap.is_some(), "Operation {id} is missing capability field");
         let cap_val = cap.unwrap();
         assert!(
             cap_val == "youtube.read" || cap_val == "youtube.write",
@@ -126,7 +123,11 @@ async fn youtube_write_operations_use_write_capability() {
     let result = connector.handle_introspect().await.unwrap();
     let ops = result["operations"].as_array().unwrap();
 
-    let write_ops = ["youtube.post_comment", "youtube.upload_caption", "youtube.upload_video"];
+    let write_ops = [
+        "youtube.post_comment",
+        "youtube.upload_caption",
+        "youtube.upload_video",
+    ];
     for op in ops {
         let id = op["id"].as_str().unwrap();
         if write_ops.contains(&id) {

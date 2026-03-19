@@ -64,8 +64,7 @@ impl WorkspaceEventsClient {
             pubsub_base_url: DEFAULT_PUBSUB_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
             runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default()
-                    .with_request_timeout(Duration::from_secs(30)),
+                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
             retry_config: HttpRetryConfig {
                 max_retries: 2,

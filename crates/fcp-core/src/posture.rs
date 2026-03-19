@@ -384,12 +384,19 @@ impl PostureRequirements {
     /// Check if an attestation satisfies all requirements.
     #[must_use]
     pub fn is_satisfied_by(&self, attestation: &PostureAttestation) -> PostureCheckResult {
-        self.is_satisfied_by_at(attestation, Utc::now().timestamp_millis().try_into().unwrap_or(0))
+        self.is_satisfied_by_at(
+            attestation,
+            Utc::now().timestamp_millis().try_into().unwrap_or(0),
+        )
     }
 
     /// Check if an attestation satisfies all requirements at a specific time.
     #[must_use]
-    pub fn is_satisfied_by_at(&self, attestation: &PostureAttestation, now_ms: u64) -> PostureCheckResult {
+    pub fn is_satisfied_by_at(
+        &self,
+        attestation: &PostureAttestation,
+        now_ms: u64,
+    ) -> PostureCheckResult {
         // Check attestation is valid
         if attestation.is_expired_at(now_ms) {
             return PostureCheckResult::AttestationExpired;

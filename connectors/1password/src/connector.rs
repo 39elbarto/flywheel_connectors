@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-
 use crate::{
     client::{DEFAULT_BASE_URL, OnePasswordAuth, OnePasswordClient},
     error::OnePasswordError,

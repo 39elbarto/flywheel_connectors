@@ -1101,7 +1101,10 @@ mod tests {
         for err in &variants {
             let mut buf = String::new();
             write!(buf, "{err}").unwrap();
-            assert!(buf.contains(": w"), "write! output should contain ': w', got '{buf}'");
+            assert!(
+                buf.contains(": w"),
+                "write! output should contain ': w', got '{buf}'"
+            );
         }
     }
 
@@ -1118,7 +1121,10 @@ mod tests {
     #[test]
     fn alternate_debug_all_variants() {
         let variants: Vec<(&str, HostError)> = vec![
-            ("ConnectorNotFound", HostError::ConnectorNotFound("z".into())),
+            (
+                "ConnectorNotFound",
+                HostError::ConnectorNotFound("z".into()),
+            ),
             ("InvalidFilter", HostError::InvalidFilter("z".into())),
             ("RegistryError", HostError::RegistryError("z".into())),
             ("PreflightFailed", HostError::PreflightFailed("z".into())),
@@ -1211,10 +1217,7 @@ mod tests {
             inner()?;
             Ok(())
         }
-        assert!(matches!(
-            outer().unwrap_err(),
-            HostError::RegistryError(_)
-        ));
+        assert!(matches!(outer().unwrap_err(), HostError::RegistryError(_)));
     }
 
     #[test]
@@ -1320,7 +1323,10 @@ mod tests {
         // String is 3 words (ptr + len + cap) = 24 bytes on 64-bit.
         // Enum discriminant adds 8 bytes (alignment) = 32 bytes total.
         assert!(size <= 64, "HostError should be compact, got {size} bytes");
-        assert!(size >= 24, "HostError needs at least a String, got {size} bytes");
+        assert!(
+            size >= 24,
+            "HostError needs at least a String, got {size} bytes"
+        );
     }
 
     #[test]
@@ -1457,11 +1463,8 @@ mod tests {
 
     #[test]
     fn host_result_collect_first_err() {
-        let results: Vec<HostResult<u32>> = vec![
-            Ok(1),
-            Err(HostError::Internal("fail".into())),
-            Ok(3),
-        ];
+        let results: Vec<HostResult<u32>> =
+            vec![Ok(1), Err(HostError::Internal("fail".into())), Ok(3)];
         let collected: HostResult<Vec<u32>> = results.into_iter().collect();
         assert!(collected.is_err());
         assert!(collected.unwrap_err().to_string().contains("fail"));
@@ -1578,9 +1581,6 @@ mod tests {
         }
         let result = step1().and_then(step2).and_then(step3);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            HostError::PreflightFailed(_)
-        ));
+        assert!(matches!(result.unwrap_err(), HostError::PreflightFailed(_)));
     }
 }

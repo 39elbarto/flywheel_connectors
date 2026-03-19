@@ -150,11 +150,16 @@ impl MysqlConnector {
     }
 
     /// Handle configure request.
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let config = MysqlConfig::from_params(&params)?;
-        let client = MysqlClient::new(config.auth.clone(), Some(&config.base_url))
-            .map_err(|e| FcpError::Internal {
-                message: format!("Failed to create MySQL client: {e}"),
+        let client =
+            MysqlClient::new(config.auth.clone(), Some(&config.base_url)).map_err(|e| {
+                FcpError::Internal {
+                    message: format!("Failed to create MySQL client: {e}"),
+                }
             })?;
 
         info!(base_url = %config.base_url, auth = %config.auth.redacted_label(), "MySQL connector configured");
@@ -166,7 +171,10 @@ impl MysqlConnector {
     }
 
     /// Handle handshake request.
-    pub async fn handle_handshake(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_handshake(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         self.handshaken = true;
         Ok(json!({
             "protocol_version": "2.0.0",
@@ -249,7 +257,11 @@ impl MysqlConnector {
 
     /// Handle self_check.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        let status = if self.config.is_some() { "ok" } else { "degraded" };
+        let status = if self.config.is_some() {
+            "ok"
+        } else {
+            "degraded"
+        };
         Ok(json!({
             "status": status,
             "version": "0.1.0",
@@ -290,10 +302,13 @@ impl MysqlConnector {
         let operation = Self::require_str(&params, "operation")?;
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
-        let client = self.client.as_ref().ok_or_else(|| FcpError::InvalidRequest {
-            code: 5001,
-            message: "Connector not configured. Call configure first.".into(),
-        })?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 5001,
+                message: "Connector not configured. Call configure first.".into(),
+            })?;
 
         let result = match operation {
             "mysql.query" => {
@@ -361,7 +376,10 @@ impl MysqlConnector {
     }
 
     /// Handle shutdown request.
-    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         if let Some(ref client) = self.client {
             client.shutdown();
         }
@@ -710,7 +728,11 @@ mod tests {
     fn operations_all_have_summaries() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.summary.is_empty(), "operation {} must have a summary", op.id.as_str());
+            assert!(
+                !op.summary.is_empty(),
+                "operation {} must have a summary",
+                op.id.as_str()
+            );
         }
     }
 
@@ -718,7 +740,11 @@ mod tests {
     fn operations_all_have_capabilities() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.capability.as_str().is_empty(), "operation {} must have a capability", op.id.as_str());
+            assert!(
+                !op.capability.as_str().is_empty(),
+                "operation {} must have a capability",
+                op.id.as_str()
+            );
         }
     }
 
@@ -777,16 +803,34 @@ mod tests {
     fn operations_all_have_schemas() {
         let ops = operations_info();
         for op in &ops {
-            assert!(op.input_schema.is_object(), "operation {} must have input schema", op.id.as_str());
-            assert!(op.output_schema.is_object() || op.output_schema.is_array(), "operation {} must have output schema", op.id.as_str());
+            assert!(
+                op.input_schema.is_object(),
+                "operation {} must have input schema",
+                op.id.as_str()
+            );
+            assert!(
+                op.output_schema.is_object() || op.output_schema.is_array(),
+                "operation {} must have output schema",
+                op.id.as_str()
+            );
         }
     }
 
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let result = DoctorResult::from_checks(checks);
         assert_eq!(result.status, DoctorStatus::Healthy);
@@ -794,9 +838,12 @@ mod tests {
 
     #[test]
     fn doctor_result_unhealthy_when_critical_fails() {
-        let checks = vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-        ];
+        let checks = vec![DoctorCheck {
+            name: "a".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        }];
         let result = DoctorResult::from_checks(checks);
         assert_eq!(result.status, DoctorStatus::Unhealthy);
     }
@@ -804,8 +851,18 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_noncritical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ];
         let result = DoctorResult::from_checks(checks);
         assert_eq!(result.status, DoctorStatus::Degraded);

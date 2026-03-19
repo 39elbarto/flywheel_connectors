@@ -65,9 +65,9 @@ impl SheetsClient {
     pub fn auth_redacted_label(&self) -> String {
         match &self.auth {
             GoogleMaterializedAuth::BearerToken { source, .. } => source.to_string(),
-            GoogleMaterializedAuth::CredentialReference {
-                credential_id, ..
-            } => format!("credential_id:{credential_id}"),
+            GoogleMaterializedAuth::CredentialReference { credential_id, .. } => {
+                format!("credential_id:{credential_id}")
+            }
         }
     }
 
@@ -80,11 +80,7 @@ impl SheetsClient {
 
     /// Read values from a range.
     #[instrument(skip(self), fields(spreadsheet_id, range))]
-    pub async fn get_values(
-        &self,
-        spreadsheet_id: &str,
-        range: &str,
-    ) -> SheetsResult<ValueRange> {
+    pub async fn get_values(&self, spreadsheet_id: &str, range: &str) -> SheetsResult<ValueRange> {
         let encoded_range = urlencoded(range);
         let url = format!(
             "{}/spreadsheets/{spreadsheet_id}/values/{encoded_range}",
@@ -322,7 +318,13 @@ mod tests {
             code: 500,
             message: "internal".into(),
         });
-        assert!(matches!(err, SheetsError::Api { status_code: 500, .. }));
+        assert!(matches!(
+            err,
+            SheetsError::Api {
+                status_code: 500,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -400,8 +400,8 @@ impl MattermostClient {
         debug!(url = %url, "POST multipart");
 
         let mut part = Part::bytes(contents).file_name(request.filename.clone());
-        if let Some(content_type) = request.content_type.as_deref() {
-            part = part.mime_str(content_type).map_err(|error| {
+        if let Some(content_type) = non_empty_trimmed(request.content_type.as_deref()) {
+            part = part.mime_str(&content_type).map_err(|error| {
                 MattermostError::Config(format!("invalid upload content_type: {error}"))
             })?;
         }
@@ -409,7 +409,7 @@ impl MattermostClient {
         let mut form = Form::new()
             .text("channel_id", request.channel_id.clone())
             .part("files", part);
-        if let Some(client_id) = request.client_id.clone() {
+        if let Some(client_id) = non_empty_trimmed(request.client_id.as_deref()) {
             form = form.text("client_ids", client_id);
         }
 
@@ -653,6 +653,13 @@ fn encode_path_segment(value: &str) -> String {
     utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
 }
 
+fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 fn append_auth_headers(headers: &mut HeaderMap, auth: &MattermostAuth) -> MattermostResult<()> {
     match auth {
         MattermostAuth::Token(token) => {
@@ -839,6 +846,16 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://chat.example.com/base/api/v4/users/user1/posts/post1/reactions/%2B1"
+        );
+    }
+
+    #[test]
+    fn non_empty_trimmed_filters_blank_values() {
+        assert_eq!(non_empty_trimmed(None), None);
+        assert_eq!(non_empty_trimmed(Some("   ")), None);
+        assert_eq!(
+            non_empty_trimmed(Some("  application/json  ")),
+            Some("application/json".into())
         );
     }
 }

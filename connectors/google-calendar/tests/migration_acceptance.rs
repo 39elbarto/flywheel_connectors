@@ -50,11 +50,7 @@ async fn calendar_introspect_has_required_operations() {
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
     // Core Calendar operations that must survive migration.
-    let required = [
-        "gcal.list_events",
-        "gcal.get_event",
-        "gcal.create_event",
-    ];
+    let required = ["gcal.list_events", "gcal.get_event", "gcal.create_event"];
 
     for op in &required {
         assert!(
@@ -73,10 +69,7 @@ async fn calendar_introspect_operations_have_capability() {
     for op in ops {
         let id = op["id"].as_str().unwrap();
         let cap = op["capability"].as_str();
-        assert!(
-            cap.is_some(),
-            "Operation {id} is missing capability field"
-        );
+        assert!(cap.is_some(), "Operation {id} is missing capability field");
         assert!(
             !cap.unwrap().is_empty(),
             "Operation {id} has empty capability"

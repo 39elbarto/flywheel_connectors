@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-
 use crate::{
     client::{BitwardenAuth, BitwardenClient, DEFAULT_BASE_URL},
     error::BitwardenError,
@@ -520,10 +519,7 @@ fn validate_base_url(base_url: &str) -> (bool, String) {
     let is_local = base_url.contains("localhost") || base_url.contains("127.0.0.1");
 
     if !base_url.starts_with("https://") && !is_local {
-        return (
-            false,
-            format!("Base URL must use HTTPS: {base_url}"),
-        );
+        return (false, format!("Base URL must use HTTPS: {base_url}"));
     }
 
     // Known Bitwarden hosts (official cloud + self-hosted pattern).
@@ -539,13 +535,18 @@ fn validate_base_url(base_url: &str) -> (bool, String) {
     }
 
     // Allow known hosts or self-hosted patterns.
-    let host_ok = known_hosts.iter().any(|h| base_url.contains(h))
-        || base_url.contains("bitwarden");
+    let host_ok =
+        known_hosts.iter().any(|h| base_url.contains(h)) || base_url.contains("bitwarden");
 
     if host_ok {
         (true, format!("Accepted endpoint: {base_url}"))
     } else {
-        (false, format!("Unrecognized Bitwarden host: {base_url}. Expected api.bitwarden.com, api.bitwarden.eu, or a self-hosted domain containing 'bitwarden'."))
+        (
+            false,
+            format!(
+                "Unrecognized Bitwarden host: {base_url}. Expected api.bitwarden.com, api.bitwarden.eu, or a self-hosted domain containing 'bitwarden'."
+            ),
+        )
     }
 }
 

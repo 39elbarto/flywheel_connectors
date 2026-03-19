@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Microsoft 365 Graph API error.
@@ -105,7 +105,6 @@ impl M365Error {
         }
     }
 }
-
 
 impl ConnectorErrorMapping for M365Error {
     fn from_async_error(error: AsyncError) -> Self {

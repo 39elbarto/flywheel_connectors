@@ -525,13 +525,7 @@ mod tests {
         use fcp_async_core::AsyncError;
         use fcp_sdk::migration::ConnectorErrorMapping;
         let err = KubernetesError::from_async_error(AsyncError::Cancelled);
-        assert!(matches!(
-            err,
-            KubernetesError::Api {
-                status_code: 0,
-                ..
-            }
-        ));
+        assert!(matches!(err, KubernetesError::Api { status_code: 0, .. }));
     }
 
     #[test]

@@ -162,7 +162,12 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(ChatError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            ChatError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]

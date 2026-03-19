@@ -408,9 +408,7 @@ impl FigmaClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
             let req = self.apply_auth(self.client.get(&url));
-            async move {
-                Self::execute_get_once::<T>(req, path).await
-            }
+            async move { Self::execute_get_once::<T>(req, path).await }
         })
         .await
     }
@@ -427,9 +425,7 @@ impl FigmaClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
             let req = self.apply_auth(self.client.post(&url)).json(body);
-            async move {
-                Self::execute_post_once::<T>(req, path).await
-            }
+            async move { Self::execute_post_once::<T>(req, path).await }
         })
         .await
     }
@@ -442,9 +438,7 @@ impl FigmaClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
             let req = self.apply_auth(self.client.delete(&url));
-            async move {
-                Self::execute_delete_once(req, path).await
-            }
+            async move { Self::execute_delete_once(req, path).await }
         })
         .await
     }

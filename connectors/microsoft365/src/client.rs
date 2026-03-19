@@ -889,7 +889,7 @@ impl M365Client {
                             return AttemptOutcome::Retryable {
                                 retry_after: err.retry_after(),
                                 error: err,
-                            }
+                            };
                         }
                         ErrorAction::Success => {}
                     }
@@ -931,7 +931,7 @@ impl M365Client {
                             return AttemptOutcome::Retryable {
                                 retry_after: err.retry_after(),
                                 error: err,
-                            }
+                            };
                         }
                         ErrorAction::Success => {}
                     }
@@ -970,7 +970,7 @@ impl M365Client {
                             return AttemptOutcome::Retryable {
                                 retry_after: err.retry_after(),
                                 error: err,
-                            }
+                            };
                         }
                         ErrorAction::Success => {}
                     }

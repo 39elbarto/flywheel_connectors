@@ -1792,7 +1792,11 @@ mod tests {
 
     #[test]
     fn retry_after_invalid_chat_id_is_none() {
-        assert!(TelegramError::InvalidChatId("x".into()).retry_after().is_none());
+        assert!(
+            TelegramError::InvalidChatId("x".into())
+                .retry_after()
+                .is_none()
+        );
     }
 
     // ── ConnectorErrorMapping ────────────────────────────────────────

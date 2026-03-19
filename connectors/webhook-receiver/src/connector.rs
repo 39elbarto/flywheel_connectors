@@ -456,12 +456,18 @@ impl WebhookReceiverConnector {
         let signature_header = optional_str(input, "signature_header")?
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map_or_else(|| provider.default_signature_header().to_string(), str::to_string);
+            .map_or_else(
+                || provider.default_signature_header().to_string(),
+                str::to_string,
+            );
 
         let signature_algorithm = optional_str(input, "signature_algorithm")?
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map_or_else(|| provider.default_signature_algorithm().to_string(), str::to_string);
+            .map_or_else(
+                || provider.default_signature_algorithm().to_string(),
+                str::to_string,
+            );
         let allowed_sources = parse_string_array(input, "allowed_sources")?;
 
         let endpoint = self.store.create_endpoint_profile(

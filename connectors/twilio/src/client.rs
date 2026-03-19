@@ -970,11 +970,11 @@ impl TwilioClient {
             match result {
                 Ok(response) => {
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        let retry_after =
-                            retry_result.or(Some(Duration::from_secs(1)));
+                        let retry_after = retry_result.or(Some(Duration::from_secs(1)));
                         return AttemptOutcome::Retryable {
                             error: TwilioError::RateLimited {
-                                retry_after_ms: retry_after.map_or(60_000, |d| d.as_millis() as u64),
+                                retry_after_ms: retry_after
+                                    .map_or(60_000, |d| d.as_millis() as u64),
                             },
                             retry_after,
                         };
@@ -1041,11 +1041,11 @@ impl TwilioClient {
             match result {
                 Ok(response) => {
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
-                        let retry_after =
-                            retry_result.or(Some(Duration::from_secs(1)));
+                        let retry_after = retry_result.or(Some(Duration::from_secs(1)));
                         return AttemptOutcome::Retryable {
                             error: TwilioError::RateLimited {
-                                retry_after_ms: retry_after.map_or(60_000, |d| d.as_millis() as u64),
+                                retry_after_ms: retry_after
+                                    .map_or(60_000, |d| d.as_millis() as u64),
                             },
                             retry_after,
                         };

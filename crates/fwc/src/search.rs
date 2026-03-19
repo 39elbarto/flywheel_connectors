@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
     readiness::{DiscoveredConnector, DiscoveredOperation},
@@ -478,7 +478,7 @@ mod tests {
                     version: "0.1.0".to_owned(),
                     description: format!("FCP connector for {slug}"),
                     archetypes: crate::readiness::MetadataField::Known(vec![
-                        "operational".to_owned()
+                        "operational".to_owned(),
                     ]),
                     state: ConnectorState::Unknown,
                     operation_count: ops.len(),
@@ -610,9 +610,11 @@ mod tests {
         );
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "github.create_issue");
-        assert!(results[0]
-            .match_reasons
-            .contains(&"exact_id_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"exact_id_match".to_owned())
+        );
     }
 
     #[test]
@@ -622,9 +624,11 @@ mod tests {
         assert!(!results.is_empty());
         // slack.send_message has "team" in when_to_use
         assert_eq!(results[0].operation_id, "slack.send_message");
-        assert!(results[0]
-            .match_reasons
-            .contains(&"when_to_use_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"when_to_use_match".to_owned())
+        );
     }
 
     #[test]
@@ -716,9 +720,11 @@ mod tests {
         };
         let results = search_operations(&connectors, "create", &filters);
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .all(|r| matches!(r.risk_level.as_str(), "low" | "medium")));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.risk_level.as_str(), "low" | "medium"))
+        );
     }
 
     #[test]
@@ -742,9 +748,11 @@ mod tests {
         };
         let results = search_operations(&connectors, "list", &filters);
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .all(|r| matches!(r.idempotency.as_str(), "strict" | "best_effort")));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.idempotency.as_str(), "strict" | "best_effort"))
+        );
     }
 
     #[test]
@@ -805,9 +813,11 @@ mod tests {
         let results = search_operations(&connectors, "send_mesage", &SearchFilters::default());
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "slack.send_message");
-        assert!(results[0]
-            .match_reasons
-            .contains(&"fuzzy_id_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_id_match".to_owned())
+        );
     }
 
     #[test]
@@ -816,9 +826,11 @@ mod tests {
         let results = search_operations(&connectors, "mesage", &SearchFilters::default());
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "slack.send_message");
-        assert!(results[0]
-            .match_reasons
-            .contains(&"fuzzy_id_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_id_match".to_owned())
+        );
     }
 
     #[test]
@@ -828,9 +840,11 @@ mod tests {
         let results = search_operations(&connectors, "open_tiket", &SearchFilters::default());
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "github.create_issue");
-        assert!(results[0]
-            .match_reasons
-            .contains(&"fuzzy_alias_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_alias_match".to_owned())
+        );
     }
 
     #[test]
@@ -994,9 +1008,11 @@ mod tests {
             vec!["Forgetting to set labels for triage".to_owned()];
         let results = search_operations(&connectors, "triage", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(results[0]
-            .match_reasons
-            .contains(&"common_mistakes_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"common_mistakes_match".to_owned())
+        );
     }
 
     #[test]
@@ -1194,9 +1210,11 @@ mod tests {
         let connectors = vec![stub_connector("github", vec![op])];
         let results = search_operations(&connectors, "github_issue", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(results[0]
-            .match_reasons
-            .contains(&"partial_alias_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"partial_alias_match".to_owned())
+        );
     }
 
     #[test]
@@ -1204,9 +1222,11 @@ mod tests {
         let connectors = sample_connectors();
         let results = search_operations(&connectors, "write", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(results[0]
-            .match_reasons
-            .contains(&"capability_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"capability_match".to_owned())
+        );
     }
 
     #[test]
@@ -2033,9 +2053,11 @@ mod tests {
         let connectors = vec![stub_connector("t", vec![op])];
         let results = search_operations(&connectors, "lookup", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(results[0]
-            .match_reasons
-            .contains(&"partial_alias_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"partial_alias_match".to_owned())
+        );
     }
 
     #[test]
@@ -2045,9 +2067,11 @@ mod tests {
         let connectors = vec![stub_connector("t", vec![op])];
         let results = search_operations(&connectors, "quick_lokup", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(results[0]
-            .match_reasons
-            .contains(&"fuzzy_alias_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"fuzzy_alias_match".to_owned())
+        );
     }
 
     // ── Multiple connectors with mixed ops ─────────────────────────
@@ -2082,9 +2106,11 @@ mod tests {
             ..Default::default()
         };
         let results = search_operations(&connectors, "op", &filters);
-        assert!(results
-            .iter()
-            .all(|r| matches!(r.safety_tier.as_str(), "safe" | "risky")));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.safety_tier.as_str(), "safe" | "risky"))
+        );
     }
 
     // ── results_to_json detailed field tests ───────────────────────

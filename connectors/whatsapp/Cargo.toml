@@ -18,6 +18,7 @@ path = "src/lib.rs"
 fcp-core.workspace = true
 fcp-sdk.workspace = true
 fcp-async-core.workspace = true
+fcp-webhook.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -29,6 +30,7 @@ sha2.workspace = true
 hex.workspace = true
 anyhow.workspace = true
 hmac.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 wiremock.workspace = true

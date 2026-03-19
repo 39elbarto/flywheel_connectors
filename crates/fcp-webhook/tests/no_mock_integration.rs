@@ -217,7 +217,7 @@ fn pipeline_slack_verify_route_event_callback() {
 }
 
 #[test]
-fn pipeline_slack_missing_event_id_still_dedups_retries() {
+fn pipeline_slack_missing_event_id_keeps_distinct_timestamps_separate() {
     let signing_secret = "slack_signing_secret_2026";
     let slack = SlackWebhook::new(signing_secret);
     let handler = WebhookHandler::new(
@@ -252,12 +252,9 @@ fn pipeline_slack_missing_event_id_still_dedups_retries() {
     let first_event = slack.verify_and_parse(&first_headers, body).unwrap();
     let second_event = slack.verify_and_parse(&second_headers, body).unwrap();
 
-    assert_eq!(first_event.id, second_event.id);
+    assert_ne!(first_event.id, second_event.id);
     assert!(handler.claim_event(&first_event.id).is_ok());
-    assert!(matches!(
-        handler.claim_event(&second_event.id),
-        Err(WebhookError::ReplayDetected { .. })
-    ));
+    assert!(handler.claim_event(&second_event.id).is_ok());
 }
 
 #[test]

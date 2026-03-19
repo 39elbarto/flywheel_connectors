@@ -25,10 +25,23 @@ fn header_value_case_insensitive<'a>(
 }
 
 fn deterministic_event_id(provider: &str, event_type: &str, body: &[u8]) -> String {
+    deterministic_event_id_with_context(provider, event_type, body, None)
+}
+
+fn deterministic_event_id_with_context(
+    provider: &str,
+    event_type: &str,
+    body: &[u8],
+    context: Option<&str>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(provider.as_bytes());
     hasher.update([0]);
     hasher.update(event_type.as_bytes());
+    hasher.update([0]);
+    if let Some(context) = context {
+        hasher.update(context.as_bytes());
+    }
     hasher.update([0]);
     hasher.update(body);
     let digest = hasher.finalize();
@@ -157,13 +170,13 @@ impl StripeWebhook {
             .ok_or_else(|| WebhookError::MissingSignature("Stripe-Signature".into()))?;
 
         // Parse signature header (format: t=timestamp,v1=signature)
-        let (timestamp, signatures) = Self::parse_stripe_signature(signature_header)?;
+        let (timestamp_str, timestamp, signatures) =
+            Self::parse_stripe_signature(signature_header)?;
 
         // Validate timestamp
         self.validate_timestamp(timestamp)?;
 
         // Build signed payload (Stripe format: timestamp.body)
-        let timestamp_str = timestamp.to_string();
         let mut signed_payload = timestamp_str.as_bytes().to_vec();
         signed_payload.push(b'.');
         signed_payload.extend_from_slice(body);
@@ -192,7 +205,14 @@ impl StripeWebhook {
             .to_string();
 
         let event_id = payload.get("id").and_then(Value::as_str).map_or_else(
-            || deterministic_event_id("stripe", &event_type, body),
+            || {
+                deterministic_event_id_with_context(
+                    "stripe",
+                    &event_type,
+                    body,
+                    Some(timestamp_str.as_str()),
+                )
+            },
             ToString::to_string,
         );
 
@@ -203,22 +223,22 @@ impl StripeWebhook {
     }
 
     /// Parse Stripe signature header.
-    fn parse_stripe_signature(header: &str) -> WebhookResult<(i64, Vec<String>)> {
+    fn parse_stripe_signature(header: &str) -> WebhookResult<(String, i64, Vec<String>)> {
         let mut timestamp = None;
         let mut signatures = Vec::new();
 
         for part in header.split(',') {
             let part = part.trim();
             if let Some(ts) = part.strip_prefix("t=") {
-                timestamp = ts.parse().ok();
+                timestamp = ts.parse().ok().map(|parsed| (ts.to_string(), parsed));
             } else if let Some(sig) = part.strip_prefix("v1=") {
                 signatures.push(sig.to_string());
             }
         }
 
-        if let Some(ts) = timestamp {
+        if let Some((raw_timestamp, parsed_timestamp)) = timestamp {
             if !signatures.is_empty() {
-                return Ok((ts, signatures));
+                return Ok((raw_timestamp, parsed_timestamp, signatures));
             }
         }
 
@@ -296,7 +316,7 @@ impl SlackWebhook {
         }
 
         // Build Slack signature base string
-        let mut base_string = format!("v0:{timestamp}:").into_bytes();
+        let mut base_string = format!("v0:{timestamp_str}:").into_bytes();
         base_string.extend_from_slice(body);
 
         // Verify signature
@@ -308,7 +328,7 @@ impl SlackWebhook {
         // Extract event details
         let event_type = Self::event_type(&payload).to_string();
         let event_id = payload.get("event_id").and_then(Value::as_str).map_or_else(
-            || deterministic_event_id("slack", &event_type, body),
+            || deterministic_event_id_with_context("slack", &event_type, body, Some(timestamp_str)),
             ToString::to_string,
         );
 
@@ -428,8 +448,10 @@ mod tests {
 
     #[test]
     fn test_stripe_signature_parsing() {
-        let (ts, sigs) = StripeWebhook::parse_stripe_signature("t=1234567890,v1=abc123").unwrap();
+        let (raw_ts, ts, sigs) =
+            StripeWebhook::parse_stripe_signature("t=1234567890,v1=abc123").unwrap();
 
+        assert_eq!(raw_ts, "1234567890");
         assert_eq!(ts, 1_234_567_890);
         assert_eq!(sigs.len(), 1);
         assert_eq!(sigs[0], "abc123");
@@ -911,8 +933,9 @@ mod tests {
     #[test]
     fn test_stripe_signature_with_extra_fields() {
         // Stripe signature headers can contain other prefixed fields
-        let (ts, sigs) =
+        let (raw_ts, ts, sigs) =
             StripeWebhook::parse_stripe_signature("t=1234567890,v1=abc123,v2=ignored").unwrap();
+        assert_eq!(raw_ts, "1234567890");
         assert_eq!(ts, 1_234_567_890);
         assert_eq!(sigs.len(), 1);
         assert_eq!(sigs[0], "abc123");
@@ -1115,7 +1138,15 @@ mod tests {
         );
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
-        assert_eq!(event.id, deterministic_event_id("stripe", "unknown", body));
+        assert_eq!(
+            event.id,
+            deterministic_event_id_with_context(
+                "stripe",
+                "unknown",
+                body,
+                Some(&timestamp.to_string())
+            )
+        );
         assert_eq!(event.event_type, "unknown");
     }
 
@@ -1155,15 +1186,58 @@ mod tests {
 
         assert_eq!(
             first_event.id,
-            deterministic_event_id("stripe", "charge.created", first_body)
+            deterministic_event_id_with_context(
+                "stripe",
+                "charge.created",
+                first_body,
+                Some(&timestamp.to_string())
+            )
         );
         assert_eq!(
             second_event.id,
-            deterministic_event_id("stripe", "charge.created", second_body)
+            deterministic_event_id_with_context(
+                "stripe",
+                "charge.created",
+                second_body,
+                Some(&timestamp.to_string())
+            )
         );
         assert_ne!(first_event.id, second_event.id);
         assert!(handler.claim_event(&first_event.id).is_ok());
         assert!(handler.claim_event(&second_event.id).is_ok());
+    }
+
+    #[test]
+    fn test_stripe_missing_event_id_does_not_alias_same_payload_across_timestamps() {
+        let secret = "secret";
+        let stripe = StripeWebhook::new(secret);
+        let body = br#"{"type":"charge.created"}"#;
+        let verifier = HmacSha256Verifier::new(secret);
+
+        let first_timestamp = Utc::now().timestamp();
+        let second_timestamp = first_timestamp + 1;
+
+        let first_signature = verifier
+            .compute(format!("{first_timestamp}.{}", String::from_utf8_lossy(body)).as_bytes());
+        let second_signature = verifier
+            .compute(format!("{second_timestamp}.{}", String::from_utf8_lossy(body)).as_bytes());
+
+        let mut first_headers = HashMap::new();
+        first_headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={first_timestamp},v1={first_signature}"),
+        );
+
+        let mut second_headers = HashMap::new();
+        second_headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={second_timestamp},v1={second_signature}"),
+        );
+
+        let first_event = stripe.verify_and_parse(&first_headers, body).unwrap();
+        let second_event = stripe.verify_and_parse(&second_headers, body).unwrap();
+
+        assert_ne!(first_event.id, second_event.id);
     }
 
     #[test]
@@ -1340,8 +1414,9 @@ mod tests {
     #[test]
     fn test_stripe_multiple_v1_signatures() {
         // Stripe can send multiple v1 signatures during secret rotation
-        let (ts, sigs) =
+        let (raw_ts, ts, sigs) =
             StripeWebhook::parse_stripe_signature("t=1234567890,v1=sig1,v1=sig2").unwrap();
+        assert_eq!(raw_ts, "1234567890");
         assert_eq!(ts, 1_234_567_890);
         assert_eq!(sigs.len(), 2);
         assert_eq!(sigs[0], "sig1");
@@ -1477,7 +1552,8 @@ mod tests {
         // Extra commas in signature header
         let result = StripeWebhook::parse_stripe_signature("t=123,,v1=abc,,");
         assert!(result.is_ok());
-        let (ts, sigs) = result.unwrap();
+        let (raw_ts, ts, sigs) = result.unwrap();
+        assert_eq!(raw_ts, "123");
         assert_eq!(ts, 123);
         assert_eq!(sigs, vec!["abc"]);
     }
@@ -1651,8 +1727,86 @@ mod tests {
 
         let first = handler.verify_and_parse(&headers, body).unwrap();
         let second = handler.verify_and_parse(&headers, body).unwrap();
-        assert_eq!(first.id, deterministic_event_id("slack", "unknown", body));
+        assert_eq!(
+            first.id,
+            deterministic_event_id_with_context(
+                "slack",
+                "unknown",
+                body,
+                Some(&timestamp.to_string())
+            )
+        );
         assert_eq!(first.id, second.id);
+    }
+
+    #[test]
+    fn test_slack_missing_event_id_does_not_alias_same_payload_across_timestamps() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = br#"{"type":"url_verification","challenge":"abc"}"#;
+        let verifier = HmacSha256Verifier::new(signing_secret);
+
+        let first_timestamp = Utc::now().timestamp();
+        let second_timestamp = first_timestamp + 1;
+
+        let first_signature = verifier
+            .compute(format!("v0:{first_timestamp}:{}", String::from_utf8_lossy(body)).as_bytes());
+        let second_signature = verifier
+            .compute(format!("v0:{second_timestamp}:{}", String::from_utf8_lossy(body)).as_bytes());
+
+        let mut first_headers = HashMap::new();
+        first_headers.insert(
+            "x-slack-signature".to_string(),
+            format!("v0={first_signature}"),
+        );
+        first_headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            first_timestamp.to_string(),
+        );
+
+        let mut second_headers = HashMap::new();
+        second_headers.insert(
+            "x-slack-signature".to_string(),
+            format!("v0={second_signature}"),
+        );
+        second_headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            second_timestamp.to_string(),
+        );
+
+        let first_event = handler.verify_and_parse(&first_headers, body).unwrap();
+        let second_event = handler.verify_and_parse(&second_headers, body).unwrap();
+
+        assert_ne!(first_event.id, second_event.id);
+    }
+
+    #[test]
+    fn test_slack_verifies_against_literal_timestamp_header_value() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = br#"{"type":"url_verification","challenge":"abc"}"#;
+        let timestamp_str = format!("0{}", Utc::now().timestamp());
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier
+            .compute(format!("v0:{timestamp_str}:{}", String::from_utf8_lossy(body)).as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp_str.clone(),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(
+            event.id,
+            deterministic_event_id_with_context(
+                "slack",
+                "url_verification",
+                body,
+                Some(timestamp_str.as_str())
+            )
+        );
     }
 
     #[test]
@@ -1775,13 +1929,14 @@ mod tests {
     fn test_stripe_parse_negative_timestamp() {
         let result = StripeWebhook::parse_stripe_signature("t=-1,v1=abc");
         assert!(result.is_ok());
-        let (ts, _) = result.unwrap();
+        let (_, ts, _) = result.unwrap();
         assert_eq!(ts, -1);
     }
 
     #[test]
     fn test_stripe_parse_zero_timestamp() {
-        let (ts, sigs) = StripeWebhook::parse_stripe_signature("t=0,v1=sig").unwrap();
+        let (raw_ts, ts, sigs) = StripeWebhook::parse_stripe_signature("t=0,v1=sig").unwrap();
+        assert_eq!(raw_ts, "0");
         assert_eq!(ts, 0);
         assert_eq!(sigs, vec!["sig"]);
     }
@@ -1867,9 +2022,39 @@ mod tests {
 
     #[test]
     fn test_stripe_parse_signature_large_timestamp() {
-        let (ts, sigs) = StripeWebhook::parse_stripe_signature("t=9999999999999,v1=sig").unwrap();
+        let (raw_ts, ts, sigs) =
+            StripeWebhook::parse_stripe_signature("t=9999999999999,v1=sig").unwrap();
+        assert_eq!(raw_ts, "9999999999999");
         assert_eq!(ts, 9_999_999_999_999);
         assert_eq!(sigs, vec!["sig"]);
+    }
+
+    #[test]
+    fn test_stripe_verifies_against_literal_timestamp_header_value() {
+        let secret = "secret";
+        let handler = StripeWebhook::new(secret);
+        let body = br#"{"type":"charge.created"}"#;
+        let timestamp_str = format!("0{}", Utc::now().timestamp());
+        let verifier = HmacSha256Verifier::new(secret);
+        let sig = verifier
+            .compute(format!("{timestamp_str}.{}", String::from_utf8_lossy(body)).as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp_str},v1={sig}"),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(
+            event.id,
+            deterministic_event_id_with_context(
+                "stripe",
+                "charge.created",
+                body,
+                Some(timestamp_str.as_str())
+            )
+        );
     }
 
     #[test]
@@ -1987,7 +2172,8 @@ mod tests {
     fn test_stripe_parse_signature_v1_empty_value() {
         let result = StripeWebhook::parse_stripe_signature("t=123,v1=");
         assert!(result.is_ok());
-        let (ts, sigs) = result.unwrap();
+        let (raw_ts, ts, sigs) = result.unwrap();
+        assert_eq!(raw_ts, "123");
         assert_eq!(ts, 123);
         assert_eq!(sigs, vec![""]);
     }
@@ -2021,7 +2207,8 @@ mod tests {
         // Multiple t= values - parse takes the last parsed value
         let result = StripeWebhook::parse_stripe_signature("t=100,t=200,v1=sig");
         assert!(result.is_ok());
-        let (ts, _) = result.unwrap();
+        let (raw_ts, ts, _) = result.unwrap();
+        assert_eq!(raw_ts, "200");
         assert_eq!(ts, 200);
     }
 

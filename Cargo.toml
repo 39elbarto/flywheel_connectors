@@ -61,6 +61,7 @@ members = [
     "connectors/plaid",
     "connectors/bitbucket",
     "connectors/browser",
+    "connectors/cloudflare",
     "connectors/google-ai",
     "connectors/microsoft365",
     "connectors/llm-router",

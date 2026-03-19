@@ -1,0 +1,228 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.cloudflare"
+name = "Cloudflare"
+version = "0.1.0"
+description = "Cloudflare connector for Workers, Pages, DNS, KV, and Zones management"
+archetype = "cloud-control-plane"
+homepage = "https://developers.cloudflare.com/api"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.zones_list]
+summary = "List Cloudflare zones"
+capability = "cloudflare.zones.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.zones_list.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.zones_list.ai_hints]
+when_to_use = "When you need to list all domains managed by Cloudflare"
+
+[provides.operations.health]
+summary = "Check API token health"
+capability = "cloudflare.zones.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to verify Cloudflare API credentials"
+
+[provides.operations.dns_list_records]
+summary = "List DNS records for a zone"
+capability = "cloudflare.dns.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.dns_list_records.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.dns_list_records.ai_hints]
+when_to_use = "When you need to see DNS records for a domain"
+
+[provides.operations.dns_create_record]
+summary = "Create a DNS record"
+capability = "cloudflare.dns.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.dns_create_record.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.dns_create_record.ai_hints]
+when_to_use = "When you need to add a DNS record to a domain"
+
+[provides.operations.dns_delete_record]
+summary = "Delete a DNS record"
+capability = "cloudflare.dns.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.dns_delete_record.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.dns_delete_record.ai_hints]
+when_to_use = "When you need to remove a DNS record — affects live traffic"
+
+[provides.operations.workers_list]
+summary = "List Workers scripts"
+capability = "cloudflare.workers.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.workers_list.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.workers_list.ai_hints]
+when_to_use = "When you need to see deployed Workers scripts"
+
+[provides.operations.workers_deploy]
+summary = "Deploy a Workers script"
+capability = "cloudflare.workers.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.workers_deploy.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.workers_deploy.ai_hints]
+when_to_use = "When you need to deploy code to Cloudflare Workers"
+
+[provides.operations.workers_delete]
+summary = "Delete a Workers script"
+capability = "cloudflare.workers.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.workers_delete.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.workers_delete.ai_hints]
+when_to_use = "When you need to permanently remove a Workers script"
+
+[provides.operations.kv_get]
+summary = "Get a KV value"
+capability = "cloudflare.kv.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.kv_get.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.kv_get.ai_hints]
+when_to_use = "When you need to read a value from Workers KV"
+
+[provides.operations.kv_put]
+summary = "Write a KV value"
+capability = "cloudflare.kv.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.kv_put.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.kv_put.ai_hints]
+when_to_use = "When you need to store a value in Workers KV"
+
+[provides.operations.kv_delete]
+summary = "Delete a KV key"
+capability = "cloudflare.kv.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.kv_delete.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.kv_delete.ai_hints]
+when_to_use = "When you need to remove a key from Workers KV"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

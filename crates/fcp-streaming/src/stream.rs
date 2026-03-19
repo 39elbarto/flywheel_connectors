@@ -106,7 +106,11 @@ where
     S::Item: Clone,
 {
     /// Create a new batch stream.
+    ///
+    /// # Panics
+    /// Panics if `max_size` is 0.
     pub fn new(inner: S, max_size: usize, max_wait: Duration) -> Self {
+        assert!(max_size > 0, "BatchStream max_size must be at least 1");
         Self {
             inner,
             max_size,

@@ -79,7 +79,10 @@ impl X25519SecretKey {
     /// Returns [`CryptoError::InvalidPublicKey`] if the peer's public key is a
     /// low-order point (e.g. all zeros) that would produce an all-zero shared
     /// secret, allowing an attacker to predict the result.
-    pub fn diffie_hellman(&self, peer_public: &X25519PublicKey) -> CryptoResult<X25519SharedSecret> {
+    pub fn diffie_hellman(
+        &self,
+        peer_public: &X25519PublicKey,
+    ) -> CryptoResult<X25519SharedSecret> {
         let shared = self.inner.diffie_hellman(&peer_public.inner);
         if shared.as_bytes().iter().all(|&b| b == 0) {
             return Err(CryptoError::InvalidPublicKey);
@@ -259,7 +262,9 @@ mod tests {
         let charlie_public_key = charlie_secret_key.public_key();
 
         let alice_bob = alice_secret_key.diffie_hellman(&bob_public_key).unwrap();
-        let alice_charlie = alice_secret_key.diffie_hellman(&charlie_public_key).unwrap();
+        let alice_charlie = alice_secret_key
+            .diffie_hellman(&charlie_public_key)
+            .unwrap();
 
         assert_ne!(alice_bob.as_bytes(), alice_charlie.as_bytes());
     }

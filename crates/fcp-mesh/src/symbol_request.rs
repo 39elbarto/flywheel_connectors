@@ -303,6 +303,12 @@ impl SymbolRequestHandler {
             now_ms,
         )?;
 
+        // Debit the budget so subsequent requests within the same window
+        // see the cumulative usage (check_admission only validates, it does
+        // not record).
+        admission.record_bytes(peer, estimated_response_bytes, now_ms);
+        admission.record_symbols(peer, max_response_symbols, now_ms);
+
         // Check anti-amplification for large requests
         let has_proof_of_need = request.has_proof_of_need();
         if max_response_symbols > self.policy.require_proof_of_need_above

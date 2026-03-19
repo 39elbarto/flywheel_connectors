@@ -3550,7 +3550,9 @@ mod tests {
                 );
 
                 StoreLogData {
-                    symbol_count: Some(u32::try_from(plan.actions.len() + plan.deferred.len()).unwrap_or(u32::MAX)),
+                    symbol_count: Some(
+                        u32::try_from(plan.actions.len() + plan.deferred.len()).unwrap_or(u32::MAX),
+                    ),
                     details: Some(json!({
                         "selected": plan.actions.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
                         "deferred": plan.deferred.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),

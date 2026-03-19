@@ -142,7 +142,7 @@ impl StreamHealthTracker {
 
     /// Record that the connection was lost and reconnection started.
     pub const fn record_disconnect(&mut self) {
-        self.reconnect_count += 1;
+        self.reconnect_count = self.reconnect_count.saturating_add(1);
         self.connected_since = None;
         if self.reconnect_count > self.config.max_reconnect_attempts {
             self.state = StreamHealthState::Unhealthy;

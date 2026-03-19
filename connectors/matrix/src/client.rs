@@ -199,7 +199,7 @@ impl MatrixClient {
             query.append_pair("dir", "b");
             query.append_pair("limit", &limit.to_string());
             if let Some(from_token) = from {
-                query.append_pair("from", &url_encode_param(from_token));
+                query.append_pair("from", from_token);
             }
         }
         self.api_get(url.as_str()).await
@@ -219,7 +219,7 @@ impl MatrixClient {
             let mut query = url.query_pairs_mut();
             query.append_pair("timeout", &timeout_ms.to_string());
             if let Some(since_token) = since {
-                query.append_pair("since", &url_encode_param(since_token));
+                query.append_pair("since", since_token);
             }
         }
         self.api_get(url.as_str()).await
@@ -337,25 +337,6 @@ fn urlencoded(s: &str) -> String {
     out
 }
 
-/// Percent-encode a query parameter value to prevent injection of extra
-/// query parameters via crafted pagination tokens.  Applied as a
-/// defense-in-depth layer *before* values are passed to
-/// `Url::query_pairs_mut().append_pair()`.
-pub(crate) fn url_encode_param(s: &str) -> String {
-    let mut encoded = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push_str(&format!("%{byte:02X}"));
-            }
-        }
-    }
-    encoded
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,26 +371,6 @@ mod tests {
     fn urlencoded_room_id() {
         let encoded = urlencoded("!room:matrix.org");
         assert_eq!(encoded, "%21room%3Amatrix.org");
-    }
-
-    #[test]
-    fn url_encode_param_passthrough_safe_chars() {
-        assert_eq!(url_encode_param("abc123"), "abc123");
-        assert_eq!(url_encode_param("a-b_c.d~e"), "a-b_c.d~e");
-    }
-
-    #[test]
-    fn url_encode_param_encodes_ampersand() {
-        // An attacker-supplied token like "tok&admin=true" must not inject parameters.
-        let encoded = url_encode_param("tok&admin=true");
-        assert_eq!(encoded, "tok%26admin%3Dtrue");
-        assert!(!encoded.contains('&'));
-    }
-
-    #[test]
-    fn url_encode_param_encodes_special_chars() {
-        let encoded = url_encode_param("a/b+c==");
-        assert_eq!(encoded, "a%2Fb%2Bc%3D%3D");
     }
 
     #[fcp_async_core::runtime::test]

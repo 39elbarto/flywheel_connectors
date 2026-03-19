@@ -19,6 +19,21 @@ use crate::{
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const JSON_CONTENT_TYPE: &str = "application/json";
 
+/// Encode a single OAuth credential component using Appendix B
+/// `application/x-www-form-urlencoded` rules.
+///
+/// RFC 6749 Section 2.3.1 requires this encoding before concatenating
+/// `client_id:client_secret` for HTTP Basic auth. This is not plain RFC 3986
+/// percent-encoding because spaces must become `+`.
+fn form_encode(s: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("", s)
+        .finish()
+        .strip_prefix('=')
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// OAuth authentication style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthStyle {
@@ -439,10 +454,12 @@ impl OAuth2Client {
 
         match self.config.auth_style {
             AuthStyle::Basic => {
+                // RFC 6749 Section 2.3.1: client_id and client_secret MUST be
+                // URL-encoded before concatenation with ':' in Basic auth.
                 let credentials = format!(
                     "{}:{}",
-                    self.config.client_id,
-                    self.config.client_secret.as_deref().unwrap_or("")
+                    form_encode(&self.config.client_id),
+                    form_encode(self.config.client_secret.as_deref().unwrap_or(""))
                 );
                 headers.push((
                     "Authorization".to_string(),
@@ -1686,6 +1703,49 @@ mod tests {
             let config = OAuth2Config::new(
                 "id",
                 "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_auth_style(AuthStyle::Basic);
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client.exchange_code("code").await.unwrap();
+            assert_eq!(tokens.access_token(), "basic-tok");
+        });
+    }
+
+    #[test]
+    fn test_form_encode_rfc6749_basic_auth() {
+        // RFC 6749 Appendix B uses form encoding, so spaces become `+`.
+        assert_eq!(form_encode("simple"), "simple");
+        assert_eq!(form_encode("id:with:colons"), "id%3Awith%3Acolons");
+        assert_eq!(form_encode("secret with spaces"), "secret+with+spaces");
+        assert_eq!(form_encode("a+b&c=d"), "a%2Bb%26c%3Dd");
+        assert_eq!(form_encode(""), "");
+    }
+
+    #[test]
+    fn test_basic_auth_style_form_encodes_credentials_before_base64() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            let expected_credentials = STANDARD.encode("client+id:secret+value%2B");
+
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(wiremock::matchers::header(
+                    "Authorization",
+                    format!("Basic {expected_credentials}"),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "basic-tok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "client id",
+                "secret value+",
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )

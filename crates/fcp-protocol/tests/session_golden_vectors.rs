@@ -308,7 +308,9 @@ fn test_generate_key_schedule_vector() {
 
     let (initiator, responder) = fixed_node_ids();
     let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
-    let shared = initiator_eph.diffie_hellman(&responder_eph.public_key()).unwrap();
+    let shared = initiator_eph
+        .diffie_hellman(&responder_eph.public_key())
+        .unwrap();
 
     let session_id = MeshSessionId(SESSION_ID);
     let hello_nonce = SessionNonce(HELLO_NONCE);
@@ -363,7 +365,9 @@ fn test_generate_mac_vectors() {
 
     let (initiator, responder) = fixed_node_ids();
     let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
-    let shared = initiator_eph.diffie_hellman(&responder_eph.public_key()).unwrap();
+    let shared = initiator_eph
+        .diffie_hellman(&responder_eph.public_key())
+        .unwrap();
     let session_id = MeshSessionId(SESSION_ID);
     let keys = derive_session_keys(
         &shared,
@@ -1292,7 +1296,9 @@ mod key_derivation_tests {
 
         let (initiator, responder) = fixed_node_ids();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
-        let shared = initiator_eph.diffie_hellman(&responder_eph.public_key()).unwrap();
+        let shared = initiator_eph
+            .diffie_hellman(&responder_eph.public_key())
+            .unwrap();
         let session_id = MeshSessionId(SESSION_ID);
         let hello_nonce = SessionNonce(HELLO_NONCE);
         let ack_nonce = SessionNonce(ACK_NONCE);
@@ -1331,7 +1337,9 @@ mod key_derivation_tests {
 
         let (initiator, responder) = fixed_node_ids();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
-        let shared = initiator_eph.diffie_hellman(&responder_eph.public_key()).unwrap();
+        let shared = initiator_eph
+            .diffie_hellman(&responder_eph.public_key())
+            .unwrap();
         let session_id = MeshSessionId(SESSION_ID);
 
         let keys = derive_session_keys(
@@ -1363,7 +1371,9 @@ mod key_derivation_tests {
 
         let (initiator, responder) = fixed_node_ids();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
-        let shared = initiator_eph.diffie_hellman(&responder_eph.public_key()).unwrap();
+        let shared = initiator_eph
+            .diffie_hellman(&responder_eph.public_key())
+            .unwrap();
 
         let keys1 = derive_session_keys(
             &shared,
@@ -1398,7 +1408,9 @@ mod key_derivation_tests {
 
         let (initiator, responder) = fixed_node_ids();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
-        let shared = initiator_eph.diffie_hellman(&responder_eph.public_key()).unwrap();
+        let shared = initiator_eph
+            .diffie_hellman(&responder_eph.public_key())
+            .unwrap();
         let session_id = MeshSessionId(SESSION_ID);
 
         let keys1 = derive_session_keys(

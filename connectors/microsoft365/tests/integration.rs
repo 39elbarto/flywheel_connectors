@@ -33,13 +33,42 @@ use fcp_microsoft365::connector::M365Connector;
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn capability_for_operation(op: &str) -> &str {
+    match op {
+        "m365.mail.send_message" | "m365.mail.reply_message" | "m365.mail.forward_message" => {
+            "m365.mail.send"
+        }
+        "m365.mail.create_draft" | "m365.mail.add_attachment" => "m365.mail.write",
+        "m365.files.upload_file" | "m365.files.delete_item" | "m365.files.create_share_link" => {
+            "m365.files.write"
+        }
+        "m365.word.create_document" | "m365.word.update_document" => "m365.word.write",
+        "m365.onenote.create_page" | "m365.onenote.update_page" => "m365.onenote.write",
+        "m365.calendar.create_event"
+        | "m365.calendar.delete_event"
+        | "m365.calendar.update_event" => "m365.calendar.write",
+        "m365.tasks.create_task" => "m365.tasks.write",
+        "m365.subscriptions.create" | "m365.subscriptions.renew" | "m365.subscriptions.delete" => {
+            "m365.subscriptions.write"
+        }
+        "m365.delta.sync" => "m365.delta.read",
+        _ if op.starts_with("m365.mail.") => "m365.mail.read",
+        _ if op.starts_with("m365.files.") => "m365.files.read",
+        _ if op.starts_with("m365.word.") => "m365.word.read",
+        _ if op.starts_with("m365.onenote.") => "m365.onenote.read",
+        _ if op.starts_with("m365.calendar.") => "m365.calendar.read",
+        _ if op.starts_with("m365.tasks.") => "m365.tasks.read",
+        _ => "m365.mail.read",
+    }
+}
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
-        .capability_id(cap)
+        .capability_id(capability_for_operation(op))
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -57,6 +86,10 @@ async fn setup_handshake(connector: &mut M365Connector, caps: &[&str]) -> Ed2551
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
     let zone_dir = unique_zone_dir("handshake");
+    let requested_caps = caps
+        .iter()
+        .map(|cap| capability_for_operation(cap))
+        .collect::<Vec<_>>();
 
     connector
         .handle_handshake(json!({
@@ -65,7 +98,7 @@ async fn setup_handshake(connector: &mut M365Connector, caps: &[&str]) -> Ed2551
             "zone_dir": zone_dir,
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": caps
+            "capabilities_requested": requested_caps
         }))
         .await
         .expect("handshake should succeed");

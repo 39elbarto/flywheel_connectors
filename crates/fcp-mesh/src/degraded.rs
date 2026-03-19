@@ -63,9 +63,17 @@ pub enum DegradedTransportError {
     #[error("retention violation: Required object was not stored")]
     RetentionViolation,
 
+    /// Envelope epoch contradicted the requested transport epoch.
+    #[error("epoch id mismatch: envelope={envelope}, requested={requested}")]
+    EpochMismatch { envelope: u64, requested: u64 },
+
     /// Frame missing CONTROL_PLANE flag.
     #[error("frame missing CONTROL_PLANE flag")]
     MissingControlPlaneFlag,
+
+    /// CONTROL_PLANE frame carried no symbols.
+    #[error("control-plane frame contains no symbols")]
+    EmptyControlPlaneFrame,
 
     /// Zone ID hash mismatch.
     #[error("zone id hash mismatch: expected {expected:?}, got {got:?}")]
@@ -164,6 +172,13 @@ impl DegradedModeEncoder {
         envelope: &ControlPlaneEnvelope,
         epoch_id: u64,
     ) -> Result<Vec<FcpsFrame>, DegradedTransportError> {
+        if epoch_id != envelope.epoch_id {
+            return Err(DegradedTransportError::EpochMismatch {
+                envelope: envelope.epoch_id,
+                requested: epoch_id,
+            });
+        }
+
         info!(
             object_id = %envelope.object_id,
             zone_id = %envelope.zone_id,
@@ -270,8 +285,36 @@ impl DegradedModeEncoder {
 /// reconstruction is possible.
 pub struct DegradedModeDecoder {
     config: RaptorQConfig,
-    /// In-progress reconstructions keyed by object ID.
-    pending: HashMap<ObjectId, PendingReconstruction>,
+    /// In-progress reconstructions keyed by object + transport context.
+    pending: HashMap<PendingReconstructionKey, PendingReconstruction>,
+}
+
+/// Identity for an in-flight degraded-mode reconstruction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PendingReconstructionKey {
+    object_id: ObjectId,
+    zone_id_hash: ZoneIdHash,
+    zone_key_id: ZoneKeyId,
+    epoch_id: u64,
+    symbol_size: u16,
+}
+
+impl PendingReconstructionKey {
+    #[must_use]
+    fn from_frame(frame: &FcpsFrame) -> Self {
+        Self {
+            object_id: frame.header.object_id.clone(),
+            zone_id_hash: frame.header.zone_id_hash,
+            zone_key_id: frame.header.zone_key_id.clone(),
+            epoch_id: frame.header.epoch_id,
+            symbol_size: frame.header.symbol_size,
+        }
+    }
+
+    #[must_use]
+    fn matches_object_id(&self, object_id: &ObjectId) -> bool {
+        &self.object_id == object_id
+    }
 }
 
 /// In-progress object reconstruction.
@@ -310,28 +353,7 @@ impl DegradedModeDecoder {
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
     ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
-        let expected_hash = expected_zone_id.hash();
-        if frame.header.zone_id_hash != expected_hash {
-            warn!(
-                object_id = %frame.header.object_id,
-                expected = %hex::encode(expected_hash.as_ref()),
-                got = %hex::encode(frame.header.zone_id_hash.as_ref()),
-                "degraded_mode: zone id hash mismatch"
-            );
-            return Err(DegradedTransportError::ZoneMismatch {
-                expected: expected_hash,
-                got: frame.header.zone_id_hash,
-            });
-        }
-        // Verify CONTROL_PLANE flag
-        if !frame.header.flags.contains(FrameFlags::CONTROL_PLANE) {
-            warn!(
-                object_id = %frame.header.object_id,
-                "degraded_mode: received frame without CONTROL_PLANE flag"
-            );
-            return Err(DegradedTransportError::MissingControlPlaneFlag);
-        }
-
+        self.validate_control_plane_frame(frame, expected_zone_id)?;
         debug!(
             object_id = %frame.header.object_id,
             symbol_count = frame.symbols.len(),
@@ -339,93 +361,19 @@ impl DegradedModeDecoder {
             "degraded_mode: processing CONTROL_PLANE frame"
         );
 
-        let object_id = frame.header.object_id.clone();
+        let pending_key = PendingReconstructionKey::from_frame(frame);
+        let object_id = pending_key.object_id.clone();
+        let completed_payload = {
+            let pending = self.pending.entry(pending_key.clone()).or_insert_with(|| {
+                Self::new_pending_reconstruction(frame, expected_zone_id, retention, &self.config)
+            });
+            Self::decode_symbols(&mut pending.decoder, &frame.symbols)?
+        };
 
-        // Get or create pending reconstruction
-        let pending = self.pending.entry(object_id.clone()).or_insert_with(|| {
-            // Estimate transfer length from first frame
-            // In practice, would get this from a manifest or first symbol K value
-            let k = frame.symbols.first().map_or(1, |s| s.k);
-            let transfer_length = u64::from(k) * u64::from(frame.header.symbol_size);
-
-            PendingReconstruction {
-                decoder: RaptorQDecoder::with_expected_symbols(
-                    u32::from(k),
-                    transfer_length,
-                    frame.header.symbol_size,
-                    &self.config,
-                ),
-                zone_id: expected_zone_id.clone(),
-                zone_key_id: frame.header.zone_key_id.clone(),
-                retention,
-            }
-        });
-
-        // Feed symbols to decoder
-        for symbol in &frame.symbols {
-            // In production, would verify auth_tag here after AEAD decryption
-            if let Some(payload) = pending
-                .decoder
-                .add_symbol(symbol.esi, symbol.data.clone())?
-            {
-                // Reconstruction complete! We know it exists because we just got a mutable ref to it above
-                let pending = self
-                    .pending
-                    .remove(&object_id)
-                    .expect("pending reconstruction missing during decode");
-
-                // Parse length prefix, schema hash, and payload
-                // Wire format: length(4 bytes) || schema_hash(32 bytes) || payload
-                if payload.len() < 36 {
-                    warn!(
-                        object_id = %object_id,
-                        payload_len = payload.len(),
-                        "degraded_mode: reconstructed payload too short for header"
-                    );
-                    return Err(DegradedTransportError::Decode(DecodeError::Timeout));
-                }
-
-                let payload_len =
-                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-
-                let mut schema_hash = [0u8; 32];
-                schema_hash.copy_from_slice(&payload[4..36]);
-
-                // Extract exactly payload_len bytes (ignoring RaptorQ padding)
-                let object_payload = if 36 + payload_len <= payload.len() {
-                    payload[36..36 + payload_len].to_vec()
-                } else {
-                    warn!(
-                        object_id = %object_id,
-                        expected_len = payload_len,
-                        actual_len = payload.len().saturating_sub(36),
-                        "degraded_mode: payload length mismatch"
-                    );
-                    return Err(DegradedTransportError::Decode(DecodeError::Timeout));
-                };
-
-                info!(
-                    object_id = %object_id,
-                    zone_id = %pending.zone_id,
-                    retention = ?pending.retention,
-                    payload_len = object_payload.len(),
-                    "degraded_mode: control-plane object reconstruction complete"
-                );
-
-                return Ok(Some(ControlPlaneEnvelope {
-                    payload: object_payload,
-                    schema_hash,
-                    object_id,
-                    zone_id: pending.zone_id,
-                    zone_key_id: pending.zone_key_id,
-                    epoch_id: frame.header.epoch_id,
-                    retention: pending.retention,
-                }));
-            }
-        }
-
-        // Not yet complete
-        Ok(None)
+        completed_payload.map_or(Ok(None), |payload| {
+            self.finish_reconstruction(&pending_key, &object_id, frame, &payload)
+                .map(Some)
+        })
     }
 
     /// Process a signed FCPS frame for degraded/bootstrap mode.
@@ -465,22 +413,175 @@ impl DegradedModeDecoder {
     /// Get decode status for a pending object.
     #[must_use]
     pub fn get_status(&self, object_id: &ObjectId) -> Option<DecodeStatusInfo> {
-        self.pending.get(object_id).map(|p| DecodeStatusInfo {
-            received: p.decoder.received_count(),
-            needed: p.decoder.needed(),
-            likely_complete: p.decoder.likely_complete(),
-        })
+        self.pending
+            .iter()
+            .filter(|(key, _)| key.matches_object_id(object_id))
+            .map(|(_, pending)| DecodeStatusInfo {
+                received: pending.decoder.received_count(),
+                needed: pending.decoder.needed(),
+                likely_complete: pending.decoder.likely_complete(),
+            })
+            .max_by(|left, right| {
+                left.likely_complete
+                    .cmp(&right.likely_complete)
+                    .then(left.received.cmp(&right.received))
+                    .then(right.needed.cmp(&left.needed))
+            })
     }
 
-    /// Clear a pending reconstruction (e.g., on timeout).
+    /// Clear all pending reconstructions for an object ID (e.g., on timeout).
     pub fn clear_pending(&mut self, object_id: &ObjectId) -> bool {
-        self.pending.remove(object_id).is_some()
+        let matching_keys: Vec<_> = self
+            .pending
+            .keys()
+            .filter(|key| key.matches_object_id(object_id))
+            .cloned()
+            .collect();
+        let cleared = !matching_keys.is_empty();
+        for key in matching_keys {
+            self.pending.remove(&key);
+        }
+        cleared
     }
 
     /// Get number of pending reconstructions.
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    fn validate_control_plane_frame(
+        &self,
+        frame: &FcpsFrame,
+        expected_zone_id: &ZoneId,
+    ) -> Result<(), DegradedTransportError> {
+        let expected_hash = expected_zone_id.hash();
+        if frame.header.zone_id_hash != expected_hash {
+            warn!(
+                object_id = %frame.header.object_id,
+                expected = %hex::encode(expected_hash.as_ref()),
+                got = %hex::encode(frame.header.zone_id_hash.as_ref()),
+                "degraded_mode: zone id hash mismatch"
+            );
+            return Err(DegradedTransportError::ZoneMismatch {
+                expected: expected_hash,
+                got: frame.header.zone_id_hash,
+            });
+        }
+        if !frame.header.flags.contains(FrameFlags::CONTROL_PLANE) {
+            warn!(
+                object_id = %frame.header.object_id,
+                "degraded_mode: received frame without CONTROL_PLANE flag"
+            );
+            return Err(DegradedTransportError::MissingControlPlaneFlag);
+        }
+        if frame.symbols.is_empty() {
+            warn!(
+                object_id = %frame.header.object_id,
+                frame_seq = frame.header.frame_seq,
+                "degraded_mode: received empty CONTROL_PLANE frame"
+            );
+            return Err(DegradedTransportError::EmptyControlPlaneFrame);
+        }
+        Ok(())
+    }
+
+    fn new_pending_reconstruction(
+        frame: &FcpsFrame,
+        expected_zone_id: &ZoneId,
+        retention: RetentionClass,
+        config: &RaptorQConfig,
+    ) -> PendingReconstruction {
+        let k = frame.symbols[0].k;
+        let transfer_length = u64::from(k) * u64::from(frame.header.symbol_size);
+
+        PendingReconstruction {
+            decoder: RaptorQDecoder::with_expected_symbols(
+                u32::from(k),
+                transfer_length,
+                frame.header.symbol_size,
+                config,
+            ),
+            zone_id: expected_zone_id.clone(),
+            zone_key_id: frame.header.zone_key_id.clone(),
+            retention,
+        }
+    }
+
+    fn decode_symbols(
+        decoder: &mut RaptorQDecoder,
+        symbols: &[SymbolRecord],
+    ) -> Result<Option<Vec<u8>>, DegradedTransportError> {
+        for symbol in symbols {
+            // In production, would verify auth_tag here after AEAD decryption.
+            if let Some(payload) = decoder.add_symbol(symbol.esi, symbol.data.clone())? {
+                return Ok(Some(payload));
+            }
+        }
+        Ok(None)
+    }
+
+    fn finish_reconstruction(
+        &mut self,
+        pending_key: &PendingReconstructionKey,
+        object_id: &ObjectId,
+        frame: &FcpsFrame,
+        payload: &[u8],
+    ) -> Result<ControlPlaneEnvelope, DegradedTransportError> {
+        let pending = self
+            .pending
+            .remove(pending_key)
+            .expect("pending reconstruction missing during decode");
+        let (schema_hash, object_payload) = Self::parse_reconstructed_payload(object_id, payload)?;
+
+        info!(
+            object_id = %object_id,
+            zone_id = %pending.zone_id,
+            retention = ?pending.retention,
+            payload_len = object_payload.len(),
+            "degraded_mode: control-plane object reconstruction complete"
+        );
+
+        Ok(ControlPlaneEnvelope {
+            payload: object_payload,
+            schema_hash,
+            object_id: object_id.clone(),
+            zone_id: pending.zone_id,
+            zone_key_id: pending.zone_key_id,
+            epoch_id: frame.header.epoch_id,
+            retention: pending.retention,
+        })
+    }
+
+    fn parse_reconstructed_payload(
+        object_id: &ObjectId,
+        payload: &[u8],
+    ) -> Result<([u8; 32], Vec<u8>), DegradedTransportError> {
+        if payload.len() < 36 {
+            warn!(
+                object_id = %object_id,
+                payload_len = payload.len(),
+                "degraded_mode: reconstructed payload too short for header"
+            );
+            return Err(DegradedTransportError::Decode(DecodeError::Timeout));
+        }
+
+        let payload_len =
+            u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        let mut schema_hash = [0u8; 32];
+        schema_hash.copy_from_slice(&payload[4..36]);
+
+        if 36 + payload_len > payload.len() {
+            warn!(
+                object_id = %object_id,
+                expected_len = payload_len,
+                actual_len = payload.len().saturating_sub(36),
+                "degraded_mode: payload length mismatch"
+            );
+            return Err(DegradedTransportError::Decode(DecodeError::Timeout));
+        }
+
+        Ok((schema_hash, payload[36..36 + payload_len].to_vec()))
     }
 }
 
@@ -678,6 +779,24 @@ mod tests {
         }
     }
 
+    fn frame_with_symbols(frame: &FcpsFrame, symbols: Vec<SymbolRecord>) -> FcpsFrame {
+        let total_payload_len = symbols
+            .iter()
+            .try_fold(0u32, |acc, symbol| {
+                let wire_size =
+                    u32::try_from(symbol.wire_size()).expect("symbol wire size should fit in u32");
+                acc.checked_add(wire_size)
+                    .ok_or("payload length should fit in u32")
+            })
+            .expect("payload length should fit in u32");
+
+        let mut header = frame.header.clone();
+        header.symbol_count = u32::try_from(symbols.len()).expect("symbol count should fit in u32");
+        header.total_payload_len = total_payload_len;
+
+        FcpsFrame { header, symbols }
+    }
+
     #[test]
     fn encoder_creates_frames_with_control_plane_flag() {
         let config = test_config();
@@ -802,6 +921,37 @@ mod tests {
             result,
             Err(DegradedTransportError::ZoneMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn decoder_rejects_empty_control_plane_frame() {
+        let config = test_config();
+        let mut decoder = DegradedModeDecoder::new(config);
+        let zone_id = test_zone_id();
+
+        let frame = FcpsFrame {
+            header: FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+                symbol_count: 0,
+                total_payload_len: 0,
+                object_id: ObjectId::from_bytes([0xEE; 32]),
+                symbol_size: 64,
+                zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+                zone_id_hash: zone_id.hash(),
+                epoch_id: 0,
+                sender_instance_id: 0,
+                frame_seq: 0,
+            },
+            symbols: vec![],
+        };
+
+        let result = decoder.process_frame(&frame, &zone_id, RetentionClass::Required);
+        assert!(matches!(
+            result,
+            Err(DegradedTransportError::EmptyControlPlaneFrame)
+        ));
+        assert_eq!(decoder.pending_count(), 0);
     }
 
     #[test]
@@ -1056,6 +1206,18 @@ mod tests {
     }
 
     #[test]
+    fn error_display_epoch_mismatch() {
+        let e = DegradedTransportError::EpochMismatch {
+            envelope: 7,
+            requested: 8,
+        };
+        let s = e.to_string();
+        assert!(s.contains("epoch id mismatch"));
+        assert!(s.contains('7'));
+        assert!(s.contains('8'));
+    }
+
+    #[test]
     fn error_display_missing_control_plane_flag() {
         let e = DegradedTransportError::MissingControlPlaneFlag;
         assert!(e.to_string().contains("CONTROL_PLANE"));
@@ -1084,7 +1246,12 @@ mod tests {
         let errors: Vec<DegradedTransportError> = vec![
             DegradedTransportError::ObjectIdMismatch,
             DegradedTransportError::RetentionViolation,
+            DegradedTransportError::EpochMismatch {
+                envelope: 0,
+                requested: 1,
+            },
             DegradedTransportError::MissingControlPlaneFlag,
+            DegradedTransportError::EmptyControlPlaneFrame,
             DegradedTransportError::SignatureVerificationFailed,
             DegradedTransportError::Incomplete {
                 received: 1,
@@ -1111,6 +1278,26 @@ mod tests {
         let frames = encoder.encode(&envelope, 100).unwrap();
 
         assert_eq!(frames[0].header.sender_instance_id, instance_id);
+    }
+
+    #[test]
+    fn encoder_rejects_epoch_mismatch() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config, 1);
+
+        let mut envelope = test_envelope();
+        envelope.epoch_id = 7;
+
+        let err = encoder
+            .encode(&envelope, 8)
+            .expect_err("mismatched epoch should fail");
+        assert!(matches!(
+            err,
+            DegradedTransportError::EpochMismatch {
+                envelope: 7,
+                requested: 8
+            }
+        ));
     }
 
     #[test]
@@ -1286,6 +1473,47 @@ mod tests {
 
         // clear_pending should work
         assert!(decoder.clear_pending(&ObjectId::from_bytes([0x55; 32])));
+        assert_eq!(decoder.pending_count(), 0);
+    }
+
+    #[test]
+    fn decoder_tracks_same_object_across_epochs_independently() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config.clone(), 1);
+        let mut decoder = DegradedModeDecoder::new(config);
+
+        let envelope = test_envelope();
+        let zone_id = envelope.zone_id.clone();
+
+        let frame_epoch_10 = encoder.encode(&envelope, 10).unwrap().remove(0);
+        let frame_epoch_11 = encoder.encode(&envelope, 11).unwrap().remove(0);
+
+        assert!(
+            frame_epoch_10.symbols.len() >= 2,
+            "test requires multiple symbols to stay incomplete"
+        );
+
+        let partial_epoch_10 =
+            frame_with_symbols(&frame_epoch_10, frame_epoch_10.symbols[..1].to_vec());
+        let partial_epoch_11 =
+            frame_with_symbols(&frame_epoch_11, frame_epoch_11.symbols[..1].to_vec());
+
+        assert!(
+            decoder
+                .process_frame(&partial_epoch_10, &zone_id, RetentionClass::Required)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decoder
+                .process_frame(&partial_epoch_11, &zone_id, RetentionClass::Required)
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(decoder.pending_count(), 2);
+        assert!(decoder.get_status(&envelope.object_id).is_some());
+        assert!(decoder.clear_pending(&envelope.object_id));
         assert_eq!(decoder.pending_count(), 0);
     }
 
@@ -1993,6 +2221,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(signed_frames[0].source_id, source_id);
+    }
+
+    #[test]
+    fn signed_frame_rejects_epoch_mismatch() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config, 1);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut env = test_envelope();
+        env.epoch_id = 3;
+        let source_id = TailscaleNodeId::new("node-epoch-mismatch");
+
+        let err = encoder
+            .encode_signed(&env, 4, &source_id, 1000, &signing_key)
+            .expect_err("mismatched epoch should fail");
+        assert!(matches!(
+            err,
+            DegradedTransportError::EpochMismatch {
+                envelope: 3,
+                requested: 4
+            }
+        ));
     }
 
     #[test]

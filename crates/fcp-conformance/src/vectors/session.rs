@@ -361,8 +361,12 @@ mod tests {
         let initiator_sk = X25519SecretKey::from_bytes(initiator_sk_bytes);
         let responder_sk = X25519SecretKey::from_bytes(responder_sk_bytes);
 
-        let shared1 = initiator_sk.diffie_hellman(&responder_sk.public_key()).unwrap();
-        let shared2 = responder_sk.diffie_hellman(&initiator_sk.public_key()).unwrap();
+        let shared1 = initiator_sk
+            .diffie_hellman(&responder_sk.public_key())
+            .unwrap();
+        let shared2 = responder_sk
+            .diffie_hellman(&initiator_sk.public_key())
+            .unwrap();
 
         assert_eq!(
             shared1.as_bytes(),

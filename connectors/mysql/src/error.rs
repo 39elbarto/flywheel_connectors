@@ -201,8 +201,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http_error_is_retryable() {
-        // reqwest errors are retryable by default
+    fn connection_error_is_retryable() {
         let err = MysqlError::Connection("connection refused".into());
         assert!(err.is_retryable());
     }

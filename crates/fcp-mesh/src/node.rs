@@ -737,10 +737,12 @@ impl MeshNode {
     /// Returns `MeshNodeEnforcementError::ReceiptValidation` if binding fails.
     pub fn validate_receipt_binding(
         &self,
+        receipt_id: ObjectId,
         receipt: &OperationReceipt,
+        intent_id: ObjectId,
         intent: &OperationIntent,
     ) -> Result<(), MeshNodeEnforcementError> {
-        fcp_core::validate_receipt_intent_binding(receipt, intent)?;
+        fcp_core::validate_receipt_intent_binding(receipt_id, receipt, intent_id, intent)?;
         Ok(())
     }
 
@@ -1160,6 +1162,8 @@ impl MeshNode {
     }
 
     /// Encode a control-plane envelope for degraded transport.
+    /// `epoch_id` is the transport epoch written into the degraded FCPS frame
+    /// headers.
     ///
     /// # Errors
     ///

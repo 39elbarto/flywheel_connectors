@@ -63,10 +63,6 @@ pub enum DegradedTransportError {
     #[error("retention violation: Required object was not stored")]
     RetentionViolation,
 
-    /// Envelope epoch contradicted the requested transport epoch.
-    #[error("epoch id mismatch: envelope={envelope}, requested={requested}")]
-    EpochMismatch { envelope: u64, requested: u64 },
-
     /// Frame missing CONTROL_PLANE flag.
     #[error("frame missing CONTROL_PLANE flag")]
     MissingControlPlaneFlag,
@@ -163,6 +159,9 @@ impl DegradedModeEncoder {
     /// Encode a control-plane object into FCPS frames.
     ///
     /// Returns one or more FCPS frames with `CONTROL_PLANE` flag set.
+    /// The `epoch_id` argument is the authoritative transport epoch to write
+    /// into the FCPS header; the envelope's stored `epoch_id` is reused only
+    /// for decoded/stored envelopes on the receiving side.
     ///
     /// # Errors
     ///
@@ -172,13 +171,6 @@ impl DegradedModeEncoder {
         envelope: &ControlPlaneEnvelope,
         epoch_id: u64,
     ) -> Result<Vec<FcpsFrame>, DegradedTransportError> {
-        if epoch_id != envelope.epoch_id {
-            return Err(DegradedTransportError::EpochMismatch {
-                envelope: envelope.epoch_id,
-                requested: epoch_id,
-            });
-        }
-
         info!(
             object_id = %envelope.object_id,
             zone_id = %envelope.zone_id,
@@ -257,7 +249,8 @@ impl DegradedModeEncoder {
 
     /// Encode and sign a control-plane object for degraded/bootstrap mode.
     ///
-    /// Use when session MACs are unavailable.
+    /// Use when session MACs are unavailable. The provided `epoch_id` is the
+    /// transport epoch written to each signed frame header.
     ///
     /// # Errors
     ///
@@ -1206,18 +1199,6 @@ mod tests {
     }
 
     #[test]
-    fn error_display_epoch_mismatch() {
-        let e = DegradedTransportError::EpochMismatch {
-            envelope: 7,
-            requested: 8,
-        };
-        let s = e.to_string();
-        assert!(s.contains("epoch id mismatch"));
-        assert!(s.contains('7'));
-        assert!(s.contains('8'));
-    }
-
-    #[test]
     fn error_display_missing_control_plane_flag() {
         let e = DegradedTransportError::MissingControlPlaneFlag;
         assert!(e.to_string().contains("CONTROL_PLANE"));
@@ -1246,10 +1227,6 @@ mod tests {
         let errors: Vec<DegradedTransportError> = vec![
             DegradedTransportError::ObjectIdMismatch,
             DegradedTransportError::RetentionViolation,
-            DegradedTransportError::EpochMismatch {
-                envelope: 0,
-                requested: 1,
-            },
             DegradedTransportError::MissingControlPlaneFlag,
             DegradedTransportError::EmptyControlPlaneFrame,
             DegradedTransportError::SignatureVerificationFailed,
@@ -1281,23 +1258,17 @@ mod tests {
     }
 
     #[test]
-    fn encoder_rejects_epoch_mismatch() {
+    fn encoder_uses_requested_epoch_even_if_envelope_differs() {
         let config = test_config();
         let mut encoder = DegradedModeEncoder::new(config, 1);
 
         let mut envelope = test_envelope();
         envelope.epoch_id = 7;
 
-        let err = encoder
+        let frames = encoder
             .encode(&envelope, 8)
-            .expect_err("mismatched epoch should fail");
-        assert!(matches!(
-            err,
-            DegradedTransportError::EpochMismatch {
-                envelope: 7,
-                requested: 8
-            }
-        ));
+            .expect("transport epoch should be authoritative");
+        assert_eq!(frames[0].header.epoch_id, 8);
     }
 
     #[test]
@@ -2224,7 +2195,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_rejects_epoch_mismatch() {
+    fn signed_frame_uses_requested_epoch_even_if_envelope_differs() {
         let config = test_config();
         let mut encoder = DegradedModeEncoder::new(config, 1);
         let signing_key = Ed25519SigningKey::generate();
@@ -2232,16 +2203,10 @@ mod tests {
         env.epoch_id = 3;
         let source_id = TailscaleNodeId::new("node-epoch-mismatch");
 
-        let err = encoder
+        let signed_frames = encoder
             .encode_signed(&env, 4, &source_id, 1000, &signing_key)
-            .expect_err("mismatched epoch should fail");
-        assert!(matches!(
-            err,
-            DegradedTransportError::EpochMismatch {
-                envelope: 3,
-                requested: 4
-            }
-        ));
+            .expect("transport epoch should be authoritative");
+        assert_eq!(signed_frames[0].frame.header.epoch_id, 4);
     }
 
     #[test]

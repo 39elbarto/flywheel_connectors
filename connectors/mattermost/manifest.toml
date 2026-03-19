@@ -422,6 +422,33 @@ min_buffer_events = 256
 
 # ── Write Operations ──
 
+[provides.operations."mattermost.create_direct_channel"]
+description = "Create or fetch the direct message channel for two Mattermost users"
+capability = "mattermost.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.create_direct_channel".input_schema]
+type = "object"
+
+[provides.operations."mattermost.create_direct_channel".output_schema]
+type = "object"
+
+[provides.operations."mattermost.create_direct_channel".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.create_direct_channel".rate_limit]
+max = 10
+per_ms = 60000
+
 [provides.operations."mattermost.create_post"]
 description = "Send a message to a channel"
 capability = "mattermost.write"
@@ -449,12 +476,93 @@ require_sni = true
 max = 30
 per_ms = 60000
 
+[provides.operations."mattermost.create_reaction"]
+description = "Add an emoji reaction to a post"
+capability = "mattermost.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.create_reaction".input_schema]
+type = "object"
+
+[provides.operations."mattermost.create_reaction".output_schema]
+type = "object"
+
+[provides.operations."mattermost.create_reaction".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.create_reaction".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."mattermost.delete_reaction"]
+description = "Remove an emoji reaction from a post"
+capability = "mattermost.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.delete_reaction".input_schema]
+type = "object"
+
+[provides.operations."mattermost.delete_reaction".output_schema]
+type = "object"
+
+[provides.operations."mattermost.delete_reaction".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.delete_reaction".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."mattermost.upload_file"]
+description = "Upload a file to a channel for later post attachment"
+capability = "mattermost.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."mattermost.upload_file".input_schema]
+type = "object"
+
+[provides.operations."mattermost.upload_file".output_schema]
+type = "object"
+
+[provides.operations."mattermost.upload_file".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.upload_file".rate_limit]
+max = 20
+per_ms = 60000
+
 [provides.operations."mattermost.delete_post"]
 description = "Delete a post (irreversible)"
 capability = "mattermost.write"
 risk_level = "high"
 safety_tier = "risky"
-requires_approval = "none"
+requires_approval = "interactive"
 idempotency = "best_effort"
 
 [provides.operations."mattermost.delete_post".input_schema]

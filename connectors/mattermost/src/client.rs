@@ -2,25 +2,51 @@
 
 use std::time::Duration;
 
+use base64::Engine as _;
+use fcp_streaming::WsConfig;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::error::{MattermostError, MattermostResult};
 use crate::types::{
-    Channel, CreatePostRequest, FileInfo, MattermostAuth, Post, PostList, SearchPostsRequest, Team,
-    User,
+    Channel, CreateDirectChannelRequest, CreatePostRequest, CreateReactionRequest,
+    DeleteReactionRequest, FileDownload, FileInfo, GetThreadRequest, MattermostAuth, Post,
+    PostList, Reaction, SearchPostsRequest, Team, UploadFileRequest, UploadFileResponse, User,
 };
 
+const CREDENTIAL_ID_HEADER: &str = "x-fcp-credential-id";
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
 /// HTTP client for the Mattermost REST API v4.
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct MattermostClient {
     client: Client,
     base_url: String,
     /// Retained for credential refresh and diagnostics.
-    #[allow(dead_code)]
     auth: MattermostAuth,
+    timeout: Duration,
+}
+
+impl std::fmt::Debug for MattermostClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let auth_mode = match &self.auth {
+            MattermostAuth::Token(_) => "token",
+            MattermostAuth::CredentialId(_) => "credential_id",
+        };
+        f.debug_struct("MattermostClient")
+            .field("base_url", &self.base_url)
+            .field("auth_mode", &auth_mode)
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MattermostClient {
@@ -31,13 +57,7 @@ impl MattermostClient {
     /// Returns an error if the token header is invalid or the HTTP client cannot be built.
     pub fn new(base_url: &str, auth: MattermostAuth, timeout: Duration) -> MattermostResult<Self> {
         let mut headers = HeaderMap::new();
-        if let MattermostAuth::Token(ref token) = auth {
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {token}"))
-                    .map_err(|e| MattermostError::Config(format!("invalid token header: {e}")))?,
-            );
-        }
+        append_auth_headers(&mut headers, &auth)?;
 
         let client = Client::builder()
             .timeout(timeout)
@@ -51,6 +71,7 @@ impl MattermostClient {
             client,
             base_url,
             auth,
+            timeout,
         })
     }
 
@@ -67,6 +88,29 @@ impl MattermostClient {
             MattermostAuth::Token(token) => Some(token.as_str()),
             MattermostAuth::CredentialId(_) => None,
         }
+    }
+
+    /// Websocket configuration matching the connector's auth mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an auth header cannot be encoded.
+    pub fn websocket_config(&self) -> MattermostResult<WsConfig> {
+        let mut config = WsConfig::new()
+            .with_connect_timeout(self.timeout)
+            .with_ping_interval(None)
+            .with_auto_reconnect(false);
+
+        config = match &self.auth {
+            MattermostAuth::Token(token) => {
+                config.with_header(AUTHORIZATION.as_str(), format!("Bearer {token}"))
+            }
+            MattermostAuth::CredentialId(credential_id) => {
+                config.with_header(CREDENTIAL_ID_HEADER, credential_id.clone())
+            }
+        };
+
+        Ok(config)
     }
 
     /// Build the websocket endpoint URL for the current server.
@@ -94,9 +138,11 @@ impl MattermostClient {
 
         let mut url = reqwest::Url::parse(&websocket_base)
             .map_err(|e| MattermostError::Config(format!("invalid websocket URL: {e}")))?;
-        {
+        let connection_id = connection_id.filter(|id| !id.is_empty());
+        let sequence_number = sequence_number.filter(|seq| *seq > 0);
+        if connection_id.is_some() || sequence_number.is_some() {
             let mut query = url.query_pairs_mut();
-            if let Some(connection_id) = connection_id.filter(|id| !id.is_empty()) {
+            if let Some(connection_id) = connection_id {
                 query.append_pair("connection_id", connection_id);
             }
             if let Some(sequence_number) = sequence_number {
@@ -112,9 +158,11 @@ impl MattermostClient {
     pub fn file_access_paths(&self, file_id: &str) -> serde_json::Value {
         let base = format!("{}/api/v4/files/{file_id}", self.base_url);
         serde_json::json!({
-            "download_url": format!("{base}?download=true"),
-            "preview_url": format!("{base}/preview?download=true"),
-            "thumbnail_url": format!("{base}/thumbnail?download=true")
+            "download_url": base,
+            "info_url": format!("{base}/info"),
+            "link_url": format!("{base}/link"),
+            "preview_url": format!("{base}/preview"),
+            "thumbnail_url": format!("{base}/thumbnail")
         })
     }
 
@@ -187,6 +235,19 @@ impl MattermostClient {
         self.get(&format!("/api/v4/channels/{channel_id}")).await
     }
 
+    /// Create or fetch the direct channel for the provided user pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the server rejects the user ID list.
+    pub async fn create_direct_channel(
+        &self,
+        request: &CreateDirectChannelRequest,
+    ) -> MattermostResult<Channel> {
+        self.post("/api/v4/channels/direct", &request.user_ids)
+            .await
+    }
+
     // ── Posts ─────────────────────────────────────────────────────────────
 
     /// Create a new post.
@@ -205,6 +266,16 @@ impl MattermostClient {
     /// Returns an error on HTTP failure or if the post is not found.
     pub async fn get_post(&self, post_id: &str) -> MattermostResult<Post> {
         self.get(&format!("/api/v4/posts/{post_id}")).await
+    }
+
+    /// Get the thread containing the given root or child post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the post is not found.
+    pub async fn get_thread(&self, req: &GetThreadRequest) -> MattermostResult<PostList> {
+        let url = self.thread_url(req)?;
+        self.get_url(url).await
     }
 
     /// Get posts in a channel (paginated).
@@ -244,30 +315,29 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the post is not found or permission is denied.
     pub async fn delete_post(&self, post_id: &str) -> MattermostResult<()> {
-        let url = format!("{}/api/v4/posts/{post_id}", self.base_url);
-        debug!(url = %url, "DELETE");
+        self.delete_path(&format!("/api/v4/posts/{post_id}")).await
+    }
 
-        let response = self
-            .client
-            .delete(&url)
-            .send()
-            .await
-            .map_err(MattermostError::Http)?;
-        let status = response.status().as_u16();
-        let request_id = response
-            .headers()
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
+    /// Save a reaction on a post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the server rejects the reaction.
+    pub async fn create_reaction(
+        &self,
+        request: &CreateReactionRequest,
+    ) -> MattermostResult<Reaction> {
+        self.post("/api/v4/reactions", request).await
+    }
 
-        if (200..300).contains(&status) {
-            Ok(())
-        } else {
-            let body = response.text().await.unwrap_or_default();
-            Err(MattermostError::from_api_response(
-                status, &body, request_id,
-            ))
-        }
+    /// Delete a reaction from a post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the server rejects the removal.
+    pub async fn delete_reaction(&self, request: &DeleteReactionRequest) -> MattermostResult<()> {
+        let url = self.reaction_delete_url(request)?;
+        self.delete_url(url).await
     }
 
     /// Get file metadata by file ID.
@@ -277,6 +347,33 @@ impl MattermostClient {
     /// Returns an error on HTTP failure or if the file is not found.
     pub async fn get_file_info(&self, file_id: &str) -> MattermostResult<FileInfo> {
         self.get(&format!("/api/v4/files/{file_id}/info")).await
+    }
+
+    /// Get a public link for a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the file is not found.
+    pub async fn get_file_link(&self, file_id: &str) -> MattermostResult<serde_json::Value> {
+        self.get(&format!("/api/v4/files/{file_id}/link")).await
+    }
+
+    /// Download a file body and return it as base64.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the file is not found.
+    pub async fn download_file(&self, file_id: &str) -> MattermostResult<FileDownload> {
+        let url = format!("{}/api/v4/files/{file_id}", self.base_url);
+        debug!(url = %url, "GET");
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
+        self.handle_binary_response(file_id, response).await
     }
 
     /// Get file metadata for all files attached to a post.
@@ -289,6 +386,43 @@ impl MattermostClient {
             .await
     }
 
+    /// Upload a single file to a channel via multipart form data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure, invalid MIME metadata, or upload rejection.
+    pub async fn upload_file(
+        &self,
+        request: &UploadFileRequest,
+        contents: Vec<u8>,
+    ) -> MattermostResult<UploadFileResponse> {
+        let url = format!("{}/api/v4/files", self.base_url);
+        debug!(url = %url, "POST multipart");
+
+        let mut part = Part::bytes(contents).file_name(request.filename.clone());
+        if let Some(content_type) = request.content_type.as_deref() {
+            part = part.mime_str(content_type).map_err(|error| {
+                MattermostError::Config(format!("invalid upload content_type: {error}"))
+            })?;
+        }
+
+        let mut form = Form::new()
+            .text("channel_id", request.channel_id.clone())
+            .part("files", part);
+        if let Some(client_id) = request.client_id.clone() {
+            form = form.text("client_ids", client_id);
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
+        self.handle_response(response).await
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> MattermostResult<T> {
@@ -298,6 +432,18 @@ impl MattermostClient {
         let response = self
             .client
             .get(&url)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
+        self.handle_response(response).await
+    }
+
+    async fn get_url<T: DeserializeOwned>(&self, url: reqwest::Url) -> MattermostResult<T> {
+        debug!(url = %url, "GET");
+
+        let response = self
+            .client
+            .get(url)
             .send()
             .await
             .map_err(MattermostError::Http)?;
@@ -322,6 +468,31 @@ impl MattermostClient {
         self.handle_response(response).await
     }
 
+    async fn delete_path(&self, path: &str) -> MattermostResult<()> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "DELETE");
+
+        let response = self
+            .client
+            .delete(&url)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
+        self.handle_empty_response(response).await
+    }
+
+    async fn delete_url(&self, url: reqwest::Url) -> MattermostResult<()> {
+        debug!(url = %url, "DELETE");
+
+        let response = self
+            .client
+            .delete(url)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
+        self.handle_empty_response(response).await
+    }
+
     async fn handle_response<T: DeserializeOwned>(
         &self,
         response: reqwest::Response,
@@ -343,6 +514,165 @@ impl MattermostClient {
             ))
         }
     }
+
+    async fn handle_binary_response(
+        &self,
+        file_id: &str,
+        response: reqwest::Response,
+    ) -> MattermostResult<FileDownload> {
+        let status = response.status().as_u16();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        if (200..300).contains(&status) {
+            let body = response.bytes().await.map_err(MattermostError::Http)?;
+            Ok(FileDownload {
+                file_id: file_id.to_string(),
+                content_base64: base64::engine::general_purpose::STANDARD.encode(body.as_ref()),
+                content_type,
+                size_bytes: body.len(),
+            })
+        } else {
+            let body = response.text().await.unwrap_or_default();
+            Err(MattermostError::from_api_response(
+                status, &body, request_id,
+            ))
+        }
+    }
+
+    async fn handle_empty_response(&self, response: reqwest::Response) -> MattermostResult<()> {
+        let status = response.status().as_u16();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            let body = response.text().await.unwrap_or_default();
+            Err(MattermostError::from_api_response(
+                status, &body, request_id,
+            ))
+        }
+    }
+
+    fn thread_url(&self, request: &GetThreadRequest) -> MattermostResult<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/api/v4/posts/{}/thread",
+            self.base_url, request.post_id
+        ))
+        .map_err(|e| MattermostError::Config(format!("invalid thread URL: {e}")))?;
+
+        let has_query = request.per_page.is_some()
+            || request.from_post.is_some()
+            || request.from_create_at.is_some()
+            || request.from_update_at.is_some()
+            || request.direction.is_some()
+            || request.skip_fetch_threads.is_some()
+            || request.collapsed_threads.is_some()
+            || request.collapsed_threads_extended.is_some()
+            || request.updates_only.is_some();
+
+        if has_query {
+            let mut query = url.query_pairs_mut();
+
+            if let Some(per_page) = request.per_page {
+                query.append_pair("perPage", &per_page.to_string());
+            }
+            if let Some(from_post) = request.from_post.as_deref() {
+                query.append_pair("fromPost", from_post);
+            }
+            if let Some(from_create_at) = request.from_create_at {
+                query.append_pair("fromCreateAt", &from_create_at.to_string());
+            }
+            if let Some(from_update_at) = request.from_update_at {
+                query.append_pair("fromUpdateAt", &from_update_at.to_string());
+            }
+            if let Some(direction) = request.direction.as_deref() {
+                query.append_pair("direction", direction);
+            }
+            if let Some(skip_fetch_threads) = request.skip_fetch_threads {
+                query.append_pair(
+                    "skipFetchThreads",
+                    if skip_fetch_threads { "true" } else { "false" },
+                );
+            }
+            if let Some(collapsed_threads) = request.collapsed_threads {
+                query.append_pair(
+                    "collapsedThreads",
+                    if collapsed_threads { "true" } else { "false" },
+                );
+            }
+            if let Some(collapsed_threads_extended) = request.collapsed_threads_extended {
+                query.append_pair(
+                    "collapsedThreadsExtended",
+                    if collapsed_threads_extended {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+            }
+            if let Some(updates_only) = request.updates_only {
+                query.append_pair("updatesOnly", if updates_only { "true" } else { "false" });
+            }
+        }
+
+        Ok(url)
+    }
+
+    fn reaction_delete_url(
+        &self,
+        request: &DeleteReactionRequest,
+    ) -> MattermostResult<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|error| MattermostError::Config(format!("invalid base_url: {error}")))?;
+        let base_path = url.path().trim_end_matches('/');
+        let path = format!(
+            "{base_path}/api/v4/users/{}/posts/{}/reactions/{}",
+            encode_path_segment(request.user_id.as_str()),
+            encode_path_segment(request.post_id.as_str()),
+            encode_path_segment(request.emoji_name.as_str())
+        );
+        url.set_path(&path);
+        Ok(url)
+    }
+}
+
+fn encode_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
+}
+
+fn append_auth_headers(headers: &mut HeaderMap, auth: &MattermostAuth) -> MattermostResult<()> {
+    match auth {
+        MattermostAuth::Token(token) => {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|e| MattermostError::Config(format!("invalid token header: {e}")))?,
+            );
+        }
+        MattermostAuth::CredentialId(credential_id) => {
+            headers.insert(
+                HeaderName::from_static(CREDENTIAL_ID_HEADER),
+                HeaderValue::from_str(credential_id).map_err(|e| {
+                    MattermostError::Config(format!("invalid credential header: {e}"))
+                })?,
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -365,6 +695,18 @@ mod tests {
     }
 
     #[test]
+    fn websocket_url_omits_empty_resume_state() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let url = client.websocket_url(Some(""), Some(0)).unwrap();
+        assert_eq!(url, "wss://chat.example.com/api/v4/websocket");
+    }
+
+    #[test]
     fn file_access_paths_include_download_variants() {
         let client = MattermostClient::new(
             "https://chat.example.com",
@@ -375,11 +717,128 @@ mod tests {
         let paths = client.file_access_paths("file123");
         assert_eq!(
             paths["download_url"],
-            "https://chat.example.com/api/v4/files/file123?download=true"
+            "https://chat.example.com/api/v4/files/file123"
+        );
+        assert_eq!(
+            paths["info_url"],
+            "https://chat.example.com/api/v4/files/file123/info"
+        );
+        assert_eq!(
+            paths["link_url"],
+            "https://chat.example.com/api/v4/files/file123/link"
         );
         assert_eq!(
             paths["preview_url"],
-            "https://chat.example.com/api/v4/files/file123/preview?download=true"
+            "https://chat.example.com/api/v4/files/file123/preview"
+        );
+    }
+
+    #[test]
+    fn websocket_config_includes_authorization_header() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let config = client.websocket_config().unwrap();
+        assert_eq!(
+            config.headers.get("authorization").map(String::as_str),
+            Some("Bearer tok")
+        );
+    }
+
+    #[test]
+    fn websocket_config_uses_credential_id_header() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::CredentialId("cred-work".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert_eq!(client.auth_token(), None);
+        let config = client.websocket_config().unwrap();
+        assert_eq!(
+            config.headers.get(CREDENTIAL_ID_HEADER).map(String::as_str),
+            Some("cred-work")
+        );
+    }
+
+    #[test]
+    fn thread_url_uses_mattermost_query_parameter_names() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let request = GetThreadRequest {
+            post_id: "post123".into(),
+            per_page: Some(25),
+            from_post: Some("cursor456".into()),
+            from_create_at: Some(17),
+            from_update_at: Some(18),
+            direction: Some("down".into()),
+            skip_fetch_threads: Some(true),
+            collapsed_threads: Some(true),
+            collapsed_threads_extended: Some(false),
+            updates_only: Some(true),
+        };
+
+        let url = client.thread_url(&request).unwrap().to_string();
+        assert!(url.contains("/api/v4/posts/post123/thread?"));
+        assert!(url.contains("perPage=25"));
+        assert!(url.contains("fromPost=cursor456"));
+        assert!(url.contains("fromCreateAt=17"));
+        assert!(url.contains("fromUpdateAt=18"));
+        assert!(url.contains("direction=down"));
+        assert!(url.contains("skipFetchThreads=true"));
+        assert!(url.contains("collapsedThreads=true"));
+        assert!(url.contains("collapsedThreadsExtended=false"));
+        assert!(url.contains("updatesOnly=true"));
+    }
+
+    #[test]
+    fn thread_url_without_options_has_no_query_suffix() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let url = client
+            .thread_url(&GetThreadRequest {
+                post_id: "post123".into(),
+                ..GetThreadRequest::default()
+            })
+            .unwrap()
+            .to_string();
+        assert_eq!(url, "https://chat.example.com/api/v4/posts/post123/thread");
+    }
+
+    #[test]
+    fn reaction_delete_url_percent_encodes_emoji_name() {
+        let client = MattermostClient::new(
+            "https://chat.example.com/base",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let url = client
+            .reaction_delete_url(&DeleteReactionRequest {
+                user_id: "user1".into(),
+                post_id: "post1".into(),
+                emoji_name: "+1".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://chat.example.com/base/api/v4/users/user1/posts/post1/reactions/%2B1"
         );
     }
 }

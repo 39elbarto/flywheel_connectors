@@ -25,8 +25,10 @@ use tracing::{debug, info, warn};
 use crate::client::MattermostClient;
 use crate::error::MattermostError;
 use crate::types::{
-    Channel, CreatePostRequest, GetThreadRequest, MattermostAuth, MattermostConfig,
+    Channel, CreateDirectChannelRequest, CreatePostRequest, CreateReactionRequest,
+    DeleteReactionRequest, GetThreadRequest, MattermostAuth, MattermostConfig,
     MattermostWebSocketMessage, Post, Reaction, SearchPostsRequest, ThreadResponse,
+    UploadFileRequest,
 };
 
 const SOCKET_EVENT_BUFFER_CAPACITY: usize = 256;
@@ -242,18 +244,24 @@ impl MattermostConnector {
             }
             "mattermost.get_channel" => invoke_get_channel(client, &req.input).await?,
             "mattermost.get_thread" => invoke_get_thread(client, &req.input).await?,
+            "mattermost.create_direct_channel" => {
+                invoke_create_direct_channel(client, &req.input).await?
+            }
             "mattermost.create_post" => invoke_create_post(client, &req.input).await?,
             "mattermost.get_post" => invoke_get_post(client, &req.input).await?,
             "mattermost.get_posts_for_channel" => {
                 invoke_get_posts_for_channel(client, &req.input).await?
             }
             "mattermost.search_posts" => invoke_search_posts(client, &req.input).await?,
+            "mattermost.create_reaction" => invoke_create_reaction(client, &req.input).await?,
+            "mattermost.delete_reaction" => invoke_delete_reaction(client, &req.input).await?,
             "mattermost.get_file_info" => invoke_get_file_info(client, &req.input).await?,
             "mattermost.get_file_link" => invoke_get_file_link(client, &req.input).await?,
             "mattermost.download_file" => invoke_download_file(client, &req.input).await?,
             "mattermost.get_file_infos_for_post" => {
                 invoke_get_file_infos_for_post(client, &req.input).await?
             }
+            "mattermost.upload_file" => invoke_upload_file(client, &req.input).await?,
             "mattermost.delete_post" => invoke_delete_post(client, &req.input).await?,
             _ => {
                 warn!(operation = %operation, "unknown operation");
@@ -532,25 +540,20 @@ impl MattermostConnector {
                                                 continue;
                                             };
 
-                                            if let Some(seq) = message.seq {
-                                                if seq != expected_server_seq {
-                                                    warn!(
-                                                        expected_server_seq,
-                                                        received_seq = seq,
-                                                        "Mattermost websocket sequence mismatch; reconnecting"
-                                                    );
-                                                    break;
-                                                }
-                                                expected_server_seq = seq.saturating_add(1);
+                                            if !apply_socket_resume_state(
+                                                &message,
+                                                &mut connection_id,
+                                                &mut expected_server_seq,
+                                            ) {
+                                                warn!(
+                                                    expected_server_seq,
+                                                    received_seq = ?message.seq,
+                                                    "Mattermost websocket sequence mismatch; reconnecting"
+                                                );
+                                                break;
                                             }
 
                                             if event_name == "hello" {
-                                                connection_id = message
-                                                    .data
-                                                    .get("connection_id")
-                                                    .and_then(Value::as_str)
-                                                    .map(str::to_owned)
-                                                    .unwrap_or(connection_id);
                                                 continue;
                                             }
 
@@ -715,6 +718,47 @@ async fn invoke_get_channel(
     to_json(channel)
 }
 
+async fn invoke_create_direct_channel(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: CreateDirectChannelRequest =
+        serde_json::from_value(input.clone()).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid create_direct_channel input: {error}"),
+        })?;
+
+    if request.user_ids.len() != 2 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "user_ids must contain exactly two Mattermost user IDs".into(),
+        });
+    }
+    if request
+        .user_ids
+        .iter()
+        .any(|user_id| user_id.trim().is_empty())
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "user_ids must not contain empty values".into(),
+        });
+    }
+    let unique_user_ids = request.user_ids.iter().collect::<HashSet<_>>();
+    if unique_user_ids.len() != 2 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "user_ids must contain two distinct users".into(),
+        });
+    }
+
+    let channel = client
+        .create_direct_channel(&request)
+        .await
+        .map_err(map_mm_err)?;
+    to_json(channel)
+}
+
 async fn invoke_create_post(
     client: &MattermostClient,
     input: &serde_json::Value,
@@ -789,6 +833,57 @@ async fn invoke_search_posts(
     to_json(results)
 }
 
+async fn invoke_create_reaction(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: CreateReactionRequest =
+        serde_json::from_value(input.clone()).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid create_reaction input: {error}"),
+        })?;
+    if request.user_id.trim().is_empty()
+        || request.post_id.trim().is_empty()
+        || request.emoji_name.trim().is_empty()
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "user_id, post_id, and emoji_name are required".into(),
+        });
+    }
+
+    let reaction = client.create_reaction(&request).await.map_err(map_mm_err)?;
+    to_json(reaction)
+}
+
+async fn invoke_delete_reaction(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: DeleteReactionRequest =
+        serde_json::from_value(input.clone()).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid delete_reaction input: {error}"),
+        })?;
+    if request.user_id.trim().is_empty()
+        || request.post_id.trim().is_empty()
+        || request.emoji_name.trim().is_empty()
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "user_id, post_id, and emoji_name are required".into(),
+        });
+    }
+
+    client.delete_reaction(&request).await.map_err(map_mm_err)?;
+    Ok(json!({
+        "status": "deleted",
+        "user_id": request.user_id,
+        "post_id": request.post_id,
+        "emoji_name": request.emoji_name,
+    }))
+}
+
 async fn invoke_get_file_info(
     client: &MattermostClient,
     input: &serde_json::Value,
@@ -842,6 +937,52 @@ async fn invoke_get_file_infos_for_post(
         })
         .collect::<Vec<_>>();
     Ok(json!({ "files": files }))
+}
+
+async fn invoke_upload_file(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: UploadFileRequest =
+        serde_json::from_value(input.clone()).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid upload_file input: {error}"),
+        })?;
+    if request.channel_id.trim().is_empty()
+        || request.filename.trim().is_empty()
+        || request.content_base64.trim().is_empty()
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "channel_id, filename, and content_base64 are required".into(),
+        });
+    }
+
+    let contents = request
+        .decode_bytes()
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("content_base64 is not valid base64: {error}"),
+        })?;
+    let response = client
+        .upload_file(&request, contents)
+        .await
+        .map_err(map_mm_err)?;
+    let files = response
+        .file_infos
+        .into_iter()
+        .map(|file| {
+            json!({
+                "file": file,
+                "paths": client.file_access_paths(&file.id),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "files": files,
+        "client_ids": response.client_ids,
+    }))
 }
 
 async fn invoke_delete_post(
@@ -1230,72 +1371,242 @@ fn search_operations() -> Vec<OperationInfo> {
 
 fn write_operations() -> Vec<OperationInfo> {
     vec![
-        OperationInfo {
-            id: OperationId::from_static("mattermost.create_post"),
-            summary: "Send a message to a channel.".into(),
-            description: Some(
-                "Create a new post (message) in a Mattermost channel. Can also reply to threads."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "channel_id": {"type": "string"},
-                    "message": {"type": "string"},
-                    "root_id": {"type": "string", "description": "Thread root post ID for replies"}
-                },
-                "required": ["channel_id", "message"]
-            }),
-            output_schema: json!({"type": "object", "properties": {"id": {"type": "string"}, "message": {"type": "string"}}}),
-            capability: CapabilityId::from_static("mattermost.write"),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use to send a message to a channel or reply to an existing thread."
-                    .into(),
-                common_mistakes: vec![
-                    "Forgetting to set channel_id.".into(),
-                    "Not using root_id when replying to a thread.".into(),
-                ],
-                examples: vec![
-                    r#"{"channel_id": "abc123", "message": "Hello team!"}"#.into(),
-                    r#"{"channel_id": "abc123", "message": "Reply here", "root_id": "post_id"}"#
-                        .into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("mattermost.get_channel"),
-                    CapabilityId::from_static("mattermost.get_post"),
-                ],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static("mattermost.delete_post"),
-            summary: "Delete a post.".into(),
-            description: Some(
-                "Permanently delete a post. Requires appropriate permissions.".into(),
-            ),
-            input_schema: json!({"type": "object", "properties": {"post_id": {"type": "string"}}, "required": ["post_id"]}),
-            output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}}}),
-            capability: CapabilityId::from_static("mattermost.write"),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "Use to delete a message after verifying the post ID carefully."
-                    .into(),
-                common_mistakes: vec![
-                    "Deleting the wrong post by not verifying post_id first.".into(),
-                ],
-                examples: vec![r#"{"post_id": "abc123"}"#.into()],
-                related: vec![CapabilityId::from_static("mattermost.get_post")],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
-        },
+        create_direct_channel_operation(),
+        create_post_operation(),
+        create_reaction_operation(),
+        delete_reaction_operation(),
+        upload_file_operation(),
+        delete_post_operation(),
     ]
+}
+
+fn create_direct_channel_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.create_direct_channel"),
+        summary: "Create or fetch a direct message channel.".into(),
+        description: Some(
+            "Creates the 1:1 direct channel for exactly two Mattermost user IDs or returns the existing direct channel.".into(),
+        ),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "user_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "uniqueItems": true
+                }
+            },
+            "required": ["user_ids"]
+        }),
+        output_schema: json!({"type": "object", "properties": {"id": {"type": "string"}, "display_name": {"type": "string"}, "type": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Medium,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use: "Use when a workflow needs to open or ensure a direct-message channel before posting.".into(),
+            common_mistakes: vec![
+                "Passing fewer or more than two user IDs.".into(),
+                "Passing duplicate user IDs instead of the two participants.".into(),
+            ],
+            examples: vec![r#"{"user_ids": ["user_a", "user_b"]}"#.into()],
+            related: vec![
+                CapabilityId::from_static("mattermost.get_channel"),
+                CapabilityId::from_static("mattermost.create_post"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn create_post_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.create_post"),
+        summary: "Send a message to a channel.".into(),
+        description: Some(
+            "Create a new post (message) in a Mattermost channel. Can also reply to threads."
+                .into(),
+        ),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string"},
+                "message": {"type": "string"},
+                "root_id": {"type": "string", "description": "Thread root post ID for replies"},
+                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Previously uploaded Mattermost file IDs to attach"},
+                "props": {"type": "object", "description": "Optional Mattermost post props"}
+            },
+            "required": ["channel_id", "message"]
+        }),
+        output_schema: json!({"type": "object", "properties": {"id": {"type": "string"}, "message": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Medium,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::None,
+        ai_hints: AgentHint {
+            when_to_use: "Use to send a message to a channel or reply to an existing thread."
+                .into(),
+            common_mistakes: vec![
+                "Forgetting to set channel_id.".into(),
+                "Not using root_id when replying to a thread.".into(),
+            ],
+            examples: vec![
+                r#"{"channel_id": "abc123", "message": "Hello team!"}"#.into(),
+                r#"{"channel_id": "abc123", "message": "Reply here", "root_id": "post_id"}"#.into(),
+            ],
+            related: vec![
+                CapabilityId::from_static("mattermost.upload_file"),
+                CapabilityId::from_static("mattermost.get_channel"),
+                CapabilityId::from_static("mattermost.get_post"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn create_reaction_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.create_reaction"),
+        summary: "Add an emoji reaction to a post.".into(),
+        description: Some("Adds a reaction for a specific user on a Mattermost post.".into()),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string"},
+                "post_id": {"type": "string"},
+                "emoji_name": {"type": "string"}
+            },
+            "required": ["user_id", "post_id", "emoji_name"]
+        }),
+        output_schema: json!({"type": "object", "properties": {"user_id": {"type": "string"}, "post_id": {"type": "string"}, "emoji_name": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Low,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use: "Use to acknowledge or classify a post with an emoji reaction without editing the post body.".into(),
+            common_mistakes: vec![
+                "Passing an empty emoji_name.".into(),
+                "Using a post ID that the acting user cannot access.".into(),
+            ],
+            examples: vec![
+                r#"{"user_id": "user_a", "post_id": "post123", "emoji_name": "thumbsup"}"#
+                    .into(),
+            ],
+            related: vec![
+                CapabilityId::from_static("mattermost.get_post"),
+                CapabilityId::from_static("mattermost.delete_reaction"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn delete_reaction_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.delete_reaction"),
+        summary: "Remove an emoji reaction from a post.".into(),
+        description: Some("Deletes a specific user's reaction from a Mattermost post.".into()),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string"},
+                "post_id": {"type": "string"},
+                "emoji_name": {"type": "string"}
+            },
+            "required": ["user_id", "post_id", "emoji_name"]
+        }),
+        output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}, "user_id": {"type": "string"}, "post_id": {"type": "string"}, "emoji_name": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Low,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use:
+                "Use to clean up or revert a reaction without deleting the underlying post.".into(),
+            common_mistakes: vec![
+                "Trying to remove a reaction without the acting user ID.".into(),
+                "Forgetting that server-side permissions still apply when removing someone else's reaction.".into(),
+            ],
+            examples: vec![
+                r#"{"user_id": "user_a", "post_id": "post123", "emoji_name": "thumbsup"}"#
+                    .into(),
+            ],
+            related: vec![
+                CapabilityId::from_static("mattermost.create_reaction"),
+                CapabilityId::from_static("mattermost.get_post"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn upload_file_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.upload_file"),
+        summary: "Upload a file to a channel.".into(),
+        description: Some(
+            "Uploads one file to Mattermost and returns the resulting file IDs and deterministic access paths so the file can be attached to a later post.".into(),
+        ),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string"},
+                "filename": {"type": "string"},
+                "content_base64": {"type": "string"},
+                "client_id": {"type": "string"},
+                "content_type": {"type": "string"}
+            },
+            "required": ["channel_id", "filename", "content_base64"]
+        }),
+        output_schema: json!({"type": "object", "properties": {"files": {"type": "array"}, "client_ids": {"type": "array"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Medium,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::None,
+        ai_hints: AgentHint {
+            when_to_use: "Use before create_post when a workflow needs to attach a file to a Mattermost message.".into(),
+            common_mistakes: vec![
+                "Passing raw bytes instead of base64-encoded content.".into(),
+                "Forgetting to carry the returned file IDs into create_post.".into(),
+            ],
+            examples: vec![r#"{"channel_id": "abc123", "filename": "report.txt", "content_base64": "aGVsbG8="}"#.into()],
+            related: vec![
+                CapabilityId::from_static("mattermost.create_post"),
+                CapabilityId::from_static("mattermost.get_file_info"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn delete_post_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.delete_post"),
+        summary: "Delete a post.".into(),
+        description: Some("Permanently delete a post. Requires appropriate permissions.".into()),
+        input_schema: json!({"type": "object", "properties": {"post_id": {"type": "string"}}, "required": ["post_id"]}),
+        output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::High,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use: "Use to delete a message after verifying the post ID carefully.".into(),
+            common_mistakes: vec!["Deleting the wrong post by not verifying post_id first.".into()],
+            examples: vec![r#"{"post_id": "abc123"}"#.into()],
+            related: vec![CapabilityId::from_static("mattermost.get_post")],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::Interactive),
+    }
 }
 
 fn event_info() -> Vec<EventInfo> {
@@ -1445,6 +1756,36 @@ fn mattermost_event_topic(event_name: &str) -> String {
         "direct_added" => "mattermost.direct_added".to_string(),
         other => format!("mattermost.event.{other}"),
     }
+}
+
+fn apply_socket_resume_state(
+    message: &MattermostWebSocketMessage,
+    connection_id: &mut String,
+    expected_server_seq: &mut u64,
+) -> bool {
+    if message.event.as_deref() == Some("hello")
+        && let Some(new_connection_id) = message
+            .data
+            .get("connection_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+    {
+        // Mattermost resets the resume stream when the server no longer recognizes the
+        // prior connection/sequence state. The hello packet advertises the new connection_id.
+        if !connection_id.is_empty() && connection_id != new_connection_id {
+            *expected_server_seq = 0;
+        }
+        connection_id.clone_from(&new_connection_id.to_string());
+    }
+
+    if let Some(seq) = message.seq {
+        if seq != *expected_server_seq {
+            return false;
+        }
+        *expected_server_seq = seq.saturating_add(1);
+    }
+
+    true
 }
 
 fn websocket_message_to_event(
@@ -1688,7 +2029,7 @@ fn reaction_from_socket_message(message: &MattermostWebSocketMessage) -> Option<
 
 fn channel_from_socket_message(message: &MattermostWebSocketMessage) -> Option<Channel> {
     match message.event.as_deref() {
-        Some("channel_created") | Some("channel_updated") | Some("channel_deleted") => {
+        Some("channel_created" | "channel_updated" | "channel_deleted") => {
             decode_embedded_json(message.data.get("channel"))
         }
         _ => None,
@@ -1815,6 +2156,37 @@ mod tests {
     }
 
     #[test]
+    fn mutation_expansion_operations_exist() {
+        let ops = operations_info();
+        let ids = ops.iter().map(|op| op.id.as_str()).collect::<HashSet<_>>();
+        assert!(ids.contains("mattermost.create_direct_channel"));
+        assert!(ids.contains("mattermost.create_reaction"));
+        assert!(ids.contains("mattermost.delete_reaction"));
+        assert!(ids.contains("mattermost.upload_file"));
+    }
+
+    #[test]
+    fn direct_channel_operation_is_best_effort() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|operation| operation.id.as_str() == "mattermost.create_direct_channel")
+            .expect("direct channel operation should exist");
+        assert!(matches!(op.idempotency, IdempotencyClass::BestEffort));
+        assert!(matches!(op.requires_approval, Some(ApprovalMode::None)));
+    }
+
+    #[test]
+    fn create_post_schema_supports_file_ids() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|operation| operation.id.as_str() == "mattermost.create_post")
+            .expect("create_post operation should exist");
+        assert_eq!(op.input_schema["properties"]["file_ids"]["type"], "array");
+    }
+
+    #[test]
     fn parse_subscribe_topics_defaults() {
         let topics = parse_subscribe_topics(&json!({}));
         assert_eq!(topics[0], "mattermost.posted");
@@ -1915,5 +2287,48 @@ mod tests {
         assert_eq!(event.seq, 88);
         assert_eq!(event.stream_key.as_deref(), Some("chan1"));
         assert_eq!(event.data.payload["data"]["thread"]["reply_count"], 2);
+    }
+
+    #[test]
+    fn hello_with_new_connection_id_resets_resume_sequence() {
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "hello",
+            "data": {
+                "connection_id": "conn-new"
+            },
+            "seq": 0
+        }))
+        .unwrap();
+
+        let mut connection_id = String::from("conn-old");
+        let mut expected_server_seq = 44;
+
+        assert!(apply_socket_resume_state(
+            &message,
+            &mut connection_id,
+            &mut expected_server_seq
+        ));
+        assert_eq!(connection_id, "conn-new");
+        assert_eq!(expected_server_seq, 1);
+    }
+
+    #[test]
+    fn non_hello_sequence_mismatch_still_requests_reconnect() {
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "seq": 9
+        }))
+        .unwrap();
+
+        let mut connection_id = String::from("conn-a");
+        let mut expected_server_seq = 3;
+
+        assert!(!apply_socket_resume_state(
+            &message,
+            &mut connection_id,
+            &mut expected_server_seq
+        ));
+        assert_eq!(connection_id, "conn-a");
+        assert_eq!(expected_server_seq, 3);
     }
 }

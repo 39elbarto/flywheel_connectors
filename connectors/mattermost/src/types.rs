@@ -1,5 +1,6 @@
 //! Mattermost API request and response types.
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -120,7 +121,31 @@ pub struct CreatePostRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub props: Option<serde_json::Value>,
+}
+
+/// Request for creating or retrieving a direct channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDirectChannelRequest {
+    pub user_ids: Vec<String>,
+}
+
+/// Request for saving a reaction on a post.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateReactionRequest {
+    pub user_id: String,
+    pub post_id: String,
+    pub emoji_name: String,
+}
+
+/// Request for removing a reaction from a post.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteReactionRequest {
+    pub user_id: String,
+    pub post_id: String,
+    pub emoji_name: String,
 }
 
 /// Paginated post list response.
@@ -130,6 +155,16 @@ pub struct PostList {
     pub order: Vec<String>,
     #[serde(default)]
     pub posts: std::collections::HashMap<String, Post>,
+    #[serde(default)]
+    pub next_post_id: String,
+    #[serde(default)]
+    pub prev_post_id: String,
+    #[serde(default)]
+    pub first_inaccessible_post_time: i64,
+    #[serde(default)]
+    pub has_next: bool,
+    #[serde(default)]
+    pub matches: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Request for fetching a thread rooted at a post.
@@ -271,6 +306,38 @@ pub struct FileDownload {
     pub size_bytes: usize,
 }
 
+/// Request for uploading a single file into Mattermost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFileRequest {
+    pub channel_id: String,
+    pub filename: String,
+    pub content_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+impl UploadFileRequest {
+    /// Decode the base64 file body into raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the content is not valid base64.
+    pub fn decode_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+        base64::engine::general_purpose::STANDARD.decode(&self.content_base64)
+    }
+}
+
+/// Mattermost file upload response payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFileResponse {
+    #[serde(default)]
+    pub file_infos: Vec<FileInfo>,
+    #[serde(default)]
+    pub client_ids: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,11 +397,13 @@ mod tests {
             channel_id: "c1".into(),
             message: "test message".into(),
             root_id: None,
+            file_ids: None,
             props: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["channel_id"], "c1");
         assert!(json.get("root_id").is_none());
+        assert!(json.get("file_ids").is_none());
     }
 
     #[test]
@@ -343,10 +412,61 @@ mod tests {
             channel_id: "c1".into(),
             message: "reply".into(),
             root_id: Some("p_root".into()),
+            file_ids: None,
             props: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["root_id"], "p_root");
+    }
+
+    #[test]
+    fn create_post_request_with_file_ids() {
+        let req = CreatePostRequest {
+            channel_id: "c1".into(),
+            message: "attachment".into(),
+            root_id: None,
+            file_ids: Some(vec!["file-1".into(), "file-2".into()]),
+            props: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["file_ids"][0], "file-1");
+        assert_eq!(json["file_ids"][1], "file-2");
+    }
+
+    #[test]
+    fn create_direct_channel_request_serializes_user_ids() {
+        let req = CreateDirectChannelRequest {
+            user_ids: vec!["u1".into(), "u2".into()],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["user_ids"][0], "u1");
+        assert_eq!(json["user_ids"][1], "u2");
+    }
+
+    #[test]
+    fn create_reaction_request_serializes() {
+        let req = CreateReactionRequest {
+            user_id: "u1".into(),
+            post_id: "p1".into(),
+            emoji_name: "thumbsup".into(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["user_id"], "u1");
+        assert_eq!(json["post_id"], "p1");
+        assert_eq!(json["emoji_name"], "thumbsup");
+    }
+
+    #[test]
+    fn delete_reaction_request_serializes() {
+        let req = DeleteReactionRequest {
+            user_id: "u1".into(),
+            post_id: "p1".into(),
+            emoji_name: "thumbsup".into(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["user_id"], "u1");
+        assert_eq!(json["post_id"], "p1");
+        assert_eq!(json["emoji_name"], "thumbsup");
     }
 
     #[test]
@@ -355,6 +475,27 @@ mod tests {
         let list: PostList = serde_json::from_str(json).unwrap();
         assert_eq!(list.order.len(), 1);
         assert!(list.posts.contains_key("p1"));
+        assert!(list.next_post_id.is_empty());
+        assert!(!list.has_next);
+    }
+
+    #[test]
+    fn post_list_preserves_thread_and_search_metadata() {
+        let json = r#"{
+            "order": ["p1"],
+            "posts": {"p1": {"id": "p1", "message": "hi"}},
+            "next_post_id": "p2",
+            "prev_post_id": "p0",
+            "first_inaccessible_post_time": 42,
+            "has_next": true,
+            "matches": {"p1": ["message"]}
+        }"#;
+        let list: PostList = serde_json::from_str(json).unwrap();
+        assert_eq!(list.next_post_id, "p2");
+        assert_eq!(list.prev_post_id, "p0");
+        assert_eq!(list.first_inaccessible_post_time, 42);
+        assert!(list.has_next);
+        assert_eq!(list.matches.get("p1"), Some(&vec![String::from("message")]));
     }
 
     #[test]
@@ -420,6 +561,31 @@ mod tests {
         assert_eq!(json["content_base64"], "aGVsbG8=");
         assert_eq!(json["content_type"], "text/plain");
         assert_eq!(json["size_bytes"], 5);
+    }
+
+    #[test]
+    fn upload_file_request_decodes_base64() {
+        let request = UploadFileRequest {
+            channel_id: "channel1".into(),
+            filename: "hello.txt".into(),
+            content_base64: "aGVsbG8=".into(),
+            client_id: Some("client-1".into()),
+            content_type: Some("text/plain".into()),
+        };
+        let bytes = request.decode_bytes().unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn upload_file_response_deserializes() {
+        let json = r#"{
+            "file_infos": [{"id":"f1","user_id":"u1","name":"report.txt","size":42}],
+            "client_ids": ["client-1"]
+        }"#;
+        let response: UploadFileResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.file_infos.len(), 1);
+        assert_eq!(response.file_infos[0].id, "f1");
+        assert_eq!(response.client_ids, vec![String::from("client-1")]);
     }
 
     #[test]

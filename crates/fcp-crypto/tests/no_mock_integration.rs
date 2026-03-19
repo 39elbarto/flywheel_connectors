@@ -145,8 +145,8 @@ fn x25519_key_agreement_to_aead_session() {
     let bob_public = bob_secret.public_key();
 
     // Both sides compute same shared secret
-    let alice_shared = alice_secret.diffie_hellman(&bob_public);
-    let bob_shared = bob_secret.diffie_hellman(&alice_public);
+    let alice_shared = alice_secret.diffie_hellman(&bob_public).unwrap();
+    let bob_shared = bob_secret.diffie_hellman(&alice_public).unwrap();
     assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
 
     // Derive session key from shared secret
@@ -776,7 +776,7 @@ fn full_frame_authentication_pipeline() {
     let alice = X25519SecretKey::generate();
     let bob = X25519SecretKey::generate();
 
-    let shared = alice.diffie_hellman(&bob.public_key());
+    let shared = alice.diffie_hellman(&bob.public_key()).unwrap();
     let session_key =
         Fcp2KeyDerivation::derive_session_key(shared.as_bytes(), b"frame-sess", "send").unwrap();
     let mac_derived = Fcp2KeyDerivation::derive_mac_key(session_key.as_bytes(), "header").unwrap();

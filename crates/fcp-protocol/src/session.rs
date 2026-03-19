@@ -1283,7 +1283,7 @@ mod tests {
             || {
                 let sk_i = X25519SecretKey::from_bytes([0x12_u8; 32]);
                 let sk_r = X25519SecretKey::from_bytes([0x34_u8; 32]);
-                let shared = sk_i.diffie_hellman(&sk_r.public_key());
+                let shared = sk_i.diffie_hellman(&sk_r.public_key()).unwrap();
                 let hello_nonce = SessionNonce([0x01_u8; 16]);
                 let ack_nonce = SessionNonce([0x02_u8; 16]);
                 let keys1 = derive_session_keys(
@@ -1918,7 +1918,7 @@ mod tests {
     fn session_keys_different_per_direction() {
         let sk = X25519SecretKey::generate();
         let pk = X25519SecretKey::generate().public_key();
-        let shared_secret = sk.diffie_hellman(&pk);
+        let shared_secret = sk.diffie_hellman(&pk).unwrap();
         let session_id = MeshSessionId([0xAA; 16]);
         let initiator = TailscaleNodeId::new("node-init");
         let responder = TailscaleNodeId::new("node-resp");
@@ -1944,7 +1944,7 @@ mod tests {
     fn session_keys_deterministic() {
         let sk = X25519SecretKey::from_bytes([0xBB; 32]);
         let pk = X25519SecretKey::from_bytes([0xCC; 32]).public_key();
-        let shared_secret = sk.diffie_hellman(&pk);
+        let shared_secret = sk.diffie_hellman(&pk).unwrap();
         let session_id = MeshSessionId([0xDD; 16]);
         let initiator = TailscaleNodeId::new("node-a");
         let responder = TailscaleNodeId::new("node-b");
@@ -2907,7 +2907,7 @@ mod tests {
     fn derive_session_keys_different_nonces_produce_different_keys() {
         let sk = X25519SecretKey::from_bytes([0x12; 32]);
         let pk = X25519SecretKey::from_bytes([0x34; 32]).public_key();
-        let shared = sk.diffie_hellman(&pk);
+        let shared = sk.diffie_hellman(&pk).unwrap();
         let session_id = MeshSessionId([0xAA; 16]);
         let initiator = TailscaleNodeId::new("node-i");
         let responder = TailscaleNodeId::new("node-r");
@@ -2941,7 +2941,7 @@ mod tests {
     fn derive_session_keys_swapped_roles_produce_different_keys() {
         let sk = X25519SecretKey::from_bytes([0x12; 32]);
         let pk = X25519SecretKey::from_bytes([0x34; 32]).public_key();
-        let shared = sk.diffie_hellman(&pk);
+        let shared = sk.diffie_hellman(&pk).unwrap();
         let session_id = MeshSessionId([0xBB; 16]);
         let node_a = TailscaleNodeId::new("node-a");
         let node_b = TailscaleNodeId::new("node-b");

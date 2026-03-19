@@ -532,8 +532,9 @@ impl Stream for SseStream {
                 // Parse events
                 let events = this.parser.parse(&data);
                 if events.is_empty() {
-                    // No complete events yet, poll again
-                    cx.waker().wake_by_ref();
+                    // No complete events yet — data was consumed into the parser
+                    // buffer but no dispatch boundary found. Let the inner stream
+                    // wake us when more data arrives instead of spuriously re-polling.
                     Poll::Pending
                 } else {
                     // Store events and return the first one

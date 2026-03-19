@@ -692,7 +692,7 @@ fn ack_sign_and_verify_with_hello() {
 fn derive_session_keys_deterministic() {
     let init_eph = X25519SecretKey::generate();
     let resp_eph = X25519SecretKey::generate();
-    let shared = init_eph.diffie_hellman(&resp_eph.public_key());
+    let shared = init_eph.diffie_hellman(&resp_eph.public_key()).unwrap();
 
     let session_id = MeshSessionId::new();
     let init_node = test_node_id("init");
@@ -727,7 +727,7 @@ fn derive_session_keys_deterministic() {
 fn session_keys_directional() {
     let init_eph = X25519SecretKey::generate();
     let resp_eph = X25519SecretKey::generate();
-    let shared = init_eph.diffie_hellman(&resp_eph.public_key());
+    let shared = init_eph.diffie_hellman(&resp_eph.public_key()).unwrap();
 
     let keys = fcp_protocol::derive_session_keys(
         &shared,

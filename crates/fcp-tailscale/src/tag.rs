@@ -126,7 +126,7 @@ impl ZoneTagMapping {
     ///
     /// # Errors
     ///
-    /// Returns an error if the zone ID doesn't start with `z:`.
+    /// Returns an error if the zone ID format is invalid.
     pub fn zone_to_tag(zone_id: &str) -> TailscaleResult<TailscaleTag> {
         Self::try_zone_to_tag(zone_id)
     }
@@ -135,8 +135,9 @@ impl ZoneTagMapping {
     ///
     /// # Errors
     ///
-    /// Returns an error if the zone ID doesn't start with `z:`.
+    /// Returns an error if the zone ID format is invalid.
     pub fn try_zone_to_tag(zone_id: &str) -> TailscaleResult<TailscaleTag> {
+        let zone_id = Self::validate_zone_id(zone_id)?;
         let suffix = zone_id
             .strip_prefix(Self::ZONE_PREFIX)
             .ok_or_else(|| TailscaleError::InvalidZoneId(zone_id.to_string()))?;
@@ -145,7 +146,7 @@ impl ZoneTagMapping {
 
     /// Convert a Tailscale FCP tag to its zone ID.
     ///
-    /// Returns `None` if the tag is not an FCP tag.
+    /// Returns `None` if the tag is not an FCP tag or does not encode a valid zone ID.
     ///
     /// # Example
     ///
@@ -161,8 +162,9 @@ impl ZoneTagMapping {
     /// ```
     #[must_use]
     pub fn tag_to_zone(tag: &TailscaleTag) -> Option<String> {
-        tag.fcp_suffix()
-            .map(|suffix| format!("{}{suffix}", Self::ZONE_PREFIX))
+        let suffix = tag.fcp_suffix()?;
+        let zone = format!("{}{suffix}", Self::ZONE_PREFIX);
+        Self::is_valid_zone_id(&zone).then_some(zone)
     }
 
     /// Try to convert a Tailscale FCP tag to its zone ID.
@@ -811,9 +813,8 @@ mod tests {
 
     #[test]
     fn test_zone_to_tag_empty_suffix() {
-        // "z:" has an empty suffix but zone_to_tag still produces a tag
-        let tag = ZoneTagMapping::zone_to_tag("z:").unwrap();
-        assert_eq!(tag.as_str(), "tag:fcp-");
+        let result = ZoneTagMapping::zone_to_tag("z:");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -828,9 +829,8 @@ mod tests {
 
     #[test]
     fn test_zone_to_tag_with_uppercase_suffix() {
-        // zone_to_tag doesn't validate suffix format, only prefix
-        let tag = ZoneTagMapping::zone_to_tag("z:UPPER").unwrap();
-        assert_eq!(tag.as_str(), "tag:fcp-UPPER");
+        let result = ZoneTagMapping::zone_to_tag("z:UPPER");
+        assert!(result.is_err());
     }
 
     // --- ZoneTagMapping: tag_to_zone edge cases ---
@@ -839,7 +839,7 @@ mod tests {
     fn test_tag_to_zone_with_empty_fcp_suffix() {
         let tag = TailscaleTag::new("tag:fcp-").unwrap();
         let zone = ZoneTagMapping::tag_to_zone(&tag);
-        assert_eq!(zone, Some("z:".to_string()));
+        assert!(zone.is_none());
     }
 
     #[test]
@@ -1342,9 +1342,15 @@ mod tests {
 
     #[test]
     fn test_zone_to_tag_unicode_suffix() {
-        // zone_to_tag only validates prefix, not suffix
-        let tag = ZoneTagMapping::zone_to_tag("z:\u{00e9}").unwrap();
-        assert_eq!(tag.as_str(), "tag:fcp-\u{00e9}");
+        let result = ZoneTagMapping::zone_to_tag("z:\u{00e9}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tag_to_zone_rejects_invalid_fcp_suffix() {
+        let tag = TailscaleTag::new("tag:fcp--work").unwrap();
+        let zone = ZoneTagMapping::tag_to_zone(&tag);
+        assert!(zone.is_none());
     }
 
     // --- ZoneAclGenerator: rules for each individual standard zone ---

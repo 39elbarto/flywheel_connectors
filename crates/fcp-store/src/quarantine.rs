@@ -175,8 +175,12 @@ impl QuarantineStore {
             return Ok(()); // Already in quarantine
         }
 
+        // Convert defensively so quota comparisons remain well-defined on any target.
+        let max_objects =
+            usize::try_from(self.policy.max_quarantine_objects_per_zone).unwrap_or(usize::MAX);
+
         // Evict if necessary to make room
-        while zone.objects.len() as u32 >= self.policy.max_quarantine_objects_per_zone
+        while zone.objects.len() >= max_objects
             || zone.used_bytes + obj_size > self.policy.max_quarantine_bytes_per_zone
         {
             if let Some(entry) = zone.eviction_queue.pop_first() {
@@ -393,7 +397,7 @@ impl QuarantineStore {
         let zones = self.zones.read();
         if let Some(zone) = zones.get(zone_id) {
             QuarantineStats {
-                object_count: zone.objects.len() as u32,
+                object_count: u32::try_from(zone.objects.len()).unwrap_or(u32::MAX),
                 used_bytes: zone.used_bytes,
                 max_bytes: self.policy.max_quarantine_bytes_per_zone,
                 max_objects: self.policy.max_quarantine_objects_per_zone,

@@ -98,7 +98,9 @@ fn test_transcript_determinism() -> Result<(), String> {
         let responder_sk = X25519SecretKey::from_bytes(responder_sk_bytes);
 
         // Verify shared secret
-        let shared = initiator_sk.diffie_hellman(&responder_sk.public_key());
+        let shared = initiator_sk
+            .diffie_hellman(&responder_sk.public_key())
+            .map_err(|e| format!("Vector {} ({}) DH failed: {e}", i + 1, vector.description))?;
         let computed_shared = hex::encode(shared.as_bytes());
         if computed_shared != vector.expected_shared_secret {
             return Err(format!(
@@ -398,7 +400,9 @@ fn test_session_id_binding() -> Result<(), String> {
 
     let initiator_sk = X25519SecretKey::from_bytes(initiator_sk_bytes);
     let responder_sk = X25519SecretKey::from_bytes(responder_sk_bytes);
-    let shared = initiator_sk.diffie_hellman(&responder_sk.public_key());
+    let shared = initiator_sk
+        .diffie_hellman(&responder_sk.public_key())
+        .map_err(|e| format!("DH failed: {e}"))?;
 
     // Derive keys with original session ID
     let session_id_1 = hex::decode(&vector.session_id).map_err(|e| format!("hex: {e}"))?;

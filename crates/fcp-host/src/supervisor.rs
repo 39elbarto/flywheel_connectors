@@ -352,6 +352,7 @@ pub struct RestartTracker {
     config: SupervisorConfig,
     history: VecDeque<RestartEvent>,
     backoff: ExponentialBackoff,
+    total_restarts: usize,
 }
 
 impl RestartTracker {
@@ -363,6 +364,7 @@ impl RestartTracker {
             config,
             history: VecDeque::new(),
             backoff,
+            total_restarts: 0,
         }
     }
 
@@ -416,6 +418,7 @@ impl RestartTracker {
             attempt,
             backoff_delay: delay,
         });
+        self.total_restarts = self.total_restarts.saturating_add(1);
 
         Ok(delay)
     }
@@ -425,10 +428,10 @@ impl RestartTracker {
         self.backoff.reset();
     }
 
-    /// Total number of restarts recorded (including pruned).
+    /// Total number of restarts ever recorded, including events pruned from history.
     #[must_use]
     pub fn total_restarts(&self) -> usize {
-        self.history.len()
+        self.total_restarts
     }
 
     /// Restarts within the current window.
@@ -770,6 +773,8 @@ pub struct ResourceUsage {
     pub open_fds: u64,
     /// Current child process count.
     pub process_count: u64,
+    /// Size in bytes of the largest file the process has created or is writing.
+    pub file_size_bytes: u64,
 }
 
 impl ResourceUsage {
@@ -819,6 +824,16 @@ impl ResourceUsage {
             });
         }
 
+        if let Some(limit) = limits.max_file_size_bytes
+            && self.file_size_bytes > limit
+        {
+            violations.push(ResourceViolation {
+                resource: ResourceKind::FileSize,
+                current: self.file_size_bytes,
+                limit,
+            });
+        }
+
         violations
     }
 
@@ -843,6 +858,9 @@ impl ResourceUsage {
             processes: limits
                 .max_processes
                 .map(|l| self.process_count as f64 / l as f64),
+            file_size: limits
+                .max_file_size_bytes
+                .map(|l| self.file_size_bytes as f64 / l as f64),
         }
     }
 }
@@ -907,16 +925,24 @@ pub struct ResourceUtilization {
     pub fds: Option<f64>,
     /// Process utilization (0.0–1.0+), None if unlimited.
     pub processes: Option<f64>,
+    /// File size utilization (0.0–1.0+), None if unlimited.
+    pub file_size: Option<f64>,
 }
 
 impl ResourceUtilization {
     /// The highest utilization across all tracked resources.
     #[must_use]
     pub fn max_utilization(&self) -> Option<f64> {
-        [self.memory, self.cpu, self.fds, self.processes]
-            .into_iter()
-            .flatten()
-            .reduce(f64::max)
+        [
+            self.memory,
+            self.cpu,
+            self.fds,
+            self.processes,
+            self.file_size,
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(f64::max)
     }
 
     /// Whether any resource is at or above the given threshold (e.g. 0.9 for 90%).
@@ -1893,6 +1919,7 @@ mod tests {
             cpu_millis: 5000,
             open_fds: 50,
             process_count: 10,
+            file_size_bytes: 0,
         };
         let limits = ResourceLimits::default();
         assert!(usage.within_limits(&limits));
@@ -1971,6 +1998,7 @@ mod tests {
             open_fds: 2048,
             process_count: 100,
             cpu_millis: 0,
+            file_size_bytes: 0,
         };
         let limits = ResourceLimits {
             memory_bytes: Some(512 * 1024 * 1024),
@@ -1989,6 +2017,7 @@ mod tests {
             cpu_millis: u64::MAX,
             open_fds: u64::MAX,
             process_count: u64::MAX,
+            file_size_bytes: u64::MAX,
         };
         let limits = ResourceLimits::unlimited();
         assert!(usage.within_limits(&limits));
@@ -2001,6 +2030,7 @@ mod tests {
             open_fds: 1024,
             process_count: 64,
             cpu_millis: 60_000,
+            file_size_bytes: 0,
         };
         let limits = ResourceLimits {
             memory_bytes: Some(512 * 1024 * 1024),
@@ -2086,6 +2116,7 @@ mod tests {
         assert!(util.cpu.is_none());
         assert!(util.fds.is_none());
         assert!(util.processes.is_none());
+        assert!(util.file_size.is_none());
     }
 
     #[test]
@@ -2118,6 +2149,38 @@ mod tests {
         let max = util.max_utilization().unwrap();
         // FDs: 900/1000 = 0.9, Memory: 400/512 ≈ 0.78
         assert!((max - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn resource_usage_file_size_violation() {
+        let usage = ResourceUsage {
+            file_size_bytes: 4097,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            max_file_size_bytes: Some(4096),
+            ..ResourceLimits::unlimited()
+        };
+        let violations = usage.violations(&limits);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].resource, ResourceKind::FileSize);
+        assert_eq!(violations[0].current, 4097);
+        assert_eq!(violations[0].limit, 4096);
+    }
+
+    #[test]
+    fn utilization_file_size_is_computed() {
+        let usage = ResourceUsage {
+            file_size_bytes: 512,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            max_file_size_bytes: Some(1024),
+            ..ResourceLimits::unlimited()
+        };
+        let util = usage.utilization(&limits);
+        assert!((util.file_size.unwrap() - 0.5).abs() < f64::EPSILON);
+        assert!((util.max_utilization().unwrap() - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -2478,7 +2541,7 @@ mod tests {
             ExponentialBackoff::new(Duration::from_millis(200), Duration::from_secs(10), 2.0);
         let first = backoff.current_delay();
         assert_eq!(first, Duration::from_millis(200));
-        backoff.next_backoff();
+        let _ = backoff.next_backoff();
         let second = backoff.current_delay();
         assert_eq!(second, Duration::from_millis(400));
     }
@@ -2488,9 +2551,9 @@ mod tests {
         let mut backoff =
             ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
         assert_eq!(backoff.attempts(), 0);
-        backoff.next_backoff();
+        let _ = backoff.next_backoff();
         assert_eq!(backoff.attempts(), 1);
-        backoff.next_backoff();
+        let _ = backoff.next_backoff();
         assert_eq!(backoff.attempts(), 2);
     }
 
@@ -2499,7 +2562,7 @@ mod tests {
         let mut backoff =
             ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
         for _ in 0..5 {
-            backoff.next_backoff();
+            let _ = backoff.next_backoff();
         }
         assert_eq!(backoff.attempts(), 5);
         backoff.reset();
@@ -2645,6 +2708,30 @@ mod tests {
         let past_boundary = start + window + Duration::from_nanos(1);
         let result2 = tracker.evaluate_restart(&exit, past_boundary);
         assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn tracker_total_restarts_includes_pruned_history() {
+        let config = SupervisorConfig {
+            max_restarts: 10,
+            restart_window: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let mut tracker = RestartTracker::new(config);
+        let exit = ProcessExit::with_code(1);
+        let start = Instant::now();
+
+        tracker.evaluate_restart(&exit, start).unwrap();
+        tracker
+            .evaluate_restart(&exit, start + Duration::from_secs(1))
+            .unwrap();
+
+        let later = start + Duration::from_secs(10);
+        tracker.evaluate_restart(&exit, later).unwrap();
+
+        assert_eq!(tracker.restarts_in_window(later), 1);
+        assert_eq!(tracker.history().len(), 1);
+        assert_eq!(tracker.total_restarts(), 3);
     }
 
     #[test]
@@ -2948,6 +3035,7 @@ mod tests {
         assert_eq!(usage.cpu_millis, 0);
         assert_eq!(usage.open_fds, 0);
         assert_eq!(usage.process_count, 0);
+        assert_eq!(usage.file_size_bytes, 0);
     }
 
     #[test]

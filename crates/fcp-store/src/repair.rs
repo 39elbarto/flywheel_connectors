@@ -3485,7 +3485,7 @@ mod tests {
                 );
 
                 StoreLogData {
-                    symbol_count: Some(first_plan.actions.len() as u32),
+                    symbol_count: Some(u32::try_from(first_plan.actions.len()).unwrap_or(u32::MAX)),
                     details: Some(json!({
                         "ordered_objects": first_plan.actions.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
                         "estimated_bytes": first_plan.actions.iter().map(|action| action.estimated_bytes).collect::<Vec<_>>()
@@ -3550,7 +3550,7 @@ mod tests {
                 );
 
                 StoreLogData {
-                    symbol_count: Some((plan.actions.len() + plan.deferred.len()) as u32),
+                    symbol_count: Some(u32::try_from(plan.actions.len() + plan.deferred.len()).unwrap_or(u32::MAX)),
                     details: Some(json!({
                         "selected": plan.actions.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
                         "deferred": plan.deferred.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),

@@ -38,9 +38,12 @@ fuzz_target!(|data: &[u8]| {
         let hello_nonce = SessionNonce([0u8; 16]);
         let ack_nonce = SessionNonce([1u8; 16]);
 
-        let shared = X25519SecretKey::from_bytes(sk_i).diffie_hellman(
+        let shared = match X25519SecretKey::from_bytes(sk_i).diffie_hellman(
             &X25519SecretKey::from_bytes(sk_r).public_key(),
-        );
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
         if let Ok(keys) = derive_session_keys(
             &shared,
             &session_id,

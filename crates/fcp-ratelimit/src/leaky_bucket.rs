@@ -93,12 +93,12 @@ impl LeakyBucket {
         let level = *self.level.lock();
         let capacity = f64::from(self.capacity);
 
-        if level <= capacity - 1.0 {
+        if level <= capacity - LEVEL_GUARD {
             Duration::ZERO
         } else if self.leak_rate <= 0.0 {
             Duration::MAX
         } else {
-            let overflow = level - (capacity - 1.0);
+            let overflow = level - (capacity - LEVEL_GUARD);
             let secs = overflow / self.leak_rate;
             if secs.is_finite() && secs >= 0.0 {
                 Duration::from_secs_f64(secs)

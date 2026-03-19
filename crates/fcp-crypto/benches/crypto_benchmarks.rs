@@ -72,7 +72,7 @@ fn bench_x25519_dh(c: &mut Criterion) {
 
     c.bench_function("x25519_dh", |b| {
         b.iter(|| {
-            let _ = alice_secret.diffie_hellman(black_box(&bob_public));
+            let _ = alice_secret.diffie_hellman(black_box(&bob_public)).unwrap();
         });
     });
 }

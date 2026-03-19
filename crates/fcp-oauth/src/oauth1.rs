@@ -19,7 +19,7 @@ const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const OAUTH1_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// OAuth 1.0a configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuth1Config {
     /// Consumer key (API key).
     pub consumer_key: String,
@@ -63,8 +63,21 @@ impl OAuth1Config {
     }
 }
 
+impl std::fmt::Debug for OAuth1Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth1Config")
+            .field("consumer_key", &self.consumer_key)
+            .field("consumer_secret", &"[REDACTED]")
+            .field("request_token_url", &self.request_token_url)
+            .field("authorization_url", &self.authorization_url)
+            .field("access_token_url", &self.access_token_url)
+            .field("callback_url", &self.callback_url)
+            .finish()
+    }
+}
+
 /// OAuth 1.0a tokens.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuth1Tokens {
     /// OAuth token.
     pub token: String,
@@ -76,8 +89,19 @@ pub struct OAuth1Tokens {
     pub screen_name: Option<String>,
 }
 
+impl std::fmt::Debug for OAuth1Tokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth1Tokens")
+            .field("token", &"[REDACTED]")
+            .field("token_secret", &"[REDACTED]")
+            .field("user_id", &self.user_id)
+            .field("screen_name", &self.screen_name)
+            .finish()
+    }
+}
+
 /// Request token from the initial OAuth 1.0a step.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RequestToken {
     /// OAuth token.
     pub token: String,
@@ -85,6 +109,16 @@ pub struct RequestToken {
     pub token_secret: String,
     /// Whether the callback was confirmed.
     pub callback_confirmed: bool,
+}
+
+impl std::fmt::Debug for RequestToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestToken")
+            .field("token", &self.token)
+            .field("token_secret", &"[REDACTED]")
+            .field("callback_confirmed", &self.callback_confirmed)
+            .finish()
+    }
 }
 
 /// OAuth 1.0a client.
@@ -163,9 +197,24 @@ impl OAuth1Client {
     /// Step 2: Build the authorization URL for user authorization.
     #[must_use]
     pub fn authorization_url(&self, request_token: &RequestToken) -> String {
-        format!(
-            "{}?oauth_token={}",
-            self.config.authorization_url, request_token.token
+        Url::parse(&self.config.authorization_url).map_or_else(
+            |_| {
+                let separator = if self.config.authorization_url.contains('?') {
+                    '&'
+                } else {
+                    '?'
+                };
+                format!(
+                    "{}{separator}oauth_token={}",
+                    self.config.authorization_url,
+                    percent_encode(&request_token.token)
+                )
+            },
+            |mut url| {
+                url.query_pairs_mut()
+                    .append_pair("oauth_token", &request_token.token);
+                url.into()
+            },
         )
     }
 
@@ -301,12 +350,7 @@ impl OAuth1Client {
     ) -> OAuthResult<String> {
         // Parse URL to separate base URL from query params
         let parsed_url = Url::parse(url)?;
-        let base_url = format!(
-            "{}://{}{}",
-            parsed_url.scheme(),
-            parsed_url.host_str().unwrap_or(""),
-            parsed_url.path()
-        );
+        let base_url = normalized_base_url(&parsed_url)?;
 
         // Collect all parameters (OAuth + query string)
         let mut all_params: Vec<(String, String)> =
@@ -373,6 +417,30 @@ impl OAuth1Client {
             Ok(Err(error)) => Err(OAuthError::from_http_client_error(&error)),
             Err(error) => Err(OAuthError::from_async_error(error, OAUTH1_REQUEST_TIMEOUT)),
         }
+    }
+}
+
+fn normalized_base_url(parsed_url: &Url) -> OAuthResult<String> {
+    let host = parsed_url
+        .host_str()
+        .ok_or_else(|| OAuthError::SignatureError("URL must include a host".into()))?;
+    let path = parsed_url.path();
+
+    let authority = match parsed_url.port() {
+        Some(port) if should_include_port(parsed_url.scheme(), port) => {
+            format!("{host}:{port}")
+        }
+        _ => host.to_string(),
+    };
+
+    Ok(format!("{}://{}{}", parsed_url.scheme(), authority, path))
+}
+
+fn should_include_port(scheme: &str, port: u16) -> bool {
+    match scheme {
+        "http" => port != 80,
+        "https" => port != 443,
+        _ => true,
     }
 }
 
@@ -787,6 +855,22 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn test_signature_non_default_port_changes_output() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<String, String> = BTreeMap::new();
+
+        let without_port = client
+            .calculate_signature("GET", "https://api.example.com/resource", &params, "")
+            .unwrap();
+        let with_port = client
+            .calculate_signature("GET", "https://api.example.com:8443/resource", &params, "")
+            .unwrap();
+
+        assert_ne!(without_port, with_port);
+    }
+
     // ── Batch: auth header format ──
 
     #[test]
@@ -1019,18 +1103,25 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("consumer_key"));
         assert!(debug.contains("OAuth1Config"));
+        // consumer_secret must be redacted
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("consumer_secret\""));
     }
 
     #[test]
     fn test_oauth1_tokens_debug() {
         let tokens = OAuth1Tokens {
-            token: "t".to_string(),
-            token_secret: "s".to_string(),
+            token: "my_secret_token_value".to_string(),
+            token_secret: "my_secret_token_secret".to_string(),
             user_id: None,
             screen_name: None,
         };
         let debug = format!("{tokens:?}");
         assert!(debug.contains("OAuth1Tokens"));
+        // token and token_secret must be redacted
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("my_secret_token_value"));
+        assert!(!debug.contains("my_secret_token_secret"));
     }
 
     // ── Batch: sign_request ──
@@ -1108,8 +1199,25 @@ mod tests {
         };
 
         let url = client.authorization_url(&rt);
-        // Token is included as-is (caller should URL-encode if needed)
-        assert!(url.contains("oauth_token=token with spaces"));
+        assert!(url.contains("oauth_token=token+with+spaces"));
+    }
+
+    #[test]
+    fn test_authorization_url_preserves_existing_query() {
+        let mut config = test_config();
+        config.authorization_url = "https://api.twitter.com/oauth/authorize?lang=en".to_string();
+        let client = OAuth1Client::new(config);
+        let rt = RequestToken {
+            token: "abc123".to_string(),
+            token_secret: "secret".to_string(),
+            callback_confirmed: true,
+        };
+
+        let url = client.authorization_url(&rt);
+        assert_eq!(
+            url,
+            "https://api.twitter.com/oauth/authorize?lang=en&oauth_token=abc123"
+        );
     }
 
     // ── Expanded tests: percent_encode unicode ──
@@ -1198,12 +1306,15 @@ mod tests {
     fn test_request_token_debug() {
         let rt = RequestToken {
             token: "t".to_string(),
-            token_secret: "s".to_string(),
+            token_secret: "my_secret_value".to_string(),
             callback_confirmed: false,
         };
         let debug = format!("{rt:?}");
         assert!(debug.contains("RequestToken"));
         assert!(debug.contains("callback_confirmed"));
+        // token_secret must be redacted
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("my_secret_value"));
     }
 
     // ── Expanded tests: OAuth1Client debug ──
@@ -1539,6 +1650,12 @@ mod tests {
         assert!(debug.contains("token_secret"));
         assert!(debug.contains("user_id"));
         assert!(debug.contains("screen_name"));
+        // Sensitive values must be redacted
+        assert!(!debug.contains("my_tok"));
+        assert!(!debug.contains("my_sec"));
+        // Non-sensitive values should still appear
+        assert!(debug.contains("uid_123"));
+        assert!(debug.contains("user_sn"));
     }
 
     #[test]

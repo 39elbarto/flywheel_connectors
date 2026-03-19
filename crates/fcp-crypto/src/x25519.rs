@@ -73,12 +73,20 @@ impl X25519SecretKey {
     /// Perform Diffie-Hellman key exchange with a peer's public key.
     ///
     /// Returns a shared secret that both parties can derive.
-    #[must_use]
-    pub fn diffie_hellman(&self, peer_public: &X25519PublicKey) -> X25519SharedSecret {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidPublicKey`] if the peer's public key is a
+    /// low-order point (e.g. all zeros) that would produce an all-zero shared
+    /// secret, allowing an attacker to predict the result.
+    pub fn diffie_hellman(&self, peer_public: &X25519PublicKey) -> CryptoResult<X25519SharedSecret> {
         let shared = self.inner.diffie_hellman(&peer_public.inner);
-        X25519SharedSecret {
-            inner: *shared.as_bytes(),
+        if shared.as_bytes().iter().all(|&b| b == 0) {
+            return Err(CryptoError::InvalidPublicKey);
         }
+        Ok(X25519SharedSecret {
+            inner: *shared.as_bytes(),
+        })
     }
 }
 
@@ -235,8 +243,8 @@ mod tests {
         let alice_public_key = alice_secret_key.public_key();
         let bob_public_key = bob_secret_key.public_key();
 
-        let alice_shared = alice_secret_key.diffie_hellman(&bob_public_key);
-        let bob_shared = bob_secret_key.diffie_hellman(&alice_public_key);
+        let alice_shared = alice_secret_key.diffie_hellman(&bob_public_key).unwrap();
+        let bob_shared = bob_secret_key.diffie_hellman(&alice_public_key).unwrap();
 
         assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
     }
@@ -250,8 +258,8 @@ mod tests {
         let bob_public_key = bob_secret_key.public_key();
         let charlie_public_key = charlie_secret_key.public_key();
 
-        let alice_bob = alice_secret_key.diffie_hellman(&bob_public_key);
-        let alice_charlie = alice_secret_key.diffie_hellman(&charlie_public_key);
+        let alice_bob = alice_secret_key.diffie_hellman(&bob_public_key).unwrap();
+        let alice_charlie = alice_secret_key.diffie_hellman(&charlie_public_key).unwrap();
 
         assert_ne!(alice_bob.as_bytes(), alice_charlie.as_bytes());
     }
@@ -333,8 +341,8 @@ mod tests {
         // Shared secret
         let expected_shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
 
-        let alice_shared = alice_sk.diffie_hellman(&bob_sk.public_key());
-        let bob_shared = bob_sk.diffie_hellman(&alice_sk.public_key());
+        let alice_shared = alice_sk.diffie_hellman(&bob_sk.public_key()).unwrap();
+        let bob_shared = bob_sk.diffie_hellman(&alice_sk.public_key()).unwrap();
 
         assert_eq!(hex::encode(alice_shared.as_bytes()), expected_shared);
         assert_eq!(hex::encode(bob_shared.as_bytes()), expected_shared);
@@ -374,8 +382,8 @@ mod tests {
         let sk2 = X25519SecretKey::from_bytes(scalar2);
 
         // DH exchange should produce same shared secret
-        let shared1 = sk1.diffie_hellman(&sk2.public_key());
-        let shared2 = sk2.diffie_hellman(&sk1.public_key());
+        let shared1 = sk1.diffie_hellman(&sk2.public_key()).unwrap();
+        let shared2 = sk2.diffie_hellman(&sk1.public_key()).unwrap();
         assert_eq!(shared1.as_bytes(), shared2.as_bytes());
     }
 
@@ -401,8 +409,8 @@ mod tests {
 
         // And the same shared secrets
         let other = X25519SecretKey::generate();
-        let shared1 = sk1.diffie_hellman(&other.public_key());
-        let shared2 = sk2.diffie_hellman(&other.public_key());
+        let shared1 = sk1.diffie_hellman(&other.public_key()).unwrap();
+        let shared2 = sk2.diffie_hellman(&other.public_key()).unwrap();
         assert_eq!(shared1.as_bytes(), shared2.as_bytes());
     }
 
@@ -457,7 +465,7 @@ mod tests {
     fn shared_secret_size() {
         let sk1 = X25519SecretKey::generate();
         let sk2 = X25519SecretKey::generate();
-        let shared = sk1.diffie_hellman(&sk2.public_key());
+        let shared = sk1.diffie_hellman(&sk2.public_key()).unwrap();
         assert_eq!(shared.as_bytes().len(), super::X25519_SHARED_SECRET_SIZE);
     }
 
@@ -465,7 +473,7 @@ mod tests {
     fn shared_secret_debug_no_leak() {
         let sk1 = X25519SecretKey::generate();
         let sk2 = X25519SecretKey::generate();
-        let shared = sk1.diffie_hellman(&sk2.public_key());
+        let shared = sk1.diffie_hellman(&sk2.public_key()).unwrap();
         let debug = format!("{shared:?}");
         assert!(debug.contains("X25519SharedSecret"));
         // Should not contain actual secret bytes
@@ -525,8 +533,8 @@ mod tests {
     fn self_dh_produces_same_result() {
         let sk = X25519SecretKey::generate();
         let pk = sk.public_key();
-        let shared1 = sk.diffie_hellman(&pk);
-        let shared2 = sk.diffie_hellman(&pk);
+        let shared1 = sk.diffie_hellman(&pk).unwrap();
+        let shared2 = sk.diffie_hellman(&pk).unwrap();
         assert_eq!(shared1.as_bytes(), shared2.as_bytes());
     }
 
@@ -625,7 +633,7 @@ mod tests {
     fn dh_self_produces_nonzero_secret() {
         let sk = X25519SecretKey::generate();
         let pk = sk.public_key();
-        let shared = sk.diffie_hellman(&pk);
+        let shared = sk.diffie_hellman(&pk).unwrap();
         // Should not be all zeros (extremely unlikely with valid keys)
         assert_ne!(shared.as_bytes(), &[0u8; 32]);
     }
@@ -637,22 +645,34 @@ mod tests {
         let c = X25519SecretKey::generate();
 
         // a-b and b-a should match
-        let ab = a.diffie_hellman(&b.public_key());
-        let ba = b.diffie_hellman(&a.public_key());
+        let ab = a.diffie_hellman(&b.public_key()).unwrap();
+        let ba = b.diffie_hellman(&a.public_key()).unwrap();
         assert_eq!(ab.as_bytes(), ba.as_bytes());
 
         // a-c and c-a should match
-        let ac = a.diffie_hellman(&c.public_key());
-        let ca = c.diffie_hellman(&a.public_key());
+        let ac = a.diffie_hellman(&c.public_key()).unwrap();
+        let ca = c.diffie_hellman(&a.public_key()).unwrap();
         assert_eq!(ac.as_bytes(), ca.as_bytes());
 
         // b-c and c-b should match
-        let bc = b.diffie_hellman(&c.public_key());
-        let cb = c.diffie_hellman(&b.public_key());
+        let bc = b.diffie_hellman(&c.public_key()).unwrap();
+        let cb = c.diffie_hellman(&b.public_key()).unwrap();
         assert_eq!(bc.as_bytes(), cb.as_bytes());
 
         // All three shared secrets should be different
         assert_ne!(ab.as_bytes(), ac.as_bytes());
         assert_ne!(ab.as_bytes(), bc.as_bytes());
+    }
+
+    #[test]
+    fn dh_rejects_zero_public_key() {
+        let keypair = X25519SecretKey::generate();
+        let zero_pk = X25519PublicKey::from_bytes([0u8; 32]);
+        let result = keypair.diffie_hellman(&zero_pk);
+        assert!(
+            result.is_err(),
+            "DH with zero public key should be rejected"
+        );
+        assert!(matches!(result, Err(CryptoError::InvalidPublicKey)));
     }
 }

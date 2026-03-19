@@ -14,6 +14,16 @@ use crate::{
     WebhookResult,
 };
 
+fn header_value_case_insensitive<'a>(
+    headers: &'a HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
 fn deterministic_event_id(provider: &str, event_type: &str, body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(provider.as_bytes());
@@ -81,9 +91,7 @@ impl GitHubWebhook {
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
         // Get signature header
-        let signature = headers
-            .get("x-hub-signature-256")
-            .or_else(|| headers.get("X-Hub-Signature-256"))
+        let signature = header_value_case_insensitive(headers, "x-hub-signature-256")
             .ok_or_else(|| WebhookError::MissingSignature("X-Hub-Signature-256".into()))?;
 
         // Verify signature
@@ -93,17 +101,15 @@ impl GitHubWebhook {
         let payload: Value = serde_json::from_slice(body)?;
 
         // Extract event details
-        let event_type = headers
-            .get("x-github-event")
-            .or_else(|| headers.get("X-GitHub-Event"))
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
+        let event_type = header_value_case_insensitive(headers, "x-github-event")
+            .map_or_else(|| "unknown".to_string(), str::to_string);
 
-        let delivery_id = headers
-            .get("x-github-delivery")
-            .or_else(|| headers.get("X-GitHub-Delivery"))
-            .cloned()
-            .unwrap_or_else(|| deterministic_event_id("github", &event_type, body));
+        let delivery_id = header_value_case_insensitive(headers, "x-github-delivery")
+            .filter(|id| !id.is_empty())
+            .map_or_else(
+                || deterministic_event_id("github", &event_type, body),
+                str::to_string,
+            );
 
         Ok(WebhookEvent::new(delivery_id, event_type, "github")
             .with_default_webhook_taint()
@@ -147,9 +153,7 @@ impl StripeWebhook {
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
         // Get Stripe-Signature header
-        let signature_header = headers
-            .get("stripe-signature")
-            .or_else(|| headers.get("Stripe-Signature"))
+        let signature_header = header_value_case_insensitive(headers, "stripe-signature")
             .ok_or_else(|| WebhookError::MissingSignature("Stripe-Signature".into()))?;
 
         // Parse signature header (format: t=timestamp,v1=signature)
@@ -204,6 +208,7 @@ impl StripeWebhook {
         let mut signatures = Vec::new();
 
         for part in header.split(',') {
+            let part = part.trim();
             if let Some(ts) = part.strip_prefix("t=") {
                 timestamp = ts.parse().ok();
             } else if let Some(sig) = part.strip_prefix("v1=") {
@@ -268,14 +273,10 @@ impl SlackWebhook {
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
         // Get headers
-        let signature = headers
-            .get("x-slack-signature")
-            .or_else(|| headers.get("X-Slack-Signature"))
+        let signature = header_value_case_insensitive(headers, "x-slack-signature")
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Signature".into()))?;
 
-        let timestamp_str = headers
-            .get("x-slack-request-timestamp")
-            .or_else(|| headers.get("X-Slack-Request-Timestamp"))
+        let timestamp_str = header_value_case_insensitive(headers, "x-slack-request-timestamp")
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Request-Timestamp".into()))?;
 
         let timestamp: i64 = timestamp_str
@@ -360,9 +361,7 @@ impl LinearWebhook {
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
         // Get signature
-        let signature = headers
-            .get("linear-signature")
-            .or_else(|| headers.get("Linear-Signature"))
+        let signature = header_value_case_insensitive(headers, "linear-signature")
             .ok_or_else(|| WebhookError::MissingSignature("Linear-Signature".into()))?;
 
         // Verify signature
@@ -1070,9 +1069,9 @@ mod tests {
 
         // Use capitalized header names
         let mut headers = HashMap::new();
-        headers.insert("X-Hub-Signature-256".to_string(), signature);
-        headers.insert("X-GitHub-Event".to_string(), "issues".to_string());
-        headers.insert("X-GitHub-Delivery".to_string(), "del_1".to_string());
+        headers.insert("X-HUB-SIGNATURE-256".to_string(), signature);
+        headers.insert("X-GITHUB-EVENT".to_string(), "issues".to_string());
+        headers.insert("X-GITHUB-DELIVERY".to_string(), "del_1".to_string());
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.id, "del_1");
@@ -1091,7 +1090,7 @@ mod tests {
 
         let mut headers = HashMap::new();
         headers.insert(
-            "Stripe-Signature".to_string(),
+            "STRIPE-SIGNATURE".to_string(),
             format!("t={timestamp},v1={sig}"),
         );
 
@@ -1450,9 +1449,9 @@ mod tests {
         let computed = verifier.compute(base_string.as_bytes());
 
         let mut headers = HashMap::new();
-        headers.insert("X-Slack-Signature".to_string(), format!("v0={computed}"));
+        headers.insert("X-SLACK-SIGNATURE".to_string(), format!("v0={computed}"));
         headers.insert(
-            "X-Slack-Request-Timestamp".to_string(),
+            "X-SLACK-REQUEST-TIMESTAMP".to_string(),
             timestamp.to_string(),
         );
 
@@ -1467,7 +1466,7 @@ mod tests {
         let signature = handler.verifier.compute(body);
 
         let mut headers = HashMap::new();
-        headers.insert("Linear-Signature".to_string(), signature);
+        headers.insert("LINEAR-SIGNATURE".to_string(), signature);
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.id, "wh_1");

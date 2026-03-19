@@ -1,10 +1,12 @@
 {
   "mcpServers": {
     "mcp-agent-mail": {
-      "command": "/Users/jemanuel/.local/bin/mcp-agent-mail",
-      "args": [],
       "env": {
         "HTTP_BEARER_TOKEN": "74b30f3438b3577f1ec0453523d5a2d73b4507062502da14f9fbefb3068a3b1a"
+      },
+      "url": "http://127.0.0.1:8765/mcp/",
+      "headers": {
+        "Authorization": "Bearer 552e3d77c4386828e5fc260b6243d44c9880177a1f945224e1aed7be1efd3c48"
       }
     }
   }

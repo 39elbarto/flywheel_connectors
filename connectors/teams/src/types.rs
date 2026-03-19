@@ -36,7 +36,7 @@ pub struct TeamsConfig {
 }
 
 /// Authentication mode for Teams.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "mode")]
 pub enum TeamsAuth {
     /// Bearer token (delegated permissions).
@@ -54,6 +54,31 @@ pub enum TeamsAuth {
     /// FCP credential reference (resolved by egress proxy).
     #[serde(rename = "credential_id")]
     CredentialId { credential_id: String },
+}
+
+impl std::fmt::Debug for TeamsAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AccessToken { .. } => f
+                .debug_struct("AccessToken")
+                .field("access_token", &"[REDACTED]")
+                .finish(),
+            Self::ClientCredentials {
+                client_id,
+                tenant_id,
+                ..
+            } => f
+                .debug_struct("ClientCredentials")
+                .field("client_id", client_id)
+                .field("client_secret", &"[REDACTED]")
+                .field("tenant_id", tenant_id)
+                .finish(),
+            Self::CredentialId { credential_id } => f
+                .debug_struct("CredentialId")
+                .field("credential_id", credential_id)
+                .finish(),
+        }
+    }
 }
 
 fn default_graph_url() -> String {
@@ -309,13 +334,24 @@ pub struct ActivityAttachment {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Azure AD token response.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: u64,
     #[serde(default)]
     pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 #[cfg(test)]

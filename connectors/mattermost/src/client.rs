@@ -156,6 +156,7 @@ impl MattermostClient {
     /// Build read-only access paths for a file.
     #[must_use]
     pub fn file_access_paths(&self, file_id: &str) -> serde_json::Value {
+        let file_id = encode_path_segment(file_id);
         let base = format!("{}/api/v4/files/{file_id}", self.base_url);
         serde_json::json!({
             "download_url": base,
@@ -183,6 +184,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the user is not found.
     pub async fn get_user(&self, user_id: &str) -> MattermostResult<User> {
+        let user_id = encode_path_segment(user_id);
         self.get(&format!("/api/v4/users/{user_id}")).await
     }
 
@@ -203,6 +205,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the team is not found.
     pub async fn get_team(&self, team_id: &str) -> MattermostResult<Team> {
+        let team_id = encode_path_segment(team_id);
         self.get(&format!("/api/v4/teams/{team_id}")).await
     }
 
@@ -219,6 +222,8 @@ impl MattermostClient {
         user_id: &str,
         include_deleted: bool,
     ) -> MattermostResult<Vec<Channel>> {
+        let team_id = encode_path_segment(team_id);
+        let user_id = encode_path_segment(user_id);
         let include_deleted = if include_deleted { "true" } else { "false" };
         self.get(&format!(
             "/api/v4/users/{user_id}/teams/{team_id}/channels?include_deleted={include_deleted}"
@@ -232,6 +237,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the channel is not found.
     pub async fn get_channel(&self, channel_id: &str) -> MattermostResult<Channel> {
+        let channel_id = encode_path_segment(channel_id);
         self.get(&format!("/api/v4/channels/{channel_id}")).await
     }
 
@@ -265,6 +271,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the post is not found.
     pub async fn get_post(&self, post_id: &str) -> MattermostResult<Post> {
+        let post_id = encode_path_segment(post_id);
         self.get(&format!("/api/v4/posts/{post_id}")).await
     }
 
@@ -289,6 +296,7 @@ impl MattermostClient {
         page: u32,
         per_page: u32,
     ) -> MattermostResult<PostList> {
+        let channel_id = encode_path_segment(channel_id);
         self.get(&format!(
             "/api/v4/channels/{channel_id}/posts?page={page}&per_page={per_page}"
         ))
@@ -305,6 +313,7 @@ impl MattermostClient {
         team_id: &str,
         req: &SearchPostsRequest,
     ) -> MattermostResult<PostList> {
+        let team_id = encode_path_segment(team_id);
         self.post(&format!("/api/v4/teams/{team_id}/posts/search"), req)
             .await
     }
@@ -315,6 +324,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the post is not found or permission is denied.
     pub async fn delete_post(&self, post_id: &str) -> MattermostResult<()> {
+        let post_id = encode_path_segment(post_id);
         self.delete_path(&format!("/api/v4/posts/{post_id}")).await
     }
 
@@ -346,6 +356,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the file is not found.
     pub async fn get_file_info(&self, file_id: &str) -> MattermostResult<FileInfo> {
+        let file_id = encode_path_segment(file_id);
         self.get(&format!("/api/v4/files/{file_id}/info")).await
     }
 
@@ -355,6 +366,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the file is not found.
     pub async fn get_file_link(&self, file_id: &str) -> MattermostResult<serde_json::Value> {
+        let file_id = encode_path_segment(file_id);
         self.get(&format!("/api/v4/files/{file_id}/link")).await
     }
 
@@ -364,7 +376,8 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the file is not found.
     pub async fn download_file(&self, file_id: &str) -> MattermostResult<FileDownload> {
-        let url = format!("{}/api/v4/files/{file_id}", self.base_url);
+        let encoded_file_id = encode_path_segment(file_id);
+        let url = format!("{}/api/v4/files/{encoded_file_id}", self.base_url);
         debug!(url = %url, "GET");
 
         let response = self
@@ -382,6 +395,7 @@ impl MattermostClient {
     ///
     /// Returns an error on HTTP failure or if the post is not found.
     pub async fn get_file_infos_for_post(&self, post_id: &str) -> MattermostResult<Vec<FileInfo>> {
+        let post_id = encode_path_segment(post_id);
         self.get(&format!("/api/v4/posts/{post_id}/files/info"))
             .await
     }
@@ -567,9 +581,10 @@ impl MattermostClient {
     }
 
     fn thread_url(&self, request: &GetThreadRequest) -> MattermostResult<reqwest::Url> {
+        let post_id = encode_path_segment(&request.post_id);
         let mut url = reqwest::Url::parse(&format!(
             "{}/api/v4/posts/{}/thread",
-            self.base_url, request.post_id
+            self.base_url, post_id
         ))
         .map_err(|e| MattermostError::Config(format!("invalid thread URL: {e}")))?;
 
@@ -857,5 +872,51 @@ mod tests {
             non_empty_trimmed(Some("  application/json  ")),
             Some("application/json".into())
         );
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_slashes_and_special_chars() {
+        assert_eq!(encode_path_segment("safe-id_123"), "safe-id_123");
+        assert_eq!(encode_path_segment("../etc/passwd"), "..%2Fetc%2Fpasswd");
+        assert_eq!(encode_path_segment("id with spaces"), "id%20with%20spaces");
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment("a?b=c&d=e"), "a%3Fb%3Dc%26d%3De");
+    }
+
+    #[test]
+    fn file_access_paths_encodes_malicious_file_id() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let paths = client.file_access_paths("../../../etc/passwd");
+        assert_eq!(
+            paths["download_url"],
+            "https://chat.example.com/api/v4/files/..%2F..%2F..%2Fetc%2Fpasswd"
+        );
+        assert_eq!(
+            paths["info_url"],
+            "https://chat.example.com/api/v4/files/..%2F..%2F..%2Fetc%2Fpasswd/info"
+        );
+    }
+
+    #[test]
+    fn thread_url_encodes_post_id_with_slashes() {
+        let client = MattermostClient::new(
+            "https://chat.example.com",
+            MattermostAuth::Token("tok".into()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let url = client
+            .thread_url(&GetThreadRequest {
+                post_id: "a/b".into(),
+                ..GetThreadRequest::default()
+            })
+            .unwrap()
+            .to_string();
+        assert_eq!(url, "https://chat.example.com/api/v4/posts/a%2Fb/thread");
     }
 }

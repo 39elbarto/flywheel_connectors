@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use reqwest::Client;
+use reqwest::header::HeaderValue;
+use reqwest::{Client, RequestBuilder};
 
 use crate::error::{MatrixError, MatrixResult};
 use crate::types::{
@@ -10,13 +11,26 @@ use crate::types::{
     SendEventResponse, SyncResponse, WhoAmIResponse,
 };
 
+const CREDENTIAL_ID_HEADER: &str = "x-fcp-credential-id";
+
 /// Matrix API client.
-#[derive(Debug)]
 pub struct MatrixClient {
     client: Client,
     homeserver_url: String,
     access_token: String,
+    credential_id: Option<String>,
     is_secretless: bool,
+}
+
+impl std::fmt::Debug for MatrixClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatrixClient")
+            .field("homeserver_url", &self.homeserver_url)
+            .field("access_token", &"[REDACTED]")
+            .field("credential_id", &self.credential_id)
+            .field("is_secretless", &self.is_secretless)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MatrixClient {
@@ -37,7 +51,37 @@ impl MatrixClient {
             client,
             homeserver_url: base,
             access_token: access_token.to_string(),
+            credential_id: None,
             is_secretless: secretless,
+        })
+    }
+
+    /// Create a Matrix client for secretless credential injection.
+    ///
+    /// # Errors
+    /// Returns `MatrixError::Config` if the credential header is invalid or the client cannot be
+    /// built.
+    pub fn new_secretless(
+        homeserver_url: &str,
+        credential_id: &str,
+        timeout: Duration,
+    ) -> MatrixResult<Self> {
+        HeaderValue::from_str(credential_id)
+            .map_err(|e| MatrixError::Config(format!("Invalid credential_id header: {e}")))?;
+
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| MatrixError::Config(format!("Failed to build HTTP client: {e}")))?;
+
+        let base = homeserver_url.trim_end_matches('/').to_string();
+
+        Ok(Self {
+            client,
+            homeserver_url: base,
+            access_token: String::new(),
+            credential_id: Some(credential_id.to_string()),
+            is_secretless: true,
         })
     }
 
@@ -145,15 +189,20 @@ impl MatrixClient {
         limit: u32,
     ) -> MatrixResult<MessagesResponse> {
         let encoded = urlencoded(room_id);
-        let mut url = format!(
-            "{}/_matrix/client/v3/rooms/{encoded}/messages?dir=b&limit={limit}",
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/_matrix/client/v3/rooms/{encoded}/messages",
             self.homeserver_url
-        );
-        if let Some(from_token) = from {
-            use std::fmt::Write;
-            let _ = write!(url, "&from={from_token}");
+        ))
+        .map_err(|e| MatrixError::Config(format!("Invalid messages URL: {e}")))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("dir", "b");
+            query.append_pair("limit", &limit.to_string());
+            if let Some(from_token) = from {
+                query.append_pair("from", &url_encode_param(from_token));
+            }
         }
-        self.api_get(&url).await
+        self.api_get(url.as_str()).await
     }
 
     // ─── Sync ───────────────────────────────────────────────────────────────
@@ -163,15 +212,17 @@ impl MatrixClient {
     /// # Errors
     /// Returns `MatrixError` on transport or API errors.
     pub async fn sync(&self, since: Option<&str>, timeout_ms: u32) -> MatrixResult<SyncResponse> {
-        let mut url = format!(
-            "{}/_matrix/client/v3/sync?timeout={timeout_ms}",
-            self.homeserver_url
-        );
-        if let Some(since_token) = since {
-            use std::fmt::Write;
-            let _ = write!(url, "&since={since_token}");
+        let mut url =
+            reqwest::Url::parse(&format!("{}/_matrix/client/v3/sync", self.homeserver_url))
+                .map_err(|e| MatrixError::Config(format!("Invalid sync URL: {e}")))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("timeout", &timeout_ms.to_string());
+            if let Some(since_token) = since {
+                query.append_pair("since", &url_encode_param(since_token));
+            }
         }
-        self.api_get(&url).await
+        self.api_get(url.as_str()).await
     }
 
     // ─── Health ─────────────────────────────────────────────────────────────
@@ -179,18 +230,16 @@ impl MatrixClient {
     /// Lightweight health check.
     ///
     /// # Errors
-    /// Returns `MatrixError` if the homeserver is unreachable.
+    /// Returns `MatrixError` if the homeserver is unreachable or authentication fails.
     pub async fn health_check(&self) -> MatrixResult<()> {
         let url = format!("{}/_matrix/client/v3/account/whoami", self.homeserver_url);
         let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.access_token)
+            .authorize(self.client.get(&url))
             .send()
             .await
             .map_err(MatrixError::Http)?;
         let status = resp.status().as_u16();
-        if status == 200 || status == 401 {
+        if status == 200 {
             Ok(())
         } else {
             let body = resp.text().await.unwrap_or_default();
@@ -202,9 +251,7 @@ impl MatrixClient {
 
     async fn api_get<T: serde::de::DeserializeOwned>(&self, url: &str) -> MatrixResult<T> {
         let resp = self
-            .client
-            .get(url)
-            .bearer_auth(&self.access_token)
+            .authorize(self.client.get(url))
             .send()
             .await
             .map_err(MatrixError::Http)?;
@@ -217,9 +264,7 @@ impl MatrixClient {
         body: &serde_json::Value,
     ) -> MatrixResult<T> {
         let resp = self
-            .client
-            .post(url)
-            .bearer_auth(&self.access_token)
+            .authorize(self.client.post(url))
             .json(body)
             .send()
             .await
@@ -233,14 +278,22 @@ impl MatrixClient {
         body: &serde_json::Value,
     ) -> MatrixResult<T> {
         let resp = self
-            .client
-            .put(url)
-            .bearer_auth(&self.access_token)
+            .authorize(self.client.put(url))
             .json(body)
             .send()
             .await
             .map_err(MatrixError::Http)?;
         self.handle_response(resp).await
+    }
+
+    fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
+        if let Some(credential_id) = &self.credential_id {
+            request.header(CREDENTIAL_ID_HEADER, credential_id)
+        } else if self.access_token.is_empty() {
+            request
+        } else {
+            request.bearer_auth(&self.access_token)
+        }
     }
 
     async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -284,6 +337,25 @@ fn urlencoded(s: &str) -> String {
     out
 }
 
+/// Percent-encode a query parameter value to prevent injection of extra
+/// query parameters via crafted pagination tokens.  Applied as a
+/// defense-in-depth layer *before* values are passed to
+/// `Url::query_pairs_mut().append_pair()`.
+pub(crate) fn url_encode_param(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +373,14 @@ mod tests {
     }
 
     #[test]
+    fn secretless_constructor_preserves_credential_reference() {
+        let c =
+            MatrixClient::new_secretless("https://matrix.org", "cred_1", Duration::from_secs(30))
+                .unwrap();
+        assert!(c.is_secretless());
+    }
+
+    #[test]
     fn not_secretless() {
         let c = MatrixClient::new("https://matrix.org", "tok", Duration::from_secs(30)).unwrap();
         assert!(!c.is_secretless());
@@ -310,6 +390,26 @@ mod tests {
     fn urlencoded_room_id() {
         let encoded = urlencoded("!room:matrix.org");
         assert_eq!(encoded, "%21room%3Amatrix.org");
+    }
+
+    #[test]
+    fn url_encode_param_passthrough_safe_chars() {
+        assert_eq!(url_encode_param("abc123"), "abc123");
+        assert_eq!(url_encode_param("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn url_encode_param_encodes_ampersand() {
+        // An attacker-supplied token like "tok&admin=true" must not inject parameters.
+        let encoded = url_encode_param("tok&admin=true");
+        assert_eq!(encoded, "tok%26admin%3Dtrue");
+        assert!(!encoded.contains('&'));
+    }
+
+    #[test]
+    fn url_encode_param_encodes_special_chars() {
+        let encoded = url_encode_param("a/b+c==");
+        assert_eq!(encoded, "a%2Fb%2Bc%3D%3D");
     }
 
     #[fcp_async_core::runtime::test]
@@ -331,6 +431,31 @@ mod tests {
         let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
         let resp = c.whoami().await.unwrap();
         assert_eq!(resp.user_id, "@bot:matrix.org");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn secretless_client_sends_credential_header() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/account/whoami",
+            ))
+            .and(wiremock::matchers::header(CREDENTIAL_ID_HEADER, "cred_1"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "user_id": "@bot:matrix.org"
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let c =
+            MatrixClient::new_secretless(&mock.uri(), "cred_1", Duration::from_secs(10)).unwrap();
+        let _ = c.whoami().await.unwrap();
+
+        let requests = mock.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.get("authorization").is_none());
     }
 
     #[fcp_async_core::runtime::test]
@@ -369,6 +494,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.event_id, "$new_event");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn get_messages_encodes_from_token() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/rooms/%21room%3Am.org/messages",
+            ))
+            .and(wiremock::matchers::query_param("dir", "b"))
+            .and(wiremock::matchers::query_param("limit", "20"))
+            .and(wiremock::matchers::query_param("from", "a/b+c=="))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "chunk": [],
+                    "end": "next"
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let resp = c
+            .get_messages("!room:m.org", Some("a/b+c=="), 20)
+            .await
+            .unwrap();
+        assert_eq!(resp.end.as_deref(), Some("next"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -428,5 +580,26 @@ mod tests {
 
         let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
         assert!(c.health_check().await.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_check_401_is_unauthorized() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/account/whoami",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "errcode": "M_UNKNOWN_TOKEN",
+                    "error": "Unrecognised access token."
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let err = c.health_check().await.unwrap_err();
+        assert!(matches!(err, MatrixError::Unauthorized(_)));
     }
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Mattermost connector configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MattermostConfig {
     /// Base URL of the Mattermost server (e.g., `https://mattermost.example.com`).
     pub base_url: String,
@@ -20,17 +20,37 @@ pub struct MattermostConfig {
     pub request_timeout_ms: u64,
 }
 
+impl std::fmt::Debug for MattermostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MattermostConfig")
+            .field("base_url", &self.base_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("credential_id", &self.credential_id)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
+}
+
 const fn default_timeout_ms() -> u64 {
     30_000
 }
 
 /// Authentication mode.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum MattermostAuth {
     /// Direct token (personal access token or bot token).
     Token(String),
     /// Credential ID for egress proxy injection.
     CredentialId(String),
+}
+
+impl std::fmt::Debug for MattermostAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token(_) => f.debug_tuple("Token").field(&"[REDACTED]").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
 }
 
 /// A Mattermost user.

@@ -35,7 +35,7 @@ const CAP_READ: &str = "whatsapp.read";
 const CAP_WEBHOOK: &str = "whatsapp.webhook";
 
 /// WhatsApp connector configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct WhatsAppConfig {
     #[serde(default = "default_base_url")]
     base_url: String,
@@ -51,6 +51,23 @@ struct WhatsAppConfig {
     /// Token for webhook challenge-response verification.
     #[serde(default)]
     webhook_verify_token: Option<String>,
+}
+
+impl std::fmt::Debug for WhatsAppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhatsAppConfig")
+            .field("base_url", &self.base_url)
+            .field("phone_number_id", &self.phone_number_id)
+            .field("access_token", &"[REDACTED]")
+            .field("retry", &self.retry)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field(
+                "app_secret",
+                &self.app_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("webhook_verify_token", &self.webhook_verify_token)
+            .finish()
+    }
 }
 
 fn default_base_url() -> String {
@@ -1221,6 +1238,35 @@ mod tests {
             .find(|op| op.id.as_str() == OP_WEBHOOK_RECEIVE)
             .unwrap();
         assert!(!receive_op.ai_hints.when_to_use.is_empty());
+    }
+
+    #[test]
+    fn debug_redacts_config_secrets() {
+        let config = WhatsAppConfig {
+            base_url: default_base_url(),
+            phone_number_id: "123".into(),
+            access_token: "super_secret_token".into(),
+            retry: HttpRetryConfig::default(),
+            request_timeout_ms: default_request_timeout_ms(),
+            app_secret: Some("super_secret_app_key".into()),
+            webhook_verify_token: Some("verify_tok".into()),
+        };
+        let debug_output = format!("{config:?}");
+        assert!(
+            !debug_output.contains("super_secret_token"),
+            "Debug output must not contain the raw access_token"
+        );
+        assert!(
+            !debug_output.contains("super_secret_app_key"),
+            "Debug output must not contain the raw app_secret"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should show [REDACTED] for sensitive fields"
+        );
+        // Non-secret fields should still appear
+        assert!(debug_output.contains("123"));
+        assert!(debug_output.contains("verify_tok"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
 use fcp_sdk::retry::RetryDecision;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde_json::json;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -13,13 +13,23 @@ use crate::error::{WhatsAppError, WhatsAppResult};
 use crate::types::{ApiErrorResponse, ProfileResponse, SendMessageResponse};
 
 /// WhatsApp API client with retry and runtime integration.
-#[derive(Debug)]
 pub struct WhatsAppClient {
     client: Client,
     base_url: String,
     phone_number_id: String,
     access_token: String,
     retry_config: HttpRetryConfig,
+}
+
+impl std::fmt::Debug for WhatsAppClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhatsAppClient")
+            .field("base_url", &self.base_url)
+            .field("phone_number_id", &self.phone_number_id)
+            .field("access_token", &"[REDACTED]")
+            .field("retry_config", &self.retry_config)
+            .finish()
+    }
 }
 
 impl WhatsAppClient {
@@ -123,13 +133,8 @@ impl WhatsAppClient {
             let body = body_clone.clone();
             async move {
                 debug!(attempt, "Sending WhatsApp message");
-                let resp = match client
-                    .post(&url)
-                    .bearer_auth(&token)
-                    .json(&body)
-                    .send()
-                    .await
-                {
+                let request = authenticate(client.post(&url), &token).json(&body);
+                let resp = match request.send().await {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
@@ -225,13 +230,9 @@ impl WhatsAppClient {
             let token = self.access_token.clone();
             async move {
                 debug!(attempt, "Fetching WhatsApp business profile");
-                let resp = match client
-                    .get(&url)
-                    .bearer_auth(&token)
-                    .query(&[("fields", "about,address,description,vertical")])
-                    .send()
-                    .await
-                {
+                let request = authenticate(client.get(&url), &token)
+                    .query(&[("fields", "about,address,description,vertical")]);
+                let resp = match request.send().await {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
@@ -294,10 +295,7 @@ impl WhatsAppClient {
     /// Returns an error if the API is unreachable.
     pub async fn health_check(&self) -> WhatsAppResult<()> {
         let url = format!("{}/{}", self.base_url, self.phone_number_id);
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.access_token)
+        let resp = authenticate(self.client.get(&url), &self.access_token)
             .send()
             .await
             .map_err(WhatsAppError::Http)?;
@@ -338,9 +336,19 @@ impl WhatsAppClient {
     }
 }
 
+fn authenticate(request: RequestBuilder, access_token: &str) -> RequestBuilder {
+    if access_token.is_empty() {
+        request
+    } else {
+        request.bearer_auth(access_token)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -378,6 +386,26 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_access_token() {
+        let client = WhatsAppClient::new(
+            "https://graph.facebook.com/v21.0",
+            "123456",
+            "super_secret_token_value",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        let debug_output = format!("{client:?}");
+        assert!(
+            !debug_output.contains("super_secret_token_value"),
+            "Debug output must not contain the raw access_token"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should show [REDACTED] for access_token"
+        );
+    }
+
+    #[test]
     fn non_secretless() {
         let client = WhatsAppClient::new(
             "https://graph.facebook.com/v21.0",
@@ -387,5 +415,44 @@ mod tests {
         )
         .unwrap();
         assert!(!client.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn secretless_health_check_omits_authorization_header() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/123456"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            WhatsAppClient::new(&mock_server.uri(), "123456", "", HttpRetryConfig::default())
+                .unwrap();
+        assert!(client.health_check().await.is_ok());
+
+        let requests = mock_server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.get("authorization").is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_check_with_token_sends_authorization_header() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/123456"))
+            .and(header("authorization", "Bearer real_token"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&mock_server)
+            .await;
+
+        let client = WhatsAppClient::new(
+            &mock_server.uri(),
+            "123456",
+            "real_token",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        assert!(client.health_check().await.is_ok());
     }
 }

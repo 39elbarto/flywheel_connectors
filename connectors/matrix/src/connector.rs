@@ -277,6 +277,47 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+fn optional_str(input: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{field}' must be a string"),
+            }),
+    }
+}
+
+fn optional_string_vec(input: &serde_json::Value, field: &str) -> FcpResult<Vec<String>> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(value) => {
+            serde_json::from_value(value.clone()).map_err(|_| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{field}' must be an array of strings"),
+            })
+        }
+    }
+}
+
+fn optional_u32(input: &serde_json::Value, field: &str, default: u32) -> FcpResult<u32> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(default),
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{field}' must be an unsigned integer"),
+            })?;
+            u32::try_from(raw).map_err(|_| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{field}' exceeds maximum supported value"),
+            })
+        }
+    }
+}
+
 #[async_trait]
 impl FcpConnector for MatrixConnector {
     fn id(&self) -> &ConnectorId {
@@ -290,6 +331,20 @@ impl FcpConnector for MatrixConnector {
                 message: format!("Invalid Matrix config: {e}"),
             })?;
 
+        // Validate homeserver URL scheme and structure.
+        if !config.homeserver_url.starts_with("http://")
+            && !config.homeserver_url.starts_with("https://")
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
+                message: "homeserver_url must start with http:// or https://".into(),
+            });
+        }
+        reqwest::Url::parse(&config.homeserver_url).map_err(|e| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("homeserver_url is not a valid URL: {e}"),
+        })?;
+
         self.retry_config = config.retry.clone();
         self.runtime = Some(ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
@@ -297,15 +352,16 @@ impl FcpConnector for MatrixConnector {
         ));
 
         let timeout = Duration::from_millis(config.timeout_ms);
-        let token = match &config.auth {
-            MatrixAuth::AccessToken { access_token } => access_token.as_str(),
-            MatrixAuth::CredentialId { .. } => "",
-        };
-
-        let client = MatrixClient::new(&config.homeserver_url, token, timeout).map_err(|e| {
-            FcpError::Internal {
-                message: format!("Failed to create Matrix client: {e}"),
+        let client = match &config.auth {
+            MatrixAuth::AccessToken { access_token } => {
+                MatrixClient::new(&config.homeserver_url, access_token, timeout)
             }
+            MatrixAuth::CredentialId { credential_id } => {
+                MatrixClient::new_secretless(&config.homeserver_url, credential_id, timeout)
+            }
+        }
+        .map_err(|e| FcpError::Internal {
+            message: format!("Failed to create Matrix client: {e}"),
         })?;
 
         self.client = Some(client);
@@ -438,28 +494,29 @@ impl FcpConnector for MatrixConnector {
 impl MatrixConnector {
     #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        self.base.check_ready()?;
+
         let operation = req.operation.as_str();
+        let required_cap = match operation {
+            OP_JOINED_ROOMS | OP_GET_MESSAGES => CapabilityId::from_static(CAP_READ),
+            OP_SEND_MESSAGE => CapabilityId::from_static(CAP_WRITE),
+            OP_CREATE_ROOM | OP_JOIN_ROOM | OP_LEAVE_ROOM => CapabilityId::from_static(CAP_MANAGE),
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
 
-        if let Some(verifier) = &self.verifier {
-            let required_cap = match operation {
-                OP_JOINED_ROOMS | OP_GET_MESSAGES => CapabilityId::from_static(CAP_READ),
-                OP_SEND_MESSAGE => CapabilityId::from_static(CAP_WRITE),
-                OP_CREATE_ROOM | OP_JOIN_ROOM | OP_LEAVE_ROOM => {
-                    CapabilityId::from_static(CAP_MANAGE)
-                }
-                _ => {
-                    return Err(FcpError::InvalidRequest {
-                        code: 1004,
-                        message: format!("Unknown operation: {operation}"),
-                    });
-                }
-            };
-            verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing capability verifier".into(),
+        })?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing Matrix client".into(),
+        })?;
 
         let output = match operation {
             OP_JOINED_ROOMS => {
@@ -467,31 +524,11 @@ impl MatrixConnector {
                 json!({ "rooms": rooms })
             }
             OP_CREATE_ROOM => {
-                let name = req
-                    .input
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let topic = req
-                    .input
-                    .get("topic")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let invite: Vec<String> = req
-                    .input
-                    .get("invite")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                let visibility = req
-                    .input
-                    .get("visibility")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let preset = req
-                    .input
-                    .get("preset")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+                let name = optional_str(&req.input, "name")?;
+                let topic = optional_str(&req.input, "topic")?;
+                let invite = optional_string_vec(&req.input, "invite")?;
+                let visibility = optional_str(&req.input, "visibility")?;
+                let preset = optional_str(&req.input, "preset")?;
 
                 let create_req = CreateRoomRequest {
                     name,
@@ -523,29 +560,20 @@ impl MatrixConnector {
             OP_SEND_MESSAGE => {
                 let room_id = require_str(&req.input, "room_id")?;
                 let body = require_str(&req.input, "body")?;
-                let msgtype = req
-                    .input
-                    .get("msgtype")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("m.text");
+                let msgtype =
+                    optional_str(&req.input, "msgtype")?.unwrap_or_else(|| "m.text".to_string());
                 let resp = client
-                    .send_message(room_id, body, msgtype)
+                    .send_message(room_id, body, &msgtype)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 json!({ "event_id": resp.event_id })
             }
             OP_GET_MESSAGES => {
                 let room_id = require_str(&req.input, "room_id")?;
-                let from = req.input.get("from").and_then(|v| v.as_str());
-                let limit = u32::try_from(
-                    req.input
-                        .get("limit")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(20),
-                )
-                .unwrap_or(20);
+                let from = optional_str(&req.input, "from")?;
+                let limit = optional_u32(&req.input, "limit", 20)?;
                 let resp = client
-                    .get_messages(room_id, from, limit)
+                    .get_messages(room_id, from.as_deref(), limit)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 json!({
@@ -643,6 +671,47 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn configure_rejects_non_http_scheme() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "ftp://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" }
+            }))
+            .await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("http://") || msg.contains("https://"),
+            "Error should mention required scheme, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_url() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "not a url at all",
+                "auth": { "mode": "access_token", "access_token": "tok" }
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_javascript_scheme() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "javascript:alert(1)",
+                "auth": { "mode": "access_token", "access_token": "tok" }
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn health_before_configure() {
         let c = MatrixConnector::new();
         let h = c.health().await;
@@ -718,6 +787,85 @@ mod tests {
         let c = MatrixConnector::new();
         let r = c.self_check().await.unwrap();
         assert_eq!(r.status, SelfCheckStatus::Degraded);
+    }
+
+    #[test]
+    fn optional_create_room_fields_reject_invalid_types() {
+        let err = optional_string_vec(&json!({ "invite": "not-an-array" }), "invite").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+
+        let err = optional_str(&json!({ "visibility": 42 }), "visibility").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn optional_message_pagination_fields_reject_invalid_types() {
+        let err = optional_str(&json!({ "from": 5 }), "from").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+
+        let err = optional_u32(&json!({ "limit": "many" }), "limit", 20).unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_requires_handshake_after_configuration() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" }
+        }))
+        .await
+        .unwrap();
+
+        let req = InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_1"),
+            connector_id: c.id().clone(),
+            operation: OperationId::from_static(OP_JOINED_ROOMS),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let err = c.invoke(req).await.unwrap_err();
+        assert!(matches!(err, FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_unauthorized_is_failed() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/account/whoami",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "errcode": "M_UNKNOWN_TOKEN",
+                    "error": "Unrecognised access token."
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": mock.uri(),
+            "auth": { "mode": "access_token", "access_token": "tok" }
+        }))
+        .await
+        .unwrap();
+
+        let report = c.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("self_check_failed"));
     }
 
     #[fcp_async_core::runtime::test]

@@ -23,6 +23,7 @@ use fcp_core::{
 use quick_xml::{Reader, escape::unescape, events::Event};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 use zip::{CompressionMethod, ZipArchive, write::FileOptions};
 
@@ -38,6 +39,7 @@ use crate::{
 
 const DEFAULT_AUTH_URL: &str = "https://login.microsoftonline.com";
 const DEFAULT_CLIENT_CREDENTIAL_SCOPE: &str = "https://graph.microsoft.com/.default";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const M365_SYNC_STATE_FILE: &str = "m365_sync_state.json";
 const M365_SYNC_LEASE_FILE: &str = "m365_sync_lease.json";
 const M365_SYNC_LEASE_TTL_SECONDS: u64 = 120;
@@ -576,6 +578,12 @@ impl M365Connector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -732,7 +740,7 @@ impl M365Connector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:microsoft365-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -4186,6 +4194,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+        assert_eq!(result["manifest_hash"], M365Connector::manifest_hash());
     }
 
     #[fcp_async_core::runtime::test]

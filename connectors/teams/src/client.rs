@@ -4,10 +4,13 @@
 
 use std::time::Duration;
 
-use reqwest::Client;
+use reqwest::header::HeaderValue;
+use reqwest::{Client, RequestBuilder};
 
 use crate::error::{TeamsError, TeamsResult};
 use crate::types::{Channel, Chat, ChatMember, ChatMessage, GraphCollection, Team, TokenResponse};
+
+const CREDENTIAL_ID_HEADER: &str = "x-fcp-credential-id";
 
 /// Minimal URL encoding for form body values.
 fn urlencoded(s: &str) -> String {
@@ -26,13 +29,61 @@ fn urlencoded(s: &str) -> String {
     out
 }
 
+/// Percent-encode a user-supplied value for safe inclusion in a URL path segment.
+///
+/// This prevents path traversal attacks (e.g. `../../../admin`) by encoding `/`, `..`,
+/// and all characters that are not unreserved per RFC 3986.
+fn encode_path_segment(s: &str) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
+/// Validate that a tenant ID looks like a GUID/UUID before interpolating into a URL.
+///
+/// Accepts formats: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (with or without hyphens).
+/// Rejects anything that could be used for path traversal.
+fn validate_tenant_id(tenant_id: &str) -> Result<(), crate::error::TeamsError> {
+    // Strip hyphens and check that it's 32 hex characters
+    let stripped: String = tenant_id.chars().filter(|c| *c != '-').collect();
+    if stripped.len() == 32 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(crate::error::TeamsError::Config(format!(
+            "Invalid tenant_id: expected a UUID/GUID, got {tenant_id:?}"
+        )))
+    }
+}
+
 /// Teams API client.
-#[derive(Debug)]
 pub struct TeamsClient {
     client: Client,
     graph_base_url: String,
     access_token: String,
+    credential_id: Option<String>,
     is_secretless: bool,
+}
+
+impl std::fmt::Debug for TeamsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeamsClient")
+            .field("client", &self.client)
+            .field("graph_base_url", &self.graph_base_url)
+            .field("access_token", &"[REDACTED]")
+            .field("credential_id", &self.credential_id)
+            .field("is_secretless", &self.is_secretless)
+            .finish()
+    }
 }
 
 impl TeamsClient {
@@ -53,7 +104,37 @@ impl TeamsClient {
             client,
             graph_base_url: base,
             access_token: access_token.to_string(),
+            credential_id: None,
             is_secretless: secretless,
+        })
+    }
+
+    /// Create a client for secretless credential injection.
+    ///
+    /// # Errors
+    /// Returns `TeamsError::Config` if the credential header is invalid or the client cannot
+    /// be built.
+    pub fn new_secretless(
+        graph_base_url: &str,
+        credential_id: &str,
+        timeout: Duration,
+    ) -> TeamsResult<Self> {
+        HeaderValue::from_str(credential_id)
+            .map_err(|e| TeamsError::Config(format!("Invalid credential_id header: {e}")))?;
+
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| TeamsError::Config(format!("Failed to build HTTP client: {e}")))?;
+
+        let base = graph_base_url.trim_end_matches('/').to_string();
+
+        Ok(Self {
+            client,
+            graph_base_url: base,
+            access_token: String::new(),
+            credential_id: Some(credential_id.to_string()),
+            is_secretless: true,
         })
     }
 
@@ -68,12 +149,30 @@ impl TeamsClient {
         tenant_id: &str,
         timeout: Duration,
     ) -> TeamsResult<Self> {
+        validate_tenant_id(tenant_id)?;
+        let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
+        Self::from_client_credentials_with_token_url(
+            graph_base_url,
+            &token_url,
+            client_id,
+            client_secret,
+            timeout,
+        )
+        .await
+    }
+
+    async fn from_client_credentials_with_token_url(
+        graph_base_url: &str,
+        token_url: &str,
+        client_id: &str,
+        client_secret: &str,
+        timeout: Duration,
+    ) -> TeamsResult<Self> {
         let http = Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|e| TeamsError::Config(format!("Failed to build HTTP client: {e}")))?;
 
-        let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
         let form_body = format!(
             "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
             urlencoded(client_id),
@@ -81,7 +180,7 @@ impl TeamsClient {
             urlencoded("https://graph.microsoft.com/.default"),
         );
         let resp = http
-            .post(&token_url)
+            .post(token_url)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(form_body)
             .send()
@@ -106,6 +205,7 @@ impl TeamsClient {
             client: http,
             graph_base_url: base,
             access_token: token_resp.access_token,
+            credential_id: None,
             is_secretless: false,
         })
     }
@@ -130,8 +230,7 @@ impl TeamsClient {
     /// Returns `TeamsError` on transport, auth, or API errors.
     pub async fn list_my_teams(&self) -> TeamsResult<Vec<Team>> {
         let url = format!("{}/me/joinedTeams", self.graph_base_url);
-        let coll: GraphCollection<Team> = self.graph_get(&url).await?;
-        Ok(coll.value)
+        self.graph_get_collection(&url).await
     }
 
     /// Get a team by ID.
@@ -139,7 +238,11 @@ impl TeamsClient {
     /// # Errors
     /// Returns `TeamsError` on transport, auth, or API errors.
     pub async fn get_team(&self, team_id: &str) -> TeamsResult<Team> {
-        let url = format!("{}/teams/{team_id}", self.graph_base_url);
+        let url = format!(
+            "{}/teams/{}",
+            self.graph_base_url,
+            encode_path_segment(team_id)
+        );
         self.graph_get(&url).await
     }
 
@@ -150,9 +253,12 @@ impl TeamsClient {
     /// # Errors
     /// Returns `TeamsError` on transport, auth, or API errors.
     pub async fn list_channels(&self, team_id: &str) -> TeamsResult<Vec<Channel>> {
-        let url = format!("{}/teams/{team_id}/channels", self.graph_base_url);
-        let coll: GraphCollection<Channel> = self.graph_get(&url).await?;
-        Ok(coll.value)
+        let url = format!(
+            "{}/teams/{}/channels",
+            self.graph_base_url,
+            encode_path_segment(team_id)
+        );
+        self.graph_get_collection(&url).await
     }
 
     /// Get a channel by ID.
@@ -161,8 +267,10 @@ impl TeamsClient {
     /// Returns `TeamsError` on transport, auth, or API errors.
     pub async fn get_channel(&self, team_id: &str, channel_id: &str) -> TeamsResult<Channel> {
         let url = format!(
-            "{}/teams/{team_id}/channels/{channel_id}",
-            self.graph_base_url
+            "{}/teams/{}/channels/{}",
+            self.graph_base_url,
+            encode_path_segment(team_id),
+            encode_path_segment(channel_id)
         );
         self.graph_get(&url).await
     }
@@ -179,11 +287,12 @@ impl TeamsClient {
         channel_id: &str,
     ) -> TeamsResult<Vec<ChatMessage>> {
         let url = format!(
-            "{}/teams/{team_id}/channels/{channel_id}/messages",
-            self.graph_base_url
+            "{}/teams/{}/channels/{}/messages",
+            self.graph_base_url,
+            encode_path_segment(team_id),
+            encode_path_segment(channel_id)
         );
-        let coll: GraphCollection<ChatMessage> = self.graph_get(&url).await?;
-        Ok(coll.value)
+        self.graph_get_collection(&url).await
     }
 
     /// Send a message to a channel.
@@ -198,8 +307,10 @@ impl TeamsClient {
         content_type: &str,
     ) -> TeamsResult<ChatMessage> {
         let url = format!(
-            "{}/teams/{team_id}/channels/{channel_id}/messages",
-            self.graph_base_url
+            "{}/teams/{}/channels/{}/messages",
+            self.graph_base_url,
+            encode_path_segment(team_id),
+            encode_path_segment(channel_id)
         );
         let body = serde_json::json!({
             "body": {
@@ -218,8 +329,7 @@ impl TeamsClient {
     /// Returns `TeamsError` on transport, auth, or API errors.
     pub async fn list_my_chats(&self) -> TeamsResult<Vec<Chat>> {
         let url = format!("{}/me/chats", self.graph_base_url);
-        let coll: GraphCollection<Chat> = self.graph_get(&url).await?;
-        Ok(coll.value)
+        self.graph_get_collection(&url).await
     }
 
     /// Send a message to a chat.
@@ -232,7 +342,11 @@ impl TeamsClient {
         content: &str,
         content_type: &str,
     ) -> TeamsResult<ChatMessage> {
-        let url = format!("{}/chats/{chat_id}/messages", self.graph_base_url);
+        let url = format!(
+            "{}/chats/{}/messages",
+            self.graph_base_url,
+            encode_path_segment(chat_id)
+        );
         let body = serde_json::json!({
             "body": {
                 "contentType": content_type,
@@ -247,9 +361,12 @@ impl TeamsClient {
     /// # Errors
     /// Returns `TeamsError` on transport, auth, or API errors.
     pub async fn list_chat_messages(&self, chat_id: &str) -> TeamsResult<Vec<ChatMessage>> {
-        let url = format!("{}/chats/{chat_id}/messages", self.graph_base_url);
-        let coll: GraphCollection<ChatMessage> = self.graph_get(&url).await?;
-        Ok(coll.value)
+        let url = format!(
+            "{}/chats/{}/messages",
+            self.graph_base_url,
+            encode_path_segment(chat_id)
+        );
+        self.graph_get_collection(&url).await
     }
 
     /// List members of a chat.
@@ -257,9 +374,12 @@ impl TeamsClient {
     /// # Errors
     /// Returns `TeamsError` on transport, auth, or API errors.
     pub async fn list_chat_members(&self, chat_id: &str) -> TeamsResult<Vec<ChatMember>> {
-        let url = format!("{}/chats/{chat_id}/members", self.graph_base_url);
-        let coll: GraphCollection<ChatMember> = self.graph_get(&url).await?;
-        Ok(coll.value)
+        let url = format!(
+            "{}/chats/{}/members",
+            self.graph_base_url,
+            encode_path_segment(chat_id)
+        );
+        self.graph_get_collection(&url).await
     }
 
     // ─── Health ─────────────────────────────────────────────────────────────
@@ -267,20 +387,17 @@ impl TeamsClient {
     /// Lightweight health check against Graph API.
     ///
     /// # Errors
-    /// Returns `TeamsError` if the API returns a non-200/401 status.
+    /// Returns `TeamsError` if the API returns an unsuccessful status.
     pub async fn health_check(&self) -> TeamsResult<()> {
         let url = format!("{}/me", self.graph_base_url);
         let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.access_token)
+            .authorize(self.client.get(&url))
             .send()
             .await
             .map_err(TeamsError::Http)?;
 
         let status = resp.status().as_u16();
-        // 200=OK, 401=auth issue but reachable
-        if status == 200 || status == 401 {
+        if status == 200 {
             Ok(())
         } else {
             let body = resp.text().await.unwrap_or_default();
@@ -292,9 +409,7 @@ impl TeamsClient {
 
     async fn graph_get<T: serde::de::DeserializeOwned>(&self, url: &str) -> TeamsResult<T> {
         let resp = self
-            .client
-            .get(url)
-            .bearer_auth(&self.access_token)
+            .authorize(self.client.get(url))
             .send()
             .await
             .map_err(TeamsError::Http)?;
@@ -308,15 +423,39 @@ impl TeamsClient {
         body: &serde_json::Value,
     ) -> TeamsResult<T> {
         let resp = self
-            .client
-            .post(url)
-            .bearer_auth(&self.access_token)
+            .authorize(self.client.post(url))
             .json(body)
             .send()
             .await
             .map_err(TeamsError::Http)?;
 
         self.handle_response(resp).await
+    }
+
+    async fn graph_get_collection<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+    ) -> TeamsResult<Vec<T>> {
+        let mut next_url = Some(url.to_string());
+        let mut items = Vec::new();
+
+        while let Some(current_url) = next_url.take() {
+            let page: GraphCollection<T> = self.graph_get(&current_url).await?;
+            items.extend(page.value);
+            next_url = page.next_link;
+        }
+
+        Ok(items)
+    }
+
+    fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
+        if let Some(credential_id) = &self.credential_id {
+            request.header(CREDENTIAL_ID_HEADER, credential_id)
+        } else if self.access_token.is_empty() {
+            request
+        } else {
+            request.bearer_auth(&self.access_token)
+        }
     }
 
     async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -373,6 +512,17 @@ mod tests {
     }
 
     #[test]
+    fn new_secretless_client_uses_credential_id() {
+        let client = TeamsClient::new_secretless(
+            "https://graph.microsoft.com/v1.0",
+            "cred_1",
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(client.is_secretless());
+    }
+
+    #[test]
     fn new_client_not_secretless() {
         let client = TeamsClient::new(
             "https://graph.microsoft.com/v1.0",
@@ -403,6 +553,108 @@ mod tests {
         let teams = client.list_my_teams().await.unwrap();
         assert_eq!(teams.len(), 2);
         assert_eq!(teams[0].display_name, "Team A");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn list_my_teams_follows_odata_pagination() {
+        let mock_server = wiremock::MockServer::start().await;
+        let page_2 = format!("{}/page-2", mock_server.uri());
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/joinedTeams"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{ "id": "t1", "displayName": "Team A" }],
+                    "@odata.nextLink": page_2,
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/page-2"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{ "id": "t2", "displayName": "Team B" }],
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let teams = client.list_my_teams().await.unwrap();
+        assert_eq!(teams.len(), 2);
+        assert_eq!(teams[1].display_name, "Team B");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn secretless_client_sends_credential_header() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/joinedTeams"))
+            .and(wiremock::matchers::header(CREDENTIAL_ID_HEADER, "cred_1"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": []
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            TeamsClient::new_secretless(&mock_server.uri(), "cred_1", Duration::from_secs(10))
+                .unwrap();
+        let teams = client.list_my_teams().await.unwrap();
+        assert!(teams.is_empty());
+
+        let requests = mock_server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.get("authorization").is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn client_credentials_flow_materializes_access_token() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/oauth2/v2.0/token"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "graph_tok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me/joinedTeams"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer graph_tok",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": [{ "id": "t1", "displayName": "Team A" }]
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::from_client_credentials_with_token_url(
+            &mock_server.uri(),
+            &format!("{}/oauth2/v2.0/token", mock_server.uri()),
+            "client_id",
+            "client_secret",
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        assert!(!client.is_secretless());
+        let teams = client.list_my_teams().await.unwrap();
+        assert_eq!(teams.len(), 1);
     }
 
     #[fcp_async_core::runtime::test]
@@ -576,7 +828,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn health_check_401_still_ok() {
+    async fn health_check_401_is_unauthorized() {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/me"))
@@ -585,7 +837,144 @@ mod tests {
             .await;
 
         let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
-        // 401 means reachable but auth issue, still considered "reachable"
-        assert!(client.health_check().await.is_ok());
+        let err = client.health_check().await.unwrap_err();
+        assert!(matches!(err, TeamsError::Unauthorized(_)));
+    }
+
+    // ─── Security: path encoding tests ─────────────────────────────────
+
+    #[test]
+    fn encode_path_segment_leaves_safe_chars_unchanged() {
+        assert_eq!(encode_path_segment("abc-123_XYZ.~"), "abc-123_XYZ.~");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_slashes() {
+        assert_eq!(
+            encode_path_segment("../../../admin"),
+            "..%2F..%2F..%2Fadmin"
+        );
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_special_characters() {
+        assert_eq!(encode_path_segment("a/b?c#d e"), "a%2Fb%3Fc%23d%20e");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_colons_and_at() {
+        assert_eq!(encode_path_segment("user@host:8080"), "user%40host%3A8080");
+    }
+
+    #[test]
+    fn encode_path_segment_handles_empty_string() {
+        assert_eq!(encode_path_segment(""), "");
+    }
+
+    #[test]
+    fn encode_path_segment_handles_percent_sign() {
+        // Percent itself must be encoded to prevent double-encoding attacks
+        assert_eq!(encode_path_segment("%2F"), "%252F");
+    }
+
+    // ─── Security: tenant_id validation tests ──────────────────────────
+
+    #[test]
+    fn validate_tenant_id_accepts_valid_uuid() {
+        assert!(validate_tenant_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn validate_tenant_id_accepts_uuid_without_hyphens() {
+        assert!(validate_tenant_id("550e8400e29b41d4a716446655440000").is_ok());
+    }
+
+    #[test]
+    fn validate_tenant_id_rejects_path_traversal() {
+        let result = validate_tenant_id("../../../evil");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TeamsError::Config(_)));
+    }
+
+    #[test]
+    fn validate_tenant_id_rejects_empty() {
+        assert!(validate_tenant_id("").is_err());
+    }
+
+    #[test]
+    fn validate_tenant_id_rejects_too_short() {
+        assert!(validate_tenant_id("abc123").is_err());
+    }
+
+    #[test]
+    fn validate_tenant_id_rejects_non_hex() {
+        assert!(validate_tenant_id("550e8400-e29b-41d4-a716-44665544zzzz").is_err());
+    }
+
+    // ─── Security: path traversal prevention in API methods ────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn get_team_encodes_traversal_in_team_id() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        // The encoded path should be requested, NOT the raw traversal
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/teams/..%2F..%2Fadmin"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "safe",
+                    "displayName": "Safe"
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let team = client.get_team("../../admin").await.unwrap();
+        assert_eq!(team.id, "safe");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_chat_message_encodes_traversal_in_chat_id() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chats/..%2F..%2Fsecret/messages"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "msg_safe",
+                    "body": { "contentType": "text", "content": "test" }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let msg = client
+            .send_chat_message("../../secret", "test", "text")
+            .await
+            .unwrap();
+        assert_eq!(msg.id, Some("msg_safe".into()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn list_channel_messages_encodes_both_ids() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/teams/t%2F1/channels/c%2F2/messages",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "value": []
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let msgs = client.list_channel_messages("t/1", "c/2").await.unwrap();
+        assert!(msgs.is_empty());
     }
 }

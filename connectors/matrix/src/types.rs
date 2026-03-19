@@ -27,7 +27,7 @@ pub struct MatrixConfig {
 }
 
 /// Authentication mode for Matrix.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "mode")]
 pub enum MatrixAuth {
     /// Direct access token.
@@ -37,6 +37,21 @@ pub enum MatrixAuth {
     /// FCP credential reference (resolved by egress proxy).
     #[serde(rename = "credential_id")]
     CredentialId { credential_id: String },
+}
+
+impl std::fmt::Debug for MatrixAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AccessToken { .. } => f
+                .debug_struct("AccessToken")
+                .field("access_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId { credential_id } => f
+                .debug_struct("CredentialId")
+                .field("credential_id", credential_id)
+                .finish(),
+        }
+    }
 }
 
 const fn default_timeout_ms() -> u64 {

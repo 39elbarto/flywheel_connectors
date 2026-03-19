@@ -740,14 +740,16 @@ impl M365Client {
         resource: &str,
         delta_token: Option<&str>,
     ) -> M365Result<GraphListResponse> {
-        let url = match delta_token {
-            Some(token) => format!("{}{resource}/delta?$deltatoken={token}", self.api_url),
-            None => format!("{}{resource}/delta", self.api_url),
-        };
+        let delta_path = format!("{}/delta", resource.trim_end_matches('/'));
+        let mut url = reqwest::Url::parse(&self.build_api_url(&delta_path)?)
+            .map_err(|e| M365Error::InvalidConfig(format!("Invalid delta URL: {e}")))?;
+        if let Some(token) = delta_token {
+            url.query_pairs_mut().append_pair("$deltatoken", token);
+        }
 
         // Follow all pages to collect all changes
         let mut all_values = Vec::new();
-        let mut current_url = url;
+        let mut current_url = url.to_string();
         let mut final_delta_link;
 
         loop {
@@ -1223,6 +1225,37 @@ mod tests {
             .reply_message("me", "msg_123", Some("Thanks!"), None)
             .await
             .unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delta_sync_urlencodes_delta_token() {
+        let mock_server = MockServer::start().await;
+        let delta_token = "opaque/with?reserved=1&two";
+
+        Mock::given(method("GET"))
+            .and(path("/me/messages/delta"))
+            .and(query_param("$deltatoken", delta_token))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "msg_1" }],
+                "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=next-token"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+
+        let result = client
+            .delta_sync("/me/messages", Some(delta_token))
+            .await
+            .unwrap();
+
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.delta_link.as_deref(),
+            Some("https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=next-token")
+        );
     }
 
     #[fcp_async_core::runtime::test]

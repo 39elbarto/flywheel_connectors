@@ -27,6 +27,7 @@ use crate::types::{
 
 /// Default dead letter queue capacity.
 const DEFAULT_DLQ_MAX_SIZE: usize = 1000;
+const SIGNATURE_HEADER: &str = "x-hub-signature-256";
 
 /// WhatsApp webhook handler.
 ///
@@ -129,9 +130,7 @@ impl WhatsAppWebhook {
         }
 
         // Get and verify signature
-        let signature = headers
-            .get("x-hub-signature-256")
-            .or_else(|| headers.get("X-Hub-Signature-256"))
+        let signature = header_value_case_insensitive(headers, SIGNATURE_HEADER)
             .ok_or_else(|| WebhookError::MissingSignature("X-Hub-Signature-256".into()))?;
 
         self.verifier.verify(body, signature)?;
@@ -223,14 +222,14 @@ impl WhatsAppWebhook {
         let value = &change.value;
 
         // Parse incoming messages
-        for msg in &value.messages {
-            let event = self.message_to_event(msg, value, entry_id, headers, body);
+        for (message_index, msg) in value.messages.iter().enumerate() {
+            let event = self.message_to_event(msg, message_index, value, entry_id, headers, body);
             events.push(event);
         }
 
         // Parse status updates
-        for status in &value.statuses {
-            let event = self.status_to_event(status, value, entry_id, headers, body);
+        for (status_index, status) in value.statuses.iter().enumerate() {
+            let event = self.status_to_event(status, status_index, value, entry_id, headers, body);
             events.push(event);
         }
 
@@ -241,14 +240,21 @@ impl WhatsAppWebhook {
     fn message_to_event(
         &self,
         msg: &IncomingMessage,
+        message_index: usize,
         value: &WebhookValue,
         entry_id: &str,
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> WebhookEvent {
         let event_type = format!("message.{}", msg.message_type);
+        let fallback_discriminator = format!("message:{entry_id}:{message_index}");
         let event_id = if msg.id.is_empty() {
-            deterministic_event_id("whatsapp", &event_type, body)
+            deterministic_event_id(
+                "whatsapp",
+                &event_type,
+                body,
+                fallback_discriminator.as_bytes(),
+            )
         } else {
             msg.id.clone()
         };
@@ -293,14 +299,21 @@ impl WhatsAppWebhook {
     fn status_to_event(
         &self,
         status: &MessageStatus,
+        status_index: usize,
         value: &WebhookValue,
         entry_id: &str,
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> WebhookEvent {
         let event_type = format!("status.{}", status.status);
+        let fallback_discriminator = format!("status:{entry_id}:{status_index}");
         let event_id = if status.id.is_empty() {
-            deterministic_event_id("whatsapp", &event_type, body)
+            deterministic_event_id(
+                "whatsapp",
+                &event_type,
+                body,
+                fallback_discriminator.as_bytes(),
+            )
         } else {
             format!("{}:status:{}", status.id, status.status)
         };
@@ -339,19 +352,44 @@ impl WhatsAppWebhook {
     }
 }
 
-/// Generate a deterministic event ID from provider, event type, and body.
-fn deterministic_event_id(provider: &str, event_type: &str, body: &[u8]) -> String {
+fn header_value_case_insensitive<'a>(
+    headers: &'a HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+/// Generate a deterministic event ID from provider, event type, payload, and
+/// an event-local discriminator so distinct empty-ID events in the same
+/// webhook body do not collapse onto one replay key.
+fn deterministic_event_id(
+    provider: &str,
+    event_type: &str,
+    body: &[u8],
+    discriminator: &[u8],
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(provider.as_bytes());
     hasher.update([0]);
     hasher.update(event_type.as_bytes());
+    hasher.update([0]);
+    hasher.update(discriminator);
     hasher.update([0]);
     hasher.update(body);
     let digest = hasher.finalize();
     format!("{provider}:{}", hex::encode(digest))
 }
 
-/// Constant-time byte comparison to prevent timing attacks on verify_token.
+/// Constant-time byte comparison to prevent timing attacks.
+///
+/// The early return on length mismatch is acceptable here because:
+/// - For HMAC signature verification (the primary security use), both inputs are
+///   always 32 bytes (SHA-256 output), so the branch is never taken.
+/// - For verify_token comparison, the token length is not a meaningful secret
+///   (it's configured in Meta's dashboard and sent as a query parameter).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -1043,9 +1081,91 @@ mod tests {
         let wh = make_webhook();
         let body = serde_json::to_vec(&sample_text_notification()).unwrap();
         let sig = sign_payload(&body);
-        let headers = HashMap::from([("X-Hub-Signature-256".to_string(), sig)]);
+        let headers = HashMap::from([("X-HUB-SIGNATURE-256".to_string(), sig)]);
 
         let result = wh.verify_and_parse(&headers, &body);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn multiple_empty_message_ids_get_distinct_fallbacks() {
+        let wh = make_webhook();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": [{
+                "id": "BIZ_1",
+                "changes": [{
+                    "value": {
+                        "messaging_product": "whatsapp",
+                        "messages": [
+                            {
+                                "from": "15551234567",
+                                "id": "",
+                                "timestamp": "1677000000",
+                                "type": "text",
+                                "text": { "body": "First", "preview_url": false }
+                            },
+                            {
+                                "from": "15557654321",
+                                "id": "",
+                                "timestamp": "1677000001",
+                                "type": "text",
+                                "text": { "body": "Second", "preview_url": false }
+                            }
+                        ]
+                    },
+                    "field": "messages"
+                }]
+            }]
+        }))
+        .unwrap();
+        let sig = sign_payload(&body);
+        let headers = HashMap::from([("x-hub-signature-256".to_string(), sig)]);
+
+        let events = wh.verify_and_parse(&headers, &body).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].id.starts_with("whatsapp:"));
+        assert!(events[1].id.starts_with("whatsapp:"));
+        assert_ne!(events[0].id, events[1].id);
+    }
+
+    #[test]
+    fn multiple_empty_status_ids_get_distinct_fallbacks() {
+        let wh = make_webhook();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "object": "whatsapp_business_account",
+            "entry": [{
+                "id": "BIZ_1",
+                "changes": [{
+                    "value": {
+                        "messaging_product": "whatsapp",
+                        "statuses": [
+                            {
+                                "id": "",
+                                "status": "sent",
+                                "timestamp": "1677000000",
+                                "recipient_id": "15551234567"
+                            },
+                            {
+                                "id": "",
+                                "status": "delivered",
+                                "timestamp": "1677000001",
+                                "recipient_id": "15557654321"
+                            }
+                        ]
+                    },
+                    "field": "messages"
+                }]
+            }]
+        }))
+        .unwrap();
+        let sig = sign_payload(&body);
+        let headers = HashMap::from([("x-hub-signature-256".to_string(), sig)]);
+
+        let events = wh.verify_and_parse(&headers, &body).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].id.starts_with("whatsapp:"));
+        assert!(events[1].id.starts_with("whatsapp:"));
+        assert_ne!(events[0].id, events[1].id);
     }
 }

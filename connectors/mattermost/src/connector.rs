@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
@@ -14,12 +14,13 @@ use fcp_core::{
     EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId, Introspection,
     InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy, Principal,
-    RiskLevel, SafetyTier, SessionId, ThreadInfo, ThreadKind, TrustLevel, ZoneId,
+    RiskLevel, SafetyTier, SessionId, SubscribeRequest, ThreadInfo, ThreadKind, TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::client::MattermostClient;
@@ -31,6 +32,7 @@ use crate::types::{
     UploadFileRequest,
 };
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const SOCKET_EVENT_BUFFER_CAPACITY: usize = 256;
 const SOCKET_EVENT_BUFFER_CAPACITY_U32: u32 = 256;
 const SOCKET_RECONNECT_MIN_MS: u64 = 1_000;
@@ -68,11 +70,13 @@ pub struct MattermostConnector {
     retry_config: HttpRetryConfig,
     verifier: Option<CapabilityVerifier>,
     socket_running: Arc<RwLock<bool>>,
+    socket_connected: Arc<RwLock<bool>>,
     socket_task: Option<fcp_async_core::task::JoinHandle<()>>,
     socket_shutdown_tx: Option<watch::Sender<bool>>,
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
     next_event_seq: Arc<AtomicU64>,
     subscribed_topics: Arc<RwLock<Vec<String>>>,
+    started_at: Instant,
 }
 
 impl MattermostConnector {
@@ -90,12 +94,20 @@ impl MattermostConnector {
             retry_config: HttpRetryConfig::default(),
             verifier: None,
             socket_running: Arc::new(RwLock::new(false)),
+            socket_connected: Arc::new(RwLock::new(false)),
             socket_task: None,
             socket_shutdown_tx: None,
             event_tx,
             next_event_seq: Arc::new(AtomicU64::new(1)),
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
+            started_at: Instant::now(),
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Connector ID.
@@ -175,7 +187,7 @@ impl MattermostConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id: SessionId::new(),
-            manifest_hash: String::new(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -190,15 +202,16 @@ impl MattermostConnector {
 
     /// Health check.
     #[must_use]
-    pub const fn health(&self) -> HealthSnapshot {
+    pub fn health(&self) -> HealthSnapshot {
         let status = if self.client.is_some() {
             HealthState::Ready
         } else {
             HealthState::Starting
         };
+        let uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         HealthSnapshot {
             status,
-            uptime_ms: 0,
+            uptime_ms,
             load: None,
             details: None,
             rate_limit: None,
@@ -229,8 +242,23 @@ impl MattermostConnector {
     /// Returns an error if the connector is not configured, the operation is unknown,
     /// required fields are missing, or the upstream API call fails.
     pub async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.base.check_ready()?;
+
         let operation = req.operation.as_str();
+        let required_capability = required_capability_for_operation(operation)?;
+        let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing capability verifier".into(),
+        })?;
+        verifier.verify(
+            &req.capability_token,
+            &required_capability,
+            &req.operation,
+            &[],
+        )?;
+
+        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing Mattermost client".into(),
+        })?;
 
         debug!(operation = %operation, "invoking mattermost operation");
 
@@ -326,12 +354,20 @@ impl MattermostConnector {
     ///
     /// Returns an error if the health payload cannot be encoded.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let mut snapshot = self.health();
+        let socket_running = *self.socket_running.read().await;
+        let socket_connected = *self.socket_connected.read().await;
+        let subscribed_topics = self.subscribed_topics.read().await.clone();
+        let mut snapshot = if !subscribed_topics.is_empty() && !socket_connected {
+            HealthSnapshot::degraded("stream subscription active but websocket is not connected")
+        } else {
+            self.health()
+        };
         snapshot.details = Some(json!({
             "streaming": {
-                "socket_running": *self.socket_running.read().await,
+                "socket_running": socket_running,
+                "socket_connected": socket_connected,
                 "buffer_capacity": SOCKET_EVENT_BUFFER_CAPACITY,
-                "subscribed_topics": self.subscribed_topics.read().await.clone(),
+                "subscribed_topics": subscribed_topics,
             }
         }));
         serde_json::to_value(snapshot).map_err(|e| FcpError::Internal {
@@ -376,9 +412,12 @@ impl MattermostConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        if self.client.is_none() {
-            return Err(FcpError::NotConfigured);
-        }
+        self.base.check_ready()?;
+        let _: SubscribeRequest =
+            serde_json::from_value(params.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("invalid subscribe request: {e}"),
+            })?;
 
         let topics = parse_subscribe_topics(&params);
         {
@@ -423,7 +462,13 @@ impl MattermostConnector {
 
         self.stop_socket_mode().await;
 
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?.clone();
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| FcpError::Internal {
+                message: "connector ready state missing Mattermost client".into(),
+            })?
+            .clone();
         let auth_token = client.auth_token().map(str::to_owned);
         let ws_config = client.websocket_config().map_err(map_mm_err)?;
 
@@ -432,12 +477,14 @@ impl MattermostConnector {
         let instance_id = self.base.instance_id.clone();
         let base = self.base.clone();
         let socket_running = self.socket_running.clone();
+        let socket_connected = self.socket_connected.clone();
         let next_event_seq = self.next_event_seq.clone();
         let subscribed_topics = self.subscribed_topics.clone();
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         self.socket_shutdown_tx = Some(shutdown_tx);
         *self.socket_running.write().await = true;
+        *self.socket_connected.write().await = false;
 
         let task = fcp_async_core::task::spawn(async move {
             info!("Starting Mattermost websocket event loop");
@@ -463,6 +510,7 @@ impl MattermostConnector {
 
                 match connect_mattermost_websocket(&ws_url, ws_config.clone()).await {
                     Ok(mut ws_stream) => {
+                        *socket_connected.write().await = true;
                         reconnect_delay_ms = SOCKET_RECONNECT_MIN_MS;
                         let mut request_seq = 1_u64;
 
@@ -590,8 +638,10 @@ impl MattermostConnector {
                                 }
                             }
                         }
+                        *socket_connected.write().await = false;
                     }
                     Err(err) => {
+                        *socket_connected.write().await = false;
                         warn!("Mattermost websocket connect failed: {err}");
                     }
                 }
@@ -609,6 +659,7 @@ impl MattermostConnector {
             }
 
             *socket_running.write().await = false;
+            *socket_connected.write().await = false;
             info!("Mattermost websocket event loop stopped");
         });
 
@@ -628,6 +679,7 @@ impl MattermostConnector {
         }
 
         *self.socket_running.write().await = false;
+        *self.socket_connected.write().await = false;
     }
 }
 
@@ -1024,6 +1076,39 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ops.extend(search_operations());
     ops.extend(write_operations());
     ops
+}
+
+fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        "mattermost.get_me"
+        | "mattermost.get_user"
+        | "mattermost.get_my_teams"
+        | "mattermost.get_team"
+        | "mattermost.get_channels_for_team"
+        | "mattermost.get_channel"
+        | "mattermost.get_post"
+        | "mattermost.get_thread"
+        | "mattermost.get_posts_for_channel"
+        | "mattermost.search_posts"
+        | "mattermost.get_file_info"
+        | "mattermost.get_file_link"
+        | "mattermost.download_file"
+        | "mattermost.get_file_infos_for_post" => "mattermost.read",
+        "mattermost.create_direct_channel"
+        | "mattermost.create_post"
+        | "mattermost.create_reaction"
+        | "mattermost.delete_reaction"
+        | "mattermost.upload_file"
+        | "mattermost.delete_post" => "mattermost.write",
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
+                message: format!("unknown operation: {operation}"),
+            });
+        }
+    };
+
+    Ok(CapabilityId::from_static(capability))
 }
 
 fn user_and_team_operations() -> Vec<OperationInfo> {
@@ -2073,6 +2158,33 @@ fn decode_embedded_json<T: DeserializeOwned>(value: Option<&Value>) -> Option<T>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::{CapabilityToken, RequestId};
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    fn invoke_request(
+        connector: &MattermostConnector,
+        operation: &str,
+        input: Value,
+        capability_token: CapabilityToken,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_1"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::new(operation).expect("valid Mattermost operation id"),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
 
     #[test]
     fn connector_new() {
@@ -2159,6 +2271,80 @@ mod tests {
         let connector = MattermostConnector::new();
         let health = connector.health();
         assert!(matches!(health.status, HealthState::Starting));
+        assert!(health.uptime_ms < 1_000);
+    }
+
+    #[test]
+    fn health_reports_elapsed_uptime() {
+        let mut connector = MattermostConnector::new();
+        connector.started_at = Instant::now()
+            .checked_sub(Duration::from_millis(25))
+            .expect("subtracting 25ms from now should be valid");
+
+        let health = connector.health();
+        assert!(health.uptime_ms >= 25);
+    }
+
+    #[test]
+    fn handshake_reports_manifest_hash() {
+        let mut connector = MattermostConnector::new();
+        let response = connector
+            .handshake(&HandshakeRequest {
+                protocol_version: "1.0".into(),
+                host_public_key: [7; 32],
+                zone: ZoneId::work(),
+                zone_dir: None,
+                capabilities_requested: vec![CapabilityId::from_static("mattermost.read")],
+                nonce: [9; 32],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .expect("handshake should succeed");
+
+        assert_eq!(response.manifest_hash, MattermostConnector::manifest_hash());
+        assert!(response.manifest_hash.starts_with("sha256:"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handle_health_marks_unconnected_stream_as_degraded() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok_123"
+            }))
+            .unwrap();
+        *connector.subscribed_topics.write().await = vec!["mattermost.posted".to_string()];
+        *connector.socket_running.write().await = true;
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"]["state"], "degraded");
+        assert_eq!(
+            health["status"]["reason"],
+            "stream subscription active but websocket is not connected"
+        );
+        assert_eq!(health["details"]["streaming"]["socket_running"], true);
+        assert_eq!(health["details"]["streaming"]["socket_connected"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handle_health_reports_connected_stream_as_ready() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok_123"
+            }))
+            .unwrap();
+        *connector.subscribed_topics.write().await = vec!["mattermost.posted".to_string()];
+        *connector.socket_running.write().await = true;
+        *connector.socket_connected.write().await = true;
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"]["state"], "ready");
+        assert_eq!(health["details"]["streaming"]["socket_running"], true);
+        assert_eq!(health["details"]["streaming"]["socket_connected"], true);
     }
 
     #[test]
@@ -2249,6 +2435,89 @@ mod tests {
         });
 
         assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_requires_handshake_after_configuration() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok",
+            }))
+            .unwrap();
+
+        let err = connector
+            .invoke(invoke_request(
+                &connector,
+                "mattermost.get_me",
+                json!({}),
+                CapabilityToken::test_token(),
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_rejects_invalid_capability_token_before_dispatch() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok",
+            }))
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(&HandshakeRequest {
+                protocol_version: "1.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static("mattermost.read")],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .unwrap();
+
+        let err = connector
+            .invoke(invoke_request(
+                &connector,
+                "mattermost.get_user",
+                json!({}),
+                CapabilityToken::test_token(),
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::InvalidSignature));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn subscribe_requires_handshake_after_configuration() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok",
+            }))
+            .unwrap();
+
+        let err = connector
+            .handle_subscribe(json!({
+                "type": "subscribe",
+                "id": "sub_1",
+                "topics": ["mattermost.posted"],
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::NotHandshaken));
     }
 
     #[test]

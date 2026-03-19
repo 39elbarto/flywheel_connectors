@@ -457,23 +457,27 @@ impl FcpConnector for TeamsConnector {
                     }
                 })?
             }
-            TeamsAuth::CredentialId { .. } => {
-                // Secretless mode: empty token, egress proxy injects credentials
-                TeamsClient::new(&config.graph_base_url, "", timeout).map_err(|e| {
-                    FcpError::Internal {
+            TeamsAuth::CredentialId { credential_id } => {
+                TeamsClient::new_secretless(&config.graph_base_url, credential_id, timeout)
+                    .map_err(|e| FcpError::Internal {
                         message: format!("Failed to create Teams client: {e}"),
-                    }
-                })?
+                    })?
             }
-            TeamsAuth::ClientCredentials { .. } => {
-                // Client credentials require async token acquisition at invoke time
-                // For now, create with empty token; real impl would acquire here
-                TeamsClient::new(&config.graph_base_url, "", timeout).map_err(|e| {
-                    FcpError::Internal {
-                        message: format!("Failed to create Teams client: {e}"),
-                    }
-                })?
-            }
+            TeamsAuth::ClientCredentials {
+                client_id,
+                client_secret,
+                tenant_id,
+            } => TeamsClient::from_client_credentials(
+                &config.graph_base_url,
+                client_id,
+                client_secret,
+                tenant_id,
+                timeout,
+            )
+            .await
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create Teams client: {e}"),
+            })?,
         };
 
         self.client = Some(client);
@@ -608,26 +612,29 @@ impl FcpConnector for TeamsConnector {
 impl TeamsConnector {
     #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        self.base.check_ready()?;
+
         let operation = req.operation.as_str();
+        let required_cap = match operation {
+            OP_LIST_TEAMS | OP_GET_TEAM | OP_LIST_CHANNELS | OP_GET_CHANNEL | OP_LIST_CHATS
+            | OP_LIST_CHAT_MSGS => CapabilityId::from_static(CAP_READ),
+            OP_SEND_CHANNEL_MSG | OP_SEND_CHAT_MSG => CapabilityId::from_static(CAP_WRITE),
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
 
-        if let Some(verifier) = &self.verifier {
-            let required_cap = match operation {
-                OP_LIST_TEAMS | OP_GET_TEAM | OP_LIST_CHANNELS | OP_GET_CHANNEL | OP_LIST_CHATS
-                | OP_LIST_CHAT_MSGS => CapabilityId::from_static(CAP_READ),
-                OP_SEND_CHANNEL_MSG | OP_SEND_CHAT_MSG => CapabilityId::from_static(CAP_WRITE),
-                _ => {
-                    return Err(FcpError::InvalidRequest {
-                        code: 1004,
-                        message: format!("Unknown operation: {operation}"),
-                    });
-                }
-            };
-            verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing capability verifier".into(),
+        })?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing Teams client".into(),
+        })?;
 
         let output = match operation {
             OP_LIST_TEAMS => {
@@ -914,5 +921,67 @@ mod tests {
         let connector = TeamsConnector::new();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_requires_handshake_after_configure() {
+        let mut connector = TeamsConnector::new();
+        connector
+            .configure(json!({
+                "auth": { "mode": "access_token", "access_token": "tok" }
+            }))
+            .await
+            .unwrap();
+
+        let req = InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_2"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::from_static(OP_LIST_TEAMS),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let err = connector.invoke(req).await.unwrap_err();
+        assert!(matches!(err, FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_unauthorized_is_failed() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "error": {
+                        "code": "InvalidAuthenticationToken",
+                        "message": "Access token has expired."
+                    }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = TeamsConnector::new();
+        connector
+            .configure(json!({
+                "graph_base_url": mock_server.uri(),
+                "auth": { "mode": "access_token", "access_token": "tok" }
+            }))
+            .await
+            .unwrap();
+
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("self_check_failed"));
     }
 }

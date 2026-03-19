@@ -35,11 +35,13 @@ percent-encoding.workspace = true
 quick-xml = "0.39.2"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+hex.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true

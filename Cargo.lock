@@ -3043,6 +3043,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-imessage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-intercom"
 version = "0.1.0"
 dependencies = [
@@ -3276,6 +3300,7 @@ dependencies = [
  "fcp-core",
  "fcp-sdk",
  "fcp-streaming",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3473,6 +3498,30 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-nextcloud-talk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "hex",
+ "percent-encoding",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 
@@ -4535,7 +4584,9 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-sdk",
+ "fcp-testkit",
  "fcp-webhook",
  "hex",
  "hmac",

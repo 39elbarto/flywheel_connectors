@@ -97,6 +97,7 @@ members = [
     "connectors/semanticscholar",
     "connectors/mattermost",
     "connectors/matrix",
+    "connectors/imessage",
     "connectors/teams",
     "connectors/whatsapp",
     "connectors/monday",
@@ -123,7 +124,9 @@ members = [
     "connectors/annas-archive",
     "connectors/make",
     "connectors/bigquery",
+    "connectors/nextcloud-talk",
     "connectors/whisper",
+    "connectors/imessage",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

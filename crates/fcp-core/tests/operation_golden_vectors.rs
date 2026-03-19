@@ -33,6 +33,14 @@ fn test_object_id(name: &str) -> ObjectId {
     ObjectId::from_unscoped_bytes(name.as_bytes())
 }
 
+fn test_intent_id() -> ObjectId {
+    test_object_id("intent-1")
+}
+
+fn test_receipt_id() -> ObjectId {
+    test_object_id("receipt-1")
+}
+
 fn test_signature() -> NodeSignature {
     NodeSignature::new(NodeId::new("test-node"), [0u8; 64], 1000)
 }
@@ -66,8 +74,11 @@ fn create_test_intent() -> OperationIntent {
 }
 
 fn create_test_receipt() -> OperationReceipt {
+    let mut header = create_test_header("receipt");
+    header.refs = vec![test_intent_id()];
+
     OperationReceipt {
-        header: create_test_header("receipt"),
+        header,
         request_object_id: test_object_id("request-1"),
         idempotency_key: Some("idem-key-123".to_string()),
         outcome_object_ids: vec![test_object_id("outcome-1")],
@@ -846,7 +857,8 @@ mod validation_tests {
         let intent = create_test_intent();
         let receipt = create_test_receipt();
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(result.is_ok());
     }
 
@@ -856,7 +868,8 @@ mod validation_tests {
         let mut receipt = create_test_receipt();
         receipt.request_object_id = test_object_id("different-request");
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(matches!(
             result,
             Err(OperationValidationError::RequestMismatch { .. })
@@ -869,7 +882,8 @@ mod validation_tests {
         let mut receipt = create_test_receipt();
         receipt.header.zone_id = ZoneId::owner();
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(matches!(
             result,
             Err(OperationValidationError::ZoneMismatch { .. })
@@ -882,10 +896,11 @@ mod validation_tests {
         let mut receipt = create_test_receipt();
         receipt.idempotency_key = Some("different-key".to_string());
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(matches!(
             result,
-            Err(OperationValidationError::IntentNotFound { .. })
+            Err(OperationValidationError::IdempotencyKeyMismatch { .. })
         ));
     }
 
@@ -897,7 +912,8 @@ mod validation_tests {
         intent.idempotency_key = None;
         receipt.idempotency_key = None;
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(result.is_ok());
     }
 
@@ -909,6 +925,10 @@ mod validation_tests {
             },
             OperationValidationError::AlreadyCompleted {
                 idempotency_key: "key-456".to_string(),
+            },
+            OperationValidationError::IdempotencyKeyMismatch {
+                expected: Some("expected".to_string()),
+                got: None,
             },
             OperationValidationError::ZoneMismatch {
                 expected: ZoneId::work(),

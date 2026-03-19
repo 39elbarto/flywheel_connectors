@@ -137,6 +137,14 @@ fn test_object_id(name: &str) -> ObjectId {
     ObjectId::from_unscoped_bytes(name.as_bytes())
 }
 
+fn test_intent_id() -> ObjectId {
+    test_object_id("intent-1")
+}
+
+fn test_receipt_id() -> ObjectId {
+    test_object_id("receipt-1")
+}
+
 fn test_signature() -> NodeSignature {
     NodeSignature::new(NodeId::new("test-node"), [0u8; 64], 1_704_067_200)
 }
@@ -162,7 +170,7 @@ fn create_receipt_header(created_at: u64) -> ObjectHeader {
         zone_id: zone.clone(),
         created_at,
         provenance: Provenance::new(zone),
-        refs: vec![],
+        refs: vec![test_intent_id()],
         foreign_refs: vec![],
         ttl_secs: None,
         placement: None,
@@ -1013,7 +1021,8 @@ fn test_receipt_intent_binding_success() {
     let intent = create_test_intent(Some("key-1"), Some(42));
     let receipt = create_test_receipt(Some("key-1"), vec![test_object_id("outcome-1")]);
 
-    let result = validate_receipt_intent_binding(&receipt, &intent);
+    let result =
+        validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
     assert!(result.is_ok());
 
     log = log
@@ -1035,7 +1044,8 @@ fn test_receipt_intent_binding_request_mismatch() {
     let mut receipt = create_test_receipt(Some("key-1"), vec![]);
     receipt.request_object_id = test_object_id("different-request");
 
-    let result = validate_receipt_intent_binding(&receipt, &intent);
+    let result =
+        validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
     assert!(matches!(
         result,
         Err(OperationValidationError::RequestMismatch { .. })
@@ -1060,7 +1070,8 @@ fn test_receipt_intent_binding_zone_mismatch() {
     let mut receipt = create_test_receipt(Some("key-1"), vec![]);
     receipt.header.zone_id = ZoneId::owner(); // Different zone
 
-    let result = validate_receipt_intent_binding(&receipt, &intent);
+    let result =
+        validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
     assert!(matches!(
         result,
         Err(OperationValidationError::ZoneMismatch { .. })
@@ -1084,10 +1095,11 @@ fn test_receipt_intent_binding_key_mismatch() {
     let intent = create_test_intent(Some("key-1"), Some(42));
     let receipt = create_test_receipt(Some("key-2"), vec![]); // Different key
 
-    let result = validate_receipt_intent_binding(&receipt, &intent);
+    let result =
+        validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
     assert!(matches!(
         result,
-        Err(OperationValidationError::IntentNotFound { .. })
+        Err(OperationValidationError::IdempotencyKeyMismatch { .. })
     ));
 
     log = log
@@ -1300,6 +1312,10 @@ fn test_all_validation_errors_are_displayable() {
         },
         OperationValidationError::AlreadyCompleted {
             idempotency_key: "key".to_string(),
+        },
+        OperationValidationError::IdempotencyKeyMismatch {
+            expected: Some("expected".to_string()),
+            got: None,
         },
         OperationValidationError::ZoneMismatch {
             expected: ZoneId::work(),

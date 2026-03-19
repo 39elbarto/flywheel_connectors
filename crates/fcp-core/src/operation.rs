@@ -33,6 +33,27 @@ use crate::{
     IdempotencyClass, NodeSignature, ObjectHeader, ObjectId, TailscaleNodeId, UsageMetric, ZoneId,
 };
 
+fn append_len_prefixed_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
+    let value_len = u32::try_from(value.len()).unwrap_or(u32::MAX);
+    bytes.extend_from_slice(&value_len.to_le_bytes());
+    bytes.extend_from_slice(value);
+}
+
+fn append_optional_string(bytes: &mut Vec<u8>, value: Option<&str>) {
+    if let Some(value) = value {
+        bytes.extend_from_slice(&[1]);
+        append_len_prefixed_bytes(bytes, value.as_bytes());
+    } else {
+        bytes.extend_from_slice(&[0]);
+    }
+}
+
+fn append_canonical_header(bytes: &mut Vec<u8>, header: &ObjectHeader) {
+    let header_cbor = fcp_cbor::to_canonical_cbor(header)
+        .expect("operation headers must be canonical-CBOR encodable");
+    append_len_prefixed_bytes(bytes, &header_cbor);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OperationIntent (NORMATIVE)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,37 +143,21 @@ impl OperationIntent {
     /// excluding the signature field itself.
     #[must_use]
     pub fn signable_bytes(&self) -> Vec<u8> {
-        // For signable bytes, we create a deterministic representation
-        // of all fields except the signature itself.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"FCP2-INTENT-V1");
-        bytes.extend_from_slice(&self.header.created_at.to_le_bytes());
+        append_canonical_header(&mut bytes, &self.header);
         bytes.extend_from_slice(self.request_object_id.as_bytes());
         bytes.extend_from_slice(self.capability_token_jti.as_bytes());
-        if let Some(ref key) = self.idempotency_key {
-            bytes.extend_from_slice(&[1]); // present marker
-            let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
-            bytes.extend_from_slice(&key_len.to_le_bytes());
-            bytes.extend_from_slice(key.as_bytes());
-        } else {
-            bytes.extend_from_slice(&[0]); // absent marker
-        }
+        append_optional_string(&mut bytes, self.idempotency_key.as_deref());
         bytes.extend_from_slice(&self.planned_at.to_le_bytes());
-        bytes.extend_from_slice(self.planned_by.as_str().as_bytes());
+        append_len_prefixed_bytes(&mut bytes, self.planned_by.as_str().as_bytes());
         if let Some(seq) = self.lease_seq {
             bytes.extend_from_slice(&[1]);
             bytes.extend_from_slice(&seq.to_le_bytes());
         } else {
             bytes.extend_from_slice(&[0]);
         }
-        if let Some(ref upstream) = self.upstream_idempotency {
-            bytes.extend_from_slice(&[1]);
-            let up_len = u32::try_from(upstream.len()).unwrap_or(u32::MAX);
-            bytes.extend_from_slice(&up_len.to_le_bytes());
-            bytes.extend_from_slice(upstream.as_bytes());
-        } else {
-            bytes.extend_from_slice(&[0]);
-        }
+        append_optional_string(&mut bytes, self.upstream_idempotency.as_deref());
         bytes
     }
 }
@@ -239,16 +244,9 @@ impl OperationReceipt {
     pub fn signable_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"FCP2-RECEIPT-V1");
-        bytes.extend_from_slice(&self.header.created_at.to_le_bytes());
+        append_canonical_header(&mut bytes, &self.header);
         bytes.extend_from_slice(self.request_object_id.as_bytes());
-        if let Some(ref key) = self.idempotency_key {
-            bytes.extend_from_slice(&[1]);
-            let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
-            bytes.extend_from_slice(&key_len.to_le_bytes());
-            bytes.extend_from_slice(key.as_bytes());
-        } else {
-            bytes.extend_from_slice(&[0]);
-        }
+        append_optional_string(&mut bytes, self.idempotency_key.as_deref());
         // Include outcome object IDs (count capped at u32::MAX for protocol encoding)
         let outcome_count = u32::try_from(self.outcome_object_ids.len()).unwrap_or(u32::MAX);
         bytes.extend_from_slice(&outcome_count.to_le_bytes());
@@ -262,6 +260,7 @@ impl OperationReceipt {
             bytes.extend_from_slice(oid.as_bytes());
         }
         if let Some(metrics) = &self.usage_metrics {
+            bytes.extend_from_slice(&[1]);
             let metric_count = u32::try_from(metrics.len()).unwrap_or(u32::MAX);
             bytes.extend_from_slice(&metric_count.to_le_bytes());
             for metric in metrics {
@@ -287,9 +286,11 @@ impl OperationReceipt {
                     bytes.extend_from_slice(&[0]);
                 }
             }
+        } else {
+            bytes.extend_from_slice(&[0]);
         }
         bytes.extend_from_slice(&self.executed_at.to_le_bytes());
-        bytes.extend_from_slice(self.executed_by.as_str().as_bytes());
+        append_len_prefixed_bytes(&mut bytes, self.executed_by.as_str().as_bytes());
         bytes
     }
 }
@@ -399,6 +400,12 @@ pub enum OperationValidationError {
     /// Receipt already exists for this idempotency key.
     AlreadyCompleted { idempotency_key: String },
 
+    /// Receipt idempotency key does not match the intent.
+    IdempotencyKeyMismatch {
+        expected: Option<String>,
+        got: Option<String>,
+    },
+
     /// Intent/receipt zone mismatch.
     ZoneMismatch { expected: ZoneId, got: ZoneId },
 
@@ -433,6 +440,14 @@ impl std::fmt::Display for OperationValidationError {
                     "operation already completed for idempotency key: {idempotency_key}"
                 )
             }
+            Self::IdempotencyKeyMismatch { expected, got } => {
+                write!(
+                    f,
+                    "idempotency key mismatch: expected {}, got {}",
+                    expected.as_deref().unwrap_or("<none>"),
+                    got.as_deref().unwrap_or("<none>")
+                )
+            }
             Self::ZoneMismatch { expected, got } => {
                 write!(f, "zone mismatch: expected {expected}, got {got}")
             }
@@ -465,7 +480,9 @@ impl std::error::Error for OperationValidationError {}
 /// # Arguments
 ///
 /// * `receipt` - The receipt to validate
+/// * `receipt_id` - `ObjectId` of the receipt object
 /// * `intent` - The expected intent
+/// * `intent_id` - `ObjectId` of the intent object
 ///
 /// # Errors
 ///
@@ -473,8 +490,11 @@ impl std::error::Error for OperationValidationError {}
 /// - Receipt's `request_object_id` doesn't match intent's
 /// - Receipt's zone doesn't match intent's
 /// - Receipt's `idempotency_key` doesn't match intent's
+/// - Receipt's `header.refs` does not include the corresponding intent ID
 pub fn validate_receipt_intent_binding(
+    receipt_id: ObjectId,
     receipt: &OperationReceipt,
+    intent_id: ObjectId,
     intent: &OperationIntent,
 ) -> Result<(), OperationValidationError> {
     // Check request object ID matches
@@ -495,13 +515,14 @@ pub fn validate_receipt_intent_binding(
 
     // Check idempotency key matches
     if receipt.idempotency_key != intent.idempotency_key {
-        // This is a logic error - keys must match exactly
-        return Err(OperationValidationError::IntentNotFound {
-            idempotency_key: receipt
-                .idempotency_key
-                .clone()
-                .unwrap_or_else(|| "<none>".to_string()),
+        return Err(OperationValidationError::IdempotencyKeyMismatch {
+            expected: intent.idempotency_key.clone(),
+            got: receipt.idempotency_key.clone(),
         });
+    }
+
+    if !receipt.header.refs.contains(&intent_id) {
+        return Err(OperationValidationError::IntentReferenceMissing { receipt_id });
     }
 
     Ok(())
@@ -571,6 +592,14 @@ mod tests {
         ObjectId::from_unscoped_bytes(name.as_bytes())
     }
 
+    fn test_intent_id() -> ObjectId {
+        test_object_id("intent-1")
+    }
+
+    fn test_receipt_id() -> ObjectId {
+        test_object_id("receipt-1")
+    }
+
     fn test_signature() -> NodeSignature {
         NodeSignature::new(crate::NodeId::new("test-node"), [0u8; 64], 1000)
     }
@@ -606,6 +635,7 @@ mod tests {
     fn create_test_receipt() -> OperationReceipt {
         let mut header = create_test_header();
         header.schema = SchemaId::new("fcp.operation", "receipt", Version::new(1, 0, 0));
+        header.refs = vec![test_intent_id()];
 
         OperationReceipt {
             header,
@@ -858,7 +888,8 @@ mod tests {
         let intent = create_test_intent();
         let receipt = create_test_receipt();
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(result.is_ok());
     }
 
@@ -868,7 +899,8 @@ mod tests {
         let mut receipt = create_test_receipt();
         receipt.request_object_id = test_object_id("different-request");
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(matches!(
             result,
             Err(OperationValidationError::RequestMismatch { .. })
@@ -881,10 +913,25 @@ mod tests {
         let mut receipt = create_test_receipt();
         receipt.header.zone_id = ZoneId::owner();
 
-        let result = validate_receipt_intent_binding(&receipt, &intent);
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
         assert!(matches!(
             result,
             Err(OperationValidationError::ZoneMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_receipt_intent_binding_missing_reference() {
+        let intent = create_test_intent();
+        let mut receipt = create_test_receipt();
+        receipt.header.refs.clear();
+
+        let result =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent);
+        assert!(matches!(
+            result,
+            Err(OperationValidationError::IntentReferenceMissing { .. })
         ));
     }
 
@@ -1465,6 +1512,10 @@ mod tests {
             OperationValidationError::AlreadyCompleted {
                 idempotency_key: "key-456".to_string(),
             },
+            OperationValidationError::IdempotencyKeyMismatch {
+                expected: Some("expected-key".to_string()),
+                got: None,
+            },
             OperationValidationError::ZoneMismatch {
                 expected: ZoneId::work(),
                 got: ZoneId::owner(),
@@ -1499,7 +1550,8 @@ mod tests {
                 | OperationValidationError::AlreadyCompleted { idempotency_key } => {
                     assert!(display.contains(idempotency_key));
                 }
-                OperationValidationError::ZoneMismatch { .. }
+                OperationValidationError::IdempotencyKeyMismatch { .. }
+                | OperationValidationError::ZoneMismatch { .. }
                 | OperationValidationError::RequestMismatch { .. } => {
                     assert!(display.contains("mismatch"));
                 }
@@ -1810,22 +1862,26 @@ mod tests {
 
     #[test]
     fn validation_error_equality() {
-        let a = OperationValidationError::IntentNotFound {
-            idempotency_key: "k".into(),
+        let a = OperationValidationError::IdempotencyKeyMismatch {
+            expected: Some("k".into()),
+            got: None,
         };
-        let b = OperationValidationError::IntentNotFound {
-            idempotency_key: "k".into(),
+        let b = OperationValidationError::IdempotencyKeyMismatch {
+            expected: Some("k".into()),
+            got: None,
         };
         assert_eq!(a, b);
     }
 
     #[test]
     fn validation_error_inequality() {
-        let a = OperationValidationError::IntentNotFound {
-            idempotency_key: "k1".into(),
+        let a = OperationValidationError::IdempotencyKeyMismatch {
+            expected: Some("k1".into()),
+            got: None,
         };
-        let b = OperationValidationError::IntentNotFound {
-            idempotency_key: "k2".into(),
+        let b = OperationValidationError::IdempotencyKeyMismatch {
+            expected: Some("k2".into()),
+            got: None,
         };
         assert_ne!(a, b);
     }
@@ -1838,7 +1894,10 @@ mod tests {
     fn validate_binding_success() {
         let intent = create_test_intent();
         let receipt = create_test_receipt();
-        assert!(validate_receipt_intent_binding(&receipt, &intent).is_ok());
+        assert!(
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1846,7 +1905,9 @@ mod tests {
         let intent = create_test_intent();
         let mut receipt = create_test_receipt();
         receipt.request_object_id = test_object_id("different-request");
-        let err = validate_receipt_intent_binding(&receipt, &intent).unwrap_err();
+        let err =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .unwrap_err();
         assert!(matches!(
             err,
             OperationValidationError::RequestMismatch { .. }
@@ -1858,10 +1919,26 @@ mod tests {
         let intent = create_test_intent();
         let mut receipt = create_test_receipt();
         receipt.idempotency_key = Some("different-key".into());
-        let err = validate_receipt_intent_binding(&receipt, &intent).unwrap_err();
+        let err =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .unwrap_err();
         assert!(matches!(
             err,
-            OperationValidationError::IntentNotFound { .. }
+            OperationValidationError::IdempotencyKeyMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_binding_missing_intent_reference() {
+        let intent = create_test_intent();
+        let mut receipt = create_test_receipt();
+        receipt.header.refs.clear();
+        let err =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            OperationValidationError::IntentReferenceMissing { .. }
         ));
     }
 
@@ -1916,6 +1993,15 @@ mod tests {
         let mut intent2 = create_test_intent();
         intent1.request_object_id = test_object_id("req-a");
         intent2.request_object_id = test_object_id("req-b");
+        assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
+    }
+
+    #[test]
+    fn intent_signable_bytes_differ_by_header_refs() {
+        let mut intent1 = create_test_intent();
+        let mut intent2 = create_test_intent();
+        intent1.header.refs.push(test_object_id("lease-a"));
+        intent2.header.refs.push(test_object_id("lease-b"));
         assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
     }
 
@@ -1980,6 +2066,14 @@ mod tests {
         let mut r2 = create_test_receipt();
         r1.resource_object_ids = vec![test_object_id("r1")];
         r2.resource_object_ids = vec![test_object_id("r2")];
+        assert_ne!(r1.signable_bytes(), r2.signable_bytes());
+    }
+
+    #[test]
+    fn receipt_signable_bytes_differ_by_header_zone() {
+        let r1 = create_test_receipt();
+        let mut r2 = create_test_receipt();
+        r2.header.zone_id = ZoneId::owner();
         assert_ne!(r1.signable_bytes(), r2.signable_bytes());
     }
 
@@ -2152,7 +2246,10 @@ mod tests {
         let mut receipt = create_test_receipt();
         receipt.idempotency_key = None;
         // Should succeed: both None means keys match
-        assert!(validate_receipt_intent_binding(&receipt, &intent).is_ok());
+        assert!(
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2161,10 +2258,12 @@ mod tests {
         intent.idempotency_key = None;
         let mut receipt = create_test_receipt();
         receipt.idempotency_key = Some("key".to_string());
-        let err = validate_receipt_intent_binding(&receipt, &intent).unwrap_err();
+        let err =
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .unwrap_err();
         assert!(matches!(
             err,
-            OperationValidationError::IntentNotFound { .. }
+            OperationValidationError::IdempotencyKeyMismatch { .. }
         ));
     }
 
@@ -2198,6 +2297,17 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("my-key"));
         assert!(msg.contains("already completed"));
+    }
+
+    #[test]
+    fn validation_error_display_idempotency_key_mismatch() {
+        let err = OperationValidationError::IdempotencyKeyMismatch {
+            expected: Some("expected-key".to_string()),
+            got: None,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("expected-key"));
+        assert!(msg.contains("<none>"));
     }
 
     #[test]
@@ -2249,11 +2359,12 @@ mod tests {
 
     #[test]
     fn validation_error_debug_format() {
-        let err = OperationValidationError::IntentNotFound {
-            idempotency_key: "k".to_string(),
+        let err = OperationValidationError::IdempotencyKeyMismatch {
+            expected: Some("k".to_string()),
+            got: None,
         };
         let debug = format!("{err:?}");
-        assert!(debug.contains("IntentNotFound"));
+        assert!(debug.contains("IdempotencyKeyMismatch"));
     }
 
     #[test]

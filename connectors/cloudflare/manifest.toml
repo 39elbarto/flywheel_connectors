@@ -93,6 +93,24 @@ max_redirects = 0
 [provides.operations.dns_create_record.ai_hints]
 when_to_use = "When you need to add a DNS record to a domain"
 
+[provides.operations.dns_update_record]
+summary = "Update a DNS record"
+capability = "cloudflare.dns.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.dns_update_record.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.dns_update_record.ai_hints]
+when_to_use = "When you need to modify an existing DNS record"
+
 [provides.operations.dns_delete_record]
 summary = "Delete a DNS record"
 capability = "cloudflare.dns.write"
@@ -129,6 +147,24 @@ max_redirects = 0
 [provides.operations.workers_list.ai_hints]
 when_to_use = "When you need to see deployed Workers scripts"
 
+[provides.operations.workers_get]
+summary = "Get a Workers script"
+capability = "cloudflare.workers.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.workers_get.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.workers_get.ai_hints]
+when_to_use = "When you need metadata for a specific Workers script"
+
 [provides.operations.workers_deploy]
 summary = "Deploy a Workers script"
 capability = "cloudflare.workers.write"
@@ -164,6 +200,42 @@ max_redirects = 0
 
 [provides.operations.workers_delete.ai_hints]
 when_to_use = "When you need to permanently remove a Workers script"
+
+[provides.operations.pages_list_projects]
+summary = "List Pages projects"
+capability = "cloudflare.pages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.pages_list_projects.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.pages_list_projects.ai_hints]
+when_to_use = "When you need to enumerate Cloudflare Pages projects"
+
+[provides.operations.pages_create_deployment]
+summary = "Create a Pages deployment"
+capability = "cloudflare.pages.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.pages_create_deployment.network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.pages_create_deployment.ai_hints]
+when_to_use = "When you need to trigger a Cloudflare Pages deployment"
 
 [provides.operations.kv_get]
 summary = "Get a KV value"

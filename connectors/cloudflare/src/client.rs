@@ -4,9 +4,7 @@ use reqwest::{Client, RequestBuilder};
 use serde_json::json;
 use tracing::debug;
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
 
 use crate::error::{CloudflareError, CloudflareResult};
 use crate::types::*;
@@ -62,32 +60,9 @@ impl CloudflareClient {
         }
     }
 
-    fn authenticate(&self, req: RequestBuilder) -> RequestBuilder {
-        match &self.auth {
-            CloudflareAuth::ApiToken { api_token } => {
-                if api_token.is_empty() {
-                    req // secretless mode
-                } else {
-                    req.bearer_auth(api_token)
-                }
-            }
-            CloudflareAuth::ApiKey { api_key, email } => {
-                if api_key.is_empty() {
-                    req
-                } else {
-                    req.header("X-Auth-Key", api_key.as_str())
-                        .header("X-Auth-Email", email.as_str())
-                }
-            }
-        }
-    }
-
     // ── Health check ──
 
-    pub async fn health_check(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> CloudflareResult<VerifyToken> {
+    pub async fn health_check(&self, runtime: &ConnectorRuntime) -> CloudflareResult<VerifyToken> {
         let url = format!("{}/user/tokens/verify", self.base_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -107,10 +82,7 @@ impl CloudflareClient {
 
     // ── Zones ──
 
-    pub async fn list_zones(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> CloudflareResult<Vec<Zone>> {
+    pub async fn list_zones(&self, runtime: &ConnectorRuntime) -> CloudflareResult<Vec<Zone>> {
         let url = format!("{}/zones", self.base_url);
         self.get_list(runtime, &url).await
     }
@@ -133,8 +105,12 @@ impl CloudflareClient {
         record: &CreateDnsRecord,
     ) -> CloudflareResult<DnsRecord> {
         let url = format!("{}/zones/{zone_id}/dns_records", self.base_url);
-        self.post_json(runtime, &url, &serde_json::to_value(record).unwrap_or(json!({})))
-            .await
+        self.post_json(
+            runtime,
+            &url,
+            &serde_json::to_value(record).unwrap_or(json!({})),
+        )
+        .await
     }
 
     pub async fn update_dns_record(
@@ -144,12 +120,13 @@ impl CloudflareClient {
         record_id: &str,
         record: &UpdateDnsRecord,
     ) -> CloudflareResult<DnsRecord> {
-        let url = format!(
-            "{}/zones/{zone_id}/dns_records/{record_id}",
-            self.base_url
-        );
-        self.put_json(runtime, &url, &serde_json::to_value(record).unwrap_or(json!({})))
-            .await
+        let url = format!("{}/zones/{zone_id}/dns_records/{record_id}", self.base_url);
+        self.put_json(
+            runtime,
+            &url,
+            &serde_json::to_value(record).unwrap_or(json!({})),
+        )
+        .await
     }
 
     pub async fn delete_dns_record(
@@ -158,19 +135,13 @@ impl CloudflareClient {
         zone_id: &str,
         record_id: &str,
     ) -> CloudflareResult<serde_json::Value> {
-        let url = format!(
-            "{}/zones/{zone_id}/dns_records/{record_id}",
-            self.base_url
-        );
+        let url = format!("{}/zones/{zone_id}/dns_records/{record_id}", self.base_url);
         self.delete(runtime, &url).await
     }
 
     // ── Workers ──
 
-    pub async fn list_workers(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> CloudflareResult<Vec<Worker>> {
+    pub async fn list_workers(&self, runtime: &ConnectorRuntime) -> CloudflareResult<Vec<Worker>> {
         let url = format!(
             "{}/accounts/{}/workers/scripts",
             self.base_url, self.account_id
@@ -536,9 +507,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: CloudflareError::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -579,10 +548,8 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 
     // Try to parse as CloudflareResponse<T> first
     if let Ok(cf_resp) = serde_json::from_str::<CloudflareResponse<T>>(&text) {
-        if cf_resp.success {
-            if let Some(result) = cf_resp.result {
-                return AttemptOutcome::Success(result);
-            }
+        if cf_resp.success && let Some(result) = cf_resp.result {
+            return AttemptOutcome::Success(result);
         }
         if !cf_resp.errors.is_empty() {
             let err = &cf_resp.errors[0];
@@ -635,9 +602,7 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: CloudflareError::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };

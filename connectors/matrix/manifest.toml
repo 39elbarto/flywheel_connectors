@@ -1,0 +1,47 @@
+[connector]
+name = "fcp.matrix"
+version = "0.1.0"
+description = "Matrix federated messaging connector (Client-Server API)"
+archetype = "bidirectional"
+
+[zones]
+home = "z:community"
+allowed_sources = ["z:community", "z:work", "z:project:*"]
+allowed_targets = ["z:community", "z:work", "z:project:*"]
+tailscale_tag = "tag:fcp-community"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+forbidden = ["system.exec", "system.privileged"]
+
+[sandbox]
+profile = "strict"
+memory_limit_mb = 64
+cpu_limit_percent = 25
+wall_clock_timeout_s = 30
+deny_exec = true
+deny_ptrace = true
+
+# Note: Matrix homeservers can be at any domain, so we cannot restrict
+# host_allow to a single domain. The operator must configure the homeserver
+# URL and the connector will only connect to that URL.
+[[operations]]
+id = "matrix.joined_rooms"
+
+[[operations]]
+id = "matrix.create_room"
+
+[[operations]]
+id = "matrix.join_room"
+
+[[operations]]
+id = "matrix.leave_room"
+
+[[operations]]
+id = "matrix.send_message"
+
+[[operations]]
+id = "matrix.get_messages"
+
+[provisioning]
+note = "Requires a Matrix homeserver account with an access token. Create via Element or any Matrix client, then extract the token from settings."

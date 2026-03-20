@@ -1,0 +1,437 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:155556c058a195543a06ddc25858e73c7eb38c3d159e50eb42a5df65dbf59bdc"
+
+[connector]
+id = "fcp.signal"
+name = "Signal Messenger"
+version = "0.1.0"
+description = "FCP connector for a local signal-cli REST daemon for sending and receiving messages, inspecting groups, and managing identity trust"
+archetypes = [
+    "operational",
+    "bidirectional",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; receive cursors, group cache, and bridge health live only in process memory."
+
+[zones]
+home = "z:private"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+]
+allowed_targets = ["z:private"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "system.privileged",
+]
+
+[provides.operations."signal.get_group"]
+description = "Get detailed information about a specific Signal group"
+capability = "signal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."signal.get_group".input_schema]
+required = ["group_id"]
+type = "object"
+
+[provides.operations."signal.get_group".input_schema.properties.group_id]
+description = "Base64-encoded Signal group identifier"
+type = "string"
+
+[provides.operations."signal.get_group".output_schema]
+type = "object"
+
+[provides.operations."signal.get_group".output_schema.properties.admins]
+type = "array"
+
+[provides.operations."signal.get_group".output_schema.properties.admins.items]
+type = "string"
+
+[provides.operations."signal.get_group".output_schema.properties.id]
+type = "string"
+
+[provides.operations."signal.get_group".output_schema.properties.members]
+type = "array"
+
+[provides.operations."signal.get_group".output_schema.properties.members.items]
+type = "string"
+
+[provides.operations."signal.get_group".output_schema.properties.name]
+type = "string"
+
+[provides.operations."signal.get_group".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [8080]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 3
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 104857600
+
+[provides.operations."signal.get_group".ai_hints]
+when_to_use = "When you need details about a specific Signal group."
+common_mistakes = ["Passing a display name instead of the encoded group ID."]
+examples = []
+related = ["signal.list_groups"]
+
+[provides.operations."signal.get_identity"]
+description = "Get identity and trust information for a Signal number"
+capability = "signal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."signal.get_identity".input_schema]
+required = ["number"]
+type = "object"
+
+[provides.operations."signal.get_identity".input_schema.properties.number]
+description = "Phone number in E.164 format"
+type = "string"
+
+[provides.operations."signal.get_identity".output_schema]
+type = "object"
+
+[provides.operations."signal.get_identity".output_schema.properties.number]
+type = "string"
+
+[provides.operations."signal.get_identity".output_schema.properties.trust_level]
+type = "string"
+
+[provides.operations."signal.get_identity".output_schema.properties.uuid]
+type = "string"
+
+[provides.operations."signal.get_identity".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [8080]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 3
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 104857600
+
+[provides.operations."signal.get_identity".ai_hints]
+when_to_use = "When you need to inspect trust state for a Signal contact."
+common_mistakes = []
+examples = []
+related = ["signal.trust_identity"]
+
+[provides.operations."signal.list_groups"]
+description = "List Signal groups for the configured account"
+capability = "signal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."signal.list_groups".input_schema]
+type = "object"
+
+[provides.operations."signal.list_groups".output_schema]
+required = ["groups"]
+type = "object"
+
+[provides.operations."signal.list_groups".output_schema.properties.groups]
+type = "array"
+
+[provides.operations."signal.list_groups".output_schema.properties.groups.items]
+type = "object"
+
+[provides.operations."signal.list_groups".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [8080]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 3
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 104857600
+
+[provides.operations."signal.list_groups".ai_hints]
+when_to_use = "When you need to inspect the Signal groups available to the registered account."
+common_mistakes = []
+examples = []
+related = ["signal.get_group"]
+
+[provides.operations."signal.receive_messages"]
+description = "Poll the local signal-cli daemon for pending incoming messages"
+capability = "signal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."signal.receive_messages".input_schema]
+type = "object"
+
+[provides.operations."signal.receive_messages".input_schema.properties.timeout_seconds]
+description = "Long-poll timeout in seconds; defaults to the connector configuration"
+minimum = 1
+type = "integer"
+
+[provides.operations."signal.receive_messages".output_schema]
+required = [
+    "messages",
+    "count",
+    "cached_group_count",
+]
+type = "object"
+
+[provides.operations."signal.receive_messages".output_schema.properties.cached_group_count]
+description = "Number of cached Signal groups after the receive poll"
+type = "integer"
+
+[provides.operations."signal.receive_messages".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."signal.receive_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."signal.receive_messages".output_schema.properties.messages.items]
+type = "object"
+
+[provides.operations."signal.receive_messages".output_schema.properties.receive_cursor]
+description = "Highest observed message timestamp cached as the next receive cursor"
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."signal.receive_messages".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [8080]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 3
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 104857600
+
+[provides.operations."signal.receive_messages".ai_hints]
+when_to_use = "When you need to check for new incoming Signal messages."
+common_mistakes = ["Expecting read messages to stay pending after a successful receive call."]
+examples = []
+related = [
+    "signal.send_message",
+    "signal.list_groups",
+]
+
+[provides.operations."signal.send_message"]
+description = "Send a Signal message to one or more recipients"
+capability = "signal.send"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."signal.send_message".input_schema]
+required = [
+    "recipients",
+    "message",
+]
+type = "object"
+
+[provides.operations."signal.send_message".input_schema.properties.attachments]
+description = "Base64-encoded attachment data"
+type = "array"
+
+[provides.operations."signal.send_message".input_schema.properties.attachments.items]
+type = "string"
+
+[provides.operations."signal.send_message".input_schema.properties.message]
+description = "Message text"
+type = "string"
+
+[provides.operations."signal.send_message".input_schema.properties.quote_timestamp]
+description = "Timestamp of the message being replied to"
+type = "integer"
+
+[provides.operations."signal.send_message".input_schema.properties.recipients]
+description = "Signal recipients as E.164 numbers, usernames, or group IDs"
+type = "array"
+
+[provides.operations."signal.send_message".input_schema.properties.recipients.items]
+type = "string"
+
+[provides.operations."signal.send_message".output_schema]
+required = ["timestamp"]
+type = "object"
+
+[provides.operations."signal.send_message".output_schema.properties.timestamp]
+type = "integer"
+
+[provides.operations."signal.send_message".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [8080]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 3
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 104857600
+
+[provides.operations."signal.send_message".ai_hints]
+when_to_use = "When you need to send a Signal message to contacts, usernames, or groups."
+common_mistakes = [
+    "Using non-E.164 phone numbers for number-based recipients.",
+    "Forgetting that attachment payloads must already be base64-encoded.",
+]
+examples = []
+related = ["signal.receive_messages"]
+
+[provides.operations."signal.trust_identity"]
+description = "Trust a Signal identity using a verified safety number or explicit override"
+capability = "signal.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."signal.trust_identity".input_schema]
+required = ["number"]
+type = "object"
+
+[provides.operations."signal.trust_identity".input_schema.properties.number]
+description = "Phone number in E.164 format"
+type = "string"
+
+[provides.operations."signal.trust_identity".input_schema.properties.trust_all_known_keys]
+description = "Trust all known keys for the recipient; intended only for test environments"
+type = "boolean"
+
+[provides.operations."signal.trust_identity".input_schema.properties.verified_safety_number]
+description = "Verified safety number to trust"
+type = "string"
+
+[provides.operations."signal.trust_identity".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."signal.trust_identity".output_schema.properties.status]
+type = "string"
+
+[provides.operations."signal.trust_identity".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [8080]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 3
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 104857600
+
+[provides.operations."signal.trust_identity".ai_hints]
+when_to_use = "When you need to mark a Signal contact as trusted after independently verifying their identity."
+common_mistakes = ["Using trust_all_known_keys in production instead of a verified safety number."]
+examples = []
+related = ["signal.get_identity"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

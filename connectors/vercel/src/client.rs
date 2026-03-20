@@ -19,17 +19,6 @@ use crate::{
     types::{ApiErrorResponse, TeamScope, VercelAuth},
 };
 
-/// Validate a user-supplied path segment to prevent URL path injection.
-/// Encode/validate a path segment for URL safety. Alias used by sub-modules.
-pub(crate) fn encode_path_segment(value: &str) -> String {
-    // Reject dangerous path traversal patterns
-    let lower = value.to_ascii_lowercase();
-    if value.contains('/') || value.contains('\\') || value.contains("..") || lower.contains("%2f") || lower.contains("%5c") {
-        return String::new(); // Sub-modules check for empty result
-    }
-    value.to_string()
-}
-
 pub(crate) fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> VercelResult<&'a str> {
     if value.trim().is_empty() {
         return Err(VercelError::Validation(format!(
@@ -99,7 +88,7 @@ impl VercelClient {
 
     #[must_use]
     pub fn with_base_url(mut self, base_url: &str) -> Self {
-        self.base_url = base_url.trim_end_matches('/').to_string();
+        self.base_url = base_url.trim().trim_end_matches('/').to_string();
         self
     }
 
@@ -456,7 +445,37 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("prj_abc123", "id").unwrap(), "prj_abc123");
-        assert_eq!(sanitize_path_segment("my-project", "id").unwrap(), "my-project");
+        assert_eq!(
+            sanitize_path_segment("prj_abc123", "id").unwrap(),
+            "prj_abc123"
+        );
+        assert_eq!(
+            sanitize_path_segment("my-project", "id").unwrap(),
+            "my-project"
+        );
+    }
+
+    #[test]
+    fn get_project_rejects_invalid_path_input_before_http() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let client = VercelClient::new(
+                VercelAuth::AccessToken {
+                    access_token: "token".into(),
+                },
+                TeamScope::default(),
+                HttpRetryConfig::default(),
+                Duration::from_secs(5),
+            )
+            .unwrap()
+            .with_base_url("http://127.0.0.1:9");
+
+            match client.get_project("../admin").await {
+                Err(VercelError::Validation(message)) => {
+                    assert!(message.contains("project_id_or_name"));
+                }
+                other => panic!("expected validation error, got {other:?}"),
+            }
+        })
+        .unwrap();
     }
 }

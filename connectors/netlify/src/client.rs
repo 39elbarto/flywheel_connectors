@@ -12,7 +12,9 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> NetlifyResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(NetlifyError::InvalidInput(format!("{field} must not be empty")));
+        return Err(NetlifyError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -21,7 +23,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> NetlifyResult<&'a s
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(NetlifyError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(NetlifyError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -95,11 +99,7 @@ impl NetlifyClient {
         self.get_list(runtime, &url).await
     }
 
-    pub async fn get_site(
-        &self,
-        runtime: &ConnectorRuntime,
-        site_id: &str,
-    ) -> NetlifyResult<Site> {
+    pub async fn get_site(&self, runtime: &ConnectorRuntime, site_id: &str) -> NetlifyResult<Site> {
         let site_id = sanitize_path_segment(site_id, "site_id")?;
         let url = format!("{}/api/v1/sites/{site_id}", self.base_url);
         self.get_single(runtime, &url).await
@@ -145,7 +145,10 @@ impl NetlifyClient {
     ) -> NetlifyResult<Deploy> {
         let site_id = sanitize_path_segment(site_id, "site_id")?;
         let deploy_id = sanitize_path_segment(deploy_id, "deploy_id")?;
-        let url = format!("{}/api/v1/sites/{site_id}/deploys/{deploy_id}", self.base_url);
+        let url = format!(
+            "{}/api/v1/sites/{site_id}/deploys/{deploy_id}",
+            self.base_url
+        );
         self.get_single(runtime, &url).await
     }
 
@@ -178,10 +181,7 @@ impl NetlifyClient {
 
     // ── DNS ──
 
-    pub async fn list_dns_zones(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> NetlifyResult<Vec<DnsZone>> {
+    pub async fn list_dns_zones(&self, runtime: &ConnectorRuntime) -> NetlifyResult<Vec<DnsZone>> {
         let url = format!("{}/api/v1/dns_zones", self.base_url);
         self.get_list(runtime, &url).await
     }
@@ -391,9 +391,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: NetlifyError::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -477,9 +475,7 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: NetlifyError::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -588,7 +584,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("site-abc123", "site_id").unwrap(), "site-abc123");
+        assert_eq!(
+            sanitize_path_segment("site-abc123", "site_id").unwrap(),
+            "site-abc123"
+        );
     }
 
     #[test]

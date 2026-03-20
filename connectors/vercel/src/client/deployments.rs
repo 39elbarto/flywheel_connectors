@@ -3,7 +3,7 @@ use crate::{
     types::{CreateDeploymentRequest, DeleteStatus, Deployment, DeploymentListResponse},
 };
 
-use super::{VercelClient, encode_path_segment};
+use super::{VercelClient, sanitize_path_segment};
 
 impl VercelClient {
     pub async fn list_deployments(
@@ -22,8 +22,8 @@ impl VercelClient {
     }
 
     pub async fn get_deployment(&self, deployment_id_or_url: &str) -> VercelResult<Deployment> {
-        let encoded = encode_path_segment(deployment_id_or_url);
-        self.get(&format!("/v13/deployments/{encoded}"), Vec::new())
+        let safe = sanitize_path_segment(deployment_id_or_url, "deployment_id_or_url")?;
+        self.get(&format!("/v13/deployments/{safe}"), Vec::new())
             .await
     }
 
@@ -35,8 +35,8 @@ impl VercelClient {
     }
 
     pub async fn delete_deployment(&self, deployment_id: &str) -> VercelResult<DeleteStatus> {
-        let encoded = encode_path_segment(deployment_id);
-        self.delete(&format!("/v13/deployments/{encoded}"), Vec::new())
+        let safe = sanitize_path_segment(deployment_id, "deployment_id")?;
+        self.delete(&format!("/v13/deployments/{safe}"), Vec::new())
             .await
     }
 }

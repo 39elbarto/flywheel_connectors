@@ -3,7 +3,7 @@ use crate::{
     types::{CreateProjectRequest, Project, ProjectListResponse},
 };
 
-use super::{VercelClient, encode_path_segment};
+use super::{VercelClient, sanitize_path_segment};
 
 impl VercelClient {
     pub async fn list_projects(&self, limit: Option<u32>) -> VercelResult<ProjectListResponse> {
@@ -15,9 +15,8 @@ impl VercelClient {
     }
 
     pub async fn get_project(&self, project_id_or_name: &str) -> VercelResult<Project> {
-        let encoded = encode_path_segment(project_id_or_name);
-        self.get(&format!("/v9/projects/{encoded}"), Vec::new())
-            .await
+        let safe = sanitize_path_segment(project_id_or_name, "project_id_or_name")?;
+        self.get(&format!("/v9/projects/{safe}"), Vec::new()).await
     }
 
     pub async fn create_project(&self, request: &CreateProjectRequest) -> VercelResult<Project> {
@@ -25,8 +24,8 @@ impl VercelClient {
     }
 
     pub async fn delete_project(&self, project_id_or_name: &str) -> VercelResult<()> {
-        let encoded = encode_path_segment(project_id_or_name);
-        self.delete_no_content(&format!("/v9/projects/{encoded}"), Vec::new())
+        let safe = sanitize_path_segment(project_id_or_name, "project_id_or_name")?;
+        self.delete_no_content(&format!("/v9/projects/{safe}"), Vec::new())
             .await
     }
 }

@@ -21,7 +21,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> 
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(GcpError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(GcpError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -34,7 +36,9 @@ fn sanitize_object_name<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('\\') || value.contains("..") || lower.contains("%5c") {
-        return Err(GcpError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(GcpError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -42,7 +46,9 @@ fn sanitize_object_name<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
 /// Validate a query string parameter to prevent injection.
 fn sanitize_query_param<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
     if value.contains('&') || value.contains('?') || value.contains('#') {
-        return Err(GcpError::InvalidInput(format!("{field} contains query injection characters")));
+        return Err(GcpError::InvalidInput(format!(
+            "{field} contains query injection characters"
+        )));
     }
     Ok(value)
 }
@@ -753,7 +759,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("us-central1-a", "zone").unwrap(), "us-central1-a");
+        assert_eq!(
+            sanitize_path_segment("us-central1-a", "zone").unwrap(),
+            "us-central1-a"
+        );
     }
 
     #[test]

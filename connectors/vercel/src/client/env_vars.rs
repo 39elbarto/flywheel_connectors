@@ -3,19 +3,16 @@ use crate::{
     types::{CreateEnvVarRequest, DeleteStatus, EnvVarListResponse, ProjectEnvVar},
 };
 
-use super::{VercelClient, encode_path_segment};
+use super::{VercelClient, sanitize_path_segment};
 
 impl VercelClient {
     pub async fn list_env_vars(
         &self,
         project_id_or_name: &str,
     ) -> VercelResult<EnvVarListResponse> {
-        let project = encode_path_segment(project_id_or_name);
-        self.get(
-            &format!("/v9/projects/{project}/env"),
-            Vec::new(),
-        )
-        .await
+        let project = sanitize_path_segment(project_id_or_name, "project_id_or_name")?;
+        self.get(&format!("/v9/projects/{project}/env"), Vec::new())
+            .await
     }
 
     pub async fn create_env_vars(
@@ -23,7 +20,7 @@ impl VercelClient {
         project_id_or_name: &str,
         requests: &[CreateEnvVarRequest],
     ) -> VercelResult<Vec<ProjectEnvVar>> {
-        let project = encode_path_segment(project_id_or_name);
+        let project = sanitize_path_segment(project_id_or_name, "project_id_or_name")?;
         self.post(
             &format!("/v10/projects/{project}/env"),
             Vec::new(),
@@ -37,13 +34,10 @@ impl VercelClient {
         project_id_or_name: &str,
         env_var_id: &str,
     ) -> VercelResult<DeleteStatus> {
-        let project = encode_path_segment(project_id_or_name);
-        let env_id = encode_path_segment(env_var_id);
-        self.delete(
-            &format!("/v9/projects/{project}/env/{env_id}"),
-            Vec::new(),
-        )
-        .await
+        let project = sanitize_path_segment(project_id_or_name, "project_id_or_name")?;
+        let env_id = sanitize_path_segment(env_var_id, "environment_variable_id")?;
+        self.delete(&format!("/v9/projects/{project}/env/{env_id}"), Vec::new())
+            .await
     }
 }
 

@@ -11,7 +11,9 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DockerHubResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(DockerHubError::InvalidInput(format!("{field} must not be empty")));
+        return Err(DockerHubError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -20,7 +22,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DockerHubResult<&'a
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(DockerHubError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(DockerHubError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -180,10 +184,7 @@ impl DockerHubClient {
     ) -> DockerHubResult<Vec<Tag>> {
         let namespace = sanitize_path_segment(namespace, "namespace")?;
         let name = sanitize_path_segment(name, "repository")?;
-        let url = format!(
-            "{}/v2/repositories/{namespace}/{name}/tags/",
-            self.base_url
-        );
+        let url = format!("{}/v2/repositories/{namespace}/{name}/tags/", self.base_url);
         self.get_paginated(runtime, &url).await
     }
 
@@ -223,7 +224,10 @@ impl DockerHubClient {
 
     // ── Organizations ──
 
-    pub async fn list_orgs(&self, runtime: &ConnectorRuntime) -> DockerHubResult<Vec<Organization>> {
+    pub async fn list_orgs(
+        &self,
+        runtime: &ConnectorRuntime,
+    ) -> DockerHubResult<Vec<Organization>> {
         let url = format!("{}/v2/user/orgs/", self.base_url);
         self.get_paginated(runtime, &url).await
     }
@@ -360,9 +364,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: DockerHubError::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -444,9 +446,7 @@ async fn handle_paginated_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: DockerHubError::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -595,8 +595,14 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("myuser", "namespace").unwrap(), "myuser");
-        assert_eq!(sanitize_path_segment("my-org", "namespace").unwrap(), "my-org");
+        assert_eq!(
+            sanitize_path_segment("myuser", "namespace").unwrap(),
+            "myuser"
+        );
+        assert_eq!(
+            sanitize_path_segment("my-org", "namespace").unwrap(),
+            "my-org"
+        );
     }
 
     #[test]

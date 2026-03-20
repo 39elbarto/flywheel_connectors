@@ -15,7 +15,9 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PayPalResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(PayPalError::InvalidInput(format!("{field} must not be empty")));
+        return Err(PayPalError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -24,7 +26,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PayPalResult<&'a st
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(PayPalError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(PayPalError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -32,7 +36,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PayPalResult<&'a st
 /// Validate a query string parameter to prevent injection.
 fn sanitize_query_param<'a>(value: &'a str, field: &str) -> PayPalResult<&'a str> {
     if value.contains('&') || value.contains('?') || value.contains('#') {
-        return Err(PayPalError::InvalidInput(format!("{field} contains query injection characters")));
+        return Err(PayPalError::InvalidInput(format!(
+            "{field} contains query injection characters"
+        )));
     }
     Ok(value)
 }
@@ -91,9 +97,10 @@ impl PayPalClient {
     async fn ensure_token(&self, runtime: &ConnectorRuntime) -> PayPalResult<String> {
         // Check if we already have a token
         {
-            let guard = self.access_token.read().map_err(|e| {
-                PayPalError::OAuth(format!("token lock poisoned: {e}"))
-            })?;
+            let guard = self
+                .access_token
+                .read()
+                .map_err(|e| PayPalError::OAuth(format!("token lock poisoned: {e}")))?;
             if let Some(ref token) = *guard {
                 return Ok(token.clone());
             }
@@ -159,9 +166,10 @@ impl PayPalClient {
 
         let token = token_resp.access_token.clone();
         {
-            let mut guard = self.access_token.write().map_err(|e| {
-                PayPalError::OAuth(format!("token lock poisoned: {e}"))
-            })?;
+            let mut guard = self
+                .access_token
+                .write()
+                .map_err(|e| PayPalError::OAuth(format!("token lock poisoned: {e}")))?;
             *guard = Some(token.clone());
         }
         Ok(token)
@@ -219,7 +227,12 @@ impl PayPalClient {
         order: &CreateOrder,
     ) -> PayPalResult<PayPalOrder> {
         let url = format!("{}/v2/checkout/orders", self.base_url);
-        self.post_json(runtime, &url, &serde_json::to_value(order).unwrap_or(json!({}))).await
+        self.post_json(
+            runtime,
+            &url,
+            &serde_json::to_value(order).unwrap_or(json!({})),
+        )
+        .await
     }
 
     pub async fn get_order(
@@ -277,7 +290,12 @@ impl PayPalClient {
     ) -> PayPalResult<Refund> {
         let capture_id = sanitize_path_segment(capture_id, "capture_id")?;
         let url = format!("{}/v2/payments/captures/{capture_id}/refund", self.base_url);
-        self.post_json(runtime, &url, &serde_json::to_value(refund_req).unwrap_or(json!({}))).await
+        self.post_json(
+            runtime,
+            &url,
+            &serde_json::to_value(refund_req).unwrap_or(json!({})),
+        )
+        .await
     }
 
     // ── Invoices ──
@@ -288,11 +306,22 @@ impl PayPalClient {
         invoice: &CreateInvoice,
     ) -> PayPalResult<Invoice> {
         let url = format!("{}/v2/invoicing/invoices", self.base_url);
-        self.post_json(runtime, &url, &serde_json::to_value(invoice).unwrap_or(json!({}))).await
+        self.post_json(
+            runtime,
+            &url,
+            &serde_json::to_value(invoice).unwrap_or(json!({})),
+        )
+        .await
     }
 
-    pub async fn list_invoices(&self, runtime: &ConnectorRuntime) -> PayPalResult<InvoicesListResponse> {
-        let url = format!("{}/v2/invoicing/invoices?page=1&page_size=20", self.base_url);
+    pub async fn list_invoices(
+        &self,
+        runtime: &ConnectorRuntime,
+    ) -> PayPalResult<InvoicesListResponse> {
+        let url = format!(
+            "{}/v2/invoicing/invoices?page=1&page_size=20",
+            self.base_url
+        );
         self.get_json(runtime, &url).await
     }
 
@@ -393,9 +422,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: PayPalError::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(5))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(5)).as_millis() as u64,
             },
             retry_after,
         };
@@ -525,7 +552,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("5O190127TN364715T", "order_id").unwrap(), "5O190127TN364715T");
+        assert_eq!(
+            sanitize_path_segment("5O190127TN364715T", "order_id").unwrap(),
+            "5O190127TN364715T"
+        );
     }
 
     #[test]

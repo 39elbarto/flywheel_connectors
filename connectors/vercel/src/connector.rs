@@ -86,8 +86,14 @@ impl std::fmt::Debug for VercelConfig {
 
 impl VercelConfig {
     fn validate(&self) -> Result<(), String> {
-        if self.base_url.trim().is_empty() {
+        let base_url = self.base_url.trim();
+        if base_url.is_empty() {
             return Err("base_url cannot be empty".into());
+        }
+        let parsed = reqwest::Url::parse(base_url)
+            .map_err(|error| format!("base_url must be a valid absolute URL: {error}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("base_url must use http or https".into());
         }
 
         if matches!(
@@ -97,8 +103,27 @@ impl VercelConfig {
             return Err("access_token is required".into());
         }
 
+        if self
+            .scope
+            .team_id
+            .as_ref()
+            .is_some_and(|team_id| team_id.trim().is_empty())
+        {
+            return Err("team_id must not be blank".into());
+        }
+        if self
+            .scope
+            .team_slug
+            .as_ref()
+            .is_some_and(|team_slug| team_slug.trim().is_empty())
+        {
+            return Err("team_slug must not be blank".into());
+        }
         if self.scope.team_id.is_some() && self.scope.team_slug.is_some() {
             return Err("Provide at most one of team_id or team_slug".into());
+        }
+        if self.request_timeout_ms == 0 {
+            return Err("request_timeout_ms must be greater than zero".into());
         }
 
         Ok(())
@@ -237,13 +262,14 @@ impl VercelConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        let value = input
-            .get(key)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("Missing string field: {key}"),
-            })?;
+        let value =
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Missing string field: {key}"),
+                })?;
         if value.trim().is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
@@ -1007,6 +1033,75 @@ mod tests {
                 .unwrap_err();
             match err {
                 FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1001),
+                other => panic!("expected invalid request, got {other:?}"),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_rejects_invalid_base_url() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = VercelConnector::new();
+            let err = connector
+                .configure(json!({
+                    "mode": "access_token",
+                    "access_token": "token",
+                    "base_url": "not-a-url"
+                }))
+                .await
+                .unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, message } => {
+                    assert_eq!(code, 1001);
+                    assert!(message.contains("base_url"));
+                }
+                other => panic!("expected invalid request, got {other:?}"),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_rejects_blank_team_scope() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = VercelConnector::new();
+            let err = connector
+                .configure(json!({
+                    "mode": "access_token",
+                    "access_token": "token",
+                    "team_id": "   "
+                }))
+                .await
+                .unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, message } => {
+                    assert_eq!(code, 1001);
+                    assert!(message.contains("team_id"));
+                }
+                other => panic!("expected invalid request, got {other:?}"),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_rejects_zero_timeout() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = VercelConnector::new();
+            let err = connector
+                .configure(json!({
+                    "mode": "access_token",
+                    "access_token": "token",
+                    "request_timeout_ms": 0
+                }))
+                .await
+                .unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, message } => {
+                    assert_eq!(code, 1001);
+                    assert!(message.contains("request_timeout_ms"));
+                }
                 other => panic!("expected invalid request, got {other:?}"),
             }
         })

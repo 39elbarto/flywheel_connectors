@@ -20,7 +20,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> 
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(AwsError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(AwsError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -33,7 +35,9 @@ fn sanitize_object_key<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('\\') || value.contains("..") || lower.contains("%5c") {
-        return Err(AwsError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(AwsError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -41,7 +45,9 @@ fn sanitize_object_key<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
 /// Validate a query string parameter to prevent injection.
 fn sanitize_query_param<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
     if value.contains('&') || value.contains('?') || value.contains('#') {
-        return Err(AwsError::InvalidInput(format!("{field} contains query injection characters")));
+        return Err(AwsError::InvalidInput(format!(
+            "{field} contains query injection characters"
+        )));
     }
     Ok(value)
 }
@@ -744,7 +750,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("my-bucket", "bucket").unwrap(), "my-bucket");
+        assert_eq!(
+            sanitize_path_segment("my-bucket", "bucket").unwrap(),
+            "my-bucket"
+        );
     }
 
     #[test]
@@ -756,7 +765,10 @@ mod tests {
 
     #[test]
     fn sanitize_query_param_accepts_valid() {
-        assert_eq!(sanitize_query_param("logs/2024/", "prefix").unwrap(), "logs/2024/");
+        assert_eq!(
+            sanitize_query_param("logs/2024/", "prefix").unwrap(),
+            "logs/2024/"
+        );
     }
 
     #[test]

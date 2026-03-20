@@ -12,7 +12,9 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> CloudflareResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(CloudflareError::InvalidInput(format!("{field} must not be empty")));
+        return Err(CloudflareError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -21,7 +23,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> CloudflareResult<&'
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(CloudflareError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(CloudflareError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }
@@ -30,11 +34,15 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> CloudflareResult<&'
 /// but blocks `..` and backslash for path traversal prevention.
 fn sanitize_kv_key<'a>(value: &'a str, field: &str) -> CloudflareResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(CloudflareError::InvalidInput(format!("{field} must not be empty")));
+        return Err(CloudflareError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('\\') || value.contains("..") || lower.contains("%5c") {
-        return Err(CloudflareError::InvalidInput(format!("{field} contains path traversal characters")));
+        return Err(CloudflareError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(value)
 }

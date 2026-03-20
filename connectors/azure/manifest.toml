@@ -1,0 +1,264 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.azure"
+name = "Azure"
+version = "0.1.0"
+description = "Azure connector for VMs, Storage, App Service, and Subscriptions"
+archetypes = ["operational"]
+homepage = "https://learn.microsoft.com/en-us/rest/api/azure/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.vm_list]
+summary = "List virtual machines"
+capability = "azure.compute.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.vm_list.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.vm_list.ai_hints]
+when_to_use = "When you need to list VMs in a resource group"
+
+[provides.operations.vm_get]
+summary = "Get virtual machine details"
+capability = "azure.compute.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.vm_get.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.vm_get.ai_hints]
+when_to_use = "When you need details of a specific VM"
+
+[provides.operations.vm_start]
+summary = "Start a virtual machine"
+capability = "azure.compute.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.vm_start.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.vm_start.ai_hints]
+when_to_use = "When you need to start a stopped VM"
+
+[provides.operations.vm_stop]
+summary = "Stop a virtual machine"
+capability = "azure.compute.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.vm_stop.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.vm_stop.ai_hints]
+when_to_use = "When you need to power off a VM"
+
+[provides.operations.vm_delete]
+summary = "Delete a virtual machine"
+capability = "azure.compute.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.vm_delete.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.vm_delete.ai_hints]
+when_to_use = "When you need to permanently delete a VM — irreversible"
+
+[provides.operations.storage_list_containers]
+summary = "List storage containers"
+capability = "azure.storage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.storage_list_containers.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_list_containers.ai_hints]
+when_to_use = "When you need to list blob containers"
+
+[provides.operations.storage_upload_blob]
+summary = "Upload a blob"
+capability = "azure.storage.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.storage_upload_blob.network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_upload_blob.ai_hints]
+when_to_use = "When you need to upload content to blob storage"
+
+[provides.operations.storage_download_blob]
+summary = "Download a blob"
+capability = "azure.storage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.storage_download_blob.network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_download_blob.ai_hints]
+when_to_use = "When you need to download blob content"
+
+[provides.operations.storage_delete_blob]
+summary = "Delete a blob"
+capability = "azure.storage.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.storage_delete_blob.network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_delete_blob.ai_hints]
+when_to_use = "When you need to permanently delete a blob"
+
+[provides.operations.appservice_list_apps]
+summary = "List App Service web apps"
+capability = "azure.app.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.appservice_list_apps.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.appservice_list_apps.ai_hints]
+when_to_use = "When you need to list App Service web apps"
+
+[provides.operations.appservice_deploy]
+summary = "Deploy to App Service"
+capability = "azure.app.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.appservice_deploy.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.appservice_deploy.ai_hints]
+when_to_use = "When you need to deploy a package to App Service"
+
+[provides.operations.subscription_get]
+summary = "Get subscription details"
+capability = "azure.iam.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.subscription_get.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.subscription_get.ai_hints]
+when_to_use = "When you need subscription info"
+
+[provides.operations.health]
+summary = "Check Azure API health"
+capability = "azure.iam.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to verify Azure credentials and subscription status"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

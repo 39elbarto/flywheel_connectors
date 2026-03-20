@@ -135,6 +135,7 @@ members = [
     "connectors/whisper",
     "connectors/imessage",
     "connectors/vercel",
+    "connectors/azure",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

@@ -11,10 +11,7 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DockerHubResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(DockerHubError::Api {
-            status: 400,
-            message: format!("{field} must not be empty"),
-        });
+        return Err(DockerHubError::InvalidInput(format!("{field} must not be empty")));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -23,10 +20,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DockerHubResult<&'a
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(DockerHubError::Api {
-            status: 400,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(DockerHubError::InvalidInput(format!("{field} contains path traversal characters")));
     }
     Ok(value)
 }

@@ -11,10 +11,7 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(AwsError::Api {
-            code: 1005,
-            message: format!("{field} must not be empty"),
-        });
+        return Err(AwsError::InvalidInput(format!("{field} must not be empty")));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -23,10 +20,20 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> 
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(AwsError::Api {
-            code: 1005,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(AwsError::InvalidInput(format!("{field} contains path traversal characters")));
+    }
+    Ok(value)
+}
+
+/// Sanitize an S3 object key — allows `/` since S3 keys use hierarchical paths
+/// (e.g., `photos/2024/sunset.jpg`), but blocks `..` and backslash.
+fn sanitize_object_key<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(AwsError::InvalidInput(format!("{field} must not be empty")));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('\\') || value.contains("..") || lower.contains("%5c") {
+        return Err(AwsError::InvalidInput(format!("{field} contains path traversal characters")));
     }
     Ok(value)
 }
@@ -34,10 +41,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> 
 /// Validate a query string parameter to prevent injection.
 fn sanitize_query_param<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
     if value.contains('&') || value.contains('?') || value.contains('#') {
-        return Err(AwsError::Api {
-            code: 1005,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(AwsError::InvalidInput(format!("{field} contains query injection characters")));
     }
     Ok(value)
 }
@@ -180,7 +184,7 @@ impl AwsClient {
         key: &str,
     ) -> AwsResult<S3GetObjectResponse> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
-        let key = sanitize_path_segment(key, "key")?;
+        let key = sanitize_object_key(key, "key")?;
         let url = format!("{}/{bucket}/{key}", self.s3_url());
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -245,7 +249,7 @@ impl AwsClient {
         content_type: Option<&str>,
     ) -> AwsResult<S3PutObjectResponse> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
-        let key = sanitize_path_segment(key, "key")?;
+        let key = sanitize_object_key(key, "key")?;
         let url = format!("{}/{bucket}/{key}", self.s3_url());
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -278,7 +282,7 @@ impl AwsClient {
         key: &str,
     ) -> AwsResult<S3DeleteObjectResponse> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
-        let key = sanitize_path_segment(key, "key")?;
+        let key = sanitize_object_key(key, "key")?;
         let url = format!("{}/{bucket}/{key}", self.s3_url());
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();

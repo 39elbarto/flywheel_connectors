@@ -15,10 +15,7 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PayPalResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(PayPalError::Api {
-            code: 1005,
-            message: format!("{field} must not be empty"),
-        });
+        return Err(PayPalError::InvalidInput(format!("{field} must not be empty")));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -27,10 +24,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PayPalResult<&'a st
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(PayPalError::Api {
-            code: 1005,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(PayPalError::InvalidInput(format!("{field} contains path traversal characters")));
     }
     Ok(value)
 }
@@ -38,10 +32,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PayPalResult<&'a st
 /// Validate a query string parameter to prevent injection.
 fn sanitize_query_param<'a>(value: &'a str, field: &str) -> PayPalResult<&'a str> {
     if value.contains('&') || value.contains('?') || value.contains('#') {
-        return Err(PayPalError::Api {
-            code: 1005,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(PayPalError::InvalidInput(format!("{field} contains query injection characters")));
     }
     Ok(value)
 }

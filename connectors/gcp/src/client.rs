@@ -12,10 +12,7 @@ use crate::types::*;
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(GcpError::Api {
-            code: 1005,
-            message: format!("{field} must not be empty"),
-        });
+        return Err(GcpError::InvalidInput(format!("{field} must not be empty")));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -24,10 +21,20 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> 
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(GcpError::Api {
-            code: 1005,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(GcpError::InvalidInput(format!("{field} contains path traversal characters")));
+    }
+    Ok(value)
+}
+
+/// Sanitize a Cloud Storage object name — allows `/` since GCS uses hierarchical paths
+/// (e.g., `data/2024/report.csv`), but blocks `..` and backslash.
+fn sanitize_object_name<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(GcpError::InvalidInput(format!("{field} must not be empty")));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('\\') || value.contains("..") || lower.contains("%5c") {
+        return Err(GcpError::InvalidInput(format!("{field} contains path traversal characters")));
     }
     Ok(value)
 }
@@ -35,10 +42,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> 
 /// Validate a query string parameter to prevent injection.
 fn sanitize_query_param<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
     if value.contains('&') || value.contains('?') || value.contains('#') {
-        return Err(GcpError::Api {
-            code: 1005,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(GcpError::InvalidInput(format!("{field} contains query injection characters")));
     }
     Ok(value)
 }
@@ -238,7 +242,7 @@ impl GcpClient {
         object_name: &str,
     ) -> GcpResult<StorageObject> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
-        let object_name = sanitize_path_segment(object_name, "object_name")?;
+        let object_name = sanitize_object_name(object_name, "object_name")?;
         let url = format!(
             "{}/storage/v1/b/{}/o/{}",
             self.storage_base, bucket, object_name
@@ -256,7 +260,7 @@ impl GcpClient {
     ) -> GcpResult<StorageObject> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
         let object_name = sanitize_query_param(
-            sanitize_path_segment(object_name, "object_name")?,
+            sanitize_object_name(object_name, "object_name")?,
             "object_name",
         )?;
         let url = format!(
@@ -294,7 +298,7 @@ impl GcpClient {
         object_name: &str,
     ) -> GcpResult<serde_json::Value> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
-        let object_name = sanitize_path_segment(object_name, "object_name")?;
+        let object_name = sanitize_object_name(object_name, "object_name")?;
         let url = format!(
             "{}/storage/v1/b/{}/o/{}",
             self.storage_base, bucket, object_name

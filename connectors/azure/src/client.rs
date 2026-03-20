@@ -6,25 +6,47 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use quick_xml::de::from_str as from_xml_str;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use tracing::debug;
 
 use crate::{
     error::{AzureError, AzureResult},
     types::{
-        ApiErrorResponse, AzureAuth, BlobContainerListResponse, BlobGetResponse,
-        BlobListResponse, BlobPutResponse, ResourceGroupListResponse, ResourceListResponse,
-        SecretBundle, SecretListResponse, SetSecretRequest, SubscriptionListResponse,
+        ApiErrorResponse, AzureAuth, BlobContainer, BlobContainerListResponse, BlobGetResponse,
+        BlobItem, BlobListResponse, BlobPutResponse, ResourceGroupListResponse,
+        ResourceListResponse, SecretBundle, SecretListResponse, SetSecretRequest,
+        SubscriptionListResponse,
     },
 };
+
+/// Azure path-safe encoding: preserves `-`, `_`, `.`, `~` and `/` for blob paths.
+/// Uses percent_encoding with a custom set that only encodes truly unsafe chars.
+const AZURE_PATH_SAFE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'#')
+    .add(b'?')
+    .add(b'%')
+    .add(b'[')
+    .add(b']')
+    .add(b'@')
+    .add(b'!')
+    .add(b'$')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b';')
+    .add(b'=');
 
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AzureResult<&'a str> {
     if value.trim().is_empty() {
-        return Err(AzureError::Validation(format!(
-            "{field} must not be empty"
-        )));
+        return Err(AzureError::Validation(format!("{field} must not be empty")));
     }
     let lower = value.to_ascii_lowercase();
     if value.contains('/')
@@ -44,6 +66,125 @@ pub const DEFAULT_MANAGEMENT_URL: &str = "https://management.azure.com";
 const ARM_API_VERSION: &str = "2022-12-01";
 const KEYVAULT_API_VERSION: &str = "7.4";
 const BLOB_API_VERSION: &str = "2023-11-03";
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobContainerEnumerationResultsXml {
+    #[serde(rename = "Containers", default)]
+    containers: BlobContainersXml,
+    #[serde(rename = "NextMarker", default)]
+    next_marker: Option<String>,
+}
+
+impl From<BlobContainerEnumerationResultsXml> for BlobContainerListResponse {
+    fn from(value: BlobContainerEnumerationResultsXml) -> Self {
+        Self {
+            containers: value
+                .containers
+                .containers
+                .into_iter()
+                .map(BlobContainer::from)
+                .collect(),
+            next_marker: value.next_marker,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobContainersXml {
+    #[serde(rename = "Container", default)]
+    containers: Vec<BlobContainerXml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobContainerXml {
+    #[serde(rename = "Name", default)]
+    name: Option<String>,
+    #[serde(rename = "Properties", default)]
+    properties: Option<BlobContainerPropertiesXml>,
+}
+
+impl From<BlobContainerXml> for BlobContainer {
+    fn from(value: BlobContainerXml) -> Self {
+        Self {
+            name: value.name,
+            last_modified: value
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.last_modified.clone()),
+            public_access: value
+                .properties
+                .and_then(|properties| properties.public_access),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobContainerPropertiesXml {
+    #[serde(rename = "Last-Modified", default)]
+    last_modified: Option<String>,
+    #[serde(rename = "PublicAccess", default)]
+    public_access: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobEnumerationResultsXml {
+    #[serde(rename = "Blobs", default)]
+    blobs: BlobItemsXml,
+    #[serde(rename = "NextMarker", default)]
+    next_marker: Option<String>,
+}
+
+impl From<BlobEnumerationResultsXml> for BlobListResponse {
+    fn from(value: BlobEnumerationResultsXml) -> Self {
+        Self {
+            blobs: value.blobs.blobs.into_iter().map(BlobItem::from).collect(),
+            next_marker: value.next_marker,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobItemsXml {
+    #[serde(rename = "Blob", default)]
+    blobs: Vec<BlobItemXml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobItemXml {
+    #[serde(rename = "Name", default)]
+    name: Option<String>,
+    #[serde(rename = "Properties", default)]
+    properties: Option<BlobItemPropertiesXml>,
+}
+
+impl From<BlobItemXml> for BlobItem {
+    fn from(value: BlobItemXml) -> Self {
+        Self {
+            name: value.name,
+            content_length: value
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.content_length),
+            content_type: value
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.content_type.clone()),
+            last_modified: value
+                .properties
+                .and_then(|properties| properties.last_modified),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlobItemPropertiesXml {
+    #[serde(rename = "Content-Length", default)]
+    content_length: Option<u64>,
+    #[serde(rename = "Content-Type", default)]
+    content_type: Option<String>,
+    #[serde(rename = "Last-Modified", default)]
+    last_modified: Option<String>,
+}
 
 pub struct AzureClient {
     http: Client,
@@ -132,9 +273,8 @@ impl AzureClient {
     ) -> AzureResult<ResourceListResponse> {
         let subscription_id = sanitize_path_segment(subscription_id, "subscription_id")?;
         let resource_group = sanitize_path_segment(resource_group, "resource_group")?;
-        let endpoint = format!(
-            "/subscriptions/{subscription_id}/resourceGroups/{resource_group}/resources"
-        );
+        let endpoint =
+            format!("/subscriptions/{subscription_id}/resourceGroups/{resource_group}/resources");
         self.arm_get(&endpoint, &[("api-version", ARM_API_VERSION)])
             .await
     }
@@ -158,11 +298,9 @@ impl AzureClient {
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
         let url = format!("{base}/");
-        let query = [
-            ("comp", "list"),
-            ("x-ms-version", BLOB_API_VERSION),
-        ];
-        self.blob_get_json(&url, &query).await
+        let xml: BlobContainerEnumerationResultsXml =
+            self.blob_get_xml(&url, &[("comp", "list")]).await?;
+        Ok(xml.into())
     }
 
     pub async fn blob_list_blobs(
@@ -176,15 +314,13 @@ impl AzureClient {
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
         let safe_container =
-            percent_encoding::utf8_percent_encode(container, percent_encoding::NON_ALPHANUMERIC)
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE)
                 .to_string();
         let url = format!("{base}/{safe_container}");
-        let query = [
-            ("restype", "container"),
-            ("comp", "list"),
-            ("x-ms-version", BLOB_API_VERSION),
-        ];
-        self.blob_get_json(&url, &query).await
+        let xml: BlobEnumerationResultsXml = self
+            .blob_get_xml(&url, &[("restype", "container"), ("comp", "list")])
+            .await?;
+        Ok(xml.into())
     }
 
     pub async fn blob_get(
@@ -199,10 +335,10 @@ impl AzureClient {
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
         let safe_container =
-            percent_encoding::utf8_percent_encode(container, percent_encoding::NON_ALPHANUMERIC)
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE)
                 .to_string();
         let safe_blob =
-            percent_encoding::utf8_percent_encode(blob_name, percent_encoding::NON_ALPHANUMERIC)
+            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE)
                 .to_string();
         let url = format!("{base}/{safe_container}/{safe_blob}");
 
@@ -280,17 +416,19 @@ impl AzureClient {
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
         let safe_container =
-            percent_encoding::utf8_percent_encode(container, percent_encoding::NON_ALPHANUMERIC)
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE)
                 .to_string();
         let safe_blob =
-            percent_encoding::utf8_percent_encode(blob_name, percent_encoding::NON_ALPHANUMERIC)
+            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE)
                 .to_string();
         let url = format!("{base}/{safe_container}/{safe_blob}");
 
         let body_bytes = BASE64
             .decode(content_base64)
             .map_err(|e| AzureError::Validation(format!("Invalid base64 content: {e}")))?;
-        let ct = content_type.unwrap_or("application/octet-stream").to_string();
+        let ct = content_type
+            .unwrap_or("application/octet-stream")
+            .to_string();
 
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -369,7 +507,7 @@ impl AzureClient {
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
         let safe_name =
-            percent_encoding::utf8_percent_encode(secret_name, percent_encoding::NON_ALPHANUMERIC)
+            percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE)
                 .to_string();
         let url = format!("{base}/secrets/{safe_name}");
         let query = [("api-version", KEYVAULT_API_VERSION)];
@@ -388,7 +526,7 @@ impl AzureClient {
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
         let safe_name =
-            percent_encoding::utf8_percent_encode(secret_name, percent_encoding::NON_ALPHANUMERIC)
+            percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE)
                 .to_string();
         let url = format!("{base}/secrets/{safe_name}");
         let query = [("api-version", KEYVAULT_API_VERSION)];
@@ -477,7 +615,7 @@ impl AzureClient {
         .await
     }
 
-    async fn blob_get_json<R>(&self, url: &str, query: &[(&str, &str)]) -> AzureResult<R>
+    async fn blob_get_xml<R>(&self, url: &str, query: &[(&str, &str)]) -> AzureResult<R>
     where
         R: DeserializeOwned + Send,
     {
@@ -491,11 +629,11 @@ impl AzureClient {
                 let builder = self
                     .apply_auth(self.http.get(&url))
                     .query(query)
-                    .header("Accept", "application/json")
+                    .header("Accept", "application/xml")
                     .header("x-ms-version", BLOB_API_VERSION);
 
                 match builder.send().await {
-                    Ok(response) => match handle_json_response(response).await {
+                    Ok(response) => match handle_xml_response(response).await {
                         Ok(parsed) => AttemptOutcome::Success(parsed),
                         Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
                             retry_after: err.retry_after(),
@@ -587,11 +725,29 @@ where
     }
 }
 
-fn parse_error_response(
-    status: StatusCode,
-    body: &str,
-    retry_after_ms: Option<u64>,
-) -> AzureError {
+async fn handle_xml_response<R>(response: Response) -> AzureResult<R>
+where
+    R: DeserializeOwned + Send,
+{
+    let status = response.status();
+    let retry_after_ms = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|seconds| seconds * 1_000);
+    let body = response.text().await.map_err(AzureError::Http)?;
+
+    if status.is_success() {
+        from_xml_str(&body).map_err(|error| {
+            AzureError::InvalidResponse(format!("failed to parse XML response: {error}"))
+        })
+    } else {
+        Err(parse_error_response(status, &body, retry_after_ms))
+    }
+}
+
+fn parse_error_response(status: StatusCode, body: &str, retry_after_ms: Option<u64>) -> AzureError {
     let parsed = serde_json::from_str::<ApiErrorResponse>(body).ok();
     let code = parsed
         .as_ref()
@@ -670,10 +826,7 @@ mod tests {
             let client = test_client(&server.uri());
             let resp = client.list_subscriptions().await.unwrap();
             assert_eq!(resp.value.len(), 1);
-            assert_eq!(
-                resp.value[0].subscription_id.as_deref(),
-                Some("sub-123")
-            );
+            assert_eq!(resp.value[0].subscription_id.as_deref(), Some("sub-123"));
         })
         .unwrap();
     }
@@ -732,14 +885,105 @@ mod tests {
             Mock::given(method("GET"))
                 .and(path("/subscriptions"))
                 .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_json(serde_json::json!({ "value": [] })),
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
                 )
                 .mount(&server)
                 .await;
 
             let client = test_client(&server.uri());
             client.health_check().await.unwrap();
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn blob_list_containers_parses_xml_response() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/"))
+                .and(query_param("comp", "list"))
+                .and(header("x-ms-version", BLOB_API_VERSION))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/">
+  <Containers>
+    <Container>
+      <Name>audio</Name>
+      <Properties>
+        <Last-Modified>Wed, 26 Oct 2016 20:39:39 GMT</Last-Modified>
+        <PublicAccess>container</PublicAccess>
+      </Properties>
+    </Container>
+  </Containers>
+  <NextMarker>next-token</NextMarker>
+</EnumerationResults>"#,
+                ))
+                .mount(&server)
+                .await;
+
+            let client = test_client(&server.uri());
+            let resp = client
+                .blob_list_containers("acct", Some(&server.uri()))
+                .await
+                .unwrap();
+            assert_eq!(resp.containers.len(), 1);
+            assert_eq!(resp.containers[0].name.as_deref(), Some("audio"));
+            assert_eq!(
+                resp.containers[0].last_modified.as_deref(),
+                Some("Wed, 26 Oct 2016 20:39:39 GMT")
+            );
+            assert_eq!(
+                resp.containers[0].public_access.as_deref(),
+                Some("container")
+            );
+            assert_eq!(resp.next_marker.as_deref(), Some("next-token"));
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn blob_list_blobs_parses_xml_response() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/docs"))
+                .and(query_param("restype", "container"))
+                .and(query_param("comp", "list"))
+                .and(header("x-ms-version", BLOB_API_VERSION))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/" ContainerName="docs">
+  <Blobs>
+    <Blob>
+      <Name>report.txt</Name>
+      <Properties>
+        <Last-Modified>Wed, 26 Oct 2016 20:39:39 GMT</Last-Modified>
+        <Content-Length>1024</Content-Length>
+        <Content-Type>text/plain</Content-Type>
+      </Properties>
+    </Blob>
+  </Blobs>
+  <NextMarker>blob-next</NextMarker>
+</EnumerationResults>"#,
+                ))
+                .mount(&server)
+                .await;
+
+            let client = test_client(&server.uri());
+            let resp = client
+                .blob_list_blobs("acct", "docs", Some(&server.uri()))
+                .await
+                .unwrap();
+            assert_eq!(resp.blobs.len(), 1);
+            assert_eq!(resp.blobs[0].name.as_deref(), Some("report.txt"));
+            assert_eq!(resp.blobs[0].content_length, Some(1024));
+            assert_eq!(resp.blobs[0].content_type.as_deref(), Some("text/plain"));
+            assert_eq!(
+                resp.blobs[0].last_modified.as_deref(),
+                Some("Wed, 26 Oct 2016 20:39:39 GMT")
+            );
+            assert_eq!(resp.next_marker.as_deref(), Some("blob-next"));
         })
         .unwrap();
     }

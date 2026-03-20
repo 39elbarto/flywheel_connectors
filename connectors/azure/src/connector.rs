@@ -12,6 +12,7 @@ use fcp_core::{
     UnsubscribeRequest,
 };
 use fcp_sdk::migration::HttpRetryConfig;
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -74,9 +75,7 @@ impl std::fmt::Debug for AzureConfig {
 
 impl AzureConfig {
     fn validate(&self) -> Result<(), String> {
-        if self.management_url.trim().is_empty() {
-            return Err("management_url cannot be empty".into());
-        }
+        validate_management_url(&self.management_url)?;
 
         if matches!(
             &self.auth,
@@ -104,6 +103,85 @@ impl AzureConfig {
 
         Ok(config)
     }
+}
+
+fn validate_https_url(url: &str, label: &str) -> Result<Url, String> {
+    let parsed =
+        Url::parse(url).map_err(|error| format!("{label} must be a valid URL: {error}"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!("{label} must use https"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("{label} must not include embedded credentials"));
+    }
+    if parsed.port_or_known_default() != Some(443) {
+        return Err(format!("{label} must resolve to port 443"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "{label} must not include a query string or fragment"
+        ));
+    }
+    if parsed.path() != "/" && !parsed.path().is_empty() {
+        return Err(format!("{label} must not include a path"));
+    }
+    Ok(parsed)
+}
+
+fn validate_allowed_host_url<F>(
+    url: &str,
+    label: &str,
+    expected_host_description: &str,
+    host_allowed: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&str) -> bool,
+{
+    let parsed = validate_https_url(url, label)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("{label} must include a host"))?;
+    if !host_allowed(host) {
+        return Err(format!(
+            "{label} host must match {expected_host_description}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_management_url(url: &str) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Err("management_url cannot be empty".into());
+    }
+    validate_allowed_host_url(url, "management_url", "management.azure.com", |host| {
+        host.eq_ignore_ascii_case("management.azure.com")
+    })
+}
+
+fn validate_blob_base_url(url: &str) -> Result<(), String> {
+    validate_allowed_host_url(url, "blob_base_url", "*.blob.core.windows.net", |host| {
+        host.ends_with(".blob.core.windows.net")
+    })
+}
+
+fn validate_vault_base_url(url: &str) -> Result<(), String> {
+    validate_allowed_host_url(url, "vault_base_url", "*.vault.azure.net", |host| {
+        host.ends_with(".vault.azure.net")
+    })
+}
+
+fn validate_optional_override(
+    url: Option<&str>,
+    label: &str,
+    validator: fn(&str) -> Result<(), String>,
+) -> FcpResult<()> {
+    if let Some(url) = url {
+        validator(url).map_err(|message| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label}: {message}"),
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -183,7 +261,7 @@ impl AzureConnector {
         if let Some(config) = &self.config {
             checks.push(DoctorCheck {
                 name: "management_url".into(),
-                passed: config.management_url.starts_with("https://"),
+                passed: validate_management_url(&config.management_url).is_ok(),
                 message: Some(format!("Management URL: {}", config.management_url)),
                 critical: false,
             });
@@ -213,13 +291,14 @@ impl AzureConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        let value = input
-            .get(key)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("Missing string field: {key}"),
-            })?;
+        let value =
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Missing string field: {key}"),
+                })?;
         if value.trim().is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
@@ -359,7 +438,12 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::Strict,
-            schema(&["storage_account", "container", "blob_name", "content_base64"]),
+            schema(&[
+                "storage_account",
+                "container",
+                "blob_name",
+                "content_base64",
+            ]),
             schema(&[]),
             "Upload or overwrite a blob in an Azure storage container",
             None,
@@ -465,10 +549,8 @@ impl AzureConnector {
 
             OP_BLOB_LIST_CONTAINERS => {
                 let storage_account = Self::require_str(&req.input, "storage_account")?;
-                let blob_base_url = req
-                    .input
-                    .get("blob_base_url")
-                    .and_then(|v| v.as_str());
+                let blob_base_url = req.input.get("blob_base_url").and_then(|v| v.as_str());
+                validate_optional_override(blob_base_url, "blob_base_url", validate_blob_base_url)?;
                 serde_json::to_value(
                     client
                         .blob_list_containers(storage_account, blob_base_url)
@@ -483,10 +565,8 @@ impl AzureConnector {
             OP_BLOB_LIST_BLOBS => {
                 let storage_account = Self::require_str(&req.input, "storage_account")?;
                 let container = Self::require_str(&req.input, "container")?;
-                let blob_base_url = req
-                    .input
-                    .get("blob_base_url")
-                    .and_then(|v| v.as_str());
+                let blob_base_url = req.input.get("blob_base_url").and_then(|v| v.as_str());
+                validate_optional_override(blob_base_url, "blob_base_url", validate_blob_base_url)?;
                 serde_json::to_value(
                     client
                         .blob_list_blobs(storage_account, container, blob_base_url)
@@ -502,10 +582,8 @@ impl AzureConnector {
                 let storage_account = Self::require_str(&req.input, "storage_account")?;
                 let container = Self::require_str(&req.input, "container")?;
                 let blob_name = Self::require_str(&req.input, "blob_name")?;
-                let blob_base_url = req
-                    .input
-                    .get("blob_base_url")
-                    .and_then(|v| v.as_str());
+                let blob_base_url = req.input.get("blob_base_url").and_then(|v| v.as_str());
+                validate_optional_override(blob_base_url, "blob_base_url", validate_blob_base_url)?;
                 serde_json::to_value(
                     client
                         .blob_get(storage_account, container, blob_name, blob_base_url)
@@ -522,14 +600,9 @@ impl AzureConnector {
                 let container = Self::require_str(&req.input, "container")?;
                 let blob_name = Self::require_str(&req.input, "blob_name")?;
                 let content_base64 = Self::require_str(&req.input, "content_base64")?;
-                let content_type = req
-                    .input
-                    .get("content_type")
-                    .and_then(|v| v.as_str());
-                let blob_base_url = req
-                    .input
-                    .get("blob_base_url")
-                    .and_then(|v| v.as_str());
+                let content_type = req.input.get("content_type").and_then(|v| v.as_str());
+                let blob_base_url = req.input.get("blob_base_url").and_then(|v| v.as_str());
+                validate_optional_override(blob_base_url, "blob_base_url", validate_blob_base_url)?;
                 serde_json::to_value(
                     client
                         .blob_put(
@@ -550,10 +623,12 @@ impl AzureConnector {
 
             OP_KEYVAULT_LIST_SECRETS => {
                 let vault_name = Self::require_str(&req.input, "vault_name")?;
-                let vault_base_url = req
-                    .input
-                    .get("vault_base_url")
-                    .and_then(|v| v.as_str());
+                let vault_base_url = req.input.get("vault_base_url").and_then(|v| v.as_str());
+                validate_optional_override(
+                    vault_base_url,
+                    "vault_base_url",
+                    validate_vault_base_url,
+                )?;
                 serde_json::to_value(
                     client
                         .keyvault_list_secrets(vault_name, vault_base_url)
@@ -568,10 +643,12 @@ impl AzureConnector {
             OP_KEYVAULT_GET_SECRET => {
                 let vault_name = Self::require_str(&req.input, "vault_name")?;
                 let secret_name = Self::require_str(&req.input, "secret_name")?;
-                let vault_base_url = req
-                    .input
-                    .get("vault_base_url")
-                    .and_then(|v| v.as_str());
+                let vault_base_url = req.input.get("vault_base_url").and_then(|v| v.as_str());
+                validate_optional_override(
+                    vault_base_url,
+                    "vault_base_url",
+                    validate_vault_base_url,
+                )?;
                 serde_json::to_value(
                     client
                         .keyvault_get_secret(vault_name, secret_name, vault_base_url)
@@ -587,20 +664,19 @@ impl AzureConnector {
                 let vault_name = Self::require_str(&req.input, "vault_name")?;
                 let secret_name = Self::require_str(&req.input, "secret_name")?;
                 let value = Self::require_str(&req.input, "value")?;
-                let vault_base_url = req
-                    .input
-                    .get("vault_base_url")
-                    .and_then(|v| v.as_str());
+                let vault_base_url = req.input.get("vault_base_url").and_then(|v| v.as_str());
+                validate_optional_override(
+                    vault_base_url,
+                    "vault_base_url",
+                    validate_vault_base_url,
+                )?;
                 let tags = req.input.get("tags").cloned();
                 let content_type = req
                     .input
                     .get("content_type")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                let enabled = req
-                    .input
-                    .get("enabled")
-                    .and_then(|v| v.as_bool());
+                let enabled = req.input.get("enabled").and_then(|v| v.as_bool());
 
                 let set_req = SetSecretRequest {
                     value: value.into(),
@@ -853,6 +929,28 @@ mod tests {
             }
         })
         .unwrap();
+    }
+
+    #[test]
+    fn management_url_requires_https_and_azure_host() {
+        assert!(validate_management_url("https://management.azure.com").is_ok());
+        assert!(validate_management_url("http://management.azure.com").is_err());
+        assert!(validate_management_url("https://example.com").is_err());
+        assert!(validate_management_url("https://user:pass@management.azure.com").is_err());
+        assert!(validate_management_url("https://management.azure.com/subscriptions").is_err());
+    }
+
+    #[test]
+    fn override_urls_require_https_and_expected_hosts() {
+        assert!(validate_blob_base_url("https://acct.blob.core.windows.net").is_ok());
+        assert!(validate_blob_base_url("http://acct.blob.core.windows.net").is_err());
+        assert!(validate_blob_base_url("https://example.com").is_err());
+        assert!(validate_blob_base_url("https://user:pass@acct.blob.core.windows.net").is_err());
+
+        assert!(validate_vault_base_url("https://vault-one.vault.azure.net").is_ok());
+        assert!(validate_vault_base_url("http://vault-one.vault.azure.net").is_err());
+        assert!(validate_vault_base_url("https://example.com").is_err());
+        assert!(validate_vault_base_url("https://user:pass@vault-one.vault.azure.net").is_err());
     }
 
     #[test]

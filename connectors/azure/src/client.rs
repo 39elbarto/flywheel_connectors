@@ -62,6 +62,24 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AzureResult<&'a str
     Ok(value)
 }
 
+/// Validate a value that will be used as a hostname component (e.g. storage account, vault name).
+/// Only allows alphanumeric characters and hyphens to prevent URL authority injection.
+fn validate_hostname_component<'a>(value: &'a str, field: &str) -> AzureResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AzureError::Validation(format!("{field} must not be empty")));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(AzureError::Validation(format!(
+            "{field} must contain only alphanumeric characters and hyphens"
+        )));
+    }
+    Ok(trimmed)
+}
+
 pub const DEFAULT_MANAGEMENT_URL: &str = "https://management.azure.com";
 const ARM_API_VERSION: &str = "2022-12-01";
 const KEYVAULT_API_VERSION: &str = "7.4";
@@ -293,7 +311,7 @@ impl AzureClient {
         storage_account: &str,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobContainerListResponse> {
-        let storage_account = sanitize_path_segment(storage_account, "storage_account")?;
+        let storage_account = validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
@@ -309,13 +327,12 @@ impl AzureClient {
         container: &str,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobListResponse> {
-        let storage_account = sanitize_path_segment(storage_account, "storage_account")?;
+        let storage_account = validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
         let safe_container =
-            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE)
-                .to_string();
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/{safe_container}");
         let xml: BlobEnumerationResultsXml = self
             .blob_get_xml(&url, &[("restype", "container"), ("comp", "list")])
@@ -330,16 +347,14 @@ impl AzureClient {
         blob_name: &str,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobGetResponse> {
-        let storage_account = sanitize_path_segment(storage_account, "storage_account")?;
+        let storage_account = validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
         let safe_container =
-            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE)
-                .to_string();
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE).to_string();
         let safe_blob =
-            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE)
-                .to_string();
+            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/{safe_container}/{safe_blob}");
 
         let ctx = self.runtime.request_context();
@@ -411,16 +426,14 @@ impl AzureClient {
         content_type: Option<&str>,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobPutResponse> {
-        let storage_account = sanitize_path_segment(storage_account, "storage_account")?;
+        let storage_account = validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
         let safe_container =
-            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE)
-                .to_string();
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE).to_string();
         let safe_blob =
-            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE)
-                .to_string();
+            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/{safe_container}/{safe_blob}");
 
         let body_bytes = BASE64
@@ -487,7 +500,7 @@ impl AzureClient {
         vault_name: &str,
         vault_base_url: Option<&str>,
     ) -> AzureResult<SecretListResponse> {
-        let vault_name = sanitize_path_segment(vault_name, "vault_name")?;
+        let vault_name = validate_hostname_component(vault_name, "vault_name")?;
         let base = vault_base_url
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
@@ -502,13 +515,12 @@ impl AzureClient {
         secret_name: &str,
         vault_base_url: Option<&str>,
     ) -> AzureResult<SecretBundle> {
-        let vault_name = sanitize_path_segment(vault_name, "vault_name")?;
+        let vault_name = validate_hostname_component(vault_name, "vault_name")?;
         let base = vault_base_url
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
         let safe_name =
-            percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE)
-                .to_string();
+            percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/secrets/{safe_name}");
         let query = [("api-version", KEYVAULT_API_VERSION)];
         self.kv_get_json(&url, &query).await
@@ -521,13 +533,12 @@ impl AzureClient {
         request: &SetSecretRequest,
         vault_base_url: Option<&str>,
     ) -> AzureResult<SecretBundle> {
-        let vault_name = sanitize_path_segment(vault_name, "vault_name")?;
+        let vault_name = validate_hostname_component(vault_name, "vault_name")?;
         let base = vault_base_url
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
         let safe_name =
-            percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE)
-                .to_string();
+            percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/secrets/{safe_name}");
         let query = [("api-version", KEYVAULT_API_VERSION)];
 

@@ -60,10 +60,7 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn handle_message(
-    connector: &mut DockerHubConnector,
-    message: &str,
-) -> serde_json::Value {
+async fn handle_message(connector: &mut DockerHubConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
         Err(e) => {

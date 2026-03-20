@@ -183,10 +183,7 @@ impl ShopifyClient {
 
     // ── Customers ──
 
-    pub async fn list_customers(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> ShopifyResult<Vec<Customer>> {
+    pub async fn list_customers(&self, runtime: &ConnectorRuntime) -> ShopifyResult<Vec<Customer>> {
         let url = format!("{}/customers.json?limit=50", self.base_url);
         self.get_wrapped::<CustomersResponse>(runtime, &url)
             .await

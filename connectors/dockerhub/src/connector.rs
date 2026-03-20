@@ -295,13 +295,14 @@ impl DockerHubConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        let value = input
-            .get(key)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("Missing: {key}"),
-            })?;
+        let value =
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Missing: {key}"),
+                })?;
         if value.trim().is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
@@ -476,7 +477,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("List user's Docker Hub organizations", vec![], vec![], vec![]),
+            ai_hints: hint(
+                "List user's Docker Hub organizations",
+                vec![],
+                vec![],
+                vec![],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -509,12 +515,11 @@ impl FcpConnector for DockerHubConnector {
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(cfg.request_timeout_ms)),
         ));
-        let mut client =
-            DockerHubClient::new(&cfg.base_url, cfg.auth.clone(), cfg.retry.clone())
-                .await
-                .map_err(|e| FcpError::Internal {
-                    message: format!("Client init: {e}"),
-                })?;
+        let mut client = DockerHubClient::new(&cfg.base_url, cfg.auth.clone(), cfg.retry.clone())
+            .await
+            .map_err(|e| FcpError::Internal {
+                message: format!("Client init: {e}"),
+            })?;
 
         // If credentials-based auth, attempt login to get JWT
         if matches!(cfg.auth, DockerHubAuth::Credentials { .. }) && !cfg.auth.is_secretless() {
@@ -875,10 +880,7 @@ mod tests {
     #[test]
     fn repos_list_is_safe() {
         let ops = operations_info();
-        let op = ops
-            .iter()
-            .find(|o| o.id.as_str() == OP_REPOS_LIST)
-            .unwrap();
+        let op = ops.iter().find(|o| o.id.as_str() == OP_REPOS_LIST).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
     }
@@ -920,10 +922,7 @@ mod tests {
     #[test]
     fn tags_list_is_safe() {
         let ops = operations_info();
-        let op = ops
-            .iter()
-            .find(|o| o.id.as_str() == OP_TAGS_LIST)
-            .unwrap();
+        let op = ops.iter().find(|o| o.id.as_str() == OP_TAGS_LIST).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
     }
@@ -931,10 +930,7 @@ mod tests {
     #[test]
     fn orgs_list_is_safe() {
         let ops = operations_info();
-        let op = ops
-            .iter()
-            .find(|o| o.id.as_str() == OP_ORGS_LIST)
-            .unwrap();
+        let op = ops.iter().find(|o| o.id.as_str() == OP_ORGS_LIST).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.capability, CapabilityId::from_static(CAP_ORGS_READ));
     }
@@ -1155,20 +1151,14 @@ mod tests {
     #[test]
     fn repos_get_is_safe() {
         let ops = operations_info();
-        let op = ops
-            .iter()
-            .find(|o| o.id.as_str() == OP_REPOS_GET)
-            .unwrap();
+        let op = ops.iter().find(|o| o.id.as_str() == OP_REPOS_GET).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
     }
 
     #[test]
     fn tags_get_is_safe() {
         let ops = operations_info();
-        let op = ops
-            .iter()
-            .find(|o| o.id.as_str() == OP_TAGS_GET)
-            .unwrap();
+        let op = ops.iter().find(|o| o.id.as_str() == OP_TAGS_GET).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
     }
 }

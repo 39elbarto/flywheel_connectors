@@ -237,9 +237,8 @@ mod tests {
     #[test]
     fn http_error_maps_to_external() {
         // Build an error through JSON parse since we can't construct reqwest::Error directly
-        let err = ShopifyError::Json(
-            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err(),
-        );
+        let err =
+            ShopifyError::Json(serde_json::from_str::<serde_json::Value>("invalid").unwrap_err());
         let fcp = err.to_fcp_error();
         assert!(matches!(fcp, FcpError::Internal { .. }));
     }

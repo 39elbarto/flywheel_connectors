@@ -20,7 +20,9 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::NetlifyClient;
-use crate::types::{CreateDeployRequest, CreateSiteRequest, NetlifyAuth, SetEnvVarRequest, SetEnvVarValue};
+use crate::types::{
+    CreateDeployRequest, CreateSiteRequest, NetlifyAuth, SetEnvVarRequest, SetEnvVarValue,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const NETLIFY_ALLOWED_HOSTS: &[&str] = &["api.netlify.com"];
@@ -293,13 +295,14 @@ impl NetlifyConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        let value = input
-            .get(key)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("Missing: {key}"),
-            })?;
+        let value =
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Missing: {key}"),
+                })?;
         if value.trim().is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
@@ -374,7 +377,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Create new Netlify site", vec![], vec![], vec![CAP_SITES_READ]),
+            ai_hints: hint(
+                "Create new Netlify site",
+                vec![],
+                vec![],
+                vec![CAP_SITES_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -421,7 +429,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("Check deploy status", vec![], vec![], vec![CAP_DEPLOYS_READ]),
+            ai_hints: hint(
+                "Check deploy status",
+                vec![],
+                vec![],
+                vec![CAP_DEPLOYS_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -1022,10 +1035,7 @@ mod tests {
     #[test]
     fn env_delete_is_dangerous() {
         let ops = operations_info();
-        let op = ops
-            .iter()
-            .find(|o| o.id.as_str() == OP_ENV_DELETE)
-            .unwrap();
+        let op = ops.iter().find(|o| o.id.as_str() == OP_ENV_DELETE).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Dangerous);
         assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
     }

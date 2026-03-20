@@ -39,7 +39,11 @@ pub struct TokenResponse {
 
 impl std::fmt::Display for TokenResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TokenResponse(token_type={}, expires_in={:?})", self.token_type, self.expires_in)
+        write!(
+            f,
+            "TokenResponse(token_type={}, expires_in={:?})",
+            self.token_type, self.expires_in
+        )
     }
 }
 

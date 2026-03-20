@@ -19,9 +19,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::ShopifyClient;
-use crate::types::{
-    CreateLineItem, CreateOrder, CreateProduct, CreateVariant, UpdateProduct,
-};
+use crate::types::{CreateLineItem, CreateOrder, CreateProduct, CreateVariant, UpdateProduct};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -124,10 +122,7 @@ pub struct DoctorCheck {
 
 impl DoctorResult {
     fn from_checks(checks: Vec<DoctorCheck>) -> Self {
-        let ready = checks
-            .iter()
-            .filter(|c| c.critical)
-            .all(|c| c.passed);
+        let ready = checks.iter().filter(|c| c.critical).all(|c| c.passed);
         let status = if checks.iter().any(|c| c.critical && !c.passed) {
             DoctorStatus::Unhealthy
         } else if checks.iter().any(|c| !c.passed) {
@@ -208,13 +203,14 @@ impl ShopifyConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        let value = input
-            .get(key)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("Missing: {key}"),
-            })?;
+        let value =
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Missing: {key}"),
+                })?;
         if value.trim().is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
@@ -243,15 +239,14 @@ impl Default for ShopifyConnector {
 
 #[allow(clippy::too_many_lines)]
 fn operations_info() -> Vec<OperationInfo> {
-    let hint =
-        |when: &str, mistakes: Vec<String>, related: Vec<&'static str>| -> AgentHint {
-            AgentHint {
-                when_to_use: when.into(),
-                common_mistakes: mistakes,
-                examples: vec![],
-                related: related.into_iter().map(CapabilityId::from_static).collect(),
-            }
-        };
+    let hint = |when: &str, mistakes: Vec<String>, related: Vec<&'static str>| -> AgentHint {
+        AgentHint {
+            when_to_use: when.into(),
+            common_mistakes: mistakes,
+            examples: vec![],
+            related: related.into_iter().map(CapabilityId::from_static).collect(),
+        }
+    };
     vec![
         OperationInfo {
             id: OperationId::from_static(OP_PRODUCTS_LIST),
@@ -263,7 +258,11 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("List products in the store", vec![], vec![CAP_PRODUCTS_WRITE]),
+            ai_hints: hint(
+                "List products in the store",
+                vec![],
+                vec![CAP_PRODUCTS_WRITE],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -721,8 +720,14 @@ impl ShopifyConnector {
                         .map(|arr| {
                             arr.iter()
                                 .map(|v| CreateVariant {
-                                    title: v.get("title").and_then(|t| t.as_str()).map(String::from),
-                                    price: v.get("price").and_then(|p| p.as_str()).map(String::from),
+                                    title: v
+                                        .get("title")
+                                        .and_then(|t| t.as_str())
+                                        .map(String::from),
+                                    price: v
+                                        .get("price")
+                                        .and_then(|p| p.as_str())
+                                        .map(String::from),
                                     sku: v.get("sku").and_then(|s| s.as_str()).map(String::from),
                                 })
                                 .collect()
@@ -825,10 +830,7 @@ impl ShopifyConnector {
                                     code: 1005,
                                     message: "line_items[].variant_id required".into(),
                                 })?,
-                            quantity: item
-                                .get("quantity")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(1),
+                            quantity: item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1),
                         })
                     })
                     .collect::<FcpResult<Vec<_>>>()?;
@@ -1315,7 +1317,8 @@ mod tests {
                 let mut c = ShopifyConnector::new();
                 c.configure(tc()).await.unwrap();
                 c.handshake(handshake_req()).await.unwrap();
-                c.invoke(invoke_req(OP_PRODUCTS_UPDATE, json!({"title":"x"}))).await
+                c.invoke(invoke_req(OP_PRODUCTS_UPDATE, json!({"title":"x"})))
+                    .await
             })
             .unwrap()
             .is_err()
@@ -1340,11 +1343,20 @@ mod tests {
     fn ops_count_matches_spec() {
         let ops = operations_info();
         assert_eq!(ops.len(), 12, "Expected 12 operations");
-        let safe_count = ops.iter().filter(|o| o.safety_tier == SafetyTier::Safe).count();
+        let safe_count = ops
+            .iter()
+            .filter(|o| o.safety_tier == SafetyTier::Safe)
+            .count();
         assert_eq!(safe_count, 8, "Expected 8 safe operations");
-        let risky_count = ops.iter().filter(|o| o.safety_tier == SafetyTier::Risky).count();
+        let risky_count = ops
+            .iter()
+            .filter(|o| o.safety_tier == SafetyTier::Risky)
+            .count();
         assert_eq!(risky_count, 3, "Expected 3 risky operations");
-        let dangerous_count = ops.iter().filter(|o| o.safety_tier == SafetyTier::Dangerous).count();
+        let dangerous_count = ops
+            .iter()
+            .filter(|o| o.safety_tier == SafetyTier::Dangerous)
+            .count();
         assert_eq!(dangerous_count, 1, "Expected 1 dangerous operation");
     }
 }

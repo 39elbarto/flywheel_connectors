@@ -20,8 +20,8 @@ use tracing::info;
 
 use crate::client::PayPalClient;
 use crate::types::{
-    Amount, CreateBillingInfo, CreateInvoice, CreateInvoiceDetail, CreateInvoiceItem,
-    CreateOrder, CreatePurchaseUnit, CreateRecipient, RefundRequest,
+    Amount, CreateBillingInfo, CreateInvoice, CreateInvoiceDetail, CreateInvoiceItem, CreateOrder,
+    CreatePurchaseUnit, CreateRecipient, RefundRequest,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -226,13 +226,14 @@ impl PayPalConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        let value = input
-            .get(key)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("Missing: {key}"),
-            })?;
+        let value =
+            input
+                .get(key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Missing: {key}"),
+                })?;
         if value.trim().is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
@@ -251,15 +252,14 @@ impl Default for PayPalConnector {
 
 #[allow(clippy::too_many_lines)]
 fn operations_info() -> Vec<OperationInfo> {
-    let hint =
-        |when: &str, mistakes: Vec<String>, related: Vec<&'static str>| -> AgentHint {
-            AgentHint {
-                when_to_use: when.into(),
-                common_mistakes: mistakes,
-                examples: vec![],
-                related: related.into_iter().map(CapabilityId::from_static).collect(),
-            }
-        };
+    let hint = |when: &str, mistakes: Vec<String>, related: Vec<&'static str>| -> AgentHint {
+        AgentHint {
+            when_to_use: when.into(),
+            common_mistakes: mistakes,
+            examples: vec![],
+            related: related.into_iter().map(CapabilityId::from_static).collect(),
+        }
+    };
     vec![
         OperationInfo {
             id: OperationId::from_static(OP_ORDERS_CREATE),
@@ -614,12 +614,8 @@ impl PayPalConnector {
         if let Some(verifier) = &self.verifier {
             let cap = match operation {
                 OP_ORDERS_GET | OP_HEALTH => CapabilityId::from_static(CAP_ORDERS_READ),
-                OP_ORDERS_CREATE | OP_ORDERS_CAPTURE => {
-                    CapabilityId::from_static(CAP_ORDERS_WRITE)
-                }
-                OP_PAYMENTS_LIST | OP_PAYMENTS_GET => {
-                    CapabilityId::from_static(CAP_PAYMENTS_READ)
-                }
+                OP_ORDERS_CREATE | OP_ORDERS_CAPTURE => CapabilityId::from_static(CAP_ORDERS_WRITE),
+                OP_PAYMENTS_LIST | OP_PAYMENTS_GET => CapabilityId::from_static(CAP_PAYMENTS_READ),
                 OP_PAYMENTS_REFUND => CapabilityId::from_static(CAP_PAYMENTS_WRITE),
                 OP_INVOICES_LIST => CapabilityId::from_static(CAP_INVOICES_READ),
                 OP_INVOICES_CREATE | OP_INVOICES_SEND => {
@@ -725,15 +721,12 @@ impl PayPalConnector {
             OP_PAYMENTS_REFUND => {
                 let cid = Self::require_str(&req.input, "capture_id")?;
                 let refund_req = RefundRequest {
-                    amount: req
-                        .input
-                        .get("amount")
-                        .and_then(|a| {
-                            Some(Amount {
-                                currency_code: a.get("currency_code")?.as_str()?.into(),
-                                value: a.get("value")?.as_str()?.into(),
-                            })
-                        }),
+                    amount: req.input.get("amount").and_then(|a| {
+                        Some(Amount {
+                            currency_code: a.get("currency_code")?.as_str()?.into(),
+                            value: a.get("value")?.as_str()?.into(),
+                        })
+                    }),
                     note_to_payer: req
                         .input
                         .get("note_to_payer")
@@ -1278,10 +1271,9 @@ mod tests {
 
     #[test]
     fn health_unconfigured() {
-        let h = fcp_async_core::runtime::block_on_sync(async {
-            PayPalConnector::new().health().await
-        })
-        .unwrap();
+        let h =
+            fcp_async_core::runtime::block_on_sync(async { PayPalConnector::new().health().await })
+                .unwrap();
         assert!(matches!(h.status, fcp_core::HealthState::Degraded { .. }));
     }
 
@@ -1316,9 +1308,15 @@ mod tests {
     fn ops_count_matches_spec() {
         let ops = operations_info();
         assert_eq!(ops.len(), 10, "Expected 10 operations");
-        let safe_count = ops.iter().filter(|o| o.safety_tier == SafetyTier::Safe).count();
+        let safe_count = ops
+            .iter()
+            .filter(|o| o.safety_tier == SafetyTier::Safe)
+            .count();
         assert_eq!(safe_count, 5, "Expected 5 safe operations");
-        let risky_count = ops.iter().filter(|o| o.safety_tier == SafetyTier::Risky).count();
+        let risky_count = ops
+            .iter()
+            .filter(|o| o.safety_tier == SafetyTier::Risky)
+            .count();
         assert_eq!(risky_count, 5, "Expected 5 risky operations");
     }
 }

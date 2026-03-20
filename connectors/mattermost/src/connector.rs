@@ -135,14 +135,15 @@ impl MattermostConnector {
                 message: format!("invalid configuration: {e}"),
             })?;
 
-        config.base_url = config.base_url.trim().to_owned();
-        if config.base_url.is_empty() {
+        let base_url = config.base_url.trim().to_owned();
+        if base_url.is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 5001,
                 message: "base_url is required for Mattermost's self-hosted deployment model"
                     .to_string(),
             });
         }
+        base_url.clone_into(&mut config.base_url);
 
         let token = config
             .token
@@ -157,8 +158,16 @@ impl MattermostConnector {
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let auth = match (token, credential_id) {
-            (Some(token), None) => MattermostAuth::Token(token),
-            (None, Some(credential_id)) => MattermostAuth::CredentialId(credential_id),
+            (Some(token), None) => {
+                config.token = Some(token.clone());
+                config.credential_id = None;
+                MattermostAuth::Token(token)
+            }
+            (None, Some(credential_id)) => {
+                config.token = None;
+                config.credential_id = Some(credential_id.clone());
+                MattermostAuth::CredentialId(credential_id)
+            }
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 5001,
@@ -2586,6 +2595,27 @@ mod tests {
 
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
         assert!(err.to_string().contains("base_url is required"));
+    }
+
+    #[test]
+    fn configure_normalizes_trimmed_auth_config() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": " https://mattermost.example.com ",
+                "token": "  tok_123  ",
+                "credential_id": "   ",
+                "request_timeout_ms": 5_000
+            }))
+            .expect("configuration should succeed");
+
+        let config = connector
+            .config
+            .as_ref()
+            .expect("configuration should be stored");
+        assert_eq!(config.base_url, "https://mattermost.example.com");
+        assert_eq!(config.token.as_deref(), Some("tok_123"));
+        assert!(config.credential_id.is_none());
     }
 
     #[test]

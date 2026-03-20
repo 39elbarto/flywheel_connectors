@@ -7,7 +7,7 @@ id = "fcp.cloudflare"
 name = "Cloudflare"
 version = "0.1.0"
 description = "Cloudflare connector for Workers, Pages, DNS, KV, and Zones management"
-archetype = "cloud-control-plane"
+archetypes = ["operational"]
 homepage = "https://developers.cloudflare.com/api"
 
 [zones]
@@ -26,7 +26,7 @@ summary = "List Cloudflare zones"
 capability = "cloudflare.zones.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
 [provides.operations.zones_list.network_constraints]
 host_allow = ["api.cloudflare.com"]
@@ -62,7 +62,7 @@ summary = "List DNS records for a zone"
 capability = "cloudflare.dns.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
 [provides.operations.dns_list_records.network_constraints]
 host_allow = ["api.cloudflare.com"]
@@ -80,7 +80,7 @@ summary = "Create a DNS record"
 capability = "cloudflare.dns.write"
 risk = "medium"
 safety_tier = "risky"
-idempotency = "strict"
+idempotency = "none"
 
 [provides.operations.dns_create_record.network_constraints]
 host_allow = ["api.cloudflare.com"]
@@ -134,7 +134,7 @@ summary = "List Workers scripts"
 capability = "cloudflare.workers.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
 [provides.operations.workers_list.network_constraints]
 host_allow = ["api.cloudflare.com"]
@@ -152,7 +152,7 @@ summary = "Get a Workers script"
 capability = "cloudflare.workers.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
 [provides.operations.workers_get.network_constraints]
 host_allow = ["api.cloudflare.com"]
@@ -168,7 +168,7 @@ when_to_use = "When you need metadata for a specific Workers script"
 [provides.operations.workers_deploy]
 summary = "Deploy a Workers script"
 capability = "cloudflare.workers.write"
-risk = "high"
+risk = "medium"
 safety_tier = "risky"
 idempotency = "strict"
 
@@ -186,7 +186,7 @@ when_to_use = "When you need to deploy code to Cloudflare Workers"
 [provides.operations.workers_delete]
 summary = "Delete a Workers script"
 capability = "cloudflare.workers.write"
-risk = "critical"
+risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
 
@@ -206,7 +206,7 @@ summary = "List Pages projects"
 capability = "cloudflare.pages.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
 [provides.operations.pages_list_projects.network_constraints]
 host_allow = ["api.cloudflare.com"]
@@ -222,9 +222,9 @@ when_to_use = "When you need to enumerate Cloudflare Pages projects"
 [provides.operations.pages_create_deployment]
 summary = "Create a Pages deployment"
 capability = "cloudflare.pages.write"
-risk = "high"
+risk = "medium"
 safety_tier = "risky"
-idempotency = "strict"
+idempotency = "none"
 
 [provides.operations.pages_create_deployment.network_constraints]
 host_allow = ["api.cloudflare.com"]
@@ -242,7 +242,7 @@ summary = "Get a KV value"
 capability = "cloudflare.kv.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
 [provides.operations.kv_get.network_constraints]
 host_allow = ["api.cloudflare.com"]

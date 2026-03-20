@@ -54,10 +54,7 @@ impl CloudflareClient {
     }
 
     pub fn is_secretless(&self) -> bool {
-        match &self.auth {
-            CloudflareAuth::ApiToken { api_token } => api_token.is_empty(),
-            CloudflareAuth::ApiKey { api_key, .. } => api_key.is_empty(),
-        }
+        self.auth.is_secretless()
     }
 
     // ── Health check ──
@@ -548,7 +545,9 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 
     // Try to parse as CloudflareResponse<T> first
     if let Ok(cf_resp) = serde_json::from_str::<CloudflareResponse<T>>(&text) {
-        if cf_resp.success && let Some(result) = cf_resp.result {
+        if cf_resp.success
+            && let Some(result) = cf_resp.result
+        {
             return AttemptOutcome::Success(result);
         }
         if !cf_resp.errors.is_empty() {

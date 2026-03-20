@@ -126,5 +126,50 @@ deny_tailnet_ranges = true
 deny_ip_literals = true
 max_redirects = 0
 
+[[operations]]
+id = "teams.send_card"
+[operations.network]
+host_allow = ["graph.microsoft.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[[operations]]
+id = "teams.reply_message"
+[operations.network]
+host_allow = ["graph.microsoft.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[[operations]]
+id = "teams.update_message"
+[operations.network]
+host_allow = ["graph.microsoft.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[[operations]]
+id = "teams.ingest_activity"
+
+[[operations]]
+id = "teams.get_conversation_state"
+
 [provisioning]
 note = "Requires Azure AD app registration with Microsoft Graph permissions (Team.ReadBasic.All, Channel.ReadBasic.All, ChannelMessage.Send, Chat.ReadWrite). Admin consent required for application permissions."

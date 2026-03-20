@@ -210,7 +210,9 @@ impl AwsClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body_owned = body.to_string();
-        let ct = content_type.unwrap_or("application/octet-stream").to_string();
+        let ct = content_type
+            .unwrap_or("application/octet-stream")
+            .to_string();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
@@ -452,10 +454,7 @@ fn authenticate_request(req: RequestBuilder, auth: &AwsAuth) -> RequestBuilder {
     }
     let req = req
         .header("X-Aws-Access-Key-Id", auth.access_key_id.as_str())
-        .header(
-            "X-Aws-Secret-Access-Key",
-            auth.secret_access_key.as_str(),
-        );
+        .header("X-Aws-Secret-Access-Key", auth.secret_access_key.as_str());
     if let Some(token) = &auth.session_token {
         req.header("X-Aws-Security-Token", token.as_str())
     } else {

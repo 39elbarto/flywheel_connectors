@@ -1,210 +1,773 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:b16d939a76d39e5e4ed473a744596e342c88663a0944ea734defe096c9609cb9"
 
 [connector]
 id = "fcp.supabase"
-name = "Supabase"
+name = "Supabase Connector"
 version = "0.1.0"
-description = "Supabase connector for database queries, storage, and edge functions"
-archetype = "cloud-control-plane"
-homepage = "https://supabase.com/docs/reference"
+description = "FCP connector for Supabase PostgREST tables, RPC functions, schema discovery, and Storage objects"
+archetypes = [
+    "storage",
+    "operational",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; configuration is injected at runtime per instance."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work", "z:private"]
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = [
+    "z:public",
+    "z:community",
+]
 
 [capabilities]
-required = ["network.outbound"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
 
-[provides.operations.list_projects]
-summary = "List all Supabase projects"
-capability = "supabase.projects.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.list_projects.network_constraints]
-host_allow = ["api.supabase.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.list_projects.ai_hints]
-when_to_use = "When you need to list all Supabase projects in the account"
-
-[provides.operations.get_project]
-summary = "Get Supabase project details"
-capability = "supabase.projects.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.get_project.network_constraints]
-host_allow = ["api.supabase.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.get_project.ai_hints]
-when_to_use = "When you need details about a specific Supabase project"
-
-[provides.operations.query]
-summary = "Query rows from a table via PostgREST"
-capability = "supabase.database.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.query.network_constraints]
-host_allow = ["*.supabase.co"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.query.ai_hints]
-when_to_use = "When you need to read rows from a Supabase table"
-
-[provides.operations.insert]
-summary = "Insert rows into a table via PostgREST"
-capability = "supabase.database.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "none"
-
-[provides.operations.insert.network_constraints]
-host_allow = ["*.supabase.co"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.insert.ai_hints]
-when_to_use = "When you need to insert new rows into a Supabase table"
-
-[provides.operations.update]
-summary = "Update rows in a table via PostgREST"
-capability = "supabase.database.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.update.network_constraints]
-host_allow = ["*.supabase.co"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.update.ai_hints]
-when_to_use = "When you need to update existing rows in a Supabase table"
-
-[provides.operations.delete_rows]
-summary = "Delete rows from a table via PostgREST"
-capability = "supabase.database.write"
-risk = "high"
+[provides.operations."supabase.delete"]
+description = "Delete rows from a Supabase table"
+capability = "supabase.write"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.delete_rows.network_constraints]
+[provides.operations."supabase.delete".input_schema]
+required = [
+    "table",
+    "filters",
+]
+type = "object"
+
+[provides.operations."supabase.delete".input_schema.properties.filters]
+type = "array"
+
+[provides.operations."supabase.delete".input_schema.properties.returning]
+type = "string"
+
+[provides.operations."supabase.delete".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."supabase.delete".input_schema.properties.table]
+type = "string"
+
+[provides.operations."supabase.delete".output_schema]
+type = "object"
+
+[provides.operations."supabase.delete".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.delete".output_schema.properties.data]
+type = "array"
+
+[provides.operations."supabase.delete".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.delete".network_constraints]
 host_allow = ["*.supabase.co"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
 
-[provides.operations.delete_rows.ai_hints]
-when_to_use = "When you need to delete rows from a Supabase table"
+[provides.operations."supabase.delete".ai_hints]
+when_to_use = "Hard-delete rows through PostgREST."
+common_mistakes = [
+    "Deleting with a weak filter.",
+    "Forgetting this is irreversible at the connector layer.",
+]
+examples = []
+related = []
 
-[provides.operations.list_buckets]
-summary = "List storage buckets"
-capability = "supabase.storage.read"
-risk = "low"
+[provides.operations."supabase.health"]
+description = "Check Supabase PostgREST reachability"
+capability = "supabase.read"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.list_buckets.network_constraints]
+[provides.operations."supabase.health".input_schema]
+type = "object"
+
+[provides.operations."supabase.health".output_schema]
+type = "object"
+
+[provides.operations."supabase.health".output_schema.properties.openapi_version]
+type = "string"
+
+[provides.operations."supabase.health".output_schema.properties.project_url]
+type = "string"
+
+[provides.operations."supabase.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."supabase.health".network_constraints]
 host_allow = ["*.supabase.co"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
-[provides.operations.list_buckets.ai_hints]
-when_to_use = "When you need to list all storage buckets in a Supabase project"
+[provides.operations."supabase.health".ai_hints]
+when_to_use = "Verify that the Supabase REST surface is reachable."
+common_mistakes = ["Assuming health proves every table, RPC, or Storage policy is correct."]
+examples = []
+related = []
 
-[provides.operations.list_files]
-summary = "List files in a storage bucket"
-capability = "supabase.storage.read"
-risk = "low"
+[provides.operations."supabase.insert"]
+description = "Insert rows into a Supabase table"
+capability = "supabase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."supabase.insert".input_schema]
+required = [
+    "table",
+    "rows",
+]
+type = "object"
+
+[provides.operations."supabase.insert".input_schema.properties.returning]
+type = "string"
+
+[provides.operations."supabase.insert".input_schema.properties.rows]
+type = "array"
+
+[provides.operations."supabase.insert".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."supabase.insert".input_schema.properties.table]
+type = "string"
+
+[provides.operations."supabase.insert".output_schema]
+type = "object"
+
+[provides.operations."supabase.insert".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.insert".output_schema.properties.data]
+type = "array"
+
+[provides.operations."supabase.insert".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.insert".network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 16777216
+
+[provides.operations."supabase.insert".ai_hints]
+when_to_use = "Create rows through PostgREST."
+common_mistakes = [
+    "Sending an empty rows array.",
+    "Expecting insert to bypass RLS or schema policy.",
+]
+examples = []
+related = []
+
+[provides.operations."supabase.query"]
+description = "Query a Supabase table or view through PostgREST"
+capability = "supabase.read"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.list_files.network_constraints]
+[provides.operations."supabase.query".input_schema]
+required = ["table"]
+type = "object"
+
+[provides.operations."supabase.query".input_schema.properties.filters]
+type = "array"
+
+[provides.operations."supabase.query".input_schema.properties.limit]
+type = "integer"
+
+[provides.operations."supabase.query".input_schema.properties.offset]
+type = "integer"
+
+[provides.operations."supabase.query".input_schema.properties.order]
+type = "array"
+
+[provides.operations."supabase.query".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."supabase.query".input_schema.properties.select]
+type = "string"
+
+[provides.operations."supabase.query".input_schema.properties.single]
+type = "boolean"
+
+[provides.operations."supabase.query".input_schema.properties.table]
+type = "string"
+
+[provides.operations."supabase.query".output_schema]
+type = "object"
+
+[provides.operations."supabase.query".output_schema.properties.content_range]
+type = "string"
+
+[provides.operations."supabase.query".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.query".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."supabase.query".output_schema.properties.data]
+type = "array"
+
+[provides.operations."supabase.query".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.query".network_constraints]
 host_allow = ["*.supabase.co"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 33554432
 
-[provides.operations.list_files.ai_hints]
-when_to_use = "When you need to list files in a Supabase storage bucket"
+[provides.operations."supabase.query".ai_hints]
+when_to_use = "Read rows from a PostgREST table or view."
+common_mistakes = [
+    "Forgetting to add a limit on broad reads.",
+    "Assuming query proves write permissions or Storage policy.",
+]
+examples = []
+related = []
 
-[provides.operations.upload_file]
-summary = "Upload a file to a storage bucket"
-capability = "supabase.storage.write"
-risk = "medium"
+[provides.operations."supabase.rpc"]
+description = "Invoke a Supabase Postgres function through PostgREST RPC"
+capability = "supabase.write"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."supabase.rpc".input_schema]
+required = ["function"]
+type = "object"
+
+[provides.operations."supabase.rpc".input_schema.properties.args]
+type = "object"
+
+[provides.operations."supabase.rpc".input_schema.properties.function]
+type = "string"
+
+[provides.operations."supabase.rpc".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."supabase.rpc".output_schema]
+type = "object"
+
+[provides.operations."supabase.rpc".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.rpc".output_schema.properties.data]
+type = "array"
+
+[provides.operations."supabase.rpc".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.rpc".network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 16777216
+
+[provides.operations."supabase.rpc".ai_hints]
+when_to_use = "Call a Postgres function exposed through /rpc."
+common_mistakes = [
+    "Assuming RPC is read-only without checking function behavior.",
+    "Forgetting that function permissions are separate from table permissions.",
+]
+examples = []
+related = []
+
+[provides.operations."supabase.schema.tables"]
+description = "List exposed PostgREST table and view resources"
+capability = "supabase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.upload_file.network_constraints]
+[provides.operations."supabase.schema.tables".input_schema]
+type = "object"
+
+[provides.operations."supabase.schema.tables".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."supabase.schema.tables".output_schema]
+type = "object"
+
+[provides.operations."supabase.schema.tables".output_schema.properties.tables]
+type = "array"
+
+[provides.operations."supabase.schema.tables".network_constraints]
 host_allow = ["*.supabase.co"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 16777216
 
-[provides.operations.upload_file.ai_hints]
-when_to_use = "When you need to upload a file to Supabase storage"
+[provides.operations."supabase.schema.tables".ai_hints]
+when_to_use = "Inspect what relations the PostgREST surface exposes."
+common_mistakes = [
+    "Expecting internal system tables to appear.",
+    "Assuming schema discovery validates row-level policies.",
+]
+examples = []
+related = []
 
-[provides.operations.invoke_function]
-summary = "Invoke a Supabase edge function"
-capability = "supabase.functions.invoke"
-risk = "medium"
-safety_tier = "risky"
+[provides.operations."supabase.storage.delete"]
+description = "Delete a file from Supabase Storage"
+capability = "supabase.storage"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."supabase.storage.delete".input_schema]
+required = [
+    "bucket",
+    "path",
+]
+type = "object"
+
+[provides.operations."supabase.storage.delete".input_schema.properties.bucket]
+type = "string"
+
+[provides.operations."supabase.storage.delete".input_schema.properties.path]
+type = "string"
+
+[provides.operations."supabase.storage.delete".output_schema]
+type = "object"
+
+[provides.operations."supabase.storage.delete".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.storage.delete".output_schema.properties.result]
+type = "object"
+
+[provides.operations."supabase.storage.delete".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.storage.delete".network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."supabase.storage.delete".ai_hints]
+when_to_use = "Permanently remove a Storage object."
+common_mistakes = [
+    "Deleting the wrong path due to missing folder segments.",
+    "Assuming Storage delete is recoverable.",
+]
+examples = []
+related = []
+
+[provides.operations."supabase.storage.download"]
+description = "Download a file from Supabase Storage"
+capability = "supabase.storage"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 
-[provides.operations.invoke_function.network_constraints]
+[provides.operations."supabase.storage.download".input_schema]
+required = [
+    "bucket",
+    "path",
+]
+type = "object"
+
+[provides.operations."supabase.storage.download".input_schema.properties.bucket]
+type = "string"
+
+[provides.operations."supabase.storage.download".input_schema.properties.download_filename]
+type = "string"
+
+[provides.operations."supabase.storage.download".input_schema.properties.path]
+type = "string"
+
+[provides.operations."supabase.storage.download".input_schema.properties.public]
+type = "boolean"
+
+[provides.operations."supabase.storage.download".output_schema]
+type = "object"
+
+[provides.operations."supabase.storage.download".output_schema.properties.cache_control]
+type = "string"
+
+[provides.operations."supabase.storage.download".output_schema.properties.content_base64]
+type = "string"
+
+[provides.operations."supabase.storage.download".output_schema.properties.content_length]
+type = "integer"
+
+[provides.operations."supabase.storage.download".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.storage.download".output_schema.properties.etag]
+type = "string"
+
+[provides.operations."supabase.storage.download".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.storage.download".network_constraints]
 host_allow = ["*.supabase.co"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 104857600
 
-[provides.operations.invoke_function.ai_hints]
-when_to_use = "When you need to invoke a Supabase edge function"
+[provides.operations."supabase.storage.download".ai_hints]
+when_to_use = "Retrieve a Storage object through the authenticated or public path."
+common_mistakes = [
+    "Using public mode for a private bucket.",
+    "Ignoring response size when downloading large artifacts.",
+]
+examples = []
+related = []
+
+[provides.operations."supabase.storage.upload"]
+description = "Upload a file into Supabase Storage"
+capability = "supabase.storage"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."supabase.storage.upload".input_schema]
+required = [
+    "bucket",
+    "path",
+    "content_base64",
+]
+type = "object"
+
+[provides.operations."supabase.storage.upload".input_schema.properties.bucket]
+type = "string"
+
+[provides.operations."supabase.storage.upload".input_schema.properties.content_base64]
+type = "string"
+
+[provides.operations."supabase.storage.upload".input_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.storage.upload".input_schema.properties.path]
+type = "string"
+
+[provides.operations."supabase.storage.upload".input_schema.properties.upsert]
+type = "boolean"
+
+[provides.operations."supabase.storage.upload".output_schema]
+type = "object"
+
+[provides.operations."supabase.storage.upload".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.storage.upload".output_schema.properties.object]
+type = "object"
+
+[provides.operations."supabase.storage.upload".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.storage.upload".network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."supabase.storage.upload".ai_hints]
+when_to_use = "Upload a Storage object into a bucket."
+common_mistakes = [
+    "Passing raw bytes instead of base64.",
+    "Forgetting that bucket policy still controls write access.",
+]
+examples = []
+related = []
+
+[provides.operations."supabase.update"]
+description = "Update rows in a Supabase table"
+capability = "supabase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."supabase.update".input_schema]
+required = [
+    "table",
+    "values",
+    "filters",
+]
+type = "object"
+
+[provides.operations."supabase.update".input_schema.properties.filters]
+type = "array"
+
+[provides.operations."supabase.update".input_schema.properties.returning]
+type = "string"
+
+[provides.operations."supabase.update".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."supabase.update".input_schema.properties.table]
+type = "string"
+
+[provides.operations."supabase.update".input_schema.properties.values]
+type = "object"
+
+[provides.operations."supabase.update".output_schema]
+type = "object"
+
+[provides.operations."supabase.update".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.update".output_schema.properties.data]
+type = "array"
+
+[provides.operations."supabase.update".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.update".network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 16777216
+
+[provides.operations."supabase.update".ai_hints]
+when_to_use = "Patch rows that match explicit filters."
+common_mistakes = [
+    "Using broad filters that mutate more rows than intended.",
+    "Assuming update is safe with anon or publishable credentials.",
+]
+examples = []
+related = []
+
+[provides.operations."supabase.upsert"]
+description = "Upsert rows in a Supabase table"
+capability = "supabase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."supabase.upsert".input_schema]
+required = [
+    "table",
+    "rows",
+]
+type = "object"
+
+[provides.operations."supabase.upsert".input_schema.properties.ignore_duplicates]
+type = "boolean"
+
+[provides.operations."supabase.upsert".input_schema.properties.on_conflict]
+type = "array"
+
+[provides.operations."supabase.upsert".input_schema.properties.returning]
+type = "string"
+
+[provides.operations."supabase.upsert".input_schema.properties.rows]
+type = "array"
+
+[provides.operations."supabase.upsert".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."supabase.upsert".input_schema.properties.table]
+type = "string"
+
+[provides.operations."supabase.upsert".output_schema]
+type = "object"
+
+[provides.operations."supabase.upsert".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."supabase.upsert".output_schema.properties.data]
+type = "array"
+
+[provides.operations."supabase.upsert".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."supabase.upsert".network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 16777216
+
+[provides.operations."supabase.upsert".ai_hints]
+when_to_use = "Merge rows using PostgREST upsert semantics."
+common_mistakes = [
+    "Forgetting on_conflict when the table has non-primary conflict targets.",
+    "Treating upsert as harmless when it can overwrite live data.",
+]
+examples = []
+related = []
 
 [sandbox]
 profile = "strict"
 memory_mb = 128
 cpu_percent = 25
 wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
 deny_exec = true
 deny_ptrace = true

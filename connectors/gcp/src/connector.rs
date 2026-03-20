@@ -324,10 +324,7 @@ impl GcpConnector {
     }
 
     pub fn doctor(&self) -> DoctorResult {
-        let provisioning = self
-            .config
-            .as_ref()
-            .map(GcpConfig::provisioning_readiness);
+        let provisioning = self.config.as_ref().map(GcpConfig::provisioning_readiness);
         let mut checks = Vec::new();
         checks.push(DoctorCheck {
             name: "configuration".into(),
@@ -463,7 +460,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("List VMs in a zone", vec!["Specify zone like us-central1-a".into()], vec![], vec![CAP_COMPUTE_WRITE]),
+            ai_hints: hint(
+                "List VMs in a zone",
+                vec!["Specify zone like us-central1-a".into()],
+                vec![],
+                vec![CAP_COMPUTE_WRITE],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -477,7 +479,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("Get details of a specific VM", vec![], vec![], vec![CAP_COMPUTE_READ]),
+            ai_hints: hint(
+                "Get details of a specific VM",
+                vec![],
+                vec![],
+                vec![CAP_COMPUTE_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -491,7 +498,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Start a stopped VM", vec!["VM must be in TERMINATED state".into()], vec![], vec![CAP_COMPUTE_READ]),
+            ai_hints: hint(
+                "Start a stopped VM",
+                vec!["VM must be in TERMINATED state".into()],
+                vec![],
+                vec![CAP_COMPUTE_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -505,7 +517,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Stop a running VM", vec!["VM must be in RUNNING state".into()], vec![], vec![CAP_COMPUTE_READ]),
+            ai_hints: hint(
+                "Stop a running VM",
+                vec!["VM must be in RUNNING state".into()],
+                vec![],
+                vec![CAP_COMPUTE_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -519,7 +536,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Critical,
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Permanently delete a VM (irreversible)", vec!["Verify instance name first".into()], vec![], vec![CAP_COMPUTE_READ]),
+            ai_hints: hint(
+                "Permanently delete a VM (irreversible)",
+                vec!["Verify instance name first".into()],
+                vec![],
+                vec![CAP_COMPUTE_READ],
+            ),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::Interactive),
         },
@@ -534,7 +556,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("List files in a bucket", vec![], vec![], vec![CAP_STORAGE_WRITE]),
+            ai_hints: hint(
+                "List files in a bucket",
+                vec![],
+                vec![],
+                vec![CAP_STORAGE_WRITE],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -548,7 +575,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("Get object metadata", vec![], vec![], vec![CAP_STORAGE_READ]),
+            ai_hints: hint(
+                "Get object metadata",
+                vec![],
+                vec![],
+                vec![CAP_STORAGE_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -562,7 +594,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Upload a file to a bucket", vec!["Overwrites existing objects with same name".into()], vec![], vec![CAP_STORAGE_READ]),
+            ai_hints: hint(
+                "Upload a file to a bucket",
+                vec!["Overwrites existing objects with same name".into()],
+                vec![],
+                vec![CAP_STORAGE_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -576,7 +613,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Remove object from bucket (irreversible unless versioned)", vec!["Verify object name first".into()], vec![], vec![CAP_STORAGE_READ]),
+            ai_hints: hint(
+                "Remove object from bucket (irreversible unless versioned)",
+                vec!["Verify object name first".into()],
+                vec![],
+                vec![CAP_STORAGE_READ],
+            ),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::Interactive),
         },
@@ -591,7 +633,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("List deployed Cloud Run services", vec![], vec![], vec![CAP_RUN_WRITE]),
+            ai_hints: hint(
+                "List deployed Cloud Run services",
+                vec![],
+                vec![],
+                vec![CAP_RUN_WRITE],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -605,7 +652,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Deploy container image to Cloud Run", vec!["Image must be in a registry accessible to the project".into()], vec![], vec![CAP_RUN_READ]),
+            ai_hints: hint(
+                "Deploy container image to Cloud Run",
+                vec!["Image must be in a registry accessible to the project".into()],
+                vec![],
+                vec![CAP_RUN_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -619,7 +671,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Critical,
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Permanently delete a Cloud Run service (irreversible)", vec!["Verify service name first".into()], vec![], vec![CAP_RUN_READ]),
+            ai_hints: hint(
+                "Permanently delete a Cloud Run service (irreversible)",
+                vec!["Verify service name first".into()],
+                vec![],
+                vec![CAP_RUN_READ],
+            ),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::Interactive),
         },
@@ -649,7 +706,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Check credentials and API connectivity", vec![], vec![], vec![]),
+            ai_hints: hint(
+                "Check credentials and API connectivity",
+                vec![],
+                vec![],
+                vec![],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -730,10 +792,7 @@ impl FcpConnector for GcpConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let provisioning = self
-            .config
-            .as_ref()
-            .map(GcpConfig::provisioning_readiness);
+        let provisioning = self.config.as_ref().map(GcpConfig::provisioning_readiness);
         let mut snap = match &provisioning {
             Some(readiness) if !readiness.network_ok => {
                 HealthSnapshot::error("network constraints invalid")
@@ -812,7 +871,9 @@ impl FcpConnector for GcpConnector {
                 } else {
                     SelfCheckReport::degraded(
                         "project_inactive",
-                        format!("GCP project lifecycle state is '{state}' - verify project is active"),
+                        format!(
+                            "GCP project lifecycle state is '{state}' - verify project is active"
+                        ),
                     )
                 }
             }
@@ -891,9 +952,9 @@ impl GcpConnector {
                 OP_COMPUTE_LIST_INSTANCES | OP_COMPUTE_GET_INSTANCE => {
                     CapabilityId::from_static(CAP_COMPUTE_READ)
                 }
-                OP_COMPUTE_START_INSTANCE | OP_COMPUTE_STOP_INSTANCE | OP_COMPUTE_DELETE_INSTANCE => {
-                    CapabilityId::from_static(CAP_COMPUTE_WRITE)
-                }
+                OP_COMPUTE_START_INSTANCE
+                | OP_COMPUTE_STOP_INSTANCE
+                | OP_COMPUTE_DELETE_INSTANCE => CapabilityId::from_static(CAP_COMPUTE_WRITE),
                 OP_STORAGE_LIST_OBJECTS | OP_STORAGE_GET_OBJECT => {
                     CapabilityId::from_static(CAP_STORAGE_READ)
                 }
@@ -1368,10 +1429,9 @@ mod tests {
 
     #[test]
     fn health_unconfigured() {
-        let h = fcp_async_core::runtime::block_on_sync(async {
-            GcpConnector::new().health().await
-        })
-        .unwrap();
+        let h =
+            fcp_async_core::runtime::block_on_sync(async { GcpConnector::new().health().await })
+                .unwrap();
         assert!(matches!(h.status, fcp_core::HealthState::Degraded { .. }));
     }
 
@@ -1508,8 +1568,11 @@ mod tests {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
                 let c = GcpConnector::new();
-                c.invoke(invoke_req(OP_COMPUTE_LIST_INSTANCES, json!({"zone": "us-central1-a"})))
-                    .await
+                c.invoke(invoke_req(
+                    OP_COMPUTE_LIST_INSTANCES,
+                    json!({"zone": "us-central1-a"}),
+                ))
+                .await
             })
             .unwrap()
             .is_err()

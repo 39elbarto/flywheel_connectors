@@ -14,11 +14,49 @@ pub enum CloudflareAuth {
     ApiKey { api_key: String, email: String },
 }
 
+impl CloudflareAuth {
+    #[must_use]
+    pub const fn auth_mode(&self) -> &'static str {
+        match self {
+            Self::ApiToken { .. } => "api_token",
+            Self::ApiKey { .. } => "api_key",
+        }
+    }
+
+    #[must_use]
+    pub fn is_secretless(&self) -> bool {
+        match self {
+            Self::ApiToken { api_token } => api_token.trim().is_empty(),
+            Self::ApiKey { api_key, .. } => api_key.trim().is_empty(),
+        }
+    }
+
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::ApiToken { .. } => "api_token",
+            Self::ApiKey { .. } => "api_key",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_legacy_global_key(&self) -> bool {
+        matches!(self, Self::ApiKey { .. })
+    }
+}
+
 impl std::fmt::Debug for CloudflareAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ApiToken { .. } => f.debug_struct("ApiToken").field("api_token", &"[REDACTED]").finish(),
-            Self::ApiKey { email, .. } => f.debug_struct("ApiKey").field("api_key", &"[REDACTED]").field("email", email).finish(),
+            Self::ApiToken { .. } => f
+                .debug_struct("ApiToken")
+                .field("api_token", &"[REDACTED]")
+                .finish(),
+            Self::ApiKey { email, .. } => f
+                .debug_struct("ApiKey")
+                .field("api_key", &"[REDACTED]")
+                .field("email", email)
+                .finish(),
         }
     }
 }
@@ -298,6 +336,38 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(debug.contains("user@example.com"));
         assert!(!debug.contains("global-key"));
+    }
+
+    #[test]
+    fn auth_helpers_report_mode_and_redacted_label() {
+        let token_auth = CloudflareAuth::ApiToken {
+            api_token: "token".into(),
+        };
+        assert_eq!(token_auth.auth_mode(), "api_token");
+        assert_eq!(token_auth.redacted_label(), "api_token");
+        assert!(!token_auth.is_legacy_global_key());
+
+        let key_auth = CloudflareAuth::ApiKey {
+            api_key: "key".into(),
+            email: "user@example.com".into(),
+        };
+        assert_eq!(key_auth.auth_mode(), "api_key");
+        assert_eq!(key_auth.redacted_label(), "api_key");
+        assert!(key_auth.is_legacy_global_key());
+    }
+
+    #[test]
+    fn auth_secretless_detects_empty_material() {
+        let token_auth = CloudflareAuth::ApiToken {
+            api_token: " ".into(),
+        };
+        assert!(token_auth.is_secretless());
+
+        let key_auth = CloudflareAuth::ApiKey {
+            api_key: String::new(),
+            email: "user@example.com".into(),
+        };
+        assert!(key_auth.is_secretless());
     }
 
     #[test]

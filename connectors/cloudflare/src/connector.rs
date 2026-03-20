@@ -1,5 +1,6 @@
 //! Cloudflare connector implementation.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -12,13 +13,19 @@ use fcp_core::{
     UnsubscribeRequest,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use reqwest::Url;
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracing::info;
 
 use crate::client::CloudflareClient;
 use crate::types::{CloudflareAuth, CreateDnsRecord, UpdateDnsRecord};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/cloudflare_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/cloudflare_connector/<timestamp>";
+const CLOUDFLARE_ALLOWED_HOSTS: &[&str] = &["api.cloudflare.com"];
 
 const OP_ZONES_LIST: &str = "cloudflare.zones.list";
 const OP_HEALTH: &str = "cloudflare.health";
@@ -97,24 +104,205 @@ impl CloudflareConfig {
         })?;
         Ok(config)
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: self.auth.auth_mode(),
+            uses_legacy_global_key: self.auth.is_legacy_global_key(),
+            secret_material_configured: !self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            account_id_configured: !self.account_id.trim().is_empty(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+            allowed_hosts: CLOUDFLARE_ALLOWED_HOSTS.to_vec(),
+            account_scope_hint: "Workers, Pages, and KV calls must target the same Cloudflare account_id used during configure.",
+        }
+    }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DoctorResult {
-    pub passed: bool,
-    pub checks: Vec<DoctorCheck>,
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    uses_legacy_global_key: bool,
+    secret_material_configured: bool,
+    requires_credential_injection: bool,
+    account_id_configured: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
+    allowed_hosts: Vec<&'static str>,
+    account_scope_hint: &'static str,
 }
-#[derive(Debug, Clone, serde::Serialize)]
+
+#[derive(Debug, Clone, Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorResult {
+    pub ready: bool,
+    pub status: DoctorStatus,
+    pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DoctorCheck {
     name: String,
     passed: bool,
     message: Option<String>,
     critical: bool,
 }
+
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
-        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
+        let ready = checks
+            .iter()
+            .filter(|check| check.critical)
+            .all(|check| check.passed);
+        let status = if checks.iter().any(|check| check.critical && !check.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|check| !check.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+        Self {
+            ready,
+            status,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+        }
+    }
+
+    const fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(url) => url,
+        Err(error) => return (false, format!("base_url must be an absolute URL: {error}")),
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    if is_local_test_host(host) {
+        return (
+            true,
+            format!("localhost test endpoint accepted for verification: {base_url}"),
+        );
+    }
+
+    let mut problems = Vec::new();
+    if parsed.scheme() != "https" {
+        problems.push(format!("scheme must be https, got {}", parsed.scheme()));
+    }
+    if !CLOUDFLARE_ALLOWED_HOSTS.contains(&host) {
+        problems.push(format!(
+            "host must be one of {:?}, got {host}",
+            CLOUDFLARE_ALLOWED_HOSTS
+        ));
+    }
+    if !parsed.path().starts_with("/client/v4") {
+        problems.push(format!(
+            "path should start with /client/v4, got {}",
+            parsed.path()
+        ));
+    }
+
+    if problems.is_empty() {
+        (true, "Cloudflare production API endpoint accepted".into())
+    } else {
+        (false, problems.join("; "))
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Create a disposable Cloudflare account or staging account for verification.",
+            "Use a non-production zone, Pages project, Workers script name, and KV namespace for mutation tests.",
+            "Provision a scoped API token with only the services you intend to exercise; avoid the legacy global API key unless required.",
+        ],
+        dedicated_environment: "Use a staging-only Cloudflare account_id and zone. DNS delete, Workers delete, and KV delete operations are dangerous and should never target production during verification.",
+        redaction_rules: vec![
+            "Never log api_token or api_key values.",
+            "Treat X-Auth-Email plus X-Auth-Key as sensitive when paired; avoid printing both together in diagnostics.",
+            "Do not paste real zone IDs, account IDs, or Pages deployment URLs from private environments into shared transcripts unless they are already public.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "token_scope_invalid",
+                symptom: "self_check returns token_inactive or invoke returns 401/403",
+                action: "Create a scoped API token for the required services and rerun self_check. Zone reads need Zone:Read; DNS mutations need DNS:Edit; Workers/Pages/KV mutations need the corresponding account-level edit scopes.",
+            },
+            RemediationHint {
+                code: "account_scope_mismatch",
+                symptom: "Workers, Pages, or KV calls return 403/404 while zone reads succeed",
+                action: "Verify account_id points at the account that owns the Workers, Pages, and KV resources. Zone IDs alone are not sufficient for account-scoped endpoints.",
+            },
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "doctor/self_check reports invalid network policy",
+                action: "Use https://api.cloudflare.com/client/v4 in production or a localhost-only mock endpoint during verification. Do not point the connector at arbitrary external hosts.",
+            },
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "auth mode is configured but secret material is intentionally omitted",
+                action: "Inject Authorization or X-Auth-* headers at runtime via the host/egress proxy, then rerun self_check before invoking mutation operations.",
+            },
+            RemediationHint {
+                code: "zone_or_record_not_found",
+                symptom: "DNS mutation returns resource not found",
+                action: "Run cloudflare.zones.list first, then cloudflare.dns.list_records for the target zone to confirm zone_id and record_id before retrying a mutation.",
+            },
+        ],
+        rerun_commands: vec![
+            "scripts/e2e/cloudflare_connector_verification.sh",
+            "rch exec -- cargo run -p fwc -- manifest fix connectors/cloudflare/manifest.toml --check --json",
+            "rch exec -- cargo test -p fcp-cloudflare --test integration -- --nocapture",
+            "rch exec -- cargo clippy -p fcp-cloudflare --all-targets -- -D warnings",
+        ],
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
@@ -148,6 +336,10 @@ impl CloudflareConnector {
     }
 
     pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(CloudflareConfig::provisioning_readiness);
         let mut checks = Vec::new();
         checks.push(DoctorCheck {
             name: "configuration".into(),
@@ -155,57 +347,99 @@ impl CloudflareConnector {
             message: if self.config.is_some() {
                 None
             } else {
-                Some("Not configured".into())
+                Some("Not configured; run configure before handshake or invoke".into())
             },
             critical: true,
         });
         checks.push(DoctorCheck {
-            name: "client".into(),
+            name: "client_initialized".into(),
             passed: self.client.is_some(),
             message: if self.client.is_some() {
                 None
             } else {
-                Some("Client not initialized".into())
+                Some("HTTP client not initialized; re-run configure".into())
             },
             critical: true,
         });
         checks.push(DoctorCheck {
-            name: "runtime".into(),
+            name: "runtime_initialized".into(),
             passed: self.runtime.is_some(),
             message: if self.runtime.is_some() {
                 None
             } else {
-                Some("Runtime not initialized".into())
+                Some("ConnectorRuntime not initialized; re-run configure".into())
             },
             critical: true,
         });
-        if let Some(cfg) = &self.config {
+        if let Some(readiness) = &provisioning {
             checks.push(DoctorCheck {
-                name: "base_url".into(),
-                passed: cfg.base_url.starts_with("https://"),
-                message: Some(format!("URL: {}", cfg.base_url)),
-                critical: false,
+                name: "network_constraints".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message.clone()),
+                critical: true,
             });
             checks.push(DoctorCheck {
                 name: "account_id".into(),
-                passed: !cfg.account_id.is_empty(),
-                message: Some("Account ID present".into()),
+                passed: readiness.account_id_configured,
+                message: Some(if readiness.account_id_configured {
+                    "Cloudflare account_id configured".into()
+                } else {
+                    "account_id missing; Workers, Pages, and KV cannot resolve account-scoped endpoints".into()
+                }),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
                 critical: false,
             });
-            if let Some(client) = &self.client {
-                checks.push(DoctorCheck {
-                    name: "credential_mode".into(),
-                    passed: true,
-                    message: Some(if client.is_secretless() {
-                        "Secretless".into()
-                    } else {
-                        "Direct".into()
-                    }),
-                    critical: false,
-                });
-            }
+            checks.push(DoctorCheck {
+                name: "secret_material".into(),
+                passed: readiness.secret_material_configured,
+                message: Some(if readiness.secret_material_configured {
+                    "Credential material configured directly".into()
+                } else {
+                    "Secret material omitted; host or egress proxy must inject headers at runtime"
+                        .into()
+                }),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "recommended_auth".into(),
+                passed: !readiness.uses_legacy_global_key,
+                message: Some(if readiness.uses_legacy_global_key {
+                    "Global API key is legacy and broad; prefer scoped API tokens for operator verification".into()
+                } else {
+                    "Scoped API token mode configured".into()
+                }),
+                critical: false,
+            });
         }
-        DoctorResult::from_checks(checks)
+        let result = DoctorResult::from_checks(checks, provisioning);
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "cloudflare.provisioning.doctor",
+            status = result.status_label(),
+            check_count = result.checks.len(),
+            failed_checks,
+            "Cloudflare doctor checks completed"
+        );
+        result
+    }
+
+    fn attach_self_check_details(
+        mut report: SelfCheckReport,
+        provisioning: Option<ProvisioningReadiness>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+        }));
+        report
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
@@ -516,6 +750,7 @@ impl FcpConnector for CloudflareConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let cf = CloudflareConfig::from_value(config)?;
+        let provisioning = cf.provisioning_readiness();
         self.runtime = Some(ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(cf.request_timeout_ms)),
@@ -535,6 +770,20 @@ impl FcpConnector for CloudflareConnector {
         self.verifier = None;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
+        info!(
+            event = "cloudflare.provisioning.configure",
+            auth_mode = provisioning.auth_mode,
+            auth_label = self
+                .config
+                .as_ref()
+                .map(|cfg| cfg.auth.redacted_label())
+                .unwrap_or("unknown"),
+            network_ok = provisioning.network_ok,
+            requires_credential_injection = provisioning.requires_credential_injection,
+            uses_legacy_global_key = provisioning.uses_legacy_global_key,
+            base_url = %provisioning.base_url,
+            "Configured Cloudflare connector"
+        );
         Ok(())
     }
 
@@ -571,37 +820,102 @@ impl FcpConnector for CloudflareConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snap = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(CloudflareConfig::provisioning_readiness);
+        let mut snap = match &provisioning {
+            Some(readiness) if !readiness.network_ok => {
+                HealthSnapshot::error("network constraints invalid")
+            }
+            Some(readiness) if readiness.requires_credential_injection => {
+                HealthSnapshot::degraded("credential injection required")
+            }
+            Some(_) => HealthSnapshot::ready(),
+            None => HealthSnapshot::degraded("not configured"),
         };
         snap.uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snap.details = Some(json!({
+            "configured": self.config.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+        }));
         snap
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        let Some(config) = &self.config else {
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+            ));
+        };
+        let provisioning = config.provisioning_readiness();
+
+        if !provisioning.network_ok {
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "network_constraints_invalid",
+                    provisioning.network_message.clone(),
+                ),
+                Some(provisioning),
+            ));
+        }
+
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Not configured",
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "client_missing",
+                    "Cloudflare HTTP client not initialized; re-run configure",
+                ),
+                Some(provisioning),
             ));
         };
         let Some(runtime) = &self.runtime else {
-            return Ok(SelfCheckReport::degraded("no_runtime", "No runtime"));
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "runtime_missing",
+                    "ConnectorRuntime not initialized; re-run configure",
+                ),
+                Some(provisioning),
+            ));
         };
-        match client.health_check(runtime).await {
-            Ok(v) if v.status == "active" => Ok(SelfCheckReport::ok()),
-            Ok(v) => Ok(SelfCheckReport::degraded(
-                "token_inactive",
-                format!("Token status: {}", v.status),
-            )),
-            Err(e) if e.is_retryable() => Ok(SelfCheckReport::degraded(
-                "self_check_retryable",
-                e.to_string(),
-            )),
-            Err(e) => Ok(SelfCheckReport::failed("self_check_failed", e.to_string())),
+
+        if provisioning.requires_credential_injection {
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Credential material is intentionally omitted; inject Authorization or X-Auth-* headers at runtime before re-running self_check",
+                ),
+                Some(provisioning),
+            ));
         }
+
+        let report = match client.health_check(runtime).await {
+            Ok(v) if v.status == "active" => SelfCheckReport::ok(),
+            Ok(v) => SelfCheckReport::degraded(
+                "token_inactive",
+                format!(
+                    "Cloudflare token status is '{}' - verify token scope and account binding",
+                    v.status
+                ),
+            ),
+            Err(error) if error.is_retryable() => {
+                SelfCheckReport::degraded("self_check_retryable", error.to_string())
+            }
+            Err(error) => SelfCheckReport::failed("self_check_failed", error.to_string()),
+        };
+        let report = Self::attach_self_check_details(report, Some(provisioning));
+        info!(
+            event = "cloudflare.provisioning.self_check",
+            status = ?report.status,
+            reason_code = report.reason_code.as_deref().unwrap_or("ok"),
+            "Cloudflare self_check completed"
+        );
+        Ok(report)
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
@@ -980,7 +1294,7 @@ mod tests {
     }
     #[test]
     fn doctor_unconfigured() {
-        assert!(!CloudflareConnector::new().doctor().passed);
+        assert!(!CloudflareConnector::new().doctor().ready);
     }
     #[test]
     fn doctor_configured() {
@@ -991,7 +1305,7 @@ mod tests {
                 c.doctor()
             })
             .unwrap()
-            .passed
+            .ready
         );
     }
     #[test]

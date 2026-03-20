@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "FCP Vercel connector for deployments, projects, domains, and environment variables"
+description = "FCP Vercel connector for projects, deployments, domains, and environment variables"
 
 [[bin]]
 name = "fcp-vercel"
@@ -30,6 +30,4 @@ sha2.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
-fcp-crypto.workspace = true
-fcp-testkit.workspace = true
 wiremock.workspace = true

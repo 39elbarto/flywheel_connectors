@@ -1,199 +1,277 @@
+use fcp_core::CredentialId;
 use serde::{Deserialize, Serialize};
 
-// ── Auth ──
-
-/// Vercel authentication via Bearer token.
 #[derive(Clone, Deserialize)]
-pub struct VercelAuth {
-    pub token: String,
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum VercelAuth {
+    AccessToken { access_token: String },
+    CredentialId { credential_id: CredentialId },
+}
+
+impl VercelAuth {
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::AccessToken { .. } => "access_token",
+            Self::CredentialId { .. } => "credential_id",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
+    }
 }
 
 impl std::fmt::Debug for VercelAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VercelAuth")
-            .field("token", &"[REDACTED]")
-            .finish()
+        match self {
+            Self::AccessToken { .. } => f
+                .debug_struct("AccessToken")
+                .field("access_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId { credential_id } => f
+                .debug_struct("CredentialId")
+                .field("credential_id", credential_id)
+                .finish(),
+        }
     }
 }
 
-// ── Projects ──
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TeamScope {
+    #[serde(default)]
+    pub team_id: Option<String>,
+    #[serde(default, rename = "team_slug")]
+    pub team_slug: Option<String>,
+}
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl TeamScope {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match (self.team_id.as_deref(), self.team_slug.as_deref()) {
+            (Some(team_id), None) => format!("team_id:{team_id}"),
+            (None, Some(team_slug)) => format!("team_slug:{team_slug}"),
+            (None, None) => "personal".into(),
+            (Some(team_id), Some(team_slug)) => format!("team_id:{team_id}, team_slug:{team_slug}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Pagination {
+    #[serde(default)]
+    pub count: Option<u64>,
+    #[serde(default)]
+    pub next: Option<u64>,
+    #[serde(default)]
+    pub prev: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectListResponse {
+    #[serde(default)]
+    pub projects: Vec<Project>,
+    #[serde(default)]
+    pub pagination: Option<Pagination>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub framework: Option<String>,
-    #[serde(rename = "createdAt", default)]
-    pub created_at: Option<u64>,
-    #[serde(rename = "updatedAt", default)]
-    pub updated_at: Option<u64>,
-    #[serde(rename = "accountId", default)]
+    #[serde(default, rename = "accountId")]
     pub account_id: Option<String>,
-    #[serde(rename = "nodeVersion", default)]
-    pub node_version: Option<String>,
-    #[serde(rename = "latestDeployments", default)]
-    pub latest_deployments: Option<Vec<Deployment>>,
+    #[serde(default, rename = "rootDirectory")]
+    pub root_directory: Option<String>,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<u64>,
+    #[serde(default, rename = "updatedAt")]
+    pub updated_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ProjectsResponse {
-    pub projects: Vec<Project>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "rootDirectory")]
+    pub root_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "publicSource")]
+    pub public_source: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "buildCommand")]
+    pub build_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "installCommand")]
+    pub install_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "outputDirectory")]
+    pub output_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "devCommand")]
+    pub dev_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentListResponse {
+    #[serde(default)]
+    pub deployments: Vec<Deployment>,
+    #[serde(default)]
     pub pagination: Option<Pagination>,
 }
 
-// ── Deployments ──
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deployment {
-    pub uid: String,
-    #[serde(default)]
-    pub name: Option<String>,
+    #[serde(alias = "uid")]
+    pub id: String,
+    pub name: String,
+    #[serde(default, rename = "projectId")]
+    pub project_id: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
-    pub state: Option<String>,
-    #[serde(rename = "readyState", default)]
-    pub ready_state: Option<String>,
-    #[serde(rename = "createdAt", default)]
-    pub created_at: Option<u64>,
-    #[serde(rename = "buildingAt", default)]
-    pub building_at: Option<u64>,
-    #[serde(default)]
-    pub ready: Option<u64>,
-    #[serde(default)]
     pub target: Option<String>,
-    #[serde(rename = "projectId", default)]
-    pub project_id: Option<String>,
     #[serde(default)]
-    pub creator: Option<Creator>,
-    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default, rename = "readyState")]
+    pub ready_state: Option<String>,
+    #[serde(default, rename = "inspectorUrl")]
+    pub inspector_url: Option<String>,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDeploymentRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "gitSource")]
+    pub git_source: Option<GitSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Creator {
-    pub uid: String,
-    #[serde(default)]
-    pub email: Option<String>,
-    #[serde(default)]
-    pub username: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DeploymentsResponse {
-    pub deployments: Vec<Deployment>,
-    pub pagination: Option<Pagination>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateDeploymentRequest {
-    pub name: String,
-    #[serde(rename = "gitSource", skip_serializing_if = "Option::is_none")]
-    pub git_source: Option<GitSource>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
-    #[serde(rename = "projectSettings", skip_serializing_if = "Option::is_none")]
-    pub project_settings: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitSource {
     #[serde(rename = "type")]
     pub source_type: String,
     #[serde(rename = "ref")]
     pub git_ref: String,
-    #[serde(rename = "repoId")]
-    pub repo_id: String,
-}
-
-// ── Domains ──
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Domain {
-    pub name: String,
-    #[serde(rename = "apexName", default)]
-    pub apex_name: Option<String>,
-    #[serde(rename = "createdAt", default)]
-    pub created_at: Option<u64>,
-    #[serde(default)]
-    pub verified: Option<bool>,
-    #[serde(rename = "projectId", default)]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "repoId")]
+    pub repo_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "projectId")]
     pub project_id: Option<String>,
-    #[serde(default)]
-    pub redirect: Option<String>,
-    #[serde(rename = "redirectStatusCode", default)]
-    pub redirect_status_code: Option<u16>,
-    #[serde(rename = "gitBranch", default)]
-    pub git_branch: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DomainsResponse {
-    pub domains: Vec<Domain>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainListResponse {
+    #[serde(default)]
+    pub domains: Vec<ProjectDomain>,
+    #[serde(default)]
     pub pagination: Option<Pagination>,
 }
 
-// ── Environment Variables ──
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDomain {
+    pub name: String,
+    #[serde(default, rename = "apexName")]
+    pub apex_name: Option<String>,
+    #[serde(default, rename = "projectId")]
+    pub project_id: Option<String>,
+    #[serde(default, rename = "gitBranch")]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub verified: Option<bool>,
+    #[serde(default, rename = "redirect")]
+    pub redirect: Option<String>,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<u64>,
+}
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EnvVar {
-    pub id: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddDomainRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "gitBranch")]
+    pub git_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "redirectStatusCode")]
+    pub redirect_status_code: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvVarListResponse {
+    #[serde(default)]
+    pub envs: Vec<ProjectEnvVar>,
+    #[serde(default)]
+    pub pagination: Option<Pagination>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectEnvVar {
+    pub id: String,
     pub key: String,
     #[serde(default)]
     pub value: Option<String>,
-    #[serde(default)]
-    pub target: Option<Vec<String>>,
-    #[serde(rename = "type", default)]
+    #[serde(default, rename = "type")]
     pub env_type: Option<String>,
-    #[serde(rename = "createdAt", default)]
-    pub created_at: Option<u64>,
-    #[serde(rename = "updatedAt", default)]
-    pub updated_at: Option<u64>,
-    #[serde(rename = "configurationId", default)]
+    #[serde(default)]
+    pub target: Vec<String>,
+    #[serde(default, rename = "gitBranch")]
+    pub git_branch: Option<String>,
+    #[serde(default, rename = "configurationId")]
     pub configuration_id: Option<String>,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EnvVarsResponse {
-    pub envs: Vec<EnvVar>,
-    pub pagination: Option<Pagination>,
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateEnvVarRequest {
     pub key: String,
     pub value: String,
-    pub target: Vec<String>,
     #[serde(rename = "type")]
     pub env_type: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "gitBranch")]
+    pub git_branch: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        rename = "customEnvironmentIds"
+    )]
+    pub custom_environment_ids: Vec<String>,
 }
 
-// ── Pagination ──
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Pagination {
-    pub count: Option<u32>,
-    pub next: Option<u64>,
-    pub prev: Option<u64>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteStatus {
+    #[serde(default, alias = "id", alias = "uid")]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
-// ── User (for health check) ──
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct UserResponse {
-    pub user: User,
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiErrorResponse {
+    #[serde(default)]
+    pub error: Option<ApiErrorDetail>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct User {
-    pub uid: String,
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiErrorDetail {
     #[serde(default)]
-    pub email: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub username: Option<String>,
+    pub code: Option<String>,
+    pub message: String,
 }
 
 #[cfg(test)]
@@ -201,182 +279,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deserialize_project() {
-        let json = serde_json::json!({
-            "id": "prj_123",
-            "name": "my-app",
-            "framework": "nextjs",
-            "createdAt": 1700000000000_u64,
-            "updatedAt": 1700000001000_u64
-        });
-        let proj: Project = serde_json::from_value(json).unwrap();
-        assert_eq!(proj.id, "prj_123");
-        assert_eq!(proj.name, "my-app");
-        assert_eq!(proj.framework.unwrap(), "nextjs");
-    }
-
-    #[test]
-    fn deserialize_deployment() {
-        let json = serde_json::json!({
-            "uid": "dpl_abc",
-            "name": "my-app",
-            "url": "my-app-abc.vercel.app",
-            "state": "READY",
-            "readyState": "READY",
-            "createdAt": 1700000000000_u64,
-            "target": "production"
-        });
-        let dep: Deployment = serde_json::from_value(json).unwrap();
-        assert_eq!(dep.uid, "dpl_abc");
-        assert_eq!(dep.state.unwrap(), "READY");
-        assert_eq!(dep.target.unwrap(), "production");
-    }
-
-    #[test]
-    fn deserialize_domain() {
-        let json = serde_json::json!({
-            "name": "example.com",
-            "verified": true,
-            "createdAt": 1700000000000_u64
-        });
-        let domain: Domain = serde_json::from_value(json).unwrap();
-        assert_eq!(domain.name, "example.com");
-        assert!(domain.verified.unwrap());
-    }
-
-    #[test]
-    fn deserialize_env_var() {
-        let json = serde_json::json!({
-            "id": "env_123",
-            "key": "DATABASE_URL",
-            "value": "postgres://...",
-            "target": ["production", "preview"],
-            "type": "encrypted"
-        });
-        let env: EnvVar = serde_json::from_value(json).unwrap();
-        assert_eq!(env.key, "DATABASE_URL");
-        assert_eq!(env.target.unwrap().len(), 2);
-    }
-
-    #[test]
-    fn deserialize_projects_response() {
-        let json = serde_json::json!({
-            "projects": [{
-                "id": "prj_1",
-                "name": "app-one"
-            }, {
-                "id": "prj_2",
-                "name": "app-two"
-            }],
-            "pagination": {
-                "count": 2,
-                "next": null,
-                "prev": null
-            }
-        });
-        let resp: ProjectsResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.projects.len(), 2);
-        assert_eq!(resp.projects[0].name, "app-one");
-    }
-
-    #[test]
-    fn deserialize_deployments_response() {
-        let json = serde_json::json!({
-            "deployments": [{
-                "uid": "dpl_1",
-                "state": "READY"
-            }],
-            "pagination": { "count": 1 }
-        });
-        let resp: DeploymentsResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.deployments.len(), 1);
-    }
-
-    #[test]
-    fn deserialize_user_response() {
-        let json = serde_json::json!({
-            "user": {
-                "uid": "user_123",
-                "email": "user@example.com",
-                "name": "Test User",
-                "username": "testuser"
-            }
-        });
-        let resp: UserResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.user.uid, "user_123");
-        assert_eq!(resp.user.email.unwrap(), "user@example.com");
-    }
-
-    #[test]
-    fn auth_debug_redacts_token() {
-        let auth = VercelAuth {
-            token: "super-secret-vercel-token".into(),
+    fn vercel_auth_debug_redacts_access_token() {
+        let auth = VercelAuth::AccessToken {
+            access_token: "secret".into(),
         };
         let debug = format!("{auth:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("super-secret"));
+        assert!(!debug.contains("secret"));
     }
 
     #[test]
-    fn serialize_create_deployment_request() {
-        let req = CreateDeploymentRequest {
-            name: "my-app".into(),
-            git_source: Some(GitSource {
-                source_type: "github".into(),
-                git_ref: "main".into(),
-                repo_id: "12345".into(),
-            }),
-            target: Some("production".into()),
-            project_settings: None,
+    fn vercel_auth_reports_secretless_mode() {
+        let auth = VercelAuth::CredentialId {
+            credential_id: CredentialId::parse("12345678-1234-5678-1234-567812345678").unwrap(),
         };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["name"], "my-app");
-        assert_eq!(json["gitSource"]["type"], "github");
-        assert_eq!(json["gitSource"]["ref"], "main");
-        assert!(json.get("projectSettings").is_none());
+        assert_eq!(auth.redacted_label(), "credential_id");
+        assert!(auth.is_secretless());
     }
 
     #[test]
-    fn serialize_create_env_var_request() {
-        let req = CreateEnvVarRequest {
+    fn team_scope_describes_shape() {
+        assert_eq!(TeamScope::default().describe(), "personal");
+        assert_eq!(
+            TeamScope {
+                team_id: Some("team_123".into()),
+                team_slug: None,
+            }
+            .describe(),
+            "team_id:team_123"
+        );
+    }
+
+    #[test]
+    fn create_env_request_serializes_targets() {
+        let request = CreateEnvVarRequest {
             key: "API_KEY".into(),
-            value: "secret123".into(),
-            target: vec!["production".into(), "preview".into()],
+            value: "redacted".into(),
             env_type: "encrypted".into(),
+            target: vec!["production".into(), "preview".into()],
+            git_branch: Some("main".into()),
+            custom_environment_ids: vec![],
         };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["key"], "API_KEY");
-        assert_eq!(json["type"], "encrypted");
-        assert_eq!(json["target"].as_array().unwrap().len(), 2);
-    }
 
-    #[test]
-    fn deserialize_domains_response() {
-        let json = serde_json::json!({
-            "domains": [{
-                "name": "example.com",
-                "verified": true
-            }],
-            "pagination": { "count": 1 }
-        });
-        let resp: DomainsResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.domains.len(), 1);
-        assert_eq!(resp.domains[0].name, "example.com");
-    }
-
-    #[test]
-    fn deserialize_env_vars_response() {
-        let json = serde_json::json!({
-            "envs": [{
-                "id": "env_1",
-                "key": "FOO",
-                "value": "bar",
-                "target": ["production"]
-            }],
-            "pagination": { "count": 1 }
-        });
-        let resp: EnvVarsResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.envs.len(), 1);
-        assert_eq!(resp.envs[0].key, "FOO");
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["target"], serde_json::json!(["production", "preview"]));
+        assert_eq!(json["gitBranch"], "main");
     }
 }

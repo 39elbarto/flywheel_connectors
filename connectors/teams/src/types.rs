@@ -132,11 +132,21 @@ pub struct ChatMessage {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
+    pub reply_to_id: Option<String>,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
     pub message_type: Option<String>,
     #[serde(default)]
     pub created_date_time: Option<String>,
     #[serde(default)]
+    pub last_modified_date_time: Option<String>,
+    #[serde(default)]
     pub subject: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
     #[serde(default)]
     pub body: Option<MessageBody>,
     #[serde(default)]
@@ -145,6 +155,10 @@ pub struct ChatMessage {
     pub importance: Option<String>,
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
+    #[serde(default)]
+    pub mentions: Vec<ChatMessageMention>,
+    #[serde(default)]
+    pub channel_identity: Option<ChannelIdentity>,
     #[serde(default)]
     pub web_url: Option<String>,
 }
@@ -188,7 +202,44 @@ pub struct ChatAttachment {
     #[serde(default)]
     pub content_url: Option<String>,
     #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
+}
+
+/// Teams message mention.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageMention {
+    pub id: i64,
+    #[serde(default)]
+    pub mention_text: Option<String>,
+    #[serde(default)]
+    pub mentioned: Option<MentionedIdentitySet>,
+}
+
+/// Mentioned identity in a Teams message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MentionedIdentitySet {
+    #[serde(default)]
+    pub user: Option<IdentitySet>,
+    #[serde(default)]
+    pub application: Option<IdentitySet>,
+    #[serde(default)]
+    pub conversation: Option<IdentitySet>,
+    #[serde(default)]
+    pub team: Option<IdentitySet>,
+    #[serde(default)]
+    pub channel: Option<IdentitySet>,
+}
+
+/// Channel identity attached to a Teams channel message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelIdentity {
+    pub team_id: String,
+    pub channel_id: String,
 }
 
 /// Teams 1:1 or group chat.
@@ -268,9 +319,13 @@ pub struct Activity {
     #[serde(default)]
     pub timestamp: Option<String>,
     #[serde(default)]
+    pub local_timestamp: Option<String>,
+    #[serde(default)]
     pub service_url: Option<String>,
     #[serde(default)]
     pub channel_id: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
     #[serde(default)]
     pub from: Option<ActivityAccount>,
     #[serde(default)]
@@ -278,13 +333,23 @@ pub struct Activity {
     #[serde(default)]
     pub recipient: Option<ActivityAccount>,
     #[serde(default)]
+    pub reply_to_id: Option<String>,
+    #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
     pub text_format: Option<String>,
     #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
     pub attachments: Vec<ActivityAttachment>,
     #[serde(default)]
     pub entities: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub members_added: Vec<ActivityAccount>,
+    #[serde(default)]
+    pub members_removed: Vec<ActivityAccount>,
+    #[serde(default)]
+    pub channel_data: Option<TeamsChannelData>,
     #[serde(default)]
     pub value: Option<serde_json::Value>,
 }
@@ -327,6 +392,124 @@ pub struct ActivityAttachment {
     pub content: Option<serde_json::Value>,
     #[serde(default)]
     pub name: Option<String>,
+}
+
+/// Teams-specific channel data attached to Bot Framework activities.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamsChannelData {
+    #[serde(default)]
+    pub event_type: Option<String>,
+    #[serde(default)]
+    pub tenant: Option<TeamsTenantRef>,
+    #[serde(default)]
+    pub team: Option<TeamsTeamRef>,
+    #[serde(default)]
+    pub channel: Option<TeamsChannelRef>,
+    #[serde(default)]
+    pub settings: Option<TeamsSettingsRef>,
+    #[serde(default)]
+    pub source: Option<TeamsSourceRef>,
+    #[serde(default)]
+    pub meeting: Option<TeamsMeetingRef>,
+}
+
+/// Teams tenant reference embedded in channel data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsTenantRef {
+    pub id: String,
+}
+
+/// Teams team reference embedded in channel data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamsTeamRef {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub aad_group_id: Option<String>,
+}
+
+/// Teams channel reference embedded in channel data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsChannelRef {
+    pub id: String,
+}
+
+/// Teams meeting reference embedded in channel data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsMeetingRef {
+    pub id: String,
+}
+
+/// Teams event source reference embedded in channel data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsSourceRef {
+    pub name: String,
+}
+
+/// Teams installation settings reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamsSettingsRef {
+    #[serde(default)]
+    pub selected_channel: Option<TeamsChannelRef>,
+}
+
+/// Normalized Teams conversation scope for cached state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamsConversationScope {
+    Personal,
+    Channel,
+    GroupChat,
+    Meeting,
+    Unknown,
+}
+
+/// Cached conversation state derived from inbound and outbound Teams activity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamsConversationState {
+    pub conversation_id: String,
+    pub scope: TeamsConversationScope,
+    pub installed: bool,
+    pub last_sequence: u64,
+    #[serde(default)]
+    pub team_id: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub service_url: Option<String>,
+    #[serde(default)]
+    pub installation_scope: Option<String>,
+    #[serde(default)]
+    pub selected_channel_id: Option<String>,
+    #[serde(default)]
+    pub last_activity_id: Option<String>,
+    #[serde(default)]
+    pub last_activity_type: Option<String>,
+    #[serde(default)]
+    pub last_activity_timestamp: Option<String>,
+    #[serde(default)]
+    pub last_message_id: Option<String>,
+    #[serde(default)]
+    pub last_message_text: Option<String>,
+    #[serde(default)]
+    pub reply_to_id: Option<String>,
+    #[serde(default)]
+    pub last_from_id: Option<String>,
+    #[serde(default)]
+    pub last_from_name: Option<String>,
+    #[serde(default)]
+    pub members: Vec<ActivityAccount>,
+    #[serde(default)]
+    pub channel_data: Option<serde_json::Value>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -435,11 +618,16 @@ mod tests {
     fn deserialize_chat_message() {
         let json = serde_json::json!({
             "id": "msg_1",
+            "replyToId": "root_1",
             "messageType": "message",
             "createdDateTime": "2026-01-01T00:00:00Z",
             "body": {
                 "contentType": "text",
                 "content": "Hello Teams!"
+            },
+            "channelIdentity": {
+                "teamId": "team_1",
+                "channelId": "channel_1"
             },
             "from": {
                 "user": {
@@ -452,7 +640,12 @@ mod tests {
         });
         let msg: ChatMessage = serde_json::from_value(json).unwrap();
         assert_eq!(msg.id, Some("msg_1".into()));
+        assert_eq!(msg.reply_to_id, Some("root_1".into()));
         assert_eq!(msg.body.as_ref().unwrap().content, "Hello Teams!");
+        assert_eq!(
+            msg.channel_identity.as_ref().unwrap().channel_id,
+            "channel_1"
+        );
         assert_eq!(
             msg.from
                 .as_ref()
@@ -530,6 +723,7 @@ mod tests {
             "type": "message",
             "id": "act_1",
             "timestamp": "2026-01-01T00:00:00Z",
+            "localTimestamp": "2025-12-31T19:00:00-05:00",
             "serviceUrl": "https://smba.trafficmanager.net/amer/",
             "channelId": "msteams",
             "from": { "id": "user:123", "name": "Alice" },
@@ -537,6 +731,9 @@ mod tests {
                 "id": "conv:1",
                 "conversationType": "personal",
                 "tenantId": "tenant_1"
+            },
+            "channelData": {
+                "tenant": { "id": "tenant_1" }
             },
             "text": "Hello bot!",
             "attachments": [],
@@ -546,8 +743,20 @@ mod tests {
         assert_eq!(activity.r#type, "message");
         assert_eq!(activity.text, Some("Hello bot!".into()));
         assert_eq!(
+            activity.local_timestamp,
+            Some("2025-12-31T19:00:00-05:00".into())
+        );
+        assert_eq!(
             activity.conversation.as_ref().unwrap().tenant_id,
             Some("tenant_1".into())
+        );
+        assert_eq!(
+            activity
+                .channel_data
+                .as_ref()
+                .and_then(|data| data.tenant.as_ref())
+                .map(|tenant| tenant.id.as_str()),
+            Some("tenant_1")
         );
     }
 
@@ -622,6 +831,74 @@ mod tests {
         });
         let att: ChatAttachment = serde_json::from_value(json).unwrap();
         assert_eq!(att.name, Some("report.pdf".into()));
+    }
+
+    #[test]
+    fn deserialize_installation_activity_channel_data() {
+        let json = serde_json::json!({
+            "type": "installationUpdate",
+            "action": "add",
+            "conversation": {
+                "id": "19:channel@thread.tacv2",
+                "conversationType": "channel"
+            },
+            "channelData": {
+                "eventType": "installationUpdate",
+                "channel": { "id": "19:channel@thread.tacv2" },
+                "team": { "id": "19:team@thread.tacv2", "name": "Engineering" },
+                "tenant": { "id": "tenant_1" },
+                "settings": {
+                    "selectedChannel": { "id": "19:selected@thread.tacv2" }
+                }
+            }
+        });
+        let activity: Activity = serde_json::from_value(json).unwrap();
+        let channel_data = activity.channel_data.unwrap();
+        assert_eq!(activity.action, Some("add".into()));
+        assert_eq!(channel_data.team.unwrap().name, Some("Engineering".into()));
+        assert_eq!(
+            channel_data.settings.unwrap().selected_channel.unwrap().id,
+            "19:selected@thread.tacv2"
+        );
+    }
+
+    #[test]
+    fn serialize_conversation_state_roundtrip() {
+        let state = TeamsConversationState {
+            conversation_id: "conv_1".into(),
+            scope: TeamsConversationScope::Channel,
+            installed: true,
+            last_sequence: 3,
+            team_id: Some("team_1".into()),
+            channel_id: Some("channel_1".into()),
+            chat_id: None,
+            tenant_id: Some("tenant_1".into()),
+            service_url: Some("https://smba.trafficmanager.net/amer/".into()),
+            installation_scope: Some("team".into()),
+            selected_channel_id: Some("channel_1".into()),
+            last_activity_id: Some("act_3".into()),
+            last_activity_type: Some("message".into()),
+            last_activity_timestamp: Some("2026-01-01T00:00:00Z".into()),
+            last_message_id: Some("msg_1".into()),
+            last_message_text: Some("hello".into()),
+            reply_to_id: Some("root_1".into()),
+            last_from_id: Some("user_1".into()),
+            last_from_name: Some("Alice".into()),
+            members: vec![ActivityAccount {
+                id: "user_1".into(),
+                name: Some("Alice".into()),
+                aad_object_id: Some("aad_1".into()),
+            }],
+            channel_data: Some(serde_json::json!({
+                "team": { "id": "team_1" }
+            })),
+        };
+
+        let json = serde_json::to_value(&state).unwrap();
+        let roundtrip: TeamsConversationState = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.scope, TeamsConversationScope::Channel);
+        assert_eq!(roundtrip.last_sequence, 3);
+        assert_eq!(roundtrip.members.len(), 1);
     }
 
     #[test]

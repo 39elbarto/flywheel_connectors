@@ -253,7 +253,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("List all S3 buckets in the account", vec![], vec![], vec![CAP_S3_READ]),
+            ai_hints: hint(
+                "List all S3 buckets in the account",
+                vec![],
+                vec![],
+                vec![CAP_S3_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -416,7 +421,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("List all Lambda functions", vec![], vec![], vec![CAP_LAMBDA_READ]),
+            ai_hints: hint(
+                "List all Lambda functions",
+                vec![],
+                vec![],
+                vec![CAP_LAMBDA_READ],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -450,7 +460,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
-            ai_hints: hint("Check who the current credentials belong to", vec![], vec![], vec![]),
+            ai_hints: hint(
+                "Check who the current credentials belong to",
+                vec![],
+                vec![],
+                vec![],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -465,7 +480,12 @@ fn operations_info() -> Vec<OperationInfo> {
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Check AWS credentials and API health", vec![], vec![], vec![]),
+            ai_hints: hint(
+                "Check AWS credentials and API health",
+                vec![],
+                vec![],
+                vec![],
+            ),
             rate_limit: None,
             requires_approval: None,
         },
@@ -631,9 +651,7 @@ impl AwsConnector {
                 OP_S3_LIST_BUCKETS | OP_S3_LIST_OBJECTS | OP_S3_GET_OBJECT => {
                     CapabilityId::from_static(CAP_S3_READ)
                 }
-                OP_S3_PUT_OBJECT | OP_S3_DELETE_OBJECT => {
-                    CapabilityId::from_static(CAP_S3_WRITE)
-                }
+                OP_S3_PUT_OBJECT | OP_S3_DELETE_OBJECT => CapabilityId::from_static(CAP_S3_WRITE),
                 OP_EC2_DESCRIBE => CapabilityId::from_static(CAP_EC2_READ),
                 OP_EC2_START | OP_EC2_STOP | OP_EC2_TERMINATE => {
                     CapabilityId::from_static(CAP_EC2_WRITE)
@@ -1035,7 +1053,8 @@ mod tests {
                 let mut c = AwsConnector::new();
                 c.configure(tc()).await.unwrap();
                 c.handshake(handshake_req()).await.unwrap();
-                c.invoke(invoke_req(OP_S3_GET_OBJECT, json!({"bucket": "b"}))).await
+                c.invoke(invoke_req(OP_S3_GET_OBJECT, json!({"bucket": "b"})))
+                    .await
             })
             .unwrap()
             .is_err()
@@ -1154,10 +1173,9 @@ mod tests {
 
     #[test]
     fn health_unconfigured() {
-        let h = fcp_async_core::runtime::block_on_sync(async {
-            AwsConnector::new().health().await
-        })
-        .unwrap();
+        let h =
+            fcp_async_core::runtime::block_on_sync(async { AwsConnector::new().health().await })
+                .unwrap();
         assert!(matches!(h.status, fcp_core::HealthState::Degraded { .. }));
     }
 
@@ -1230,11 +1248,17 @@ mod tests {
     #[test]
     fn ops_ec2_write_has_correct_risk() {
         let ops = operations_info();
-        let ec2_start = ops.iter().find(|op| op.id.as_str() == OP_EC2_START).unwrap();
+        let ec2_start = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_EC2_START)
+            .unwrap();
         assert_eq!(ec2_start.risk_level, RiskLevel::Medium);
         assert_eq!(ec2_start.safety_tier, SafetyTier::Risky);
 
-        let ec2_terminate = ops.iter().find(|op| op.id.as_str() == OP_EC2_TERMINATE).unwrap();
+        let ec2_terminate = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_EC2_TERMINATE)
+            .unwrap();
         assert_eq!(ec2_terminate.risk_level, RiskLevel::Critical);
         assert_eq!(ec2_terminate.safety_tier, SafetyTier::Dangerous);
     }
@@ -1242,7 +1266,10 @@ mod tests {
     #[test]
     fn ops_lambda_invoke_best_effort() {
         let ops = operations_info();
-        let lambda_invoke = ops.iter().find(|op| op.id.as_str() == OP_LAMBDA_INVOKE).unwrap();
+        let lambda_invoke = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_LAMBDA_INVOKE)
+            .unwrap();
         assert_eq!(lambda_invoke.idempotency, IdempotencyClass::BestEffort);
     }
 
@@ -1325,7 +1352,11 @@ mod tests {
                 let mut c = AwsConnector::new();
                 c.configure(tc()).await.unwrap();
                 c.handshake(handshake_req()).await.unwrap();
-                c.invoke(invoke_req(OP_S3_PUT_OBJECT, json!({"bucket": "b", "key": "k"}))).await
+                c.invoke(invoke_req(
+                    OP_S3_PUT_OBJECT,
+                    json!({"bucket": "b", "key": "k"}),
+                ))
+                .await
             })
             .unwrap()
             .is_err()
@@ -1339,7 +1370,8 @@ mod tests {
                 let mut c = AwsConnector::new();
                 c.configure(tc()).await.unwrap();
                 c.handshake(handshake_req()).await.unwrap();
-                c.invoke(invoke_req(OP_S3_DELETE_OBJECT, json!({"bucket": "b"}))).await
+                c.invoke(invoke_req(OP_S3_DELETE_OBJECT, json!({"bucket": "b"})))
+                    .await
             })
             .unwrap()
             .is_err()

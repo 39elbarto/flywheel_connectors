@@ -1,5 +1,7 @@
 //! Supabase connector implementation.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -13,17 +15,22 @@ use fcp_core::{
     UnsubscribeRequest,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use reqwest::Url;
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use crate::client::{SupabaseAuth, SupabaseClient, DEFAULT_PROJECT_URL};
+use crate::client::{DEFAULT_PROJECT_URL, SupabaseAuth, SupabaseClient};
 use crate::types::{
     DeleteRequest, InsertRequest, RpcRequest, SchemaTablesRequest, StorageDeleteRequest,
     StorageDownloadRequest, StorageUploadRequest, TableQueryRequest, UpdateRequest, UpsertRequest,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/supabase_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/supabase_connector/<timestamp>";
+const SUPABASE_ALLOWED_HOST_SUFFIX: &str = ".supabase.co";
 
 const OP_QUERY: &str = "supabase.query";
 const OP_INSERT: &str = "supabase.insert";
@@ -98,6 +105,324 @@ impl SupabaseConfig {
             _ => SupabaseAuth::Secretless,
         }
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message, project_ref) = project_url_policy(&self.project_url);
+        let auth = self.auth();
+        let (key_classification, key_role_hint, token_project_ref, permissions_guidance) =
+            match &auth {
+                SupabaseAuth::Secretless => (
+                    "secretless".to_string(),
+                    None,
+                    None,
+                    "No raw API key is configured. The host or egress proxy must inject a concrete Supabase key before self_check can verify live permissions.".into(),
+                ),
+                SupabaseAuth::ApiKey(key) => {
+                    let classification = classify_api_key(key);
+                    let role_hint = match &classification {
+                        ApiKeyClassification::JwtRole(role) => Some(role.clone()),
+                        _ => None,
+                    };
+                    let token_project_ref = decode_jwt_claim(key, "ref");
+                    (
+                        classification.label(),
+                        role_hint,
+                        token_project_ref,
+                        classification.permissions_guidance(),
+                    )
+                }
+            };
+        let project_ref_matches_token = match (&project_ref, &token_project_ref) {
+            (Some(project_ref), Some(token_project_ref)) => Some(project_ref == token_project_ref),
+            _ => None,
+        };
+
+        ProvisioningReadiness {
+            auth_mode: auth.redacted_label(),
+            secret_material_configured: !auth.is_secretless(),
+            requires_credential_injection: auth.is_secretless(),
+            key_classification,
+            key_role_hint,
+            project_url: self.project_url.clone(),
+            project_ref,
+            token_project_ref,
+            project_ref_matches_token,
+            network_ok,
+            network_message,
+            default_schema: self.schema.clone(),
+            request_timeout_ms: self.request_timeout_ms,
+            permissions_guidance,
+            storage_policy_guidance: "Storage upload/download/delete also depend on bucket-level policies. Verify bucket existence plus insert/select/delete policies before rerunning mutation checks.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApiKeyClassification {
+    Publishable,
+    Secret,
+    JwtRole(String),
+    Opaque,
+}
+
+impl ApiKeyClassification {
+    fn label(&self) -> String {
+        match self {
+            Self::Publishable => "publishable".into(),
+            Self::Secret => "secret".into(),
+            Self::JwtRole(role) => format!("jwt:{role}"),
+            Self::Opaque => "opaque".into(),
+        }
+    }
+
+    fn permissions_guidance(&self) -> String {
+        match self {
+            Self::Publishable => "Publishable keys are intended for constrained client traffic. Read and mutation flows still depend on RLS and Storage bucket policies.".into(),
+            Self::Secret => "Secret keys can exercise broader Supabase APIs. Use them only in a dedicated staging project and redact them from every artifact.".into(),
+            Self::JwtRole(role) if role == "anon" => "Anon JWT keys are limited by RLS and Storage bucket policies. Expect write and delete operations to fail unless the target project explicitly permits them.".into(),
+            Self::JwtRole(role) if role == "service_role" => "service_role JWT keys bypass many RLS checks. Restrict them to disposable verification environments.".into(),
+            Self::JwtRole(role) => format!("JWT key carries role `{role}`. Verify that role has the table, RPC, and Storage permissions needed for the operations you intend to test."),
+            Self::Opaque => "Custom or opaque API key format detected. Verify table/RPC/Storage permissions out of band because role inference is unavailable.".into(),
+        }
+    }
+
+    fn implies_limited_scope(&self) -> bool {
+        matches!(self, Self::Publishable) || matches!(self, Self::JwtRole(role) if role == "anon")
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    secret_material_configured: bool,
+    requires_credential_injection: bool,
+    key_classification: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_role_hint: Option<String>,
+    project_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_project_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_ref_matches_token: Option<bool>,
+    network_ok: bool,
+    network_message: String,
+    default_schema: String,
+    request_timeout_ms: u64,
+    permissions_guidance: String,
+    storage_policy_guidance: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorCheck {
+    name: String,
+    passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    critical: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorResult {
+    ready: bool,
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
+}
+
+impl DoctorResult {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
+        let ready = checks
+            .iter()
+            .filter(|check| check.critical)
+            .all(|check| check.passed);
+        let status = if checks.iter().any(|check| check.critical && !check.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|check| !check.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        Self {
+            ready,
+            status,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
+    }
+
+    fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+}
+
+fn project_url_policy(project_url: &str) -> (bool, String, Option<String>) {
+    let parsed = match Url::parse(project_url) {
+        Ok(url) => url,
+        Err(error) => {
+            return (
+                false,
+                format!("project_url must be an absolute URL: {error}"),
+                None,
+            );
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "project_url must include a host".into(), None);
+    };
+
+    if is_local_test_host(host) {
+        return (
+            true,
+            format!("localhost test endpoint accepted for verification: {project_url}"),
+            None,
+        );
+    }
+
+    let mut problems = Vec::new();
+    if parsed.scheme() != "https" {
+        problems.push(format!("scheme must be https, got {}", parsed.scheme()));
+    }
+    if !host.ends_with(SUPABASE_ALLOWED_HOST_SUFFIX) {
+        problems.push(format!(
+            "host must end with {SUPABASE_ALLOWED_HOST_SUFFIX}, got {host}"
+        ));
+    }
+    if !(parsed.path().is_empty() || parsed.path() == "/") {
+        problems.push(format!(
+            "project_url must not include a path beyond '/', got {}",
+            parsed.path()
+        ));
+    }
+
+    let project_ref = host
+        .strip_suffix(SUPABASE_ALLOWED_HOST_SUFFIX)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+
+    if problems.is_empty() {
+        (
+            true,
+            "Supabase project endpoint accepted".into(),
+            project_ref,
+        )
+    } else {
+        (false, problems.join("; "), project_ref)
+    }
+}
+
+fn classify_api_key(key: &str) -> ApiKeyClassification {
+    let trimmed = key.trim();
+    if trimmed.starts_with("sb_publishable_") {
+        ApiKeyClassification::Publishable
+    } else if trimmed.starts_with("sb_secret_") {
+        ApiKeyClassification::Secret
+    } else if let Some(role) = decode_jwt_claim(trimmed, "role") {
+        ApiKeyClassification::JwtRole(role)
+    } else {
+        ApiKeyClassification::Opaque
+    }
+}
+
+fn decode_jwt_claim(token: &str, field: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get(field)?.as_str().map(str::to_string)
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a dedicated Supabase staging project with disposable tables, RPC functions, and Storage buckets.",
+            "Provision the exact key type you want to verify: publishable/anon for policy-constrained reads, or secret/service-role for full mutation coverage.",
+            "Seed representative test data and bucket policies before running destructive verification flows.",
+        ],
+        dedicated_environment: "Run verification only against a disposable staging project. Row deletes and Storage deletes are dangerous and should never target production data.",
+        redaction_rules: vec![
+            "Never print raw api_key values or Authorization headers.",
+            "Treat project refs, JWT role claims, and bucket names as environment metadata; only share them when the environment is already public or disposable.",
+            "Do not paste full row payloads or object contents from private datasets into shared transcripts unless they are synthetic fixtures.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "project_url_invalid",
+                symptom: "doctor/self_check reports invalid network policy or malformed project_url",
+                action: "Use the project root URL in the form https://<project-ref>.supabase.co for production, or a localhost mock endpoint during deterministic verification.",
+            },
+            RemediationHint {
+                code: "project_ref_mismatch",
+                symptom: "JWT ref claim and project_url host do not match",
+                action: "Pair each JWT-style key with the Supabase project that minted it. Update either project_url or the injected key, then rerun self_check.",
+            },
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "secretless mode is configured but self_check cannot prove live connectivity",
+                action: "Configure the host or egress proxy to inject a concrete Supabase key at runtime, then rerun self_check before invoking writes or deletes.",
+            },
+            RemediationHint {
+                code: "limited_key_scope",
+                symptom: "REST root is reachable but write/storage checks remain degraded",
+                action: "Use a service_role or secret key for full mutation verification, or loosen staging-only RLS and bucket policies for the publishable/anon key under test.",
+            },
+            RemediationHint {
+                code: "permissions_insufficient",
+                symptom: "invoke or self_check returns 401/403 from PostgREST or Storage",
+                action: "Verify the key type, row-level policies, and Storage bucket policies needed for the target operation. Table reads/writes and Storage object mutations are authorized independently.",
+            },
+        ],
+        rerun_commands: vec![
+            "scripts/e2e/supabase_connector_verification.sh",
+            "fwc manifest fix connectors/supabase/manifest.toml --check --json",
+            "rch exec -- cargo test -p fcp-supabase --test integration -- --nocapture",
+            "rch exec -- cargo clippy -p fcp-supabase --all-targets -- -D warnings",
+        ],
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
 }
 
 #[derive(Debug)]
@@ -138,6 +463,136 @@ impl SupabaseConnector {
                 code: 1005,
                 message: format!("Missing: {key}"),
             })
+    }
+
+    pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(SupabaseConfig::provisioning_readiness);
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
+        let mut checks = vec![
+            DoctorCheck {
+                name: "configuration".into(),
+                passed: self.config.is_some(),
+                message: if self.config.is_some() {
+                    None
+                } else {
+                    Some("Not configured; run configure before handshake or invoke".into())
+                },
+                critical: true,
+            },
+            DoctorCheck {
+                name: "client_initialized".into(),
+                passed: self.client.is_some(),
+                message: if self.client.is_some() {
+                    None
+                } else {
+                    Some("Supabase HTTP client not initialized; re-run configure".into())
+                },
+                critical: true,
+            },
+            DoctorCheck {
+                name: "runtime_initialized".into(),
+                passed: self.runtime.is_some(),
+                message: if self.runtime.is_some() {
+                    None
+                } else {
+                    Some("ConnectorRuntime not initialized; re-run configure".into())
+                },
+                critical: true,
+            },
+            DoctorCheck {
+                name: "handshake".into(),
+                passed: handshaken,
+                message: if handshaken {
+                    None
+                } else {
+                    Some("Handshake not completed".into())
+                },
+                critical: false,
+            },
+        ];
+        if let Some(readiness) = &provisioning {
+            let limited_scope = readiness.key_classification == "publishable"
+                || readiness.key_role_hint.as_deref() == Some("anon");
+            checks.push(DoctorCheck {
+                name: "network_constraints".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "project_ref_alignment".into(),
+                passed: readiness.project_ref_matches_token != Some(false),
+                message: Some(match readiness.project_ref_matches_token {
+                    Some(true) => format!(
+                        "project_url ref {} matches token ref {}",
+                        readiness.project_ref.as_deref().unwrap_or("unknown"),
+                        readiness.token_project_ref.as_deref().unwrap_or("unknown")
+                    ),
+                    Some(false) => format!(
+                        "project_url ref {} does not match token ref {}",
+                        readiness.project_ref.as_deref().unwrap_or("unknown"),
+                        readiness.token_project_ref.as_deref().unwrap_or("unknown")
+                    ),
+                    None => "No JWT project ref claim available for preflight matching".into(),
+                }),
+                critical: readiness.project_ref_matches_token.is_some(),
+            });
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!(
+                    "Auth mode: {} ({})",
+                    readiness.auth_mode, readiness.key_classification
+                )),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "secret_material".into(),
+                passed: readiness.secret_material_configured,
+                message: Some(if readiness.secret_material_configured {
+                    "Secret material configured directly".into()
+                } else {
+                    "Secretless mode requires host-side credential injection before live verification"
+                        .into()
+                }),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "permission_model".into(),
+                passed: !limited_scope,
+                message: Some(readiness.permissions_guidance.clone()),
+                critical: false,
+            });
+        }
+        let result = DoctorResult::from_checks(checks, provisioning);
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "supabase.provisioning.doctor",
+            status = result.status_label(),
+            check_count = result.checks.len(),
+            failed_checks,
+            "Supabase doctor checks completed"
+        );
+        result
+    }
+
+    fn attach_self_check_details(
+        mut report: SelfCheckReport,
+        provisioning: Option<ProvisioningReadiness>,
+        live_probe: Option<serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "provisioning": provisioning,
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+        }));
+        report
     }
 }
 
@@ -408,21 +863,30 @@ impl FcpConnector for SupabaseConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let cfg = SupabaseConfig::from_value(config)?;
+        let readiness = cfg.provisioning_readiness();
         let auth = cfg.auth();
         self.runtime = Some(ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(cfg.request_timeout_ms)),
         ));
-        let client = SupabaseClient::new(auth, &cfg.project_url, &cfg.schema, cfg.request_timeout_ms)
-            .map_err(|e| FcpError::Internal {
-                message: format!("Client init: {e}"),
-            })?;
+        let client =
+            SupabaseClient::new(auth, &cfg.project_url, &cfg.schema, cfg.request_timeout_ms)
+                .map_err(|e| FcpError::Internal {
+                    message: format!("Client init: {e}"),
+                })?;
         self.client = Some(client);
         self.config = Some(cfg);
         self.verifier = None;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
-        info!(event = "supabase.configure", "Configured Supabase connector");
+        info!(
+            event = "supabase.configure",
+            auth_mode = readiness.auth_mode,
+            key_classification = %readiness.key_classification,
+            network_ok = readiness.network_ok,
+            project_url = %readiness.project_url,
+            "Configured Supabase connector"
+        );
         Ok(())
     }
 
@@ -459,57 +923,147 @@ impl FcpConnector for SupabaseConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snap = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(SupabaseConfig::provisioning_readiness);
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
+        let mut snap = match &provisioning {
+            Some(readiness)
+                if !readiness.network_ok || readiness.project_ref_matches_token == Some(false) =>
+            {
+                HealthSnapshot::error("Supabase provisioning is not ready")
+            }
+            Some(readiness)
+                if readiness.requires_credential_injection
+                    || readiness.key_classification == "publishable"
+                    || readiness.key_role_hint.as_deref() == Some("anon") =>
+            {
+                HealthSnapshot::degraded(
+                    "Supabase is reachable but not fully ready for all operations",
+                )
+            }
+            Some(_) => HealthSnapshot::ready(),
+            None => HealthSnapshot::degraded("not configured"),
         };
         snap.uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snap.details = Some(json!({
             "configured": self.config.is_some(),
-            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "handshaken": handshaken,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
             "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
         }));
         snap
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(config) = &self.config else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+                None,
             ));
         };
+        let readiness = config.provisioning_readiness();
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::failed(
-                "client_missing",
-                "Supabase HTTP client not initialized; re-run configure",
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "client_missing",
+                    "Supabase HTTP client not initialized; re-run configure",
+                ),
+                Some(readiness),
+                None,
             ));
         };
 
-        let auth = config.auth();
-        if auth.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
-                "credential_injection_required",
-                "No API key configured; egress proxy must inject credentials",
+        if !readiness.network_ok {
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "network_constraints_invalid",
+                    readiness.network_message.clone(),
+                ),
+                Some(readiness),
+                None,
+            ));
+        }
+        if readiness.project_ref_matches_token == Some(false) {
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "project_ref_mismatch",
+                    format!(
+                        "project_url ref {} does not match token ref {}",
+                        readiness.project_ref.as_deref().unwrap_or("unknown"),
+                        readiness.token_project_ref.as_deref().unwrap_or("unknown")
+                    ),
+                ),
+                Some(readiness),
+                None,
+            ));
+        }
+        if readiness.requires_credential_injection {
+            return Ok(Self::attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "No API key configured; egress proxy must inject credentials before live verification",
+                ),
+                Some(readiness),
+                None,
             ));
         }
 
         match client.health().await {
             Ok(v) if v.get("status").and_then(|s| s.as_str()) == Some("ok") => {
-                Ok(SelfCheckReport::ok())
+                let classification = match &config.auth() {
+                    SupabaseAuth::ApiKey(key) => classify_api_key(key),
+                    SupabaseAuth::Secretless => ApiKeyClassification::Opaque,
+                };
+                let report = if classification.implies_limited_scope() {
+                    SelfCheckReport::degraded(
+                        "limited_key_scope",
+                        "Supabase REST root is reachable, but publishable/anon keys may still fail writes, RPCs, or Storage mutations under RLS and bucket policies",
+                    )
+                } else {
+                    SelfCheckReport::ok()
+                };
+                Ok(Self::attach_self_check_details(
+                    report,
+                    Some(readiness),
+                    Some(v),
+                ))
             }
-            Ok(_) => Ok(SelfCheckReport::degraded(
-                "health_unknown",
-                "PostgREST responded but health status is unclear",
+            Ok(v) => Ok(Self::attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "health_unknown",
+                    "PostgREST responded but health status is unclear",
+                ),
+                Some(readiness),
+                Some(v),
             )),
-            Err(error) if error.is_retryable() => Ok(SelfCheckReport::degraded(
-                "self_check_retryable",
-                error.to_string(),
+            Err(error @ crate::error::SupabaseError::Auth(_)) => {
+                Ok(Self::attach_self_check_details(
+                    SelfCheckReport::failed("auth_invalid", error.to_string()),
+                    Some(readiness),
+                    None,
+                ))
+            }
+            Err(error @ crate::error::SupabaseError::PermissionDenied(_)) => {
+                Ok(Self::attach_self_check_details(
+                    SelfCheckReport::failed("permissions_insufficient", error.to_string()),
+                    Some(readiness),
+                    None,
+                ))
+            }
+            Err(error) if error.is_retryable() => Ok(Self::attach_self_check_details(
+                SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                Some(readiness),
+                None,
             )),
-            Err(error) => Ok(SelfCheckReport::failed(
-                "self_check_failed",
-                error.to_string(),
+            Err(error) => Ok(Self::attach_self_check_details(
+                SelfCheckReport::failed("self_check_failed", error.to_string()),
+                Some(readiness),
+                None,
             )),
         }
     }
@@ -600,152 +1154,135 @@ impl SupabaseConnector {
             message: "connector ready state missing Supabase client".into(),
         })?;
 
-        let output = match operation {
-            OP_QUERY => {
-                let request: TableQueryRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+        let output =
+            match operation {
+                OP_QUERY => {
+                    let request: TableQueryRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
                             code: 1005,
                             message: format!("Invalid query input: {e}"),
-                        }
-                    })?;
-                let result = client.query(&request).await.map_err(|e| e.to_fcp_error())?;
-                json_response("data", result)
-            }
-            OP_INSERT => {
-                let request: InsertRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                        })?;
+                    let result = client.query(&request).await.map_err(|e| e.to_fcp_error())?;
+                    json_response("data", result)
+                }
+                OP_INSERT => {
+                    let request: InsertRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
                             code: 1005,
                             message: format!("Invalid insert input: {e}"),
-                        }
-                    })?;
-                let result = client
-                    .insert(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json_response("data", result)
-            }
-            OP_UPDATE => {
-                let request: UpdateRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                        })?;
+                    let result = client
+                        .insert(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    json_response("data", result)
+                }
+                OP_UPDATE => {
+                    let request: UpdateRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
                             code: 1005,
                             message: format!("Invalid update input: {e}"),
-                        }
-                    })?;
-                let result = client
-                    .update(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json_response("data", result)
-            }
-            OP_UPSERT => {
-                let request: UpsertRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                        })?;
+                    let result = client
+                        .update(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    json_response("data", result)
+                }
+                OP_UPSERT => {
+                    let request: UpsertRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
                             code: 1005,
                             message: format!("Invalid upsert input: {e}"),
-                        }
-                    })?;
-                let result = client
-                    .upsert(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json_response("data", result)
-            }
-            OP_DELETE => {
-                let request: DeleteRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                        })?;
+                    let result = client
+                        .upsert(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    json_response("data", result)
+                }
+                OP_DELETE => {
+                    let request: DeleteRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
                             code: 1005,
                             message: format!("Invalid delete input: {e}"),
-                        }
-                    })?;
-                let result = client
-                    .delete(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json_response("data", result)
-            }
-            OP_RPC => {
-                let request: RpcRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
-                            code: 1005,
-                            message: format!("Invalid RPC input: {e}"),
-                        }
-                    })?;
-                let result = client.rpc(&request).await.map_err(|e| e.to_fcp_error())?;
-                json_response("data", result)
-            }
-            OP_SCHEMA_TABLES => {
-                let request: SchemaTablesRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                        })?;
+                    let result = client
+                        .delete(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    json_response("data", result)
+                }
+                OP_RPC => {
+                    let request: RpcRequest =
+                        serde_json::from_value(req.input.clone()).map_err(|e| {
+                            FcpError::InvalidRequest {
+                                code: 1005,
+                                message: format!("Invalid RPC input: {e}"),
+                            }
+                        })?;
+                    let result = client.rpc(&request).await.map_err(|e| e.to_fcp_error())?;
+                    json_response("data", result)
+                }
+                OP_SCHEMA_TABLES => {
+                    let request: SchemaTablesRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
                             code: 1005,
                             message: format!("Invalid schema_tables input: {e}"),
-                        }
+                        })?;
+                    let result = client
+                        .schema_tables(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    serde_json::to_value(result).unwrap_or(json!({"tables": []}))
+                }
+                OP_STORAGE_UPLOAD => {
+                    let request: StorageUploadRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("Invalid storage_upload input: {e}"),
                     })?;
-                let result = client
-                    .schema_tables(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(result).unwrap_or(json!({"tables": []}))
-            }
-            OP_STORAGE_UPLOAD => {
-                let request: StorageUploadRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
-                            code: 1005,
-                            message: format!("Invalid storage_upload input: {e}"),
-                        }
-                    })?;
-                let result = client
-                    .storage_upload(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json_response("object", result)
-            }
-            OP_STORAGE_DOWNLOAD => {
-                let request: StorageDownloadRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                    let result = client
+                        .storage_upload(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    json_response("object", result)
+                }
+                OP_STORAGE_DOWNLOAD => {
+                    let request: StorageDownloadRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
                             code: 1005,
                             message: format!("Invalid storage_download input: {e}"),
-                        }
+                        })?;
+                    let result = client
+                        .storage_download(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    serde_json::to_value(result).unwrap_or(json!({}))
+                }
+                OP_STORAGE_DELETE => {
+                    let request: StorageDeleteRequest = serde_json::from_value(req.input.clone())
+                        .map_err(|e| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("Invalid storage_delete input: {e}"),
                     })?;
-                let result = client
-                    .storage_download(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(result).unwrap_or(json!({}))
-            }
-            OP_STORAGE_DELETE => {
-                let request: StorageDeleteRequest =
-                    serde_json::from_value(req.input.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
-                            code: 1005,
-                            message: format!("Invalid storage_delete input: {e}"),
-                        }
-                    })?;
-                let result = client
-                    .storage_delete(&request)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json_response("result", result)
-            }
-            OP_HEALTH => {
-                let health = client.health().await.map_err(|e| e.to_fcp_error())?;
-                json!({ "health": health })
-            }
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
+                    let result = client
+                        .storage_delete(&request)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    json_response("result", result)
+                }
+                OP_HEALTH => {
+                    let health = client.health().await.map_err(|e| e.to_fcp_error())?;
+                    json!({ "health": health })
+                }
+                _ => {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1004,
+                        message: format!("Unknown operation: {operation}"),
+                    });
+                }
+            };
         Ok(InvokeResponse::ok(req.id, output))
     }
 }
@@ -1069,5 +1606,82 @@ mod tests {
     fn connector_id_correct() {
         let c = SupabaseConnector::new();
         assert_eq!(c.id().as_str(), "fcp.supabase");
+    }
+
+    #[test]
+    fn project_url_policy_accepts_supabase_host() {
+        let (ok, message, project_ref) = project_url_policy("https://demo-ref.supabase.co");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+        assert_eq!(project_ref.as_deref(), Some("demo-ref"));
+    }
+
+    #[test]
+    fn project_url_policy_accepts_localhost() {
+        let (ok, _message, project_ref) = project_url_policy("http://localhost:54321");
+        assert!(ok);
+        assert_eq!(project_ref, None);
+    }
+
+    #[test]
+    fn project_url_policy_rejects_external_http() {
+        let (ok, message, _project_ref) = project_url_policy("http://example.com/api");
+        assert!(!ok);
+        assert!(message.contains("scheme must be https"));
+        assert!(message.contains("host must end with"));
+    }
+
+    #[test]
+    fn classify_api_key_prefixes() {
+        assert_eq!(
+            classify_api_key("sb_secret_123"),
+            ApiKeyClassification::Secret
+        );
+        assert_eq!(
+            classify_api_key("sb_publishable_123"),
+            ApiKeyClassification::Publishable
+        );
+    }
+
+    #[test]
+    fn classify_api_key_service_role_jwt() {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"role":"service_role","ref":"projref"}"#);
+        let token = format!("{header}.{payload}.sig");
+        assert_eq!(
+            classify_api_key(&token),
+            ApiKeyClassification::JwtRole("service_role".into())
+        );
+        assert_eq!(decode_jwt_claim(&token, "ref").as_deref(), Some("projref"));
+    }
+
+    #[test]
+    fn provisioning_readiness_detects_project_ref_mismatch() {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"role":"anon","ref":"other-ref"}"#);
+        let token = format!("{header}.{payload}.sig");
+        let config = SupabaseConfig::from_value(json!({
+            "api_key": token,
+            "project_url": "https://demo-ref.supabase.co",
+            "schema": "public"
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.project_ref_matches_token, Some(false));
+        assert_eq!(readiness.key_role_hint.as_deref(), Some("anon"));
+    }
+
+    #[test]
+    fn doctor_unconfigured_contains_operator_guidance() {
+        let doctor = serde_json::to_value(SupabaseConnector::new().doctor()).unwrap();
+        assert_eq!(doctor["status"], "unhealthy");
+        assert_eq!(
+            doctor["verification_script"],
+            "scripts/e2e/supabase_connector_verification.sh"
+        );
+        assert_eq!(
+            doctor["operator_guidance"]["artifact_root_hint"],
+            "artifacts/e2e/supabase_connector/<timestamp>"
+        );
     }
 }

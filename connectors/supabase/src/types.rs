@@ -489,7 +489,10 @@ mod tests {
             }
         });
         let doc: OpenApiDocument = serde_json::from_value(json).unwrap();
-        assert_eq!(doc.info.as_ref().unwrap().title.as_deref(), Some("PostgREST API"));
+        assert_eq!(
+            doc.info.as_ref().unwrap().title.as_deref(),
+            Some("PostgREST API")
+        );
         assert_eq!(doc.paths.len(), 2);
     }
 

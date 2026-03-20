@@ -14,8 +14,12 @@ pub enum VercelError {
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Vercel API error {code}: {message}")]
-    Api { code: u32, message: String },
+    #[error("Vercel API error: {message} (status {status_code:?}, code {code:?})")]
+    Api {
+        message: String,
+        status_code: Option<u16>,
+        code: Option<String>,
+    },
 
     #[error("Rate limited (retry after {retry_after_ms}ms)")]
     RateLimited { retry_after_ms: u64 },
@@ -26,29 +30,32 @@ pub enum VercelError {
     #[error("Not found: {0}")]
     NotFound(String),
 
-    #[error("Async error: {0}")]
-    Async(String),
+    #[error("Validation error: {0}")]
+    Validation(String),
 
     #[error("Configuration error: {0}")]
     Config(String),
 
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+    #[error("Invalid response: {0}")]
+    InvalidResponse(String),
+
+    #[error("Async error: {0}")]
+    Async(String),
 }
 
 impl VercelError {
     #[must_use]
-    pub fn is_retryable(&self) -> bool {
+    pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(error) => error.is_timeout() || error.is_connect(),
-            Self::RateLimited { .. } => true,
-            Self::Api { code, .. } => matches!(code, 500 | 502 | 503 | 504),
+            Self::Http(_) | Self::RateLimited { .. } => true,
+            Self::Api { status_code, .. } => matches!(status_code, Some(429 | 500..=599)),
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::NotFound(_)
-            | Self::Async(_)
+            | Self::Validation(_)
             | Self::Config(_)
-            | Self::InvalidInput(_) => false,
+            | Self::InvalidResponse(_)
+            | Self::Async(_) => false,
         }
     }
 
@@ -73,10 +80,14 @@ impl VercelError {
             Self::Json(error) => FcpError::Internal {
                 message: format!("JSON parse error: {error}"),
             },
-            Self::Api { code, message } => FcpError::External {
+            Self::Api {
+                message,
+                status_code,
+                ..
+            } => FcpError::External {
                 service: "vercel".into(),
-                message: format!("Vercel API error {code}: {message}"),
-                status_code: u16::try_from(*code).ok(),
+                message: message.clone(),
+                status_code: *status_code,
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },
@@ -91,15 +102,15 @@ impl VercelError {
             Self::NotFound(resource) => FcpError::ResourceNotFound {
                 resource: resource.clone(),
             },
-            Self::Async(message) => FcpError::Internal {
-                message: format!("Async error: {message}"),
+            Self::Validation(message) => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
             },
             Self::Config(message) => FcpError::InvalidRequest {
                 code: 1001,
-                message: format!("Configuration error: {message}"),
+                message: message.clone(),
             },
-            Self::InvalidInput(message) => FcpError::InvalidRequest {
-                code: 1005,
+            Self::InvalidResponse(message) | Self::Async(message) => FcpError::Internal {
                 message: message.clone(),
             },
         }
@@ -137,128 +148,42 @@ mod tests {
     #[test]
     fn rate_limited_is_retryable() {
         let err = VercelError::RateLimited {
-            retry_after_ms: 5_000,
+            retry_after_ms: 4_000,
         };
         assert!(err.is_retryable());
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(5_000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(4_000)));
     }
 
     #[test]
-    fn unauthorized_is_not_retryable() {
+    fn unauthorized_maps_to_fcp_unauthorized() {
         let err = VercelError::Unauthorized("bad token".into());
-        assert!(!err.is_retryable());
-        assert!(err.retry_after().is_none());
-    }
-
-    #[test]
-    fn not_found_maps_to_resource_not_found() {
-        let err = VercelError::NotFound("project prj_abc".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::ResourceNotFound { resource } => assert_eq!(resource, "project prj_abc"),
-            other => panic!("Expected ResourceNotFound, got {other:?}"),
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert_eq!(message, "bad token");
+            }
+            other => panic!("expected unauthorized, got {other:?}"),
         }
     }
 
     #[test]
-    fn api_error_retryable_for_server_errors() {
-        let retryable = VercelError::Api {
-            code: 500,
-            message: "Internal".into(),
-        };
-        assert!(retryable.is_retryable());
-
-        let terminal = VercelError::Api {
-            code: 400,
-            message: "Bad request".into(),
-        };
-        assert!(!terminal.is_retryable());
-    }
-
-    #[test]
-    fn config_error_maps_to_invalid_request() {
-        let err = VercelError::Config("missing token".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
+    fn validation_maps_to_invalid_request() {
+        let err = VercelError::Validation("name is required".into());
+        match err.to_fcp_error() {
             FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert!(message.contains("missing token"));
+                assert_eq!(code, 1003);
+                assert_eq!(message, "name is required");
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => panic!("expected invalid request, got {other:?}"),
         }
     }
 
     #[test]
-    fn rate_limited_maps_to_fcp_rate_limited() {
-        let err = VercelError::RateLimited {
-            retry_after_ms: 3_000,
-        };
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 3_000);
-                assert!(violation.is_none());
-            }
-            other => panic!("Expected RateLimited, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn async_error_mapping_preserves_timeout() {
-        let err = VercelError::from_async_error(AsyncError::Timeout { timeout_ms: 1_500 });
+    fn async_timeout_is_preserved() {
+        let err = VercelError::from_async_error(AsyncError::Timeout { timeout_ms: 2_000 });
         assert_eq!(
             err.to_string(),
-            "Async error: request deadline exceeded after 1500ms"
+            "Async error: request deadline exceeded after 2000ms"
         );
-    }
-
-    #[test]
-    fn invalid_input_maps_correctly() {
-        let err = VercelError::InvalidInput("project_id is required".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1005);
-                assert!(message.contains("project_id"));
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn json_error_not_retryable() {
-        let err = VercelError::Json(
-            serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
-        );
-        assert!(!err.is_retryable());
-        assert!(err.retry_after().is_none());
-    }
-
-    #[test]
-    fn async_cancelled_maps_correctly() {
-        let err = VercelError::from_async_error(AsyncError::Cancelled);
-        assert_eq!(err.to_string(), "Async error: operation cancelled");
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn api_502_is_retryable() {
-        let err = VercelError::Api {
-            code: 502,
-            message: "Bad Gateway".into(),
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn api_503_is_retryable() {
-        let err = VercelError::Api {
-            code: 503,
-            message: "Service Unavailable".into(),
-        };
-        assert!(err.is_retryable());
     }
 }

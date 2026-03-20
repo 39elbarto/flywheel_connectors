@@ -215,7 +215,9 @@ impl GcpClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = content.to_string();
-        let ct = content_type.unwrap_or("application/octet-stream").to_string();
+        let ct = content_type
+            .unwrap_or("application/octet-stream")
+            .to_string();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
@@ -314,10 +316,7 @@ impl GcpClient {
     // ── Projects ──
 
     pub async fn get_project(&self, runtime: &ConnectorRuntime) -> GcpResult<Project> {
-        let url = format!(
-            "{}/v1/projects/{}",
-            self.crm_base, self.project_id
-        );
+        let url = format!("{}/v1/projects/{}", self.crm_base, self.project_id);
         self.get_single(runtime, &url).await
     }
 
@@ -385,19 +384,15 @@ impl GcpClient {
             let auth = self.auth.clone();
             async move {
                 debug!(attempt, url = %url, "POST empty");
-                let req = authenticate_request(client.post(&url), &auth)
-                    .header("Content-Length", "0");
+                let req =
+                    authenticate_request(client.post(&url), &auth).header("Content-Length", "0");
                 handle_response::<serde_json::Value>(req, attempt).await
             }
         })
         .await
     }
 
-    async fn delete(
-        &self,
-        runtime: &ConnectorRuntime,
-        url: &str,
-    ) -> GcpResult<serde_json::Value> {
+    async fn delete(&self, runtime: &ConnectorRuntime, url: &str) -> GcpResult<serde_json::Value> {
         let url = url.to_string();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();

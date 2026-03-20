@@ -1012,9 +1012,18 @@ mod tests {
 
     #[test]
     fn normalize_identifier_accepts_valid() {
-        assert_eq!(normalize_identifier("my_table", "table").unwrap(), "my_table");
-        assert_eq!(normalize_identifier("my-table", "table").unwrap(), "my-table");
-        assert_eq!(normalize_identifier("my.schema", "table").unwrap(), "my.schema");
+        assert_eq!(
+            normalize_identifier("my_table", "table").unwrap(),
+            "my_table"
+        );
+        assert_eq!(
+            normalize_identifier("my-table", "table").unwrap(),
+            "my-table"
+        );
+        assert_eq!(
+            normalize_identifier("my.schema", "table").unwrap(),
+            "my.schema"
+        );
     }
 
     #[test]
@@ -1095,10 +1104,7 @@ mod tests {
             value: json!(null),
         }];
         let result = build_filter_query(&filters).unwrap();
-        assert_eq!(
-            result,
-            vec![("deleted_at".into(), "is.null".into())]
-        );
+        assert_eq!(result, vec![("deleted_at".into(), "is.null".into())]);
     }
 
     #[test]

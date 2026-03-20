@@ -68,9 +68,7 @@ impl std::fmt::Debug for GcpAuth {
                 .debug_struct("AccessToken")
                 .field("access_token", &"[REDACTED]")
                 .finish(),
-            Self::ServiceAccount {
-                client_email, ..
-            } => f
+            Self::ServiceAccount { client_email, .. } => f
                 .debug_struct("ServiceAccount")
                 .field("client_email", client_email)
                 .field("private_key", &"[REDACTED]")

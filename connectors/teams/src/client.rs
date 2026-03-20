@@ -306,19 +306,98 @@ impl TeamsClient {
         content: &str,
         content_type: &str,
     ) -> TeamsResult<ChatMessage> {
-        let url = format!(
-            "{}/teams/{}/channels/{}/messages",
-            self.graph_base_url,
-            encode_path_segment(team_id),
-            encode_path_segment(channel_id)
-        );
         let body = serde_json::json!({
             "body": {
                 "contentType": content_type,
                 "content": content
             }
         });
-        self.graph_post(&url, &body).await
+        self.send_channel_message_payload(team_id, channel_id, &body)
+            .await
+    }
+
+    /// Send a structured payload to a channel.
+    ///
+    /// # Errors
+    /// Returns `TeamsError` on transport, auth, or API errors.
+    pub async fn send_channel_message_payload(
+        &self,
+        team_id: &str,
+        channel_id: &str,
+        payload: &serde_json::Value,
+    ) -> TeamsResult<ChatMessage> {
+        let url = format!(
+            "{}/teams/{}/channels/{}/messages",
+            self.graph_base_url,
+            encode_path_segment(team_id),
+            encode_path_segment(channel_id)
+        );
+        self.graph_post(&url, payload).await
+    }
+
+    /// Reply to a channel message.
+    ///
+    /// # Errors
+    /// Returns `TeamsError` on transport, auth, or API errors.
+    pub async fn reply_to_channel_message(
+        &self,
+        team_id: &str,
+        channel_id: &str,
+        message_id: &str,
+        payload: &serde_json::Value,
+    ) -> TeamsResult<ChatMessage> {
+        let url = format!(
+            "{}/teams/{}/channels/{}/messages/{}/replies",
+            self.graph_base_url,
+            encode_path_segment(team_id),
+            encode_path_segment(channel_id),
+            encode_path_segment(message_id)
+        );
+        self.graph_post(&url, payload).await
+    }
+
+    /// Update a channel message.
+    ///
+    /// # Errors
+    /// Returns `TeamsError` on transport, auth, or API errors.
+    pub async fn update_channel_message(
+        &self,
+        team_id: &str,
+        channel_id: &str,
+        message_id: &str,
+        payload: &serde_json::Value,
+    ) -> TeamsResult<()> {
+        let url = format!(
+            "{}/teams/{}/channels/{}/messages/{}",
+            self.graph_base_url,
+            encode_path_segment(team_id),
+            encode_path_segment(channel_id),
+            encode_path_segment(message_id)
+        );
+        self.graph_patch_empty(&url, payload).await
+    }
+
+    /// Update a reply beneath a channel message.
+    ///
+    /// # Errors
+    /// Returns `TeamsError` on transport, auth, or API errors.
+    pub async fn update_channel_reply(
+        &self,
+        team_id: &str,
+        channel_id: &str,
+        message_id: &str,
+        reply_id: &str,
+        payload: &serde_json::Value,
+    ) -> TeamsResult<()> {
+        let url = format!(
+            "{}/teams/{}/channels/{}/messages/{}/replies/{}",
+            self.graph_base_url,
+            encode_path_segment(team_id),
+            encode_path_segment(channel_id),
+            encode_path_segment(message_id),
+            encode_path_segment(reply_id)
+        );
+        self.graph_patch_empty(&url, payload).await
     }
 
     // ─── Graph API: Chats ───────────────────────────────────────────────────
@@ -342,18 +421,71 @@ impl TeamsClient {
         content: &str,
         content_type: &str,
     ) -> TeamsResult<ChatMessage> {
-        let url = format!(
-            "{}/chats/{}/messages",
-            self.graph_base_url,
-            encode_path_segment(chat_id)
-        );
         let body = serde_json::json!({
             "body": {
                 "contentType": content_type,
                 "content": content
             }
         });
-        self.graph_post(&url, &body).await
+        self.send_chat_message_payload(chat_id, &body).await
+    }
+
+    /// Send a structured payload to a chat.
+    ///
+    /// # Errors
+    /// Returns `TeamsError` on transport, auth, or API errors.
+    pub async fn send_chat_message_payload(
+        &self,
+        chat_id: &str,
+        payload: &serde_json::Value,
+    ) -> TeamsResult<ChatMessage> {
+        let url = format!(
+            "{}/chats/{}/messages",
+            self.graph_base_url,
+            encode_path_segment(chat_id)
+        );
+        self.graph_post(&url, payload).await
+    }
+
+    /// Reply with a quote in a chat.
+    ///
+    /// # Errors
+    /// Returns `TeamsError` on transport, auth, or API errors.
+    pub async fn reply_with_quote(
+        &self,
+        chat_id: &str,
+        message_ids: &[String],
+        reply_message: &serde_json::Value,
+    ) -> TeamsResult<ChatMessage> {
+        let url = format!(
+            "{}/chats/{}/messages/replyWithQuote",
+            self.graph_base_url,
+            encode_path_segment(chat_id)
+        );
+        let payload = serde_json::json!({
+            "messageIds": message_ids,
+            "replyMessage": reply_message,
+        });
+        self.graph_post(&url, &payload).await
+    }
+
+    /// Update a chat message.
+    ///
+    /// # Errors
+    /// Returns `TeamsError` on transport, auth, or API errors.
+    pub async fn update_chat_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        payload: &serde_json::Value,
+    ) -> TeamsResult<()> {
+        let url = format!(
+            "{}/chats/{}/messages/{}",
+            self.graph_base_url,
+            encode_path_segment(chat_id),
+            encode_path_segment(message_id)
+        );
+        self.graph_patch_empty(&url, payload).await
     }
 
     /// List messages in a chat.
@@ -432,6 +564,17 @@ impl TeamsClient {
         self.handle_response(resp).await
     }
 
+    async fn graph_patch_empty(&self, url: &str, body: &serde_json::Value) -> TeamsResult<()> {
+        let resp = self
+            .authorize(self.client.patch(url))
+            .json(body)
+            .send()
+            .await
+            .map_err(TeamsError::Http)?;
+
+        self.handle_empty_response(resp).await
+    }
+
     async fn graph_get_collection<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
@@ -482,6 +625,29 @@ impl TeamsClient {
         }
 
         resp.json().await.map_err(TeamsError::Http)
+    }
+
+    async fn handle_empty_response(&self, resp: reqwest::Response) -> TeamsResult<()> {
+        let status = resp.status().as_u16();
+
+        if status == 429 {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(30_000, |s| s * 1000);
+            return Err(TeamsError::RateLimited {
+                retry_after_ms: retry_after,
+            });
+        }
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(TeamsError::from_graph_response(status, &body));
+        }
+
+        Ok(())
     }
 }
 
@@ -720,6 +886,47 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn send_channel_message_payload_preserves_attachments() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/teams/t1/channels/ch1/messages"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "msg_card",
+                    "attachments": [{
+                        "id": "card_1",
+                        "contentType": "application/vnd.microsoft.card.adaptive"
+                    }]
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let payload = serde_json::json!({
+            "body": {
+                "contentType": "html",
+                "content": "<attachment id=\"card_1\"></attachment>"
+            },
+            "attachments": [{
+                "id": "card_1",
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": "{\"type\":\"AdaptiveCard\",\"version\":\"1.4\"}"
+            }]
+        });
+
+        let msg = client
+            .send_channel_message_payload("t1", "ch1", &payload)
+            .await
+            .unwrap();
+        assert_eq!(msg.id, Some("msg_card".into()));
+
+        let requests = mock_server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["attachments"][0]["id"], "card_1");
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn send_chat_message_returns_message() {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -739,6 +946,132 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(msg.id, Some("msg_2".into()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn reply_to_channel_message_returns_reply() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/t1/channels/ch1/messages/root_1/replies",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "reply_1",
+                    "replyToId": "root_1",
+                    "body": { "contentType": "html", "content": "Hello reply" }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let reply = client
+            .reply_to_channel_message(
+                "t1",
+                "ch1",
+                "root_1",
+                &serde_json::json!({
+                    "body": {
+                        "contentType": "html",
+                        "content": "Hello reply"
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.reply_to_id, Some("root_1".into()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn reply_with_quote_posts_action_payload() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/chats/chat_1/messages/replyWithQuote",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "reply_quote_1",
+                    "chatId": "chat_1",
+                    "body": { "contentType": "html", "content": "Quoted reply" }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let message_ids = vec!["1728088338580".to_string()];
+        let reply = client
+            .reply_with_quote(
+                "chat_1",
+                &message_ids,
+                &serde_json::json!({
+                    "body": {
+                        "content": "Quoted reply"
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.chat_id, Some("chat_1".into()));
+
+        let requests = mock_server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["messageIds"][0], "1728088338580");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn update_channel_message_accepts_no_content_response() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path(
+                "/teams/t1/channels/ch1/messages/msg_1",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        client
+            .update_channel_message(
+                "t1",
+                "ch1",
+                "msg_1",
+                &serde_json::json!({
+                    "body": {
+                        "contentType": "text",
+                        "content": "Edited"
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn update_chat_message_accepts_no_content_response() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/chats/chat_1/messages/msg_2"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        client
+            .update_chat_message(
+                "chat_1",
+                "msg_2",
+                &serde_json::json!({
+                    "body": {
+                        "contentType": "text",
+                        "content": "Edited"
+                    }
+                }),
+            )
+            .await
+            .unwrap();
     }
 
     #[fcp_async_core::runtime::test]

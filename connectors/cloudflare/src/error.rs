@@ -229,6 +229,9 @@ mod tests {
     #[test]
     fn async_error_mapping_preserves_timeout() {
         let err = CloudflareError::from_async_error(AsyncError::Timeout { timeout_ms: 1_500 });
-        assert_eq!(err.to_string(), "Async error: request deadline exceeded after 1500ms");
+        assert_eq!(
+            err.to_string(),
+            "Async error: request deadline exceeded after 1500ms"
+        );
     }
 }

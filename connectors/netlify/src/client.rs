@@ -33,10 +33,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> NetlifyResult<&'a s
 /// Validate a query string parameter to prevent injection.
 fn sanitize_query_param<'a>(value: &'a str, field: &str) -> NetlifyResult<&'a str> {
     if value.contains('&') || value.contains('?') || value.contains('#') {
-        return Err(NetlifyError::Api {
-            status: 400,
-            message: format!("{field} contains invalid characters"),
-        });
+        return Err(NetlifyError::InvalidInput(format!(
+            "{field} contains query injection characters"
+        )));
     }
     Ok(value)
 }
@@ -111,7 +110,7 @@ impl NetlifyClient {
         req: &CreateSiteRequest,
     ) -> NetlifyResult<Site> {
         let url = format!("{}/api/v1/sites", self.base_url);
-        let body = serde_json::to_value(req).unwrap_or(json!({}));
+        let body = serde_json::to_value(req).map_err(NetlifyError::Json)?;
         self.post_json(runtime, &url, &body).await
     }
 
@@ -160,7 +159,7 @@ impl NetlifyClient {
     ) -> NetlifyResult<Deploy> {
         let site_id = sanitize_path_segment(site_id, "site_id")?;
         let url = format!("{}/api/v1/sites/{site_id}/deploys", self.base_url);
-        let body = serde_json::to_value(req).unwrap_or(json!({}));
+        let body = serde_json::to_value(req).map_err(NetlifyError::Json)?;
         self.post_json(runtime, &url, &body).await
     }
 
@@ -216,7 +215,7 @@ impl NetlifyClient {
             "{}/api/v1/accounts/{account_slug}/env?site_id={site_id}",
             self.base_url
         );
-        let body = serde_json::to_value(req).unwrap_or(json!([]));
+        let body = serde_json::to_value(req).map_err(NetlifyError::Json)?;
         self.post_json_list(runtime, &url, &body).await
     }
 

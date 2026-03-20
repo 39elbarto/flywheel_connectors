@@ -230,7 +230,7 @@ impl PayPalClient {
         self.post_json(
             runtime,
             &url,
-            &serde_json::to_value(order).unwrap_or(json!({})),
+            &serde_json::to_value(order).map_err(PayPalError::Json)?,
         )
         .await
     }
@@ -293,7 +293,7 @@ impl PayPalClient {
         self.post_json(
             runtime,
             &url,
-            &serde_json::to_value(refund_req).unwrap_or(json!({})),
+            &serde_json::to_value(refund_req).map_err(PayPalError::Json)?,
         )
         .await
     }
@@ -309,7 +309,7 @@ impl PayPalClient {
         self.post_json(
             runtime,
             &url,
-            &serde_json::to_value(invoice).unwrap_or(json!({})),
+            &serde_json::to_value(invoice).map_err(PayPalError::Json)?,
         )
         .await
     }

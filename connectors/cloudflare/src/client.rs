@@ -145,7 +145,7 @@ impl CloudflareClient {
         self.post_json(
             runtime,
             &url,
-            &serde_json::to_value(record).unwrap_or(json!({})),
+            &serde_json::to_value(record).map_err(CloudflareError::Json)?,
         )
         .await
     }
@@ -163,7 +163,7 @@ impl CloudflareClient {
         self.put_json(
             runtime,
             &url,
-            &serde_json::to_value(record).unwrap_or(json!({})),
+            &serde_json::to_value(record).map_err(CloudflareError::Json)?,
         )
         .await
     }

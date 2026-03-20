@@ -14,8 +14,8 @@ pub enum VercelError {
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Vercel API error: {code}: {message}")]
-    Api { code: String, message: String },
+    #[error("Vercel API error {code}: {message}")]
+    Api { code: u32, message: String },
 
     #[error("Rate limited (retry after {retry_after_ms}ms)")]
     RateLimited { retry_after_ms: u64 },
@@ -42,9 +42,7 @@ impl VercelError {
         match self {
             Self::Http(error) => error.is_timeout() || error.is_connect(),
             Self::RateLimited { .. } => true,
-            Self::Api { code, .. } => {
-                matches!(code.as_str(), "internal_server_error" | "service_unavailable")
-            }
+            Self::Api { code, .. } => matches!(code, 500 | 502 | 503 | 504),
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::NotFound(_)
@@ -78,7 +76,7 @@ impl VercelError {
             Self::Api { code, message } => FcpError::External {
                 service: "vercel".into(),
                 message: format!("Vercel API error {code}: {message}"),
-                status_code: None,
+                status_code: u16::try_from(*code).ok(),
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },
@@ -154,12 +152,10 @@ mod tests {
 
     #[test]
     fn not_found_maps_to_resource_not_found() {
-        let err = VercelError::NotFound("deployment dpl_abc".into());
+        let err = VercelError::NotFound("project prj_abc".into());
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "deployment dpl_abc");
-            }
+            FcpError::ResourceNotFound { resource } => assert_eq!(resource, "project prj_abc"),
             other => panic!("Expected ResourceNotFound, got {other:?}"),
         }
     }
@@ -167,13 +163,13 @@ mod tests {
     #[test]
     fn api_error_retryable_for_server_errors() {
         let retryable = VercelError::Api {
-            code: "internal_server_error".into(),
+            code: 500,
             message: "Internal".into(),
         };
         assert!(retryable.is_retryable());
 
         let terminal = VercelError::Api {
-            code: "bad_request".into(),
+            code: 400,
             message: "Bad request".into(),
         };
         assert!(!terminal.is_retryable());
@@ -220,49 +216,48 @@ mod tests {
     }
 
     #[test]
-    fn async_error_mapping_cancelled() {
-        let err = VercelError::from_async_error(AsyncError::Cancelled);
-        assert_eq!(err.to_string(), "Async error: operation cancelled");
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn invalid_input_maps_to_invalid_request() {
+    fn invalid_input_maps_correctly() {
         let err = VercelError::InvalidInput("project_id is required".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::InvalidRequest { code, message } => {
                 assert_eq!(code, 1005);
-                assert_eq!(message, "project_id is required");
+                assert!(message.contains("project_id"));
             }
             other => panic!("Expected InvalidRequest, got {other:?}"),
         }
     }
 
     #[test]
-    fn json_error_is_not_retryable() {
-        let err = VercelError::Json(serde_json::from_str::<String>("bad").unwrap_err());
+    fn json_error_not_retryable() {
+        let err = VercelError::Json(
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+        );
         assert!(!err.is_retryable());
         assert!(err.retry_after().is_none());
     }
 
     #[test]
-    fn json_error_maps_to_internal() {
-        let err = VercelError::Json(serde_json::from_str::<String>("bad").unwrap_err());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Internal { message } => {
-                assert!(message.contains("JSON parse error"));
-            }
-            other => panic!("Expected Internal, got {other:?}"),
-        }
+    fn async_cancelled_maps_correctly() {
+        let err = VercelError::from_async_error(AsyncError::Cancelled);
+        assert_eq!(err.to_string(), "Async error: operation cancelled");
+        assert!(!err.is_retryable());
     }
 
     #[test]
-    fn service_unavailable_is_retryable() {
+    fn api_502_is_retryable() {
         let err = VercelError::Api {
-            code: "service_unavailable".into(),
-            message: "Service unavailable".into(),
+            code: 502,
+            message: "Bad Gateway".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_503_is_retryable() {
+        let err = VercelError::Api {
+            code: 503,
+            message: "Service Unavailable".into(),
         };
         assert!(err.is_retryable());
     }

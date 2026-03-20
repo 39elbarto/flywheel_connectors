@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
-use serde_json::json;
 use tracing::debug;
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
@@ -57,100 +56,67 @@ impl VercelClient {
         self.auth.token.is_empty()
     }
 
-    /// Append `?teamId=xxx` or `&teamId=xxx` if team_id is set.
-    fn with_team(&self, url: &str) -> String {
-        match &self.team_id {
-            Some(tid) if !tid.is_empty() => {
-                if url.contains('?') {
-                    format!("{url}&teamId={tid}")
-                } else {
-                    format!("{url}?teamId={tid}")
-                }
-            }
-            _ => url.to_string(),
-        }
+    fn team_query(&self) -> String {
+        self.team_id
+            .as_ref()
+            .map_or_else(String::new, |id| format!("?teamId={id}"))
     }
 
-    // ── Health check ──
+    // ── Health check (get authenticated user) ──
 
     pub async fn health_check(&self, runtime: &ConnectorRuntime) -> VercelResult<User> {
-        let resp: UserResponse = self
-            .get_single(runtime, &format!("{}/v2/user", self.base_url))
-            .await?;
+        let url = format!("{}/v2/user", self.base_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        let resp: UserResponse = RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth = self.auth.clone();
+            async move {
+                debug!(attempt, "Verifying Vercel token");
+                let req = authenticate_request(client.get(&url), &auth);
+                handle_response::<UserResponse>(req, attempt).await
+            }
+        })
+        .await?;
         Ok(resp.user)
-    }
-
-    // ── Deployments ──
-
-    pub async fn list_deployments(
-        &self,
-        runtime: &ConnectorRuntime,
-        project_id: Option<&str>,
-        limit: Option<u32>,
-    ) -> VercelResult<Vec<Deployment>> {
-        let mut url = format!("{}/v6/deployments", self.base_url);
-        let mut params = Vec::new();
-        if let Some(pid) = project_id {
-            params.push(format!("projectId={pid}"));
-        }
-        if let Some(lim) = limit {
-            params.push(format!("limit={lim}"));
-        }
-        if !params.is_empty() {
-            url = format!("{url}?{}", params.join("&"));
-        }
-        let url = self.with_team(&url);
-        self.get_typed::<DeploymentListResponse>(runtime, &url)
-            .await
-            .map(|r| r.deployments)
-    }
-
-    pub async fn get_deployment(
-        &self,
-        runtime: &ConnectorRuntime,
-        deployment_id: &str,
-    ) -> VercelResult<Deployment> {
-        let url = format!("{}/v13/deployments/{deployment_id}", self.base_url);
-        let url = self.with_team(&url);
-        self.get_single(runtime, &url).await
-    }
-
-    pub async fn create_deployment(
-        &self,
-        runtime: &ConnectorRuntime,
-        deployment: &CreateDeployment,
-    ) -> VercelResult<Deployment> {
-        let url = format!("{}/v13/deployments", self.base_url);
-        let url = self.with_team(&url);
-        let body = serde_json::to_value(deployment).unwrap_or(json!({}));
-        self.post_json(runtime, &url, &body).await
-    }
-
-    pub async fn delete_deployment(
-        &self,
-        runtime: &ConnectorRuntime,
-        deployment_id: &str,
-    ) -> VercelResult<serde_json::Value> {
-        let url = format!("{}/v13/deployments/{deployment_id}", self.base_url);
-        let url = self.with_team(&url);
-        self.delete(runtime, &url).await
     }
 
     // ── Projects ──
 
-    pub async fn list_projects(
-        &self,
-        runtime: &ConnectorRuntime,
-        limit: Option<u32>,
-    ) -> VercelResult<Vec<Project>> {
-        let mut url = format!("{}/v9/projects", self.base_url);
-        if let Some(lim) = limit {
-            url = format!("{url}?limit={lim}");
-        }
-        let url = self.with_team(&url);
-        self.get_typed::<ProjectListResponse>(runtime, &url)
-            .await
-            .map(|r| r.projects)
+    pub async fn list_projects(&self, runtime: &ConnectorRuntime) -> VercelResult<Vec<Project>> {
+        let url = format!("{}/v9/projects{}", self.base_url, self.team_query());
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth = self.auth.clone();
+            async move {
+                debug!(attempt, "Listing projects");
+                let req = authenticate_request(client.get(&url), &auth);
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: VercelError::Http(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+                let status = resp.status().as_u16();
+                if let Some(outcome) = check_error_status::<Vec<Project>>(status) {
+                    return outcome;
+                }
+                match resp.json::<ProjectsResponse>().await {
+                    Ok(resp) => AttemptOutcome::Success(resp.projects),
+                    Err(e) => AttemptOutcome::Terminal(VercelError::Http(e)),
+                }
+            }
+        })
+        .await
     }
 
     pub async fn get_project(
@@ -158,76 +124,158 @@ impl VercelClient {
         runtime: &ConnectorRuntime,
         project_id: &str,
     ) -> VercelResult<Project> {
-        let url = format!("{}/v9/projects/{project_id}", self.base_url);
-        let url = self.with_team(&url);
+        let url = format!(
+            "{}/v9/projects/{project_id}{}",
+            self.base_url,
+            self.team_query()
+        );
         self.get_single(runtime, &url).await
     }
 
-    pub async fn create_project(
-        &self,
-        runtime: &ConnectorRuntime,
-        project: &CreateProject,
-    ) -> VercelResult<Project> {
-        let url = format!("{}/v10/projects", self.base_url);
-        let url = self.with_team(&url);
-        let body = serde_json::to_value(project).unwrap_or(json!({}));
-        self.post_json(runtime, &url, &body).await
-    }
+    // ── Deployments ──
 
-    pub async fn delete_project(
+    pub async fn list_deployments(
         &self,
         runtime: &ConnectorRuntime,
         project_id: &str,
-    ) -> VercelResult<serde_json::Value> {
-        let url = format!("{}/v9/projects/{project_id}", self.base_url);
-        let url = self.with_team(&url);
-        self.delete(runtime, &url).await
+    ) -> VercelResult<Vec<Deployment>> {
+        let sep = if self.team_id.is_some() { "&" } else { "?" };
+        let url = format!(
+            "{}/v6/deployments{}{sep}projectId={project_id}",
+            self.base_url,
+            self.team_query()
+        );
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth = self.auth.clone();
+            async move {
+                debug!(attempt, "Listing deployments");
+                let req = authenticate_request(client.get(&url), &auth);
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: VercelError::Http(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+                let status = resp.status().as_u16();
+                if let Some(outcome) = check_error_status::<Vec<Deployment>>(status) {
+                    return outcome;
+                }
+                match resp.json::<DeploymentsResponse>().await {
+                    Ok(resp) => AttemptOutcome::Success(resp.deployments),
+                    Err(e) => AttemptOutcome::Terminal(VercelError::Http(e)),
+                }
+            }
+        })
+        .await
+    }
+
+    pub async fn get_deployment(
+        &self,
+        runtime: &ConnectorRuntime,
+        deployment_id: &str,
+    ) -> VercelResult<Deployment> {
+        let url = format!(
+            "{}/v13/deployments/{deployment_id}{}",
+            self.base_url,
+            self.team_query()
+        );
+        self.get_single(runtime, &url).await
+    }
+
+    pub async fn create_deployment(
+        &self,
+        runtime: &ConnectorRuntime,
+        body: &serde_json::Value,
+    ) -> VercelResult<Deployment> {
+        let url = format!(
+            "{}/v13/deployments{}",
+            self.base_url,
+            self.team_query()
+        );
+        self.post_json(runtime, &url, body).await
+    }
+
+    pub async fn cancel_deployment(
+        &self,
+        runtime: &ConnectorRuntime,
+        deployment_id: &str,
+    ) -> VercelResult<Deployment> {
+        let url = format!(
+            "{}/v12/deployments/{deployment_id}/cancel{}",
+            self.base_url,
+            self.team_query()
+        );
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth = self.auth.clone();
+            async move {
+                debug!(attempt, "Cancelling deployment");
+                let req = authenticate_request(client.patch(&url), &auth);
+                handle_response::<Deployment>(req, attempt).await
+            }
+        })
+        .await
     }
 
     // ── Domains ──
 
-    pub async fn list_domains(
-        &self,
-        runtime: &ConnectorRuntime,
-        project_id: &str,
-    ) -> VercelResult<Vec<Domain>> {
-        let url = format!(
-            "{}/v9/projects/{project_id}/domains",
-            self.base_url
-        );
-        let url = self.with_team(&url);
-        self.get_typed::<DomainListResponse>(runtime, &url)
-            .await
-            .map(|r| r.domains)
+    pub async fn list_domains(&self, runtime: &ConnectorRuntime) -> VercelResult<Vec<Domain>> {
+        let url = format!("{}/v5/domains{}", self.base_url, self.team_query());
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth = self.auth.clone();
+            async move {
+                debug!(attempt, "Listing domains");
+                let req = authenticate_request(client.get(&url), &auth);
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: VercelError::Http(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+                let status = resp.status().as_u16();
+                if let Some(outcome) = check_error_status::<Vec<Domain>>(status) {
+                    return outcome;
+                }
+                match resp.json::<DomainsResponse>().await {
+                    Ok(resp) => AttemptOutcome::Success(resp.domains),
+                    Err(e) => AttemptOutcome::Terminal(VercelError::Http(e)),
+                }
+            }
+        })
+        .await
     }
 
-    pub async fn add_domain(
+    pub async fn get_domain(
         &self,
         runtime: &ConnectorRuntime,
-        project_id: &str,
-        domain: &AddDomain,
+        domain_name: &str,
     ) -> VercelResult<Domain> {
         let url = format!(
-            "{}/v10/projects/{project_id}/domains",
-            self.base_url
+            "{}/v5/domains/{domain_name}{}",
+            self.base_url,
+            self.team_query()
         );
-        let url = self.with_team(&url);
-        let body = serde_json::to_value(domain).unwrap_or(json!({}));
-        self.post_json(runtime, &url, &body).await
-    }
-
-    pub async fn remove_domain(
-        &self,
-        runtime: &ConnectorRuntime,
-        project_id: &str,
-        domain_name: &str,
-    ) -> VercelResult<serde_json::Value> {
-        let url = format!(
-            "{}/v9/projects/{project_id}/domains/{domain_name}",
-            self.base_url
-        );
-        let url = self.with_team(&url);
-        self.delete(runtime, &url).await
+        self.get_single(runtime, &url).await
     }
 
     // ── Environment Variables ──
@@ -238,52 +286,10 @@ impl VercelClient {
         project_id: &str,
     ) -> VercelResult<Vec<EnvVar>> {
         let url = format!(
-            "{}/v10/projects/{project_id}/env",
-            self.base_url
+            "{}/v9/projects/{project_id}/env{}",
+            self.base_url,
+            self.team_query()
         );
-        let url = self.with_team(&url);
-        self.get_typed::<EnvVarListResponse>(runtime, &url)
-            .await
-            .map(|r| r.envs)
-    }
-
-    pub async fn create_env_var(
-        &self,
-        runtime: &ConnectorRuntime,
-        project_id: &str,
-        env_var: &CreateEnvVar,
-    ) -> VercelResult<EnvVar> {
-        let url = format!(
-            "{}/v10/projects/{project_id}/env",
-            self.base_url
-        );
-        let url = self.with_team(&url);
-        let body = serde_json::to_value(env_var).unwrap_or(json!({}));
-        self.post_json(runtime, &url, &body).await
-    }
-
-    pub async fn delete_env_var(
-        &self,
-        runtime: &ConnectorRuntime,
-        project_id: &str,
-        env_id: &str,
-    ) -> VercelResult<serde_json::Value> {
-        let url = format!(
-            "{}/v10/projects/{project_id}/env/{env_id}",
-            self.base_url
-        );
-        let url = self.with_team(&url);
-        self.delete(runtime, &url).await
-    }
-
-    // ── Generic HTTP helpers ──
-
-    async fn get_typed<T: serde::de::DeserializeOwned + Send + 'static>(
-        &self,
-        runtime: &ConnectorRuntime,
-        url: &str,
-    ) -> VercelResult<T> {
-        let url = url.to_string();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
@@ -292,13 +298,45 @@ impl VercelClient {
             let client = self.client.clone();
             let auth = self.auth.clone();
             async move {
-                debug!(attempt, url = %url, "GET typed");
+                debug!(attempt, "Listing env vars");
                 let req = authenticate_request(client.get(&url), &auth);
-                handle_response::<T>(req, attempt).await
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: VercelError::Http(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+                let status = resp.status().as_u16();
+                if let Some(outcome) = check_error_status::<Vec<EnvVar>>(status) {
+                    return outcome;
+                }
+                match resp.json::<EnvVarsResponse>().await {
+                    Ok(resp) => AttemptOutcome::Success(resp.envs),
+                    Err(e) => AttemptOutcome::Terminal(VercelError::Http(e)),
+                }
             }
         })
         .await
     }
+
+    pub async fn set_env_var(
+        &self,
+        runtime: &ConnectorRuntime,
+        project_id: &str,
+        body: &serde_json::Value,
+    ) -> VercelResult<EnvVar> {
+        let url = format!(
+            "{}/v10/projects/{project_id}/env{}",
+            self.base_url,
+            self.team_query()
+        );
+        self.post_json(runtime, &url, body).await
+    }
+
+    // ── Generic HTTP helpers ──
 
     async fn get_single<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
@@ -346,28 +384,6 @@ impl VercelClient {
         })
         .await
     }
-
-    async fn delete<T: serde::de::DeserializeOwned + Send + 'static>(
-        &self,
-        runtime: &ConnectorRuntime,
-        url: &str,
-    ) -> VercelResult<T> {
-        let url = url.to_string();
-        let ctx = runtime.request_context();
-        let policy = self.retry_config.to_retry_policy();
-
-        RetryLoop::execute(&ctx, &policy, |attempt| {
-            let url = url.clone();
-            let client = self.client.clone();
-            let auth = self.auth.clone();
-            async move {
-                debug!(attempt, url = %url, "DELETE");
-                let req = authenticate_request(client.delete(&url), &auth);
-                handle_response::<T>(req, attempt).await
-            }
-        })
-        .await
-    }
 }
 
 // ── Free functions for request handling ──
@@ -378,6 +394,28 @@ fn authenticate_request(req: RequestBuilder, auth: &VercelAuth) -> RequestBuilde
     } else {
         req.bearer_auth(&auth.token)
     }
+}
+
+fn check_error_status<T>(status: u16) -> Option<AttemptOutcome<T, VercelError>> {
+    if status == 429 {
+        return Some(AttemptOutcome::Retryable {
+            error: VercelError::RateLimited {
+                retry_after_ms: 60_000,
+            },
+            retry_after: Some(Duration::from_secs(60)),
+        });
+    }
+    if status == 401 || status == 403 {
+        return Some(AttemptOutcome::Terminal(VercelError::Unauthorized(
+            format!("Authentication failed (HTTP {status})"),
+        )));
+    }
+    if status == 404 {
+        return Some(AttemptOutcome::Terminal(VercelError::NotFound(format!(
+            "Resource not found (HTTP {status})"
+        ))));
+    }
+    None
 }
 
 async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -427,27 +465,8 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 
     if !resp.status().is_success() {
         let text = resp.text().await.unwrap_or_default();
-        // Try to parse Vercel error envelope
-        if let Ok(VercelErrorResponse {
-            error: Some(api_err),
-        }) = serde_json::from_str::<VercelErrorResponse>(&text)
-        {
-            let ve = VercelError::Api {
-                code: api_err.code.unwrap_or_else(|| status.to_string()),
-                message: api_err
-                    .message
-                    .unwrap_or_else(|| format!("HTTP {status}")),
-            };
-            if ve.is_retryable() {
-                return AttemptOutcome::Retryable {
-                    error: ve,
-                    retry_after: None,
-                };
-            }
-            return AttemptOutcome::Terminal(ve);
-        }
         let err = VercelError::Api {
-            code: status.to_string(),
+            code: u32::from(status),
             message: text,
         };
         if status >= 500 {
@@ -459,25 +478,11 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
         return AttemptOutcome::Terminal(err);
     }
 
-    // For 204 No Content (delete responses), return empty JSON
-    if status == 204 {
-        match serde_json::from_str::<T>("{}") {
-            Ok(v) => return AttemptOutcome::Success(v),
-            Err(_) => {
-                match serde_json::from_str::<T>("null") {
-                    Ok(v) => return AttemptOutcome::Success(v),
-                    Err(e) => return AttemptOutcome::Terminal(VercelError::Json(e)),
-                }
-            }
-        }
-    }
-
     let text = match resp.text().await {
         Ok(t) => t,
         Err(e) => return AttemptOutcome::Terminal(VercelError::Http(e)),
     };
 
-    // Vercel API returns direct JSON (no envelope wrapper like Cloudflare)
     match serde_json::from_str::<T>(&text) {
         Ok(v) => AttemptOutcome::Success(v),
         Err(e) => {
@@ -564,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn with_team_appends_query_param() {
+    fn team_query_with_team() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             VercelClient::new(
                 "https://api.vercel.com",
@@ -578,37 +583,11 @@ mod tests {
             .unwrap()
         })
         .unwrap();
-        let url = rt.with_team("https://api.vercel.com/v6/deployments");
-        assert_eq!(
-            url,
-            "https://api.vercel.com/v6/deployments?teamId=team_abc"
-        );
+        assert_eq!(rt.team_query(), "?teamId=team_abc");
     }
 
     #[test]
-    fn with_team_appends_ampersand_when_query_exists() {
-        let rt = fcp_async_core::runtime::block_on_sync(async {
-            VercelClient::new(
-                "https://api.vercel.com",
-                VercelAuth {
-                    token: "t".into(),
-                },
-                Some("team_abc".into()),
-                HttpRetryConfig::default(),
-            )
-            .await
-            .unwrap()
-        })
-        .unwrap();
-        let url = rt.with_team("https://api.vercel.com/v6/deployments?limit=10");
-        assert_eq!(
-            url,
-            "https://api.vercel.com/v6/deployments?limit=10&teamId=team_abc"
-        );
-    }
-
-    #[test]
-    fn with_team_no_team_returns_original() {
+    fn team_query_without_team() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             VercelClient::new(
                 "https://api.vercel.com",
@@ -622,26 +601,6 @@ mod tests {
             .unwrap()
         })
         .unwrap();
-        let url = rt.with_team("https://api.vercel.com/v6/deployments");
-        assert_eq!(url, "https://api.vercel.com/v6/deployments");
-    }
-
-    #[test]
-    fn with_team_empty_string_returns_original() {
-        let rt = fcp_async_core::runtime::block_on_sync(async {
-            VercelClient::new(
-                "https://api.vercel.com",
-                VercelAuth {
-                    token: "t".into(),
-                },
-                Some(String::new()),
-                HttpRetryConfig::default(),
-            )
-            .await
-            .unwrap()
-        })
-        .unwrap();
-        let url = rt.with_team("https://api.vercel.com/v6/deployments");
-        assert_eq!(url, "https://api.vercel.com/v6/deployments");
+        assert_eq!(rt.team_query(), "");
     }
 }

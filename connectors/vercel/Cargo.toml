@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "FCP Vercel connector for Deployments, Projects, Domains, and Environment Variables"
+description = "FCP Vercel connector for deployments, projects, domains, and environment variables"
 
 [[bin]]
 name = "fcp-vercel"

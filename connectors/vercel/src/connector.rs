@@ -16,32 +16,25 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::VercelClient;
-use crate::types::{AddDomain, CreateDeployment, CreateEnvVar, CreateProject, GitSource, VercelAuth};
+use crate::types::VercelAuth;
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
-const OP_DEPLOYMENTS_LIST: &str = "vercel.deployments.list";
-const OP_DEPLOYMENTS_GET: &str = "vercel.deployments.get";
-const OP_DEPLOYMENTS_CREATE: &str = "vercel.deployments.create";
-const OP_DEPLOYMENTS_DELETE: &str = "vercel.deployments.delete";
-const OP_PROJECTS_LIST: &str = "vercel.projects.list";
-const OP_PROJECTS_GET: &str = "vercel.projects.get";
-const OP_PROJECTS_CREATE: &str = "vercel.projects.create";
-const OP_PROJECTS_DELETE: &str = "vercel.projects.delete";
-const OP_DOMAINS_LIST: &str = "vercel.domains.list";
-const OP_DOMAINS_ADD: &str = "vercel.domains.add";
-const OP_DOMAINS_REMOVE: &str = "vercel.domains.remove";
-const OP_ENV_LIST: &str = "vercel.env.list";
-const OP_ENV_CREATE: &str = "vercel.env.create";
-const OP_ENV_DELETE: &str = "vercel.env.delete";
-const OP_HEALTH: &str = "vercel.health";
+const OP_LIST_PROJECTS: &str = "vercel.projects.list";
+const OP_GET_PROJECT: &str = "vercel.projects.get";
+const OP_LIST_DEPLOYMENTS: &str = "vercel.deployments.list";
+const OP_GET_DEPLOYMENT: &str = "vercel.deployments.get";
+const OP_CREATE_DEPLOYMENT: &str = "vercel.deployments.create";
+const OP_CANCEL_DEPLOYMENT: &str = "vercel.deployments.cancel";
+const OP_LIST_DOMAINS: &str = "vercel.domains.list";
+const OP_GET_DOMAIN: &str = "vercel.domains.get";
+const OP_LIST_ENV_VARS: &str = "vercel.env.list";
+const OP_SET_ENV_VAR: &str = "vercel.env.set";
 
+const CAP_PROJECTS_READ: &str = "vercel.projects.read";
 const CAP_DEPLOYMENTS_READ: &str = "vercel.deployments.read";
 const CAP_DEPLOYMENTS_WRITE: &str = "vercel.deployments.write";
-const CAP_PROJECTS_READ: &str = "vercel.projects.read";
-const CAP_PROJECTS_WRITE: &str = "vercel.projects.write";
 const CAP_DOMAINS_READ: &str = "vercel.domains.read";
-const CAP_DOMAINS_WRITE: &str = "vercel.domains.write";
 const CAP_ENV_READ: &str = "vercel.env.read";
 const CAP_ENV_WRITE: &str = "vercel.env.write";
 
@@ -186,9 +179,9 @@ impl VercelConnector {
                 name: "team_id".into(),
                 passed: true,
                 message: Some(if cfg.team_id.is_some() {
-                    "Team-scoped".into()
+                    "Team scope active".into()
                 } else {
-                    "Personal account".into()
+                    "Personal scope".into()
                 }),
                 critical: false,
             });
@@ -236,23 +229,45 @@ fn operations_info() -> Vec<OperationInfo> {
             when_to_use: when.into(),
             common_mistakes: mistakes,
             examples,
-            related: related.into_iter().map(CapabilityId::from_static).collect(),
+            related: related
+                .into_iter()
+                .map(CapabilityId::from_static)
+                .collect(),
         }
     };
     vec![
         OperationInfo {
-            id: OperationId::from_static(OP_DEPLOYMENTS_LIST),
-            summary: "List deployments".into(),
+            id: OperationId::from_static(OP_LIST_PROJECTS),
+            summary: "List all Vercel projects".into(),
             description: None,
             input_schema: json!({"type":"object"}),
             output_schema: json!({"type":"array"}),
-            capability: CapabilityId::from_static(CAP_DEPLOYMENTS_READ),
+            capability: CapabilityId::from_static(CAP_PROJECTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "List recent deployments",
+                "Get a list of all projects in the account",
                 vec![],
+                vec![],
+                vec![CAP_DEPLOYMENTS_READ],
+            ),
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_GET_PROJECT),
+            summary: "Get project details".into(),
+            description: None,
+            input_schema: json!({"type":"object","required":["project_id"]}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_PROJECTS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint(
+                "Get details for a specific project by ID or name",
+                vec!["Use project ID or name, not the deployment URL".into()],
                 vec![],
                 vec![CAP_PROJECTS_READ],
             ),
@@ -260,7 +275,26 @@ fn operations_info() -> Vec<OperationInfo> {
             requires_approval: None,
         },
         OperationInfo {
-            id: OperationId::from_static(OP_DEPLOYMENTS_GET),
+            id: OperationId::from_static(OP_LIST_DEPLOYMENTS),
+            summary: "List deployments for a project".into(),
+            description: None,
+            input_schema: json!({"type":"object","required":["project_id"]}),
+            output_schema: json!({"type":"array"}),
+            capability: CapabilityId::from_static(CAP_DEPLOYMENTS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint(
+                "See deployment history for a project",
+                vec!["Requires project_id, not project name".into()],
+                vec![],
+                vec![CAP_PROJECTS_READ],
+            ),
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_GET_DEPLOYMENT),
             summary: "Get deployment details".into(),
             description: None,
             input_schema: json!({"type":"object","required":["deployment_id"]}),
@@ -268,9 +302,9 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_DEPLOYMENTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "Get details of a specific deployment",
+                "Check status or details of a specific deployment",
                 vec!["Use deployment uid not URL".into()],
                 vec![],
                 vec![CAP_DEPLOYMENTS_READ],
@@ -279,18 +313,18 @@ fn operations_info() -> Vec<OperationInfo> {
             requires_approval: None,
         },
         OperationInfo {
-            id: OperationId::from_static(OP_DEPLOYMENTS_CREATE),
-            summary: "Create deployment".into(),
+            id: OperationId::from_static(OP_CREATE_DEPLOYMENT),
+            summary: "Trigger a new deployment".into(),
             description: None,
             input_schema: json!({"type":"object","required":["name"]}),
             output_schema: json!({"type":"object"}),
             capability: CapabilityId::from_static(CAP_DEPLOYMENTS_WRITE),
-            risk_level: RiskLevel::High,
+            risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::None,
             ai_hints: hint(
-                "Trigger a new deployment",
-                vec!["Requires git source or files".into()],
+                "Create a new deployment for a project",
+                vec!["Requires project name in body".into()],
                 vec![],
                 vec![CAP_PROJECTS_READ],
             ),
@@ -298,107 +332,36 @@ fn operations_info() -> Vec<OperationInfo> {
             requires_approval: None,
         },
         OperationInfo {
-            id: OperationId::from_static(OP_DEPLOYMENTS_DELETE),
-            summary: "Delete deployment".into(),
+            id: OperationId::from_static(OP_CANCEL_DEPLOYMENT),
+            summary: "Cancel an in-progress deployment".into(),
             description: None,
             input_schema: json!({"type":"object","required":["deployment_id"]}),
             output_schema: json!({"type":"object"}),
             capability: CapabilityId::from_static(CAP_DEPLOYMENTS_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "Remove a deployment (irreversible)",
-                vec!["Check deployment state first".into()],
+                "Cancel a deployment that is currently building",
+                vec!["Only works on in-progress deployments".into()],
                 vec![],
                 vec![CAP_DEPLOYMENTS_READ],
             ),
             rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
+            requires_approval: None,
         },
         OperationInfo {
-            id: OperationId::from_static(OP_PROJECTS_LIST),
-            summary: "List projects".into(),
+            id: OperationId::from_static(OP_LIST_DOMAINS),
+            summary: "List all domains".into(),
             description: None,
             input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
-            capability: CapabilityId::from_static(CAP_PROJECTS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: hint("List all projects", vec![], vec![], vec![]),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PROJECTS_GET),
-            summary: "Get project details".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["project_id"]}),
-            output_schema: json!({"type":"object"}),
-            capability: CapabilityId::from_static(CAP_PROJECTS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: hint(
-                "Get details of a specific project",
-                vec![],
-                vec![],
-                vec![CAP_PROJECTS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PROJECTS_CREATE),
-            summary: "Create project".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["name"]}),
-            output_schema: json!({"type":"object"}),
-            capability: CapabilityId::from_static(CAP_PROJECTS_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Create a new Vercel project",
-                vec!["Name must be unique".into()],
-                vec![],
-                vec![CAP_PROJECTS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PROJECTS_DELETE),
-            summary: "Delete project".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["project_id"]}),
-            output_schema: json!({"type":"object"}),
-            capability: CapabilityId::from_static(CAP_PROJECTS_WRITE),
-            risk_level: RiskLevel::Critical,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Permanently delete project and all deployments",
-                vec!["Cannot be undone".into()],
-                vec![],
-                vec![CAP_PROJECTS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_DOMAINS_LIST),
-            summary: "List project domains".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["project_id"]}),
             output_schema: json!({"type":"array"}),
             capability: CapabilityId::from_static(CAP_DOMAINS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "See domains attached to a project",
+                "See all domains in the account",
                 vec![],
                 vec![],
                 vec![CAP_PROJECTS_READ],
@@ -407,18 +370,18 @@ fn operations_info() -> Vec<OperationInfo> {
             requires_approval: None,
         },
         OperationInfo {
-            id: OperationId::from_static(OP_DOMAINS_ADD),
-            summary: "Add domain to project".into(),
+            id: OperationId::from_static(OP_GET_DOMAIN),
+            summary: "Get domain details".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["project_id","name"]}),
+            input_schema: json!({"type":"object","required":["domain_name"]}),
             output_schema: json!({"type":"object"}),
-            capability: CapabilityId::from_static(CAP_DOMAINS_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
+            capability: CapabilityId::from_static(CAP_DOMAINS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "Assign a custom domain to a project",
-                vec!["Domain must be verified".into()],
+                "Get details about a specific domain",
+                vec!["Use the full domain name".into()],
                 vec![],
                 vec![CAP_DOMAINS_READ],
             ),
@@ -426,37 +389,18 @@ fn operations_info() -> Vec<OperationInfo> {
             requires_approval: None,
         },
         OperationInfo {
-            id: OperationId::from_static(OP_DOMAINS_REMOVE),
-            summary: "Remove domain from project".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["project_id","domain"]}),
-            output_schema: json!({"type":"object"}),
-            capability: CapabilityId::from_static(CAP_DOMAINS_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Detach domain from project (affects routing)",
-                vec!["Traffic will stop routing".into()],
-                vec![],
-                vec![CAP_DOMAINS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_ENV_LIST),
-            summary: "List environment variables".into(),
+            id: OperationId::from_static(OP_LIST_ENV_VARS),
+            summary: "List environment variables for a project".into(),
             description: None,
             input_schema: json!({"type":"object","required":["project_id"]}),
             output_schema: json!({"type":"array"}),
             capability: CapabilityId::from_static(CAP_ENV_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "List env vars for a project",
-                vec!["Values may be encrypted".into()],
+                "See environment variables configured for a project",
+                vec!["Values of encrypted vars may not be returned".into()],
                 vec![],
                 vec![CAP_PROJECTS_READ],
             ),
@@ -464,56 +408,26 @@ fn operations_info() -> Vec<OperationInfo> {
             requires_approval: None,
         },
         OperationInfo {
-            id: OperationId::from_static(OP_ENV_CREATE),
-            summary: "Create environment variable".into(),
+            id: OperationId::from_static(OP_SET_ENV_VAR),
+            summary: "Set an environment variable".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["project_id","key","value","type","target"]}),
+            input_schema: json!({"type":"object","required":["project_id","key","value","target"]}),
             output_schema: json!({"type":"object"}),
             capability: CapabilityId::from_static(CAP_ENV_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "Add an env var to a project",
-                vec!["Must specify target environments".into()],
-                vec![],
-                vec![CAP_ENV_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_ENV_DELETE),
-            summary: "Delete environment variable".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["project_id","env_id"]}),
-            output_schema: json!({"type":"object"}),
-            capability: CapabilityId::from_static(CAP_ENV_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Remove env var (may break deployments)",
-                vec!["Deployments may depend on this var".into()],
+                "Create or update an environment variable for a project",
+                vec![
+                    "target must be array like [\"production\", \"preview\"]".into(),
+                    "Requires a new deployment to take effect".into(),
+                ],
                 vec![],
                 vec![CAP_ENV_READ],
             ),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::Interactive),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Verify API token".into(),
-            description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"object"}),
-            capability: CapabilityId::from_static(CAP_PROJECTS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Check credentials", vec![], vec![], vec![]),
-            rate_limit: None,
-            requires_approval: None,
         },
     ]
 }
@@ -669,24 +583,20 @@ impl VercelConnector {
         let operation = req.operation.as_str();
         if let Some(verifier) = &self.verifier {
             let cap = match operation {
-                OP_DEPLOYMENTS_LIST | OP_DEPLOYMENTS_GET => {
-                    CapabilityId::from_static(CAP_DEPLOYMENTS_READ)
-                }
-                OP_DEPLOYMENTS_CREATE | OP_DEPLOYMENTS_DELETE => {
-                    CapabilityId::from_static(CAP_DEPLOYMENTS_WRITE)
-                }
-                OP_PROJECTS_LIST | OP_PROJECTS_GET | OP_HEALTH => {
+                OP_LIST_PROJECTS | OP_GET_PROJECT => {
                     CapabilityId::from_static(CAP_PROJECTS_READ)
                 }
-                OP_PROJECTS_CREATE | OP_PROJECTS_DELETE => {
-                    CapabilityId::from_static(CAP_PROJECTS_WRITE)
+                OP_LIST_DEPLOYMENTS | OP_GET_DEPLOYMENT => {
+                    CapabilityId::from_static(CAP_DEPLOYMENTS_READ)
                 }
-                OP_DOMAINS_LIST => CapabilityId::from_static(CAP_DOMAINS_READ),
-                OP_DOMAINS_ADD | OP_DOMAINS_REMOVE => {
-                    CapabilityId::from_static(CAP_DOMAINS_WRITE)
+                OP_CREATE_DEPLOYMENT | OP_CANCEL_DEPLOYMENT => {
+                    CapabilityId::from_static(CAP_DEPLOYMENTS_WRITE)
                 }
-                OP_ENV_LIST => CapabilityId::from_static(CAP_ENV_READ),
-                OP_ENV_CREATE | OP_ENV_DELETE => CapabilityId::from_static(CAP_ENV_WRITE),
+                OP_LIST_DOMAINS | OP_GET_DOMAIN => {
+                    CapabilityId::from_static(CAP_DOMAINS_READ)
+                }
+                OP_LIST_ENV_VARS => CapabilityId::from_static(CAP_ENV_READ),
+                OP_SET_ENV_VAR => CapabilityId::from_static(CAP_ENV_WRITE),
                 _ => {
                     return Err(FcpError::InvalidRequest {
                         code: 1004,
@@ -709,177 +619,85 @@ impl VercelConnector {
         })?;
 
         let output = match operation {
-            OP_DEPLOYMENTS_LIST => {
-                let project_id = req.input.get("project_id").and_then(|v| v.as_str());
-                let limit = req
-                    .input
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
-                let deps = client
-                    .list_deployments(runtime, project_id, limit)
+            OP_LIST_PROJECTS => {
+                let projects = client
+                    .list_projects(runtime)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&deps).map_err(|e| FcpError::Internal {
+                serde_json::to_value(&projects).map_err(|e| FcpError::Internal {
                     message: e.to_string(),
                 })?
             }
-            OP_DEPLOYMENTS_GET => {
-                let did = Self::require_str(&req.input, "deployment_id")?;
-                let dep = client
-                    .get_deployment(runtime, did)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&dep).map_err(|e| FcpError::Internal {
-                    message: e.to_string(),
-                })?
-            }
-            OP_DEPLOYMENTS_CREATE => {
-                let name = Self::require_str(&req.input, "name")?;
-                let git_source = req.input.get("git_source").map(|gs| GitSource {
-                    source_type: gs
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("github")
-                        .into(),
-                    repo: gs
-                        .get("repo")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .into(),
-                    git_ref: gs.get("ref").and_then(|v| v.as_str()).map(String::from),
-                });
-                let target = req
-                    .input
-                    .get("target")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let dep_req = CreateDeployment {
-                    name: name.into(),
-                    git_source,
-                    target,
-                    project_settings: req.input.get("project_settings").cloned(),
-                };
-                let dep = client
-                    .create_deployment(runtime, &dep_req)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&dep).map_err(|e| FcpError::Internal {
-                    message: e.to_string(),
-                })?
-            }
-            OP_DEPLOYMENTS_DELETE => {
-                let did = Self::require_str(&req.input, "deployment_id")?;
-                client
-                    .delete_deployment(runtime, did)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?
-            }
-            OP_PROJECTS_LIST => {
-                let limit = req
-                    .input
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
-                let projs = client
-                    .list_projects(runtime, limit)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&projs).map_err(|e| FcpError::Internal {
-                    message: e.to_string(),
-                })?
-            }
-            OP_PROJECTS_GET => {
+            OP_GET_PROJECT => {
                 let pid = Self::require_str(&req.input, "project_id")?;
-                let proj = client
+                let project = client
                     .get_project(runtime, pid)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&proj).map_err(|e| FcpError::Internal {
+                serde_json::to_value(&project).map_err(|e| FcpError::Internal {
                     message: e.to_string(),
                 })?
             }
-            OP_PROJECTS_CREATE => {
-                let name = Self::require_str(&req.input, "name")?;
-                let framework = req
-                    .input
-                    .get("framework")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let git_repository = req.input.get("git_repository").and_then(|gr| {
-                    Some(crate::types::GitRepository {
-                        repo_type: gr.get("type")?.as_str()?.into(),
-                        repo: gr.get("repo")?.as_str()?.into(),
-                    })
-                });
-                let proj_req = CreateProject {
-                    name: name.into(),
-                    framework,
-                    git_repository,
-                };
-                let proj = client
-                    .create_project(runtime, &proj_req)
+            OP_LIST_DEPLOYMENTS => {
+                let pid = Self::require_str(&req.input, "project_id")?;
+                let deployments = client
+                    .list_deployments(runtime, pid)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&proj).map_err(|e| FcpError::Internal {
+                serde_json::to_value(&deployments).map_err(|e| FcpError::Internal {
                     message: e.to_string(),
                 })?
             }
-            OP_PROJECTS_DELETE => {
-                let pid = Self::require_str(&req.input, "project_id")?;
-                client
-                    .delete_project(runtime, pid)
+            OP_GET_DEPLOYMENT => {
+                let did = Self::require_str(&req.input, "deployment_id")?;
+                let deployment = client
+                    .get_deployment(runtime, did)
                     .await
-                    .map_err(|e| e.to_fcp_error())?
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&deployment).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
             }
-            OP_DOMAINS_LIST => {
-                let pid = Self::require_str(&req.input, "project_id")?;
+            OP_CREATE_DEPLOYMENT => {
+                let body = req.input.clone();
+                let deployment = client
+                    .create_deployment(runtime, &body)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&deployment).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
+            }
+            OP_CANCEL_DEPLOYMENT => {
+                let did = Self::require_str(&req.input, "deployment_id")?;
+                let deployment = client
+                    .cancel_deployment(runtime, did)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&deployment).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
+            }
+            OP_LIST_DOMAINS => {
                 let domains = client
-                    .list_domains(runtime, pid)
+                    .list_domains(runtime)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&domains).map_err(|e| FcpError::Internal {
                     message: e.to_string(),
                 })?
             }
-            OP_DOMAINS_ADD => {
-                let pid = Self::require_str(&req.input, "project_id")?;
-                let name = Self::require_str(&req.input, "name")?;
-                let domain_req = AddDomain {
-                    name: name.into(),
-                    git_branch: req
-                        .input
-                        .get("git_branch")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    redirect: req
-                        .input
-                        .get("redirect")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    redirect_status_code: req
-                        .input
-                        .get("redirect_status_code")
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as u16),
-                };
+            OP_GET_DOMAIN => {
+                let name = Self::require_str(&req.input, "domain_name")?;
                 let domain = client
-                    .add_domain(runtime, pid, &domain_req)
+                    .get_domain(runtime, name)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&domain).map_err(|e| FcpError::Internal {
                     message: e.to_string(),
                 })?
             }
-            OP_DOMAINS_REMOVE => {
-                let pid = Self::require_str(&req.input, "project_id")?;
-                let domain = Self::require_str(&req.input, "domain")?;
-                client
-                    .remove_domain(runtime, pid, domain)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?
-            }
-            OP_ENV_LIST => {
+            OP_LIST_ENV_VARS => {
                 let pid = Self::require_str(&req.input, "project_id")?;
                 let envs = client
                     .list_env_vars(runtime, pid)
@@ -889,11 +707,10 @@ impl VercelConnector {
                     message: e.to_string(),
                 })?
             }
-            OP_ENV_CREATE => {
+            OP_SET_ENV_VAR => {
                 let pid = Self::require_str(&req.input, "project_id")?;
                 let key = Self::require_str(&req.input, "key")?;
                 let value = Self::require_str(&req.input, "value")?;
-                let env_type = Self::require_str(&req.input, "type")?;
                 let target = req
                     .input
                     .get("target")
@@ -903,40 +720,25 @@ impl VercelConnector {
                             .filter_map(|v| v.as_str().map(String::from))
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(|| vec!["production".into()]);
-                let env_req = CreateEnvVar {
-                    key: key.into(),
-                    value: value.into(),
-                    env_type: env_type.into(),
-                    target,
-                };
-                let env = client
-                    .create_env_var(runtime, pid, &env_req)
+                    .unwrap_or_else(|| vec!["production".into(), "preview".into(), "development".into()]);
+                let env_type = req
+                    .input
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("encrypted");
+                let body = json!({
+                    "key": key,
+                    "value": value,
+                    "target": target,
+                    "type": env_type,
+                });
+                let env_var = client
+                    .set_env_var(runtime, pid, &body)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&env).map_err(|e| FcpError::Internal {
+                serde_json::to_value(&env_var).map_err(|e| FcpError::Internal {
                     message: e.to_string(),
                 })?
-            }
-            OP_ENV_DELETE => {
-                let pid = Self::require_str(&req.input, "project_id")?;
-                let eid = Self::require_str(&req.input, "env_id")?;
-                client
-                    .delete_env_var(runtime, pid, eid)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?
-            }
-            OP_HEALTH => {
-                let user = client
-                    .health_check(runtime)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json!({
-                    "healthy": true,
-                    "user_id": user.id,
-                    "username": user.username,
-                    "email": user.email
-                })
             }
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -955,7 +757,7 @@ mod tests {
     use fcp_core::{CapabilityToken, RequestId, ZoneId};
 
     fn tc() -> serde_json::Value {
-        json!({"token": "t"})
+        json!({"token": "test-token"})
     }
 
     fn handshake_req() -> HandshakeRequest {
@@ -966,9 +768,9 @@ mod tests {
             host_public_key: [0u8; 32],
             nonce: [0u8; 32],
             capabilities_requested: vec![
-                CapabilityId::from_static(CAP_DEPLOYMENTS_READ),
                 CapabilityId::from_static(CAP_PROJECTS_READ),
-                CapabilityId::from_static(CAP_DOMAINS_READ),
+                CapabilityId::from_static(CAP_DEPLOYMENTS_READ),
+                CapabilityId::from_static(CAP_DEPLOYMENTS_WRITE),
             ],
             host: None,
             transport_caps: None,
@@ -1027,14 +829,15 @@ mod tests {
     }
 
     #[test]
-    fn configure_empty_base_url() {
+    fn configure_with_team() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
                 let mut c = VercelConnector::new();
-                c.configure(json!({"token":"t","base_url":""})).await
+                c.configure(json!({"token": "t", "team_id": "team_abc"}))
+                    .await
             })
             .unwrap()
-            .is_err()
+            .is_ok()
         );
     }
 
@@ -1044,6 +847,18 @@ mod tests {
             fcp_async_core::runtime::block_on_sync(async {
                 let mut c = VercelConnector::new();
                 c.configure(json!("bad")).await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn configure_empty_base_url() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = VercelConnector::new();
+                c.configure(json!({"token": "t", "base_url": ""})).await
             })
             .unwrap()
             .is_err()
@@ -1070,7 +885,7 @@ mod tests {
 
     #[test]
     fn introspect_ops() {
-        assert_eq!(VercelConnector::new().introspect().operations.len(), 15);
+        assert_eq!(VercelConnector::new().introspect().operations.len(), 10);
     }
 
     #[test]
@@ -1090,6 +905,16 @@ mod tests {
     }
 
     #[test]
+    fn env_write_needs_approval() {
+        let ops = operations_info();
+        let set_env = ops
+            .iter()
+            .find(|o| o.id.as_str() == OP_SET_ENV_VAR)
+            .unwrap();
+        assert!(set_env.requires_approval.is_some());
+    }
+
+    #[test]
     fn invoke_unknown() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
@@ -1104,13 +929,13 @@ mod tests {
     }
 
     #[test]
-    fn invoke_missing_deployment_id() {
+    fn invoke_missing_project_id() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
                 let mut c = VercelConnector::new();
                 c.configure(tc()).await.unwrap();
                 c.handshake(handshake_req()).await.unwrap();
-                c.invoke(invoke_req(OP_DEPLOYMENTS_GET, json!({}))).await
+                c.invoke(invoke_req(OP_GET_PROJECT, json!({}))).await
             })
             .unwrap()
             .is_err()
@@ -1123,7 +948,7 @@ mod tests {
             VercelConnector::new()
                 .simulate(SimulateRequest::new(
                     ConnectorId::from_static("fcp.vercel"),
-                    OperationId::from_static(OP_PROJECTS_LIST),
+                    OperationId::from_static(OP_LIST_PROJECTS),
                     ZoneId::work(),
                     json!({}),
                     CapabilityToken::test_token(),
@@ -1148,6 +973,24 @@ mod tests {
                         max_events_per_sec: None,
                         batch_ms: None,
                         window_size: None,
+                        capability_token: None,
+                    })
+                    .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unsubscribe_unsupported() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                VercelConnector::new()
+                    .unsubscribe(UnsubscribeRequest {
+                        r#type: "unsubscribe".into(),
+                        id: RequestId::new("unsub1"),
+                        topics: vec![],
                         capability_token: None,
                     })
                     .await
@@ -1223,66 +1066,57 @@ mod tests {
     fn config_debug_redacts_token() {
         let cfg = VercelConfig {
             base_url: "https://api.vercel.com".into(),
-            token: "super-secret".into(),
+            token: "my-secret-token".into(),
             team_id: None,
             retry: HttpRetryConfig::default(),
             request_timeout_ms: 30_000,
         };
         let debug = format!("{cfg:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("super-secret"));
+        assert!(!debug.contains("my-secret"));
     }
 
     #[test]
-    fn config_with_team_id() {
+    fn invoke_list_deployments_missing_project() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
                 let mut c = VercelConnector::new();
-                c.configure(json!({"token":"t","team_id":"team_abc"})).await
+                c.configure(tc()).await.unwrap();
+                c.handshake(handshake_req()).await.unwrap();
+                c.invoke(invoke_req(OP_LIST_DEPLOYMENTS, json!({}))).await
             })
             .unwrap()
-            .is_ok()
+            .is_err()
         );
     }
 
     #[test]
-    fn operations_correct_risk_levels() {
-        let ops = operations_info();
-        let find_op = |id: &str| ops.iter().find(|o| o.id.as_str() == id).unwrap();
-
-        // Safe operations
-        assert_eq!(find_op(OP_DEPLOYMENTS_LIST).safety_tier, SafetyTier::Safe);
-        assert_eq!(find_op(OP_PROJECTS_LIST).safety_tier, SafetyTier::Safe);
-        assert_eq!(find_op(OP_DOMAINS_LIST).safety_tier, SafetyTier::Safe);
-        assert_eq!(find_op(OP_ENV_LIST).safety_tier, SafetyTier::Safe);
-        assert_eq!(find_op(OP_HEALTH).safety_tier, SafetyTier::Safe);
-
-        // Risky operations
-        assert_eq!(find_op(OP_DEPLOYMENTS_CREATE).safety_tier, SafetyTier::Risky);
-        assert_eq!(find_op(OP_PROJECTS_CREATE).safety_tier, SafetyTier::Risky);
-        assert_eq!(find_op(OP_DOMAINS_ADD).safety_tier, SafetyTier::Risky);
-        assert_eq!(find_op(OP_ENV_CREATE).safety_tier, SafetyTier::Risky);
-
-        // Dangerous operations
-        assert_eq!(find_op(OP_DEPLOYMENTS_DELETE).safety_tier, SafetyTier::Dangerous);
-        assert_eq!(find_op(OP_PROJECTS_DELETE).safety_tier, SafetyTier::Dangerous);
-        assert_eq!(find_op(OP_DOMAINS_REMOVE).safety_tier, SafetyTier::Dangerous);
-        assert_eq!(find_op(OP_ENV_DELETE).safety_tier, SafetyTier::Dangerous);
+    fn invoke_get_deployment_missing_id() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = VercelConnector::new();
+                c.configure(tc()).await.unwrap();
+                c.handshake(handshake_req()).await.unwrap();
+                c.invoke(invoke_req(OP_GET_DEPLOYMENT, json!({}))).await
+            })
+            .unwrap()
+            .is_err()
+        );
     }
 
     #[test]
-    fn operations_correct_capabilities() {
-        let ops = operations_info();
-        let find_op = |id: &str| ops.iter().find(|o| o.id.as_str() == id).unwrap();
-
-        assert_eq!(find_op(OP_DEPLOYMENTS_LIST).capability.as_str(), CAP_DEPLOYMENTS_READ);
-        assert_eq!(find_op(OP_DEPLOYMENTS_CREATE).capability.as_str(), CAP_DEPLOYMENTS_WRITE);
-        assert_eq!(find_op(OP_PROJECTS_LIST).capability.as_str(), CAP_PROJECTS_READ);
-        assert_eq!(find_op(OP_PROJECTS_DELETE).capability.as_str(), CAP_PROJECTS_WRITE);
-        assert_eq!(find_op(OP_DOMAINS_LIST).capability.as_str(), CAP_DOMAINS_READ);
-        assert_eq!(find_op(OP_DOMAINS_ADD).capability.as_str(), CAP_DOMAINS_WRITE);
-        assert_eq!(find_op(OP_ENV_LIST).capability.as_str(), CAP_ENV_READ);
-        assert_eq!(find_op(OP_ENV_CREATE).capability.as_str(), CAP_ENV_WRITE);
-        assert_eq!(find_op(OP_HEALTH).capability.as_str(), CAP_PROJECTS_READ);
+    fn invoke_set_env_var_missing_key() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = VercelConnector::new();
+                c.configure(tc()).await.unwrap();
+                let mut hr = handshake_req();
+                hr.capabilities_requested.push(CapabilityId::from_static(CAP_ENV_WRITE));
+                c.handshake(hr).await.unwrap();
+                c.invoke(invoke_req(OP_SET_ENV_VAR, json!({"project_id": "p"}))).await
+            })
+            .unwrap()
+            .is_err()
+        );
     }
 }

@@ -40,6 +40,10 @@ pub enum ElasticsearchError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (path traversal, empty segment, etc.)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl ElasticsearchError {
@@ -50,6 +54,7 @@ impl ElasticsearchError {
             Self::Http(_) => true,
             Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
+            Self::InvalidInput(_) => false,
             _ => false,
         }
     }
@@ -114,6 +119,9 @@ impl ElasticsearchError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -16,6 +17,35 @@ use crate::{
 
 /// Default Kubernetes API base URL (in-cluster).
 pub const DEFAULT_BASE_URL: &str = "https://kubernetes.default.svc";
+
+/// Validate that a value is safe to embed as a URL path segment.
+///
+/// Rejects empty/whitespace-only strings and strings containing path traversal
+/// characters (`/`, `\`, `..`, `%2f`, `%5c`).
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> KubernetesResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(KubernetesError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(KubernetesError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(value)
+}
+
+/// Percent-encode a value for safe inclusion as a URL query parameter.
+fn encode_query_param(value: &str) -> String {
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
 
 /// Authentication mode for the Kubernetes API.
 #[derive(Clone)]
@@ -288,13 +318,14 @@ impl KubernetesClient {
         label_selector: Option<&str>,
         field_selector: Option<&str>,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/pods");
         let mut params = Vec::new();
         if let Some(ls) = label_selector {
-            params.push(format!("labelSelector={ls}"));
+            params.push(format!("labelSelector={}", encode_query_param(ls)));
         }
         if let Some(fs) = field_selector {
-            params.push(format!("fieldSelector={fs}"));
+            params.push(format!("fieldSelector={}", encode_query_param(fs)));
         }
         if !params.is_empty() {
             path.push('?');
@@ -309,6 +340,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.get(&format!("/api/v1/namespaces/{namespace}/pods/{name}"))
             .await
     }
@@ -320,6 +353,8 @@ impl KubernetesClient {
         name: &str,
         grace_period_seconds: Option<u64>,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/pods/{name}");
         if let Some(gp) = grace_period_seconds {
             let _ = write!(path, "?gracePeriodSeconds={gp}");
@@ -336,10 +371,12 @@ impl KubernetesClient {
         tail_lines: Option<u64>,
         since_seconds: Option<u64>,
     ) -> KubernetesResult<String> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/pods/{name}/log");
         let mut params = Vec::new();
         if let Some(c) = container {
-            params.push(format!("container={c}"));
+            params.push(format!("container={}", encode_query_param(c)));
         }
         if let Some(t) = tail_lines {
             params.push(format!("tailLines={t}"));
@@ -362,10 +399,12 @@ impl KubernetesClient {
         container: Option<&str>,
         tail_lines: Option<u64>,
     ) -> KubernetesResult<String> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/pods/{name}/log");
         let mut params = vec!["follow=true".to_string()];
         if let Some(c) = container {
-            params.push(format!("container={c}"));
+            params.push(format!("container={}", encode_query_param(c)));
         }
         if let Some(t) = tail_lines {
             params.push(format!("tailLines={t}"));
@@ -381,9 +420,10 @@ impl KubernetesClient {
         namespace: &str,
         label_selector: Option<&str>,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         let mut path = format!("/apis/apps/v1/namespaces/{namespace}/deployments");
         if let Some(ls) = label_selector {
-            let _ = write!(path, "?labelSelector={ls}");
+            let _ = write!(path, "?labelSelector={}", encode_query_param(ls));
         }
         self.get(&path).await
     }
@@ -394,6 +434,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.get(&format!(
             "/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
         ))
@@ -407,6 +449,8 @@ impl KubernetesClient {
         name: &str,
         replicas: u32,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let body = serde_json::json!({
             "spec": {
                 "replicas": replicas
@@ -425,6 +469,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let now = epoch_timestamp();
         let body = serde_json::json!({
             "spec": {
@@ -450,6 +496,7 @@ impl KubernetesClient {
         namespace: &str,
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         self.post(&format!("/api/v1/namespaces/{namespace}/pods"), body)
             .await
     }
@@ -466,8 +513,9 @@ impl KubernetesClient {
         body: &serde_json::Value,
         update: bool,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         if update {
-            let name = name.unwrap_or_default();
+            let name = sanitize_path_segment(name.unwrap_or_default(), "name")?;
             self.put(
                 &format!("/apis/apps/v1/namespaces/{namespace}/deployments/{name}"),
                 body,
@@ -488,6 +536,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.delete(&format!(
             "/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
         ))
@@ -500,9 +550,10 @@ impl KubernetesClient {
         namespace: &str,
         label_selector: Option<&str>,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/services");
         if let Some(ls) = label_selector {
-            let _ = write!(path, "?labelSelector={ls}");
+            let _ = write!(path, "?labelSelector={}", encode_query_param(ls));
         }
         self.get(&path).await
     }
@@ -513,6 +564,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.get(&format!("/api/v1/namespaces/{namespace}/services/{name}"))
             .await
     }
@@ -523,6 +576,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.get(&format!("/api/v1/namespaces/{namespace}/configmaps/{name}"))
             .await
     }
@@ -534,6 +589,8 @@ impl KubernetesClient {
         name: &str,
         data: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let body = serde_json::json!({
             "data": data
         });
@@ -550,6 +607,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.get(&format!("/api/v1/namespaces/{namespace}/secrets/{name}"))
             .await
     }
@@ -560,9 +619,10 @@ impl KubernetesClient {
         namespace: &str,
         label_selector: Option<&str>,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/configmaps");
         if let Some(ls) = label_selector {
-            let _ = write!(path, "?labelSelector={ls}");
+            let _ = write!(path, "?labelSelector={}", encode_query_param(ls));
         }
         self.get(&path).await
     }
@@ -573,6 +633,7 @@ impl KubernetesClient {
         namespace: &str,
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         self.post(&format!("/api/v1/namespaces/{namespace}/configmaps"), body)
             .await
     }
@@ -583,6 +644,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.delete(&format!("/api/v1/namespaces/{namespace}/configmaps/{name}"))
             .await
     }
@@ -593,9 +656,10 @@ impl KubernetesClient {
         namespace: &str,
         label_selector: Option<&str>,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/secrets");
         if let Some(ls) = label_selector {
-            let _ = write!(path, "?labelSelector={ls}");
+            let _ = write!(path, "?labelSelector={}", encode_query_param(ls));
         }
         self.get(&path).await
     }
@@ -606,6 +670,7 @@ impl KubernetesClient {
         namespace: &str,
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         self.post(&format!("/api/v1/namespaces/{namespace}/secrets"), body)
             .await
     }
@@ -616,6 +681,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.delete(&format!("/api/v1/namespaces/{namespace}/secrets/{name}"))
             .await
     }
@@ -631,15 +698,17 @@ impl KubernetesClient {
         container: Option<&str>,
         command: &[String],
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/pods/{name}/exec");
         let mut params = Vec::new();
         for cmd in command {
-            params.push(format!("command={cmd}"));
+            params.push(format!("command={}", encode_query_param(cmd)));
         }
         params.push("stdout=true".to_string());
         params.push("stderr=true".to_string());
         if let Some(c) = container {
-            params.push(format!("container={c}"));
+            params.push(format!("container={}", encode_query_param(c)));
         }
         if !params.is_empty() {
             path.push('?');
@@ -655,13 +724,14 @@ impl KubernetesClient {
         field_selector: Option<&str>,
         resource_version: Option<&str>,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         let mut path = format!("/api/v1/namespaces/{namespace}/events");
         let mut params = Vec::new();
         if let Some(fs) = field_selector {
-            params.push(format!("fieldSelector={fs}"));
+            params.push(format!("fieldSelector={}", encode_query_param(fs)));
         }
         if let Some(rv) = resource_version {
-            params.push(format!("resourceVersion={rv}"));
+            params.push(format!("resourceVersion={}", encode_query_param(rv)));
         }
         if !params.is_empty() {
             path.push('?');
@@ -678,6 +748,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.get(&format!(
             "/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
         ))
@@ -690,8 +762,11 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         self.get(&format!(
-            "/apis/apps/v1/namespaces/{namespace}/replicasets?labelSelector=app={name}"
+            "/apis/apps/v1/namespaces/{namespace}/replicasets?labelSelector=app%3D{}",
+            encode_query_param(name)
         ))
         .await
     }
@@ -703,6 +778,8 @@ impl KubernetesClient {
         name: &str,
         template: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "name")?;
         let body = serde_json::json!({
             "spec": {
                 "template": template
@@ -899,5 +976,108 @@ mod tests {
             KubernetesClient::new(KubernetesAuth::BearerToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("KubernetesClient"));
+    }
+
+    // ── sanitize_path_segment ──────────────────────────────────────
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("default/admin", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("default\\admin", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("../kube-system", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("default%2fadmin", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash_upper() {
+        assert!(sanitize_path_segment("foo%5Cbar", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash_lower() {
+        assert!(sanitize_path_segment("foo%5cbar", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("   ", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid_namespace() {
+        assert_eq!(
+            sanitize_path_segment("kube-system", "namespace").unwrap(),
+            "kube-system"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid_pod_name() {
+        assert_eq!(
+            sanitize_path_segment("nginx-pod-abc123", "name").unwrap(),
+            "nginx-pod-abc123"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash_upper() {
+        assert!(sanitize_path_segment("ns%2Fadmin", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_error_message_contains_field() {
+        let err = sanitize_path_segment("a/b", "namespace").unwrap_err();
+        assert!(err.to_string().contains("namespace"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_empty_error_contains_field() {
+        let err = sanitize_path_segment("", "name").unwrap_err();
+        assert!(err.to_string().contains("name"));
+    }
+
+    // ── encode_query_param ─────────────────────────────────────────
+
+    #[test]
+    fn encode_query_param_encodes_equals() {
+        let encoded = encode_query_param("app=nginx");
+        assert!(encoded.contains("%3D") || encoded.contains("%3d"));
+        assert!(!encoded.contains('='));
+    }
+
+    #[test]
+    fn encode_query_param_encodes_ampersand() {
+        let encoded = encode_query_param("a&b");
+        assert!(encoded.contains("%26"));
+        assert!(!encoded.contains('&'));
+    }
+
+    #[test]
+    fn encode_query_param_encodes_slash() {
+        let encoded = encode_query_param("a/b");
+        assert!(encoded.contains("%2F") || encoded.contains("%2f"));
+    }
+
+    #[test]
+    fn encode_query_param_preserves_alphanumeric() {
+        let encoded = encode_query_param("nginx123");
+        assert_eq!(encoded, "nginx123");
     }
 }

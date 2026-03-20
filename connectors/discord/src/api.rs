@@ -18,6 +18,23 @@ use crate::{
 const JSON_CONTENT_TYPE: &str = "application/json";
 const STATUS_TOO_MANY_REQUESTS: u16 = 429;
 
+/// Validate that a Discord snowflake ID is a non-empty, all-digit string.
+/// Prevents URL path injection via crafted IDs containing `/`, `..`, etc.
+fn validate_snowflake_id<'a>(id: &'a str, field: &str) -> DiscordResult<&'a str> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(DiscordError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(DiscordError::InvalidInput(format!(
+            "{field} must be a numeric snowflake ID, got: {trimmed}"
+        )));
+    }
+    Ok(trimmed)
+}
+
 /// Discord REST API client.
 pub struct DiscordApiClient {
     client: HttpClient,
@@ -301,6 +318,7 @@ impl DiscordApiClient {
 
     /// Get a channel by ID.
     pub async fn get_channel(&self, channel_id: &str) -> DiscordResult<Channel> {
+        let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
         self.get(&format!("/channels/{channel_id}")).await
     }
 
@@ -326,6 +344,11 @@ impl DiscordApiClient {
         struct MessageReference<'a> {
             message_id: &'a str,
         }
+
+        let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
+        let reply_to = reply_to
+            .map(|id| validate_snowflake_id(id, "reply_to"))
+            .transpose()?;
 
         let request = CreateMessageRequest {
             content,
@@ -353,6 +376,9 @@ impl DiscordApiClient {
             embeds: Option<Vec<crate::types::Embed>>,
         }
 
+        let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
+        let message_id = validate_snowflake_id(message_id, "message_id")?;
+
         self.patch(
             &format!("/channels/{channel_id}/messages/{message_id}"),
             &EditMessageRequest { content, embeds },
@@ -362,12 +388,15 @@ impl DiscordApiClient {
 
     /// Delete a message.
     pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> DiscordResult<()> {
+        let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
+        let message_id = validate_snowflake_id(message_id, "message_id")?;
         self.delete(&format!("/channels/{channel_id}/messages/{message_id}"))
             .await
     }
 
     /// Trigger typing indicator.
     pub async fn trigger_typing(&self, channel_id: &str) -> DiscordResult<()> {
+        let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
         let _: serde_json::Value = self
             .post(
                 &format!("/channels/{channel_id}/typing"),
@@ -389,6 +418,8 @@ impl DiscordApiClient {
         message_id: &str,
         emoji: &str,
     ) -> DiscordResult<()> {
+        let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
+        let message_id = validate_snowflake_id(message_id, "message_id")?;
         // Discord expects emoji to be URL-encoded in the path.
         // For custom emoji (name:id format), encode the colon.
         // For Unicode emoji, percent-encode the bytes.
@@ -424,6 +455,9 @@ impl DiscordApiClient {
             auto_archive_duration: Option<u32>,
         }
 
+        let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
+        let message_id = validate_snowflake_id(message_id, "message_id")?;
+
         self.post(
             &format!("/channels/{channel_id}/messages/{message_id}/threads"),
             &CreateThreadRequest {
@@ -440,11 +474,13 @@ impl DiscordApiClient {
 
     /// Get a guild by ID.
     pub async fn get_guild(&self, guild_id: &str) -> DiscordResult<Guild> {
+        let guild_id = validate_snowflake_id(guild_id, "guild_id")?;
         self.get(&format!("/guilds/{guild_id}")).await
     }
 
     /// Get guild channels.
     pub async fn get_guild_channels(&self, guild_id: &str) -> DiscordResult<Vec<Channel>> {
+        let guild_id = validate_snowflake_id(guild_id, "guild_id")?;
         self.get(&format!("/guilds/{guild_id}/channels")).await
     }
 
@@ -863,5 +899,181 @@ mod tests {
             retry_after: None,
         };
         assert_eq!(api_error_no_retry.retry_after(), None);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Snowflake ID validation tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_snowflake_id_accepts_valid_numeric() {
+        assert_eq!(
+            validate_snowflake_id("123456789012345678", "test_id").unwrap(),
+            "123456789012345678"
+        );
+    }
+
+    #[test]
+    fn validate_snowflake_id_trims_whitespace() {
+        assert_eq!(
+            validate_snowflake_id("  987654321  ", "test_id").unwrap(),
+            "987654321"
+        );
+    }
+
+    #[test]
+    fn validate_snowflake_id_rejects_empty() {
+        let err = validate_snowflake_id("", "channel_id").unwrap_err();
+        assert!(
+            matches!(err, DiscordError::InvalidInput(ref msg) if msg.contains("must not be empty"))
+        );
+    }
+
+    #[test]
+    fn validate_snowflake_id_rejects_whitespace_only() {
+        let err = validate_snowflake_id("   ", "channel_id").unwrap_err();
+        assert!(matches!(err, DiscordError::InvalidInput(ref msg) if msg.contains("must not be empty")));
+    }
+
+    #[test]
+    fn validate_snowflake_id_rejects_path_traversal() {
+        let err = validate_snowflake_id("../../../etc/passwd", "guild_id").unwrap_err();
+        assert!(
+            matches!(err, DiscordError::InvalidInput(ref msg) if msg.contains("must be a numeric snowflake ID"))
+        );
+    }
+
+    #[test]
+    fn validate_snowflake_id_rejects_slash_injection() {
+        let err =
+            validate_snowflake_id("123/../../admin/delete", "message_id").unwrap_err();
+        assert!(matches!(err, DiscordError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn validate_snowflake_id_rejects_alpha() {
+        let err = validate_snowflake_id("abc123", "channel_id").unwrap_err();
+        assert!(matches!(err, DiscordError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn validate_snowflake_id_rejects_special_chars() {
+        let err = validate_snowflake_id("123%00456", "channel_id").unwrap_err();
+        assert!(matches!(err, DiscordError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn validate_snowflake_id_rejects_newline_injection() {
+        let err = validate_snowflake_id("123\n456", "channel_id").unwrap_err();
+        assert!(matches!(err, DiscordError::InvalidInput(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_channel_rejects_malicious_id() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.get_channel("../guilds/evil").await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_message_rejects_malicious_channel_id() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client
+            .create_message("evil/path", Some("hello"), None, None)
+            .await;
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_message_rejects_malicious_reply_to() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client
+            .create_message("123456789", Some("hello"), None, Some("not-a-number"))
+            .await;
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_message_rejects_empty_message_id() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.delete_message("123456789", "").await;
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_guild_rejects_path_traversal() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.get_guild("../../etc/passwd").await;
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_guild_channels_rejects_path_traversal() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.get_guild_channels("abc/def").await;
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_add_reaction_rejects_malicious_ids() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.add_reaction("bad/id", "123", "👍").await;
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+
+        let result = client.add_reaction("123", "bad/id", "👍").await;
+        assert!(matches!(
+            result.unwrap_err(),
+            DiscordError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_input_error_is_not_retryable() {
+        let err = DiscordError::InvalidInput("bad id".into());
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
     }
 }

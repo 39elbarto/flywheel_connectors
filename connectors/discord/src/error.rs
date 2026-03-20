@@ -126,6 +126,10 @@ pub enum DiscordError {
     /// Generic gateway error
     #[error("Gateway error: {0}")]
     Gateway(String),
+
+    /// Invalid input (e.g. malformed snowflake IDs)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl DiscordError {
@@ -216,6 +220,9 @@ impl DiscordError {
             },
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

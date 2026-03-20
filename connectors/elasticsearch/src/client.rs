@@ -16,6 +16,30 @@ use crate::{
 /// Default Elasticsearch Cloud base URL (placeholder — must be configured).
 pub const DEFAULT_BASE_URL: &str = "https://localhost:9200";
 
+/// Validate that a value is safe to embed as a URL path segment.
+///
+/// Rejects empty/whitespace-only strings and strings containing path traversal
+/// characters (`/`, `\`, `..`, `%2f`, `%5c`).
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> ElasticsearchResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(ElasticsearchError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(ElasticsearchError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(value)
+}
+
 /// Authentication mode for the Elasticsearch API.
 #[derive(Clone)]
 pub enum ElasticsearchAuth {
@@ -248,6 +272,7 @@ impl ElasticsearchClient {
         from: Option<i64>,
         sort: Option<&serde_json::Value>,
     ) -> ElasticsearchResult<serde_json::Value> {
+        let index = sanitize_path_segment(index, "index")?;
         let mut body = serde_json::json!({});
         if let Some(q) = query {
             body["query"] = q.clone();
@@ -270,6 +295,8 @@ impl ElasticsearchClient {
         index: &str,
         document_id: &str,
     ) -> ElasticsearchResult<serde_json::Value> {
+        let index = sanitize_path_segment(index, "index")?;
+        let document_id = sanitize_path_segment(document_id, "document_id")?;
         self.get(&format!("/{index}/_doc/{document_id}")).await
     }
 
@@ -282,8 +309,12 @@ impl ElasticsearchClient {
         document_id: Option<&str>,
         document: &serde_json::Value,
     ) -> ElasticsearchResult<serde_json::Value> {
+        let index = sanitize_path_segment(index, "index")?;
         match document_id {
-            Some(id) => self.put(&format!("/{index}/_doc/{id}"), document).await,
+            Some(id) => {
+                let id = sanitize_path_segment(id, "document_id")?;
+                self.put(&format!("/{index}/_doc/{id}"), document).await
+            }
             None => self.post(&format!("/{index}/_doc"), document).await,
         }
     }
@@ -309,11 +340,13 @@ impl ElasticsearchClient {
         pattern: Option<&str>,
     ) -> ElasticsearchResult<serde_json::Value> {
         let idx = pattern.unwrap_or("*");
+        let idx = sanitize_path_segment(idx, "pattern")?;
         self.get(&format!("/_cat/indices/{idx}?format=json")).await
     }
 
     /// Delete an index.
     pub async fn delete_index(&self, index: &str) -> ElasticsearchResult<serde_json::Value> {
+        let index = sanitize_path_segment(index, "index")?;
         self.delete(&format!("/{index}")).await
     }
 
@@ -485,5 +518,80 @@ mod tests {
         );
         let dbg = format!("{client:?}");
         assert!(dbg.contains("https://custom-es:9200"));
+    }
+
+    // ── sanitize_path_segment ──────────────────────────────────────
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("foo/bar", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("foo\\bar", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("../admin", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("foo%2fbar", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash_upper() {
+        assert!(sanitize_path_segment("foo%5Cbar", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash_lower() {
+        assert!(sanitize_path_segment("foo%5cbar", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("  ", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid_index() {
+        assert_eq!(
+            sanitize_path_segment("my-index-2024", "index").unwrap(),
+            "my-index-2024"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid_document_id() {
+        assert_eq!(
+            sanitize_path_segment("doc_abc-123", "document_id").unwrap(),
+            "doc_abc-123"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash_upper() {
+        assert!(sanitize_path_segment("foo%2Fbar", "index").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_error_message_contains_field() {
+        let err = sanitize_path_segment("a/b", "index").unwrap_err();
+        assert!(err.to_string().contains("index"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_empty_error_contains_field() {
+        let err = sanitize_path_segment("", "document_id").unwrap_err();
+        assert!(err.to_string().contains("document_id"));
     }
 }

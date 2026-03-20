@@ -41,6 +41,10 @@ pub enum TwitterError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// Invalid input (e.g. non-numeric ID)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     /// Not configured
     #[error("Connector not configured")]
     NotConfigured,
@@ -129,6 +133,9 @@ impl TwitterError {
             Self::Config(msg) => FcpError::ConnectorUnavailable {
                 code: 5001,
                 message: format!("Configuration error: {msg}"),
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
             Self::NotConfigured => FcpError::NotConfigured,
         }
@@ -515,6 +522,7 @@ mod tests {
             TwitterError::RateLimited { retry_after: 120 },
             TwitterError::Stream("dropped".into()),
             TwitterError::Config("bad key".into()),
+            TwitterError::InvalidInput("bad id".into()),
             TwitterError::NotConfigured,
         ];
         for v in &variants {
@@ -663,6 +671,29 @@ mod tests {
             ConnectorErrorMapping::retry_after(&err),
             Some(Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn test_invalid_input_maps_to_internal() {
+        let err = TwitterError::InvalidInput("user_id must be numeric, got: abc".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::Internal { message } if message.contains("Invalid input")
+        ));
+    }
+
+    #[test]
+    fn test_invalid_input_not_retryable() {
+        let err = TwitterError::InvalidInput("bad id".into());
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn display_invalid_input() {
+        let err = TwitterError::InvalidInput("user_id must not be empty".into());
+        assert_eq!(err.to_string(), "Invalid input: user_id must not be empty");
     }
 
     #[test]

@@ -71,6 +71,27 @@ impl TwitterAuth {
     }
 }
 
+/// Validate that an ID is a non-empty, all-ASCII-digit string.
+///
+/// Twitter user IDs, tweet IDs, conversation IDs, and list IDs are
+/// numeric strings.  Interpolating unvalidated input into URL paths
+/// opens the door to path-injection attacks (e.g. `../` or query
+/// parameter smuggling).
+fn validate_numeric_id<'a>(id: &'a str, field: &str) -> TwitterResult<&'a str> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(TwitterError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(TwitterError::InvalidInput(format!(
+            "{field} must be numeric, got: {trimmed}"
+        )));
+    }
+    Ok(trimmed)
+}
+
 /// Twitter REST API client.
 #[derive(Debug)]
 pub struct TwitterApiClient {
@@ -445,6 +466,7 @@ impl TwitterApiClient {
 
     /// Get a user by ID.
     pub async fn get_user(&self, user_id: &str) -> TwitterResult<TwitterResponse<User>> {
+        let user_id = validate_numeric_id(user_id, "user_id")?;
         let params = vec![(
             "user.fields".to_string(),
             "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
@@ -474,6 +496,7 @@ impl TwitterApiClient {
 
     /// Get a tweet by ID.
     pub async fn get_tweet(&self, tweet_id: &str) -> TwitterResult<TwitterResponse<Tweet>> {
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         let params =
             vec![
             (
@@ -500,6 +523,9 @@ impl TwitterApiClient {
         &self,
         tweet_ids: &[&str],
     ) -> TwitterResult<TwitterResponse<Vec<Tweet>>> {
+        for id in tweet_ids {
+            validate_numeric_id(id, "tweet_id")?;
+        }
         let params = vec![
             ("ids".to_string(), tweet_ids.join(",")),
             (
@@ -525,6 +551,7 @@ impl TwitterApiClient {
 
     /// Delete a tweet.
     pub async fn delete_tweet(&self, tweet_id: &str) -> TwitterResult<DeleteTweetResponse> {
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         self.delete(&format!("/2/tweets/{tweet_id}")).await
     }
 
@@ -535,6 +562,7 @@ impl TwitterApiClient {
         max_results: Option<u32>,
         pagination_token: Option<&str>,
     ) -> TwitterResult<TwitterResponse<Vec<Tweet>>> {
+        let user_id = validate_numeric_id(user_id, "user_id")?;
         let mut params = vec![
             (
                 "tweet.fields".to_string(),
@@ -560,6 +588,7 @@ impl TwitterApiClient {
         max_results: Option<u32>,
         pagination_token: Option<&str>,
     ) -> TwitterResult<TwitterResponse<Vec<Tweet>>> {
+        let user_id = validate_numeric_id(user_id, "user_id")?;
         let mut params = vec![
             (
                 "tweet.fields".to_string(),
@@ -659,6 +688,8 @@ impl TwitterApiClient {
 
     /// Retweet a tweet on behalf of the authenticated user.
     pub async fn retweet(&self, user_id: &str, tweet_id: &str) -> TwitterResult<RetweetResponse> {
+        let user_id = validate_numeric_id(user_id, "user_id")?;
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         #[derive(serde::Serialize)]
         struct RetweetBody {
             tweet_id: String,
@@ -676,12 +707,16 @@ impl TwitterApiClient {
         user_id: &str,
         tweet_id: &str,
     ) -> TwitterResult<UnretweetResponse> {
+        let user_id = validate_numeric_id(user_id, "user_id")?;
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         self.delete(&format!("/2/users/{user_id}/retweets/{tweet_id}"))
             .await
     }
 
     /// Like a tweet on behalf of the authenticated user.
     pub async fn like_tweet(&self, user_id: &str, tweet_id: &str) -> TwitterResult<LikeResponse> {
+        let user_id = validate_numeric_id(user_id, "user_id")?;
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         #[derive(serde::Serialize)]
         struct LikeBody {
             tweet_id: String,
@@ -698,6 +733,8 @@ impl TwitterApiClient {
         user_id: &str,
         tweet_id: &str,
     ) -> TwitterResult<UnlikeResponse> {
+        let user_id = validate_numeric_id(user_id, "user_id")?;
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         self.delete(&format!("/2/users/{user_id}/likes/{tweet_id}"))
             .await
     }
@@ -712,6 +749,7 @@ impl TwitterApiClient {
         conversation_id: &str,
         text: &str,
     ) -> TwitterResult<SendDmResponse> {
+        let conversation_id = validate_numeric_id(conversation_id, "conversation_id")?;
         let body = SendDmRequest {
             text: text.to_string(),
         };
@@ -728,6 +766,7 @@ impl TwitterApiClient {
         participant_id: &str,
         text: &str,
     ) -> TwitterResult<SendDmResponse> {
+        let participant_id = validate_numeric_id(participant_id, "participant_id")?;
         #[derive(serde::Serialize)]
         struct NewDmRequest {
             conversation_type: String,
@@ -750,6 +789,7 @@ impl TwitterApiClient {
         conversation_id: &str,
         max_results: Option<u32>,
     ) -> TwitterResult<TwitterResponse<Vec<DmEvent>>> {
+        let conversation_id = validate_numeric_id(conversation_id, "conversation_id")?;
         let mut params = vec![(
             "dm_event.fields".to_string(),
             "id,event_type,text,sender_id,dm_conversation_id,created_at".to_string(),
@@ -1128,5 +1168,123 @@ mod tests {
         assert!(!logs.contains("test_access_token_secret"));
         assert!(!logs.contains("test_bearer_token"));
         assert!(!logs.contains(secret_tweet));
+    }
+
+    // ── validate_numeric_id tests ──────────────────────────────────
+
+    #[test]
+    fn validate_numeric_id_accepts_valid_ids() {
+        assert_eq!(validate_numeric_id("123456789", "user_id").unwrap(), "123456789");
+        assert_eq!(validate_numeric_id("0", "tweet_id").unwrap(), "0");
+        assert_eq!(
+            validate_numeric_id("99999999999999999999", "conversation_id").unwrap(),
+            "99999999999999999999"
+        );
+    }
+
+    #[test]
+    fn validate_numeric_id_trims_whitespace() {
+        assert_eq!(validate_numeric_id("  123  ", "user_id").unwrap(), "123");
+    }
+
+    #[test]
+    fn validate_numeric_id_rejects_empty() {
+        let err = validate_numeric_id("", "user_id").unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must not be empty")));
+    }
+
+    #[test]
+    fn validate_numeric_id_rejects_whitespace_only() {
+        let err = validate_numeric_id("   ", "tweet_id").unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must not be empty")));
+    }
+
+    #[test]
+    fn validate_numeric_id_rejects_path_traversal() {
+        let err = validate_numeric_id("../admin", "user_id").unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric")));
+    }
+
+    #[test]
+    fn validate_numeric_id_rejects_alpha() {
+        let err = validate_numeric_id("abc123", "tweet_id").unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric")));
+    }
+
+    #[test]
+    fn validate_numeric_id_rejects_special_chars() {
+        let err = validate_numeric_id("123/456", "list_id").unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric")));
+    }
+
+    #[test]
+    fn validate_numeric_id_rejects_query_injection() {
+        let err = validate_numeric_id("123?admin=true", "user_id").unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn get_user_rejects_non_numeric_id() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let err = client.get_user("../admin").await.unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn get_tweet_rejects_non_numeric_id() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let err = client.get_tweet("abc").await.unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn delete_tweet_rejects_non_numeric_id() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let err = client.delete_tweet("not-a-number").await.unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_dm_rejects_non_numeric_conversation_id() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let err = client.send_dm("bad/id", "hello").await.unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn retweet_validates_both_ids() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        // Bad user_id
+        let err = client.retweet("bad", "123").await.unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("user_id")));
+
+        // Bad tweet_id
+        let err = client.retweet("123", "bad").await.unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("tweet_id")));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn unlike_tweet_validates_both_ids() {
+        let mock_server = MockServer::start().await;
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let err = client.unlike_tweet("../evil", "123").await.unwrap_err();
+        assert!(matches!(err, TwitterError::InvalidInput(_)));
     }
 }

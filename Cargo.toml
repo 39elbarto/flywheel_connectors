@@ -77,7 +77,9 @@ members = [
     "connectors/intercom",
     "connectors/pandadoc",
     "connectors/postgresql",
+    "connectors/supabase",
     "connectors/mysql",
+    "connectors/sqlite",
     "connectors/pulumi",
     "connectors/todoist",
     "connectors/clickup",
@@ -128,6 +130,7 @@ members = [
     "connectors/nextcloud-talk",
     "connectors/whisper",
     "connectors/imessage",
+    "connectors/vercel",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

@@ -1,0 +1,300 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.vercel"
+name = "Vercel"
+version = "0.1.0"
+description = "Vercel connector for Deployments, Projects, Domains, and Environment Variables management"
+archetype = "cloud-control-plane"
+homepage = "https://vercel.com/docs/rest-api"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.deployments_list]
+summary = "List Vercel deployments"
+capability = "vercel.deployments.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.deployments_list.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deployments_list.ai_hints]
+when_to_use = "When you need to list recent deployments"
+
+[provides.operations.deployments_get]
+summary = "Get deployment details"
+capability = "vercel.deployments.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.deployments_get.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deployments_get.ai_hints]
+when_to_use = "When you need details about a specific deployment"
+
+[provides.operations.deployments_create]
+summary = "Create a deployment"
+capability = "vercel.deployments.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.deployments_create.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deployments_create.ai_hints]
+when_to_use = "When you need to trigger a new deployment"
+
+[provides.operations.deployments_delete]
+summary = "Delete a deployment"
+capability = "vercel.deployments.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.deployments_delete.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deployments_delete.ai_hints]
+when_to_use = "When you need to remove a deployment — affects live traffic"
+
+[provides.operations.projects_list]
+summary = "List Vercel projects"
+capability = "vercel.projects.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.projects_list.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.projects_list.ai_hints]
+when_to_use = "When you need to list all projects"
+
+[provides.operations.projects_get]
+summary = "Get project details"
+capability = "vercel.projects.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.projects_get.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.projects_get.ai_hints]
+when_to_use = "When you need details about a specific project"
+
+[provides.operations.projects_create]
+summary = "Create a project"
+capability = "vercel.projects.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.projects_create.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.projects_create.ai_hints]
+when_to_use = "When you need to create a new Vercel project"
+
+[provides.operations.projects_delete]
+summary = "Delete a project"
+capability = "vercel.projects.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.projects_delete.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.projects_delete.ai_hints]
+when_to_use = "When you need to permanently delete a project and all its deployments"
+
+[provides.operations.domains_list]
+summary = "List project domains"
+capability = "vercel.domains.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.domains_list.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.domains_list.ai_hints]
+when_to_use = "When you need to see domains attached to a project"
+
+[provides.operations.domains_add]
+summary = "Add a domain to a project"
+capability = "vercel.domains.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.domains_add.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.domains_add.ai_hints]
+when_to_use = "When you need to assign a custom domain to a project"
+
+[provides.operations.domains_remove]
+summary = "Remove a domain from a project"
+capability = "vercel.domains.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.domains_remove.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.domains_remove.ai_hints]
+when_to_use = "When you need to detach a domain from a project — affects routing"
+
+[provides.operations.env_list]
+summary = "List environment variables"
+capability = "vercel.env.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.env_list.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.env_list.ai_hints]
+when_to_use = "When you need to see environment variables for a project"
+
+[provides.operations.env_create]
+summary = "Create an environment variable"
+capability = "vercel.env.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.env_create.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.env_create.ai_hints]
+when_to_use = "When you need to add an environment variable to a project"
+
+[provides.operations.env_delete]
+summary = "Delete an environment variable"
+capability = "vercel.env.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.env_delete.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.env_delete.ai_hints]
+when_to_use = "When you need to remove an environment variable — may break deployments"
+
+[provides.operations.health]
+summary = "Check API token health"
+capability = "vercel.projects.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["api.vercel.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to verify Vercel API credentials"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

@@ -1,0 +1,37 @@
+[package]
+name = "fcp-supabase"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "FCP Supabase connector for PostgREST CRUD, RPC, and Storage operations"
+
+[[bin]]
+name = "fcp-supabase"
+path = "src/main.rs"
+
+[lib]
+name = "fcp_supabase"
+path = "src/lib.rs"
+
+[dependencies]
+fcp-core.workspace = true
+fcp-sdk.workspace = true
+fcp-async-core.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+async-trait.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
+
+[dev-dependencies]
+fcp-crypto.workspace = true
+fcp-testkit.workspace = true
+wiremock.workspace = true

@@ -1,0 +1,210 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.supabase"
+name = "Supabase"
+version = "0.1.0"
+description = "Supabase connector for database queries, storage, and edge functions"
+archetype = "cloud-control-plane"
+homepage = "https://supabase.com/docs/reference"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.list_projects]
+summary = "List all Supabase projects"
+capability = "supabase.projects.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_projects.network_constraints]
+host_allow = ["api.supabase.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.list_projects.ai_hints]
+when_to_use = "When you need to list all Supabase projects in the account"
+
+[provides.operations.get_project]
+summary = "Get Supabase project details"
+capability = "supabase.projects.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_project.network_constraints]
+host_allow = ["api.supabase.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.get_project.ai_hints]
+when_to_use = "When you need details about a specific Supabase project"
+
+[provides.operations.query]
+summary = "Query rows from a table via PostgREST"
+capability = "supabase.database.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.query.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.query.ai_hints]
+when_to_use = "When you need to read rows from a Supabase table"
+
+[provides.operations.insert]
+summary = "Insert rows into a table via PostgREST"
+capability = "supabase.database.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.insert.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.insert.ai_hints]
+when_to_use = "When you need to insert new rows into a Supabase table"
+
+[provides.operations.update]
+summary = "Update rows in a table via PostgREST"
+capability = "supabase.database.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.update.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.update.ai_hints]
+when_to_use = "When you need to update existing rows in a Supabase table"
+
+[provides.operations.delete_rows]
+summary = "Delete rows from a table via PostgREST"
+capability = "supabase.database.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.delete_rows.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.delete_rows.ai_hints]
+when_to_use = "When you need to delete rows from a Supabase table"
+
+[provides.operations.list_buckets]
+summary = "List storage buckets"
+capability = "supabase.storage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_buckets.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.list_buckets.ai_hints]
+when_to_use = "When you need to list all storage buckets in a Supabase project"
+
+[provides.operations.list_files]
+summary = "List files in a storage bucket"
+capability = "supabase.storage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_files.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.list_files.ai_hints]
+when_to_use = "When you need to list files in a Supabase storage bucket"
+
+[provides.operations.upload_file]
+summary = "Upload a file to a storage bucket"
+capability = "supabase.storage.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.upload_file.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.upload_file.ai_hints]
+when_to_use = "When you need to upload a file to Supabase storage"
+
+[provides.operations.invoke_function]
+summary = "Invoke a Supabase edge function"
+capability = "supabase.functions.invoke"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.invoke_function.network_constraints]
+host_allow = ["*.supabase.co"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.invoke_function.ai_hints]
+when_to_use = "When you need to invoke a Supabase edge function"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

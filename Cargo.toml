@@ -62,6 +62,7 @@ members = [
     "connectors/bitbucket",
     "connectors/browser",
     "connectors/cloudflare",
+    "connectors/vercel",
     "connectors/google-ai",
     "connectors/microsoft365",
     "connectors/llm-router",

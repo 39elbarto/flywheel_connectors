@@ -1,0 +1,266 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.aws"
+name = "AWS"
+version = "0.1.0"
+description = "AWS connector for S3, EC2, Lambda, and STS management"
+archetype = "cloud-control-plane"
+homepage = "https://docs.aws.amazon.com/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+# ── S3 operations ──
+
+[provides.operations.s3_list_buckets]
+summary = "List all S3 buckets"
+capability = "aws.s3.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.s3_list_buckets.network_constraints]
+host_allow = ["s3.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.s3_list_buckets.ai_hints]
+when_to_use = "When you need to list all S3 buckets in the account"
+
+[provides.operations.s3_list_objects]
+summary = "List objects in an S3 bucket"
+capability = "aws.s3.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.s3_list_objects.network_constraints]
+host_allow = ["s3.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.s3_list_objects.ai_hints]
+when_to_use = "When you need to list objects/keys in a specific S3 bucket"
+
+[provides.operations.s3_get_object]
+summary = "Get an object from S3"
+capability = "aws.s3.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.s3_get_object.network_constraints]
+host_allow = ["s3.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.s3_get_object.ai_hints]
+when_to_use = "When you need to download or read an S3 object"
+
+[provides.operations.s3_put_object]
+summary = "Upload an object to S3"
+capability = "aws.s3.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.s3_put_object.network_constraints]
+host_allow = ["s3.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.s3_put_object.ai_hints]
+when_to_use = "When you need to upload or create an S3 object"
+
+[provides.operations.s3_delete_object]
+summary = "Delete an object from S3"
+capability = "aws.s3.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.s3_delete_object.network_constraints]
+host_allow = ["s3.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.s3_delete_object.ai_hints]
+when_to_use = "When you need to permanently delete an S3 object"
+
+# ── EC2 operations ──
+
+[provides.operations.ec2_describe_instances]
+summary = "Describe EC2 instances"
+capability = "aws.ec2.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.ec2_describe_instances.network_constraints]
+host_allow = ["ec2.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.ec2_describe_instances.ai_hints]
+when_to_use = "When you need to list or inspect EC2 instances"
+
+[provides.operations.ec2_start_instance]
+summary = "Start an EC2 instance"
+capability = "aws.ec2.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.ec2_start_instance.network_constraints]
+host_allow = ["ec2.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.ec2_start_instance.ai_hints]
+when_to_use = "When you need to start a stopped EC2 instance"
+
+[provides.operations.ec2_stop_instance]
+summary = "Stop an EC2 instance"
+capability = "aws.ec2.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.ec2_stop_instance.network_constraints]
+host_allow = ["ec2.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.ec2_stop_instance.ai_hints]
+when_to_use = "When you need to stop a running EC2 instance"
+
+[provides.operations.ec2_terminate_instance]
+summary = "Terminate an EC2 instance"
+capability = "aws.ec2.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.ec2_terminate_instance.network_constraints]
+host_allow = ["ec2.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.ec2_terminate_instance.ai_hints]
+when_to_use = "When you need to permanently terminate an EC2 instance (irreversible)"
+
+# ── Lambda operations ──
+
+[provides.operations.lambda_list_functions]
+summary = "List Lambda functions"
+capability = "aws.lambda.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.lambda_list_functions.network_constraints]
+host_allow = ["lambda.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.lambda_list_functions.ai_hints]
+when_to_use = "When you need to list all Lambda functions"
+
+[provides.operations.lambda_invoke]
+summary = "Invoke a Lambda function"
+capability = "aws.lambda.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.lambda_invoke.network_constraints]
+host_allow = ["lambda.*.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.lambda_invoke.ai_hints]
+when_to_use = "When you need to execute a Lambda function"
+
+# ── STS operations ──
+
+[provides.operations.sts_get_caller_identity]
+summary = "Get caller identity"
+capability = "aws.iam.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.sts_get_caller_identity.network_constraints]
+host_allow = ["sts.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.sts_get_caller_identity.ai_hints]
+when_to_use = "When you need to verify who the current AWS credentials belong to"
+
+# ── Health operation ──
+
+[provides.operations.health]
+summary = "Check AWS API health"
+capability = "aws.iam.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["sts.amazonaws.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to check AWS credentials and API health"

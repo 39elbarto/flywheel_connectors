@@ -1,0 +1,282 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.gcp"
+name = "Google Cloud Platform"
+version = "0.1.0"
+description = "GCP connector for Compute Engine, Cloud Storage, Cloud Run, and Projects"
+archetype = "cloud-control-plane"
+homepage = "https://cloud.google.com/apis"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.compute_list_instances]
+summary = "List Compute Engine instances in a zone"
+capability = "gcp.compute.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.compute_list_instances.network_constraints]
+host_allow = ["compute.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.compute_list_instances.ai_hints]
+when_to_use = "When you need to list VMs in a specific zone"
+
+[provides.operations.compute_get_instance]
+summary = "Get a Compute Engine instance"
+capability = "gcp.compute.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.compute_get_instance.network_constraints]
+host_allow = ["compute.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.compute_get_instance.ai_hints]
+when_to_use = "When you need details of a specific VM instance"
+
+[provides.operations.compute_start_instance]
+summary = "Start a Compute Engine instance"
+capability = "gcp.compute.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.compute_start_instance.network_constraints]
+host_allow = ["compute.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.compute_start_instance.ai_hints]
+when_to_use = "When you need to start a stopped VM"
+
+[provides.operations.compute_stop_instance]
+summary = "Stop a Compute Engine instance"
+capability = "gcp.compute.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.compute_stop_instance.network_constraints]
+host_allow = ["compute.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.compute_stop_instance.ai_hints]
+when_to_use = "When you need to stop a running VM"
+
+[provides.operations.compute_delete_instance]
+summary = "Delete a Compute Engine instance"
+capability = "gcp.compute.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.compute_delete_instance.network_constraints]
+host_allow = ["compute.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.compute_delete_instance.ai_hints]
+when_to_use = "When you need to permanently delete a VM — irreversible"
+
+[provides.operations.storage_list_objects]
+summary = "List objects in a Cloud Storage bucket"
+capability = "gcp.storage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.storage_list_objects.network_constraints]
+host_allow = ["storage.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_list_objects.ai_hints]
+when_to_use = "When you need to list files in a Cloud Storage bucket"
+
+[provides.operations.storage_get_object]
+summary = "Get metadata for a Cloud Storage object"
+capability = "gcp.storage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.storage_get_object.network_constraints]
+host_allow = ["storage.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_get_object.ai_hints]
+when_to_use = "When you need metadata for a specific object in a bucket"
+
+[provides.operations.storage_upload_object]
+summary = "Upload an object to Cloud Storage"
+capability = "gcp.storage.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.storage_upload_object.network_constraints]
+host_allow = ["storage.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_upload_object.ai_hints]
+when_to_use = "When you need to upload a file to a Cloud Storage bucket"
+
+[provides.operations.storage_delete_object]
+summary = "Delete a Cloud Storage object"
+capability = "gcp.storage.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.storage_delete_object.network_constraints]
+host_allow = ["storage.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.storage_delete_object.ai_hints]
+when_to_use = "When you need to remove an object from a bucket — irreversible unless versioned"
+
+[provides.operations.run_list_services]
+summary = "List Cloud Run services"
+capability = "gcp.run.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.run_list_services.network_constraints]
+host_allow = ["run.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.run_list_services.ai_hints]
+when_to_use = "When you need to list deployed Cloud Run services"
+
+[provides.operations.run_deploy_service]
+summary = "Deploy a Cloud Run service"
+capability = "gcp.run.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.run_deploy_service.network_constraints]
+host_allow = ["run.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.run_deploy_service.ai_hints]
+when_to_use = "When you need to deploy a container image to Cloud Run"
+
+[provides.operations.run_delete_service]
+summary = "Delete a Cloud Run service"
+capability = "gcp.run.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.run_delete_service.network_constraints]
+host_allow = ["run.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.run_delete_service.ai_hints]
+when_to_use = "When you need to permanently delete a Cloud Run service — irreversible"
+
+[provides.operations.projects_get]
+summary = "Get project information"
+capability = "gcp.iam.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.projects_get.network_constraints]
+host_allow = ["cloudresourcemanager.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.projects_get.ai_hints]
+when_to_use = "When you need to verify GCP project metadata"
+
+[provides.operations.health]
+summary = "Check GCP API health"
+capability = "gcp.iam.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["cloudresourcemanager.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to verify GCP credentials and connectivity"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

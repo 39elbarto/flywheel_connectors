@@ -1,6 +1,6 @@
 //! Signal messenger connector for FCP.
 //!
-//! Supports the signal-cli REST daemon mode (HTTP API) and CLI subprocess mode.
+//! Supports the signal-cli REST daemon mode (HTTP API).
 
 #![forbid(unsafe_code)]
 

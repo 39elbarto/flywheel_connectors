@@ -1,8 +1,7 @@
 //! Signal HTTP client.
 //!
 //! Communicates with signal-cli's REST daemon API.
-//! In daemon mode (preferred), uses HTTP calls to signal-cli-rest-api.
-//! Falls back to CLI subprocess invocation if `daemon_url` is empty.
+//! Uses HTTP calls to `signal-cli-rest-api`.
 
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,

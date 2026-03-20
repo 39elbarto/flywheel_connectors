@@ -21,7 +21,7 @@ use crate::bridge::BridgeManager;
 use crate::client::SignalClient;
 use crate::types::{
     GroupLookupRequest, IdentityRequest, ReceiveMessagesRequest, SendMessageRequest, SignalConfig,
-    SignalEnvelope, TrustIdentityRequest,
+    SignalEnvelope, TrustIdentityRequest, is_loopback_host,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -297,25 +297,18 @@ impl SignalConnector {
                 critical: false,
             });
 
-            // Extract host and validate
-            let host_part = daemon_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost" || host_part == "127.0.0.1";
+            let host = config.daemon_host();
+            let host_ok = host.as_deref().is_some_and(is_loopback_host);
+            let host_part = host.unwrap_or_else(|| "<unparseable>".into());
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
                 passed: host_ok,
                 message: Some(if host_ok {
-                    "Daemon URL is local (localhost or 127.0.0.1)".into()
+                    "Daemon URL is local loopback (localhost, 127.0.0.1, or ::1)".into()
                 } else {
-                    format!("Daemon URL host '{host_part}' is not localhost; ensure trust boundary")
+                    format!(
+                        "Daemon URL host '{host_part}' is not loopback; keep signal-cli on the same machine or behind an explicit trust boundary"
+                    )
                 }),
                 critical: false,
             });
@@ -426,7 +419,15 @@ pub fn operations_info() -> Vec<OperationInfo> {
                         "type": "array",
                         "items": { "type": "object" }
                     },
-                    "count": { "type": "integer" }
+                    "count": { "type": "integer" },
+                    "receive_cursor": {
+                        "type": ["string", "null"],
+                        "description": "Highest observed message timestamp cached as the next receive cursor"
+                    },
+                    "cached_group_count": {
+                        "type": "integer",
+                        "description": "Number of Signal groups cached after the receive poll"
+                    }
                 }
             }),
             capability: CapabilityId::from_static(CAP_READ),
@@ -1089,6 +1090,26 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_doctor_accepts_ipv6_loopback_daemon_url() {
+        let mut connector = SignalConnector::new();
+        connector
+            .configure(json!({
+                "daemon_url": "http://[::1]:8080",
+                "phone_number": "+15551234567"
+            }))
+            .await
+            .unwrap();
+
+        let report = connector.doctor();
+        let network_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "network_constraints")
+            .expect("network_constraints check");
+        assert!(network_check.passed);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_self_check_before_configure() {
         let connector = SignalConnector::new();
         let report = connector.self_check().await.unwrap();
@@ -1255,6 +1276,22 @@ mod tests {
         let connector = SignalConnector::new();
         let intro = connector.introspect();
         assert!(!intro.event_caps.as_ref().unwrap().streaming);
+    }
+
+    #[test]
+    fn test_receive_messages_schema_includes_bridge_metadata() {
+        let receive = operations_info()
+            .into_iter()
+            .find(|op| op.id.as_str() == OP_RECEIVE_MESSAGES)
+            .expect("receive_messages operation");
+
+        let properties = receive
+            .output_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("receive_messages output properties");
+        assert!(properties.contains_key("receive_cursor"));
+        assert!(properties.contains_key("cached_group_count"));
     }
 
     // -- Bridge integration tests --

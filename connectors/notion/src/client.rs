@@ -6,6 +6,7 @@ use fcp_core::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, header};
 use tracing::debug;
 
@@ -17,6 +18,40 @@ use crate::{
 /// Default Notion API base URL.
 pub const DEFAULT_API_URL: &str = "https://api.notion.com/v1";
 const NOTION_VERSION: &str = "2022-06-28";
+
+/// Characters that are NOT percent-encoded in a path segment.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Validate a Notion object ID (UUIDs with optional hyphens, hex chars only).
+/// Rejects empty strings and strings containing path separators, query
+/// parameters, or other URL-active characters.
+fn validate_notion_id(id: &str, label: &str) -> NotionResult<()> {
+    if id.is_empty() {
+        return Err(NotionError::Validation {
+            message: format!("{label} must not be empty"),
+        });
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        return Err(NotionError::Validation {
+            message: format!(
+                "{label} contains invalid characters (expected UUID hex digits and hyphens): {id:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Percent-encode a value for safe inclusion in a URL path segment.
+fn encode_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
+}
 
 /// Authentication mode for the Notion connector.
 #[derive(Clone)]
@@ -158,21 +193,27 @@ impl NotionClient {
 
     /// Get a page by ID.
     pub async fn get_page(&self, page_id: &str) -> NotionResult<Page> {
-        let url = format!("{}/pages/{page_id}", self.api_url);
+        validate_notion_id(page_id, "page_id")?;
+        let seg = encode_path_segment(page_id);
+        let url = format!("{}/pages/{seg}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Update a page (PATCH properties).
     pub async fn update_page(&self, page_id: &str, body: serde_json::Value) -> NotionResult<Page> {
-        let url = format!("{}/pages/{page_id}", self.api_url);
+        validate_notion_id(page_id, "page_id")?;
+        let seg = encode_path_segment(page_id);
+        let url = format!("{}/pages/{seg}", self.api_url);
         let data = self.patch(&url, body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Archive (soft-delete) a page.
     pub async fn delete_page(&self, page_id: &str) -> NotionResult<Page> {
-        let url = format!("{}/pages/{page_id}", self.api_url);
+        validate_notion_id(page_id, "page_id")?;
+        let seg = encode_path_segment(page_id);
+        let url = format!("{}/pages/{seg}", self.api_url);
         let body = serde_json::json!({ "archived": true });
         let data = self.patch(&url, body).await?;
         Ok(serde_json::from_value(data)?)
@@ -187,7 +228,9 @@ impl NotionClient {
         filter: Option<serde_json::Value>,
         start_cursor: Option<&str>,
     ) -> NotionResult<PaginatedResponse> {
-        let url = format!("{}/databases/{database_id}/query", self.api_url);
+        validate_notion_id(database_id, "database_id")?;
+        let seg = encode_path_segment(database_id);
+        let url = format!("{}/databases/{seg}/query", self.api_url);
         let mut body = serde_json::json!({});
         if let Some(f) = filter {
             body["filter"] = f;
@@ -201,7 +244,9 @@ impl NotionClient {
 
     /// Get a database by ID.
     pub async fn get_database(&self, database_id: &str) -> NotionResult<serde_json::Value> {
-        let url = format!("{}/databases/{database_id}", self.api_url);
+        validate_notion_id(database_id, "database_id")?;
+        let seg = encode_path_segment(database_id);
+        let url = format!("{}/databases/{seg}", self.api_url);
         self.get(&url).await
     }
 
@@ -220,7 +265,9 @@ impl NotionClient {
         database_id: &str,
         body: serde_json::Value,
     ) -> NotionResult<serde_json::Value> {
-        let url = format!("{}/databases/{database_id}", self.api_url);
+        validate_notion_id(database_id, "database_id")?;
+        let seg = encode_path_segment(database_id);
+        let url = format!("{}/databases/{seg}", self.api_url);
         self.patch(&url, body).await
     }
 
@@ -248,14 +295,18 @@ impl NotionClient {
 
     /// Get child blocks of a block or page.
     pub async fn get_block_children(&self, block_id: &str) -> NotionResult<PaginatedResponse> {
-        let url = format!("{}/blocks/{block_id}/children", self.api_url);
+        validate_notion_id(block_id, "block_id")?;
+        let seg = encode_path_segment(block_id);
+        let url = format!("{}/blocks/{seg}/children", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Get a single block by ID.
     pub async fn get_block(&self, block_id: &str) -> NotionResult<serde_json::Value> {
-        let url = format!("{}/blocks/{block_id}", self.api_url);
+        validate_notion_id(block_id, "block_id")?;
+        let seg = encode_path_segment(block_id);
+        let url = format!("{}/blocks/{seg}", self.api_url);
         self.get(&url).await
     }
 
@@ -265,13 +316,17 @@ impl NotionClient {
         block_id: &str,
         body: serde_json::Value,
     ) -> NotionResult<serde_json::Value> {
-        let url = format!("{}/blocks/{block_id}", self.api_url);
+        validate_notion_id(block_id, "block_id")?;
+        let seg = encode_path_segment(block_id);
+        let url = format!("{}/blocks/{seg}", self.api_url);
         self.patch(&url, body).await
     }
 
     /// Archive (soft-delete) a block.
     pub async fn delete_block(&self, block_id: &str) -> NotionResult<serde_json::Value> {
-        let url = format!("{}/blocks/{block_id}", self.api_url);
+        validate_notion_id(block_id, "block_id")?;
+        let seg = encode_path_segment(block_id);
+        let url = format!("{}/blocks/{seg}", self.api_url);
         let body = serde_json::json!({ "archived": true });
         self.patch(&url, body).await
     }
@@ -282,7 +337,9 @@ impl NotionClient {
         block_id: &str,
         children: serde_json::Value,
     ) -> NotionResult<PaginatedResponse> {
-        let url = format!("{}/blocks/{block_id}/children", self.api_url);
+        validate_notion_id(block_id, "block_id")?;
+        let seg = encode_path_segment(block_id);
+        let url = format!("{}/blocks/{seg}/children", self.api_url);
         let body = serde_json::json!({ "children": children });
         let data = self.patch(&url, body).await?;
         Ok(serde_json::from_value(data)?)
@@ -298,7 +355,10 @@ impl NotionClient {
 
     /// List comments on a block or page.
     pub async fn list_comments(&self, block_id: &str) -> NotionResult<PaginatedResponse> {
-        let url = format!("{}/comments?block_id={block_id}", self.api_url);
+        validate_notion_id(block_id, "block_id")?;
+        let encoded_id =
+            utf8_percent_encode(block_id, PATH_SEGMENT_ENCODE_SET).to_string();
+        let url = format!("{}/comments?block_id={encoded_id}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -877,6 +937,121 @@ mod tests {
             result.unwrap_err(),
             NotionError::RateLimited { .. }
         ));
+    }
+
+    // ─── URL injection prevention tests ──────────────────────────────
+
+    #[test]
+    fn test_validate_notion_id_valid_uuid() {
+        assert!(validate_notion_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890", "page_id").is_ok());
+    }
+
+    #[test]
+    fn test_validate_notion_id_no_hyphens() {
+        assert!(validate_notion_id("a1b2c3d4e5f67890abcdef1234567890", "page_id").is_ok());
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_empty() {
+        let result = validate_notion_id("", "page_id");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_slashes() {
+        let result = validate_notion_id("../../etc/passwd", "block_id");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_query_injection() {
+        let result = validate_notion_id("abc?admin=true", "block_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_spaces() {
+        let result = validate_notion_id("abc def", "block_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_hash_fragment() {
+        let result = validate_notion_id("abc#fragment", "block_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_non_hex() {
+        let result = validate_notion_id("xyz-not-hex!", "page_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encode_path_segment_safe_chars() {
+        let encoded = encode_path_segment("a1b2c3d4-e5f6-7890");
+        assert_eq!(encoded, "a1b2c3d4-e5f6-7890");
+    }
+
+    #[test]
+    fn test_encode_path_segment_special_chars() {
+        let encoded = encode_path_segment("abc?foo=bar&x=1");
+        assert!(encoded.contains("%3F"));
+        assert!(encoded.contains("%3D"));
+        assert!(encoded.contains("%26"));
+    }
+
+    #[test]
+    fn test_encode_path_segment_slash() {
+        let encoded = encode_path_segment("../../etc");
+        assert!(encoded.contains("%2F"));
+        assert!(!encoded.contains('/'));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_page_rejects_path_traversal() {
+        let client = NotionClient::new("test-token")
+            .unwrap()
+            .with_api_url("http://localhost:1234/v1");
+
+        let result = client.get_page("../../admin").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_block_rejects_query_injection() {
+        let client = NotionClient::new("test-token")
+            .unwrap()
+            .with_api_url("http://localhost:1234/v1");
+
+        let result = client.get_block("abc?admin=true").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_comments_rejects_injection() {
+        let client = NotionClient::new("test-token")
+            .unwrap()
+            .with_api_url("http://localhost:1234/v1");
+
+        let result = client.list_comments("abc&admin=true").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_query_database_rejects_empty_id() {
+        let client = NotionClient::new("test-token")
+            .unwrap()
+            .with_api_url("http://localhost:1234/v1");
+
+        let result = client.query_database("", None, None).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
     }
 
     #[test]

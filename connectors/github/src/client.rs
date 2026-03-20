@@ -8,6 +8,7 @@ use fcp_core::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -22,6 +23,46 @@ use crate::{
 
 /// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.github.com";
+
+/// Characters that are NOT percent-encoded when encoding a single path segment.
+/// We keep alphanumerics, hyphens, underscores, dots, and tildes (RFC 3986 unreserved).
+/// Slashes are NOT included — they delimit path segments.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Validate that a GitHub owner or repo name contains only safe characters
+/// (alphanumeric, hyphens, dots, underscores). Returns an error on invalid input.
+fn validate_owner_repo(value: &str, label: &str) -> GitHubResult<()> {
+    if value.is_empty() {
+        return Err(GitHubError::ValidationError {
+            message: format!("{label} must not be empty"),
+        });
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+    {
+        return Err(GitHubError::ValidationError {
+            message: format!(
+                "{label} contains invalid characters (only alphanumeric, hyphens, dots, underscores allowed): {value:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Percent-encode a file path for use in a GitHub API URL.
+/// Each segment between `/` separators is encoded individually, preserving the
+/// path hierarchy. E.g. `"src/my file.rs"` → `"src/my%20file.rs"`.
+fn encode_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 /// Authentication mode for the GitHub client.
 #[derive(Clone)]
@@ -137,7 +178,7 @@ impl GitHubClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub fn with_retry_config(
+    pub const fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,
@@ -165,7 +206,7 @@ impl GitHubClient {
     /// Create an issue.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self, req))]
     pub async fn create_issue(
         &self,
@@ -173,6 +214,8 @@ impl GitHubClient {
         repo: &str,
         req: &CreateIssueRequest,
     ) -> GitHubResult<Issue> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
         self.post(&format!("/repos/{owner}/{repo}/issues"), req)
             .await
     }
@@ -180,7 +223,7 @@ impl GitHubClient {
     /// Get a single issue.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self))]
     pub async fn get_issue(
         &self,
@@ -188,6 +231,8 @@ impl GitHubClient {
         repo: &str,
         issue_number: u32,
     ) -> GitHubResult<Issue> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
         self.get(&format!("/repos/{owner}/{repo}/issues/{issue_number}"))
             .await
     }
@@ -207,7 +252,7 @@ impl GitHubClient {
     /// Create a pull request.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self, req))]
     pub async fn create_pull_request(
         &self,
@@ -215,6 +260,8 @@ impl GitHubClient {
         repo: &str,
         req: &CreatePullRequestRequest,
     ) -> GitHubResult<PullRequest> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
         self.post(&format!("/repos/{owner}/{repo}/pulls"), req)
             .await
     }
@@ -222,7 +269,7 @@ impl GitHubClient {
     /// Get a single pull request.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self))]
     pub async fn get_pull_request(
         &self,
@@ -230,6 +277,8 @@ impl GitHubClient {
         repo: &str,
         pull_number: u32,
     ) -> GitHubResult<PullRequest> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
         self.get(&format!("/repos/{owner}/{repo}/pulls/{pull_number}"))
             .await
     }
@@ -237,7 +286,7 @@ impl GitHubClient {
     /// Merge a pull request.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self, req))]
     pub async fn merge_pull_request(
         &self,
@@ -246,6 +295,8 @@ impl GitHubClient {
         pull_number: u32,
         req: &MergePullRequestRequest,
     ) -> GitHubResult<MergeResult> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
         self.put(
             &format!("/repos/{owner}/{repo}/pulls/{pull_number}/merge"),
             req,
@@ -258,9 +309,11 @@ impl GitHubClient {
     /// Get repository metadata.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self))]
     pub async fn get_repo(&self, owner: &str, repo: &str) -> GitHubResult<Repository> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
         self.get(&format!("/repos/{owner}/{repo}")).await
     }
 
@@ -279,9 +332,11 @@ impl GitHubClient {
     /// List workflows in a repository.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self))]
     pub async fn list_workflows(&self, owner: &str, repo: &str) -> GitHubResult<WorkflowsResponse> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
         self.get(&format!("/repos/{owner}/{repo}/actions/workflows"))
             .await
     }
@@ -289,7 +344,7 @@ impl GitHubClient {
     /// Trigger a workflow dispatch event.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self))]
     pub async fn trigger_workflow(
         &self,
@@ -298,9 +353,13 @@ impl GitHubClient {
         workflow_id: &str,
         git_ref: &str,
     ) -> GitHubResult<()> {
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
+        let encoded_workflow_id =
+            utf8_percent_encode(workflow_id, PATH_SEGMENT_ENCODE_SET).to_string();
         let body = serde_json::json!({ "ref": git_ref });
         let url = format!(
-            "{}/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches",
+            "{}/repos/{owner}/{repo}/actions/workflows/{encoded_workflow_id}/dispatches",
             self.base_url
         );
 
@@ -362,7 +421,7 @@ impl GitHubClient {
     /// Get file or directory content.
     ///
     /// # Errors
-    /// Returns [`GitHubError`] if the API request fails.
+    /// Returns [`GitHubError`] if the API request fails or owner/repo are invalid.
     #[instrument(skip(self))]
     pub async fn get_file_content(
         &self,
@@ -370,7 +429,10 @@ impl GitHubClient {
         repo: &str,
         path: &str,
     ) -> GitHubResult<FileContent> {
-        self.get(&format!("/repos/{owner}/{repo}/contents/{path}"))
+        validate_owner_repo(owner, "owner")?;
+        validate_owner_repo(repo, "repo")?;
+        let encoded_path = encode_path(path);
+        self.get(&format!("/repos/{owner}/{repo}/contents/{encoded_path}"))
             .await
     }
 
@@ -1126,6 +1188,144 @@ mod tests {
     }
 
     // ─── parse_error_response tests ─────────────────────────────────
+
+    // ─── URL injection prevention tests ──────────────────────────────
+
+    #[test]
+    fn test_validate_owner_repo_valid() {
+        assert!(validate_owner_repo("octocat", "owner").is_ok());
+        assert!(validate_owner_repo("my-org", "owner").is_ok());
+        assert!(validate_owner_repo("my_repo", "repo").is_ok());
+        assert!(validate_owner_repo("repo.name", "repo").is_ok());
+        assert!(validate_owner_repo("a123", "owner").is_ok());
+    }
+
+    #[test]
+    fn test_validate_owner_repo_rejects_slashes() {
+        let result = validate_owner_repo("evil/../../etc", "owner");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GitHubError::ValidationError { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_owner_repo_rejects_empty() {
+        let result = validate_owner_repo("", "owner");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GitHubError::ValidationError { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_owner_repo_rejects_spaces() {
+        let result = validate_owner_repo("bad name", "owner");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_owner_repo_rejects_query_injection() {
+        let result = validate_owner_repo("repo?admin=true", "repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_owner_repo_rejects_hash_fragment() {
+        let result = validate_owner_repo("repo#fragment", "repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_owner_repo_rejects_unicode() {
+        let result = validate_owner_repo("repo\u{0000}evil", "repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encode_path_simple() {
+        assert_eq!(encode_path("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn test_encode_path_with_spaces() {
+        assert_eq!(encode_path("my dir/my file.rs"), "my%20dir/my%20file.rs");
+    }
+
+    #[test]
+    fn test_encode_path_preserves_slashes() {
+        assert_eq!(encode_path("a/b/c"), "a/b/c");
+    }
+
+    #[test]
+    fn test_encode_path_special_chars() {
+        assert_eq!(encode_path("dir/file#1.txt"), "dir/file%231.txt");
+    }
+
+    #[test]
+    fn test_encode_path_traversal_dots_preserved() {
+        // ".." segments are valid path segments in a repo file tree
+        // and are preserved after encoding. The key protection is that
+        // `/` separators are preserved but not injected into segments.
+        let encoded = encode_path("../../../etc/passwd");
+        assert_eq!(encoded, "../../../etc/passwd");
+    }
+
+    #[test]
+    fn test_encode_path_query_injection() {
+        let encoded = encode_path("file?admin=true");
+        assert!(encoded.contains("%3F"));
+        assert!(!encoded.contains('?'));
+    }
+
+    #[test]
+    fn test_encode_path_unicode() {
+        let encoded = encode_path("docs/日本語.md");
+        assert!(encoded.starts_with("docs/"));
+        assert!(encoded.contains('%'));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_repo_rejects_path_traversal() {
+        let client = GitHubClient::new("test_token")
+            .unwrap()
+            .with_base_url("http://localhost:1234");
+
+        let result = client.get_repo("../admin", "hello-world").await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GitHubError::ValidationError { .. }
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_issue_rejects_invalid_owner() {
+        let client = GitHubClient::new("test_token")
+            .unwrap()
+            .with_base_url("http://localhost:1234");
+
+        let result = client
+            .create_issue(
+                "evil/owner",
+                "repo",
+                &CreateIssueRequest {
+                    title: "test".into(),
+                    body: None,
+                    assignees: None,
+                    labels: None,
+                    milestone: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GitHubError::ValidationError { .. }
+        ));
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_server_error_500() {

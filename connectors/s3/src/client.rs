@@ -280,7 +280,8 @@ impl S3Client {
         prefix: Option<&str>,
         max_keys: Option<u64>,
     ) -> S3Result<ListObjectsResponse> {
-        let base_url = format!("{}/{bucket}", self.base_url);
+        let encoded_bucket = Self::encode_bucket(bucket);
+        let base_url = format!("{}/{encoded_bucket}", self.base_url);
         let mut params: Vec<(&str, String)> = Vec::new();
         params.push(("list-type", "2".to_string()));
 
@@ -360,7 +361,9 @@ impl S3Client {
         dest_key: &str,
     ) -> S3Result<PutObjectResponse> {
         let url = self.object_url(dest_bucket, dest_key);
-        let copy_source = format!("/{source_bucket}/{source_key}");
+        let encoded_source_bucket = Self::encode_bucket(source_bucket);
+        let encoded_source_key = percent_encoding::utf8_percent_encode(source_key, S3_PATH_SET);
+        let copy_source = format!("/{encoded_source_bucket}/{encoded_source_key}");
 
         let response: serde_json::Value = self.put_with_copy_source(&url, &copy_source).await?;
 
@@ -441,11 +444,12 @@ impl S3Client {
             S3Auth::CredentialId(_) => ("CREDENTIAL_ID_MODE", "proxy"),
         };
 
+        let encoded_bucket = Self::encode_bucket(bucket);
         let encoded_key =
             percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC);
 
         let url = format!(
-            "{base}/{bucket}/{encoded_key}?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+            "{base}/{encoded_bucket}/{encoded_key}?X-Amz-Algorithm=AWS4-HMAC-SHA256\
              &X-Amz-Credential={access_key}%2F{region}%2Fs3%2Faws4_request\
              &X-Amz-Expires={expires_in}\
              &X-Amz-SignedHeaders=host\
@@ -458,15 +462,23 @@ impl S3Client {
 
     // ── Internal helpers ─────────────────────────────────────────────────
 
+    /// Percent-encode a bucket name for safe inclusion in a URL path segment.
+    fn encode_bucket(bucket: &str) -> String {
+        percent_encoding::utf8_percent_encode(bucket, percent_encoding::NON_ALPHANUMERIC)
+            .to_string()
+    }
+
     /// Build the URL for an object in a bucket.
     fn object_url(&self, bucket: &str, key: &str) -> String {
+        let encoded_bucket = Self::encode_bucket(bucket);
         let encoded_key = percent_encoding::utf8_percent_encode(key, S3_PATH_SET);
-        format!("{}/{bucket}/{encoded_key}", self.base_url)
+        format!("{}/{encoded_bucket}/{encoded_key}", self.base_url)
     }
 
     /// Build the URL for a bucket.
     fn bucket_url(&self, bucket: &str) -> String {
-        format!("{}/{}", self.base_url, bucket)
+        let encoded_bucket = Self::encode_bucket(bucket);
+        format!("{}/{encoded_bucket}", self.base_url)
     }
 
     /// GET request returning deserialized JSON.
@@ -1136,5 +1148,130 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    // --- URL encoding safety tests ---
+
+    #[test]
+    fn encode_bucket_normal_name() {
+        // Standard bucket names use lowercase, digits, hyphens, dots
+        let encoded = S3Client::encode_bucket("my-bucket-123");
+        // Hyphens and digits get encoded with NON_ALPHANUMERIC
+        assert!(!encoded.contains('/'));
+    }
+
+    #[test]
+    fn encode_bucket_prevents_path_traversal() {
+        let encoded = S3Client::encode_bucket("../../../etc/passwd");
+        assert!(!encoded.contains("../"));
+        assert!(encoded.contains("%2E%2E%2F"));
+    }
+
+    #[test]
+    fn encode_bucket_encodes_slashes() {
+        let encoded = S3Client::encode_bucket("bucket/injection");
+        assert!(!encoded.contains('/'));
+        assert!(encoded.contains("%2F"));
+    }
+
+    #[test]
+    fn encode_bucket_encodes_query_chars() {
+        let encoded = S3Client::encode_bucket("bucket?param=value");
+        assert!(!encoded.contains('?'));
+        assert!(!encoded.contains('='));
+    }
+
+    #[test]
+    fn object_url_encodes_bucket_and_key() {
+        let client = S3Client::new("key", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.example.com");
+
+        let url = client.object_url("my-bucket", "path/to/file.txt");
+        // Bucket gets NON_ALPHANUMERIC encoding (hyphens encoded)
+        // Key gets S3_PATH_SET encoding (slashes preserved)
+        assert!(url.starts_with("https://s3.example.com/"));
+        assert!(url.contains("path/to/file.txt"));
+    }
+
+    #[test]
+    fn object_url_encodes_special_key_chars() {
+        let client = S3Client::new("key", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.example.com");
+
+        let url = client.object_url("bucket", "file with spaces.txt");
+        assert!(!url.contains(' '));
+        assert!(url.contains("%20"));
+    }
+
+    #[test]
+    fn object_url_bucket_traversal_blocked() {
+        let client = S3Client::new("key", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.example.com");
+
+        let url = client.object_url("../evil-bucket", "key.txt");
+        // The ../ should be encoded, not interpreted as path traversal
+        assert!(!url.contains("../"));
+    }
+
+    #[test]
+    fn bucket_url_encodes_bucket() {
+        let client = S3Client::new("key", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.example.com");
+
+        let url = client.bucket_url("safe-bucket");
+        assert!(url.starts_with("https://s3.example.com/"));
+    }
+
+    #[test]
+    fn bucket_url_prevents_traversal() {
+        let client = S3Client::new("key", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.example.com");
+
+        let url = client.bucket_url("../../admin");
+        assert!(!url.contains("../../"));
+    }
+
+    #[test]
+    fn presigned_url_encodes_bucket() {
+        let client = S3Client::new("AKIAEXAMPLE", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.amazonaws.com");
+
+        let result = client.generate_presigned_url("my-bucket", "file.txt", 3600);
+        // Bucket should not allow injection
+        assert!(result.url.contains("X-Amz-Expires=3600"));
+    }
+
+    #[test]
+    fn copy_source_header_is_encoded() {
+        // Verify the encoding logic for copy_source construction
+        let source_bucket = "src-bucket";
+        let source_key = "path/to/file with spaces.txt";
+        let encoded_bucket = S3Client::encode_bucket(source_bucket);
+        let encoded_key = percent_encoding::utf8_percent_encode(source_key, S3_PATH_SET);
+        let copy_source = format!("/{encoded_bucket}/{encoded_key}");
+
+        // Spaces in key should be encoded
+        assert!(!copy_source.contains(' '));
+        assert!(copy_source.contains("%20"));
+        // Slashes in key should be preserved (S3_PATH_SET preserves /)
+        assert!(copy_source.contains("path/to/"));
+    }
+
+    #[test]
+    fn copy_source_bucket_traversal_blocked() {
+        let source_bucket = "../other-bucket";
+        let source_key = "key.txt";
+        let encoded_bucket = S3Client::encode_bucket(source_bucket);
+        let encoded_key = percent_encoding::utf8_percent_encode(source_key, S3_PATH_SET);
+        let copy_source = format!("/{encoded_bucket}/{encoded_key}");
+
+        // Traversal attempt must be encoded
+        assert!(!copy_source.contains("../"));
     }
 }

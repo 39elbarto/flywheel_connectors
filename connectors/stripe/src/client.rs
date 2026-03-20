@@ -9,6 +9,7 @@ use fcp_core::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, header};
 use tracing::debug;
 
@@ -176,7 +177,8 @@ impl StripeClient {
 
     /// Get a customer by ID.
     pub async fn get_customer(&self, customer_id: &str) -> StripeResult<Customer> {
-        let url = format!("{}/customers/{customer_id}", self.api_url);
+        let id = Self::encode_path_segment(customer_id);
+        let url = format!("{}/customers/{id}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -189,7 +191,8 @@ impl StripeClient {
         name: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> StripeResult<Customer> {
-        let url = format!("{}/customers/{customer_id}", self.api_url);
+        let id = Self::encode_path_segment(customer_id);
+        let url = format!("{}/customers/{id}", self.api_url);
         let mut body = serde_json::json!({});
         if let Some(e) = email {
             body["email"] = serde_json::Value::String(e.to_string());
@@ -209,7 +212,8 @@ impl StripeClient {
         customer_id: &str,
         idempotency_key: Option<&str>,
     ) -> StripeResult<DeletedResource> {
-        let url = format!("{}/customers/{customer_id}", self.api_url);
+        let id = Self::encode_path_segment(customer_id);
+        let url = format!("{}/customers/{id}", self.api_url);
         let data = self.delete_with_idempotency(&url, idempotency_key).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -226,7 +230,7 @@ impl StripeClient {
             params.push(format!("limit={l}"));
         }
         if let Some(e) = email {
-            params.push(format!("email={e}"));
+            params.push(format!("email={}", Self::encode_query_value(e)));
         }
         if !params.is_empty() {
             url = format!("{url}?{}", params.join("&"));
@@ -272,7 +276,8 @@ impl StripeClient {
 
     /// Get a payment intent by ID.
     pub async fn get_payment_intent(&self, payment_intent_id: &str) -> StripeResult<PaymentIntent> {
-        let url = format!("{}/payment_intents/{payment_intent_id}", self.api_url);
+        let id = Self::encode_path_segment(payment_intent_id);
+        let url = format!("{}/payment_intents/{id}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -284,10 +289,8 @@ impl StripeClient {
         payment_method: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> StripeResult<PaymentIntent> {
-        let url = format!(
-            "{}/payment_intents/{payment_intent_id}/confirm",
-            self.api_url
-        );
+        let id = Self::encode_path_segment(payment_intent_id);
+        let url = format!("{}/payment_intents/{id}/confirm", self.api_url);
         let mut body = serde_json::json!({});
         if let Some(pm) = payment_method {
             body["payment_method"] = serde_json::Value::String(pm.to_string());
@@ -305,10 +308,8 @@ impl StripeClient {
         amount_to_capture: Option<i64>,
         idempotency_key: Option<&str>,
     ) -> StripeResult<PaymentIntent> {
-        let url = format!(
-            "{}/payment_intents/{payment_intent_id}/capture",
-            self.api_url
-        );
+        let id = Self::encode_path_segment(payment_intent_id);
+        let url = format!("{}/payment_intents/{id}/capture", self.api_url);
         let mut body = serde_json::json!({});
         if let Some(amount) = amount_to_capture {
             body["amount_to_capture"] = serde_json::Value::Number(amount.into());
@@ -326,10 +327,8 @@ impl StripeClient {
         cancellation_reason: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> StripeResult<PaymentIntent> {
-        let url = format!(
-            "{}/payment_intents/{payment_intent_id}/cancel",
-            self.api_url
-        );
+        let id = Self::encode_path_segment(payment_intent_id);
+        let url = format!("{}/payment_intents/{id}/cancel", self.api_url);
         let mut body = serde_json::json!({});
         if let Some(reason) = cancellation_reason {
             body["cancellation_reason"] = serde_json::Value::String(reason.to_string());
@@ -402,7 +401,8 @@ impl StripeClient {
 
     /// Get a subscription by ID.
     pub async fn get_subscription(&self, subscription_id: &str) -> StripeResult<Subscription> {
-        let url = format!("{}/subscriptions/{subscription_id}", self.api_url);
+        let id = Self::encode_path_segment(subscription_id);
+        let url = format!("{}/subscriptions/{id}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -417,10 +417,10 @@ impl StripeClient {
         let mut url = format!("{}/subscriptions", self.api_url);
         let mut params = Vec::new();
         if let Some(c) = customer {
-            params.push(format!("customer={c}"));
+            params.push(format!("customer={}", Self::encode_query_value(c)));
         }
         if let Some(s) = status {
-            params.push(format!("status={s}"));
+            params.push(format!("status={}", Self::encode_query_value(s)));
         }
         if let Some(l) = limit {
             params.push(format!("limit={l}"));
@@ -444,7 +444,8 @@ impl StripeClient {
         subscription_id: &str,
         idempotency_key: Option<&str>,
     ) -> StripeResult<Subscription> {
-        let url = format!("{}/subscriptions/{subscription_id}", self.api_url);
+        let id = Self::encode_path_segment(subscription_id);
+        let url = format!("{}/subscriptions/{id}", self.api_url);
         let data = self.delete_with_idempotency(&url, idempotency_key).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -453,7 +454,8 @@ impl StripeClient {
 
     /// Get an invoice by ID.
     pub async fn get_invoice(&self, invoice_id: &str) -> StripeResult<Invoice> {
-        let url = format!("{}/invoices/{invoice_id}", self.api_url);
+        let id = Self::encode_path_segment(invoice_id);
+        let url = format!("{}/invoices/{id}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -467,7 +469,7 @@ impl StripeClient {
         let mut url = format!("{}/invoices", self.api_url);
         let mut params = Vec::new();
         if let Some(c) = customer {
-            params.push(format!("customer={c}"));
+            params.push(format!("customer={}", Self::encode_query_value(c)));
         }
         if let Some(l) = limit {
             params.push(format!("limit={l}"));
@@ -486,6 +488,20 @@ impl StripeClient {
         let url = format!("{}/balance", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
+    }
+
+    // ── Encoding helpers ──────────────────────────────────────────
+
+    /// Percent-encode a value for safe inclusion in a URL path segment.
+    /// Encodes everything except unreserved characters (RFC 3986).
+    fn encode_path_segment(s: &str) -> String {
+        utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+    }
+
+    /// Percent-encode a value for safe inclusion as a query parameter value.
+    /// Encodes everything except unreserved characters (RFC 3986).
+    fn encode_query_value(s: &str) -> String {
+        utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────
@@ -1194,5 +1210,108 @@ mod tests {
             .with_retry_config(0);
         assert_eq!(client.api_url(), "https://test.com/v1");
         assert_eq!(client.retry_config.max_retries, 0);
+    }
+
+    // --- URL encoding safety tests ---
+
+    #[test]
+    fn encode_path_segment_safe_chars_unchanged() {
+        // Normal Stripe IDs should pass through (only alphanumeric + underscore)
+        let encoded = StripeClient::encode_path_segment("cus_123abc");
+        assert_eq!(encoded, "cus%5F123abc");
+    }
+
+    #[test]
+    fn encode_path_segment_prevents_traversal() {
+        // Path traversal attempt must be encoded
+        let encoded = StripeClient::encode_path_segment("../../../etc/passwd");
+        assert!(!encoded.contains("../"));
+        assert!(encoded.contains("%2E%2E%2F"));
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_slashes() {
+        let encoded = StripeClient::encode_path_segment("cus_123/extra/path");
+        assert!(!encoded.contains('/'));
+        assert!(encoded.contains("%2F"));
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_query_injection() {
+        let encoded = StripeClient::encode_path_segment("cus_123?admin=true");
+        assert!(!encoded.contains('?'));
+        assert!(encoded.contains("%3F"));
+    }
+
+    #[test]
+    fn encode_query_value_encodes_ampersand() {
+        let encoded = StripeClient::encode_query_value("foo&bar=baz");
+        assert!(!encoded.contains('&'));
+        assert!(encoded.contains("%26"));
+    }
+
+    #[test]
+    fn encode_query_value_encodes_equals() {
+        let encoded = StripeClient::encode_query_value("key=value");
+        assert!(!encoded.contains('='));
+        assert!(encoded.contains("%3D"));
+    }
+
+    #[test]
+    fn encode_query_value_encodes_email_at_sign() {
+        let encoded = StripeClient::encode_query_value("user@example.com");
+        assert!(encoded.contains("%40"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_customers_email_with_special_chars() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/customers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [],
+                "has_more": false
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        // Should not panic or produce malformed URL with special chars in email
+        let result = client
+            .list_customers(Some(10), Some("user+tag@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(result.data.len(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_subscriptions_status_encoded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [],
+                "has_more": false
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        // Malicious status value should be safely encoded
+        let result = client
+            .list_subscriptions(Some("cus_123"), Some("active&admin=true"), Some(10))
+            .await
+            .unwrap();
+        assert_eq!(result.data.len(), 0);
     }
 }

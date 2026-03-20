@@ -1,179 +1,252 @@
+use fcp_core::CredentialId;
 use serde::{Deserialize, Serialize};
 
-// ── Auth ──
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
 
-/// Azure service principal authentication.
 #[derive(Clone, Deserialize)]
-pub struct AzureAuth {
-    /// Bearer access token for Azure Resource Manager.
-    pub access_token: String,
-    /// Azure subscription ID.
-    pub subscription_id: String,
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AzureAuth {
+    BearerToken { bearer_token: String },
+    CredentialId { credential_id: CredentialId },
 }
 
 impl AzureAuth {
     #[must_use]
-    pub fn is_secretless(&self) -> bool {
-        self.access_token.trim().is_empty()
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::BearerToken { .. } => "bearer_token",
+            Self::CredentialId { .. } => "credential_id",
+        }
     }
 
     #[must_use]
-    pub const fn redacted_label(&self) -> &'static str {
-        "bearer_token"
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
     }
 }
 
 impl std::fmt::Debug for AzureAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AzureAuth")
-            .field("access_token", &"[REDACTED]")
-            .field("subscription_id", &self.subscription_id)
-            .finish()
+        match self {
+            Self::BearerToken { .. } => f
+                .debug_struct("BearerToken")
+                .field("bearer_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId { credential_id } => f
+                .debug_struct("CredentialId")
+                .field("credential_id", credential_id)
+                .finish(),
+        }
     }
 }
 
-// ── Azure REST API envelope ──
+// ---------------------------------------------------------------------------
+// Azure Resource Manager responses
+// ---------------------------------------------------------------------------
 
-/// Azure REST API error response.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AzureErrorResponse {
-    pub error: Option<AzureErrorDetail>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AzureErrorDetail {
-    pub code: Option<String>,
-    pub message: Option<String>,
-}
-
-// ── Virtual Machines ──
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VmListResponse {
-    pub value: Vec<VirtualMachine>,
-    #[serde(rename = "nextLink")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionListResponse {
+    #[serde(default)]
+    pub value: Vec<Subscription>,
+    #[serde(default, rename = "nextLink")]
     pub next_link: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VirtualMachine {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscription {
+    #[serde(default, rename = "subscriptionId")]
+    pub subscription_id: Option<String>,
+    #[serde(default, rename = "displayName")]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default, rename = "tenantId")]
+    pub tenant_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceGroupListResponse {
+    #[serde(default)]
+    pub value: Vec<ResourceGroup>,
+    #[serde(default, rename = "nextLink")]
+    pub next_link: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceGroup {
+    #[serde(default)]
     pub id: Option<String>,
-    pub name: String,
-    pub location: String,
-    #[serde(rename = "type")]
-    pub vm_type: Option<String>,
-    pub properties: Option<VmProperties>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub tags: Option<serde_json::Value>,
+    #[serde(default)]
+    pub properties: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceListResponse {
+    #[serde(default)]
+    pub value: Vec<Resource>,
+    #[serde(default, rename = "nextLink")]
+    pub next_link: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resource {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, rename = "type")]
+    pub resource_type: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
     pub tags: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VmProperties {
-    #[serde(rename = "vmId")]
-    pub vm_id: Option<String>,
-    #[serde(rename = "provisioningState")]
-    pub provisioning_state: Option<String>,
-    #[serde(rename = "hardwareProfile")]
-    pub hardware_profile: Option<HardwareProfile>,
+// ---------------------------------------------------------------------------
+// Blob Storage responses (XML-based, but we use JSON REST where possible)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobContainerListResponse {
+    #[serde(default)]
+    pub containers: Vec<BlobContainer>,
+    #[serde(default)]
+    pub next_marker: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HardwareProfile {
-    #[serde(rename = "vmSize")]
-    pub vm_size: Option<String>,
-}
-
-// ── Storage ──
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ContainerListResponse {
-    #[serde(rename = "Containers")]
-    pub containers: Option<Vec<BlobContainer>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobContainer {
-    #[serde(rename = "Name")]
-    pub name: String,
-    #[serde(rename = "Properties")]
-    pub properties: Option<ContainerProperties>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ContainerProperties {
-    #[serde(rename = "Last-Modified")]
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
     pub last_modified: Option<String>,
-    #[serde(rename = "Etag")]
-    pub etag: Option<String>,
-    #[serde(rename = "LeaseStatus")]
-    pub lease_status: Option<String>,
+    #[serde(default, rename = "publicAccess")]
+    pub public_access: Option<String>,
 }
 
-// ── App Service ──
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobListResponse {
+    #[serde(default)]
+    pub blobs: Vec<BlobItem>,
+    #[serde(default)]
+    pub next_marker: Option<String>,
+}
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AppListResponse {
-    pub value: Vec<WebApp>,
-    #[serde(rename = "nextLink")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobItem {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub content_length: Option<u64>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobGetResponse {
+    #[serde(default)]
+    pub content_base64: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub content_length: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobPutResponse {
+    pub created: bool,
+    #[serde(default)]
+    pub blob_name: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Key Vault responses
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretListResponse {
+    #[serde(default)]
+    pub value: Vec<SecretItem>,
+    #[serde(default, rename = "nextLink")]
     pub next_link: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WebApp {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretItem {
+    #[serde(default)]
     pub id: Option<String>,
-    pub name: String,
-    pub location: String,
-    #[serde(rename = "type")]
-    pub app_type: Option<String>,
-    pub kind: Option<String>,
-    pub properties: Option<WebAppProperties>,
+    #[serde(default)]
+    pub attributes: Option<SecretAttributes>,
+    #[serde(default)]
+    pub tags: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WebAppProperties {
-    pub state: Option<String>,
-    #[serde(rename = "defaultHostName")]
-    pub default_host_name: Option<String>,
-    #[serde(rename = "repositorySiteName")]
-    pub repository_site_name: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretAttributes {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub created: Option<u64>,
+    #[serde(default)]
+    pub updated: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretBundle {
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub attributes: Option<SecretAttributes>,
+    #[serde(default)]
+    pub tags: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSecretRequest {
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<SetSecretAttributes>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSecretAttributes {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
 
-// ── App Service deployment ──
+// ---------------------------------------------------------------------------
+// Error response (shared across ARM / Blob / KeyVault)
+// ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DeploymentResponse {
-    pub id: Option<String>,
-    pub name: Option<String>,
-    #[serde(rename = "type")]
-    pub deployment_type: Option<String>,
-    pub properties: Option<DeploymentProperties>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DeploymentProperties {
-    pub status: Option<i32>,
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiErrorResponse {
+    #[serde(default)]
+    pub error: Option<ApiErrorDetail>,
+    #[serde(default)]
     pub message: Option<String>,
-    pub author: Option<String>,
-    pub deployer: Option<String>,
-    #[serde(rename = "start_time")]
-    pub start_time: Option<String>,
-    #[serde(rename = "end_time")]
-    pub end_time: Option<String>,
-    pub active: Option<bool>,
 }
 
-// ── Subscription ──
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Subscription {
-    pub id: Option<String>,
-    #[serde(rename = "subscriptionId")]
-    pub subscription_id: Option<String>,
-    #[serde(rename = "displayName")]
-    pub display_name: Option<String>,
-    pub state: Option<String>,
-    #[serde(rename = "tenantId")]
-    pub tenant_id: Option<String>,
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiErrorDetail {
+    #[serde(default)]
+    pub code: Option<String>,
+    pub message: String,
 }
 
 #[cfg(test)]
@@ -181,217 +254,193 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auth_debug_redacts_token() {
-        let auth = AzureAuth {
-            access_token: "super-secret-token-123".into(),
-            subscription_id: "sub-123".into(),
+    fn azure_auth_debug_redacts_bearer_token() {
+        let auth = AzureAuth::BearerToken {
+            bearer_token: "super-secret-token".into(),
         };
         let debug = format!("{auth:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("super-secret"));
-        assert!(debug.contains("sub-123"));
+        assert!(!debug.contains("super-secret-token"));
     }
 
     #[test]
-    fn auth_secretless_detects_empty() {
-        let auth = AzureAuth {
-            access_token: "  ".into(),
-            subscription_id: "sub-123".into(),
+    fn azure_auth_reports_secretless_mode() {
+        let auth = AzureAuth::CredentialId {
+            credential_id: CredentialId::parse("12345678-1234-5678-1234-567812345678").unwrap(),
         };
+        assert_eq!(auth.redacted_label(), "credential_id");
         assert!(auth.is_secretless());
-
-        let auth2 = AzureAuth {
-            access_token: "token".into(),
-            subscription_id: "sub-123".into(),
-        };
-        assert!(!auth2.is_secretless());
     }
 
     #[test]
-    fn auth_redacted_label() {
-        let auth = AzureAuth {
-            access_token: "t".into(),
-            subscription_id: "s".into(),
+    fn bearer_token_is_not_secretless() {
+        let auth = AzureAuth::BearerToken {
+            bearer_token: "tok".into(),
         };
+        assert!(!auth.is_secretless());
         assert_eq!(auth.redacted_label(), "bearer_token");
     }
 
     #[test]
-    fn deserialize_virtual_machine() {
-        let json = serde_json::json!({
-            "name": "my-vm",
-            "location": "eastus",
-            "type": "Microsoft.Compute/virtualMachines",
-            "properties": {
-                "vmId": "vm-abc-123",
-                "provisioningState": "Succeeded",
-                "hardwareProfile": {
-                    "vmSize": "Standard_DS1_v2"
-                }
-            }
-        });
-        let vm: VirtualMachine = serde_json::from_value(json).unwrap();
-        assert_eq!(vm.name, "my-vm");
-        assert_eq!(vm.location, "eastus");
-        let props = vm.properties.unwrap();
-        assert_eq!(props.provisioning_state.unwrap(), "Succeeded");
-        assert_eq!(
-            props.hardware_profile.unwrap().vm_size.unwrap(),
-            "Standard_DS1_v2"
-        );
-    }
-
-    #[test]
-    fn deserialize_vm_list_response() {
+    fn subscription_list_deserializes() {
         let json = serde_json::json!({
             "value": [
-                { "name": "vm1", "location": "eastus" },
-                { "name": "vm2", "location": "westus" }
+                {
+                    "subscriptionId": "sub-123",
+                    "displayName": "My Sub",
+                    "state": "Enabled",
+                    "tenantId": "tenant-abc"
+                }
             ],
             "nextLink": null
         });
-        let resp: VmListResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.value.len(), 2);
-        assert_eq!(resp.value[0].name, "vm1");
-        assert!(resp.next_link.is_none());
-    }
-
-    #[test]
-    fn deserialize_blob_container() {
-        let json = serde_json::json!({
-            "Name": "my-container",
-            "Properties": {
-                "Last-Modified": "2026-01-01T00:00:00Z",
-                "Etag": "0x123",
-                "LeaseStatus": "unlocked"
-            }
-        });
-        let container: BlobContainer = serde_json::from_value(json).unwrap();
-        assert_eq!(container.name, "my-container");
-        let props = container.properties.unwrap();
-        assert_eq!(props.lease_status.unwrap(), "unlocked");
-    }
-
-    #[test]
-    fn deserialize_web_app() {
-        let json = serde_json::json!({
-            "id": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Web/sites/myapp",
-            "name": "myapp",
-            "location": "East US",
-            "kind": "app",
-            "properties": {
-                "state": "Running",
-                "defaultHostName": "myapp.azurewebsites.net",
-                "enabled": true
-            }
-        });
-        let app: WebApp = serde_json::from_value(json).unwrap();
-        assert_eq!(app.name, "myapp");
-        assert_eq!(app.kind.unwrap(), "app");
-        let props = app.properties.unwrap();
-        assert_eq!(props.state.unwrap(), "Running");
+        let resp: SubscriptionListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.value.len(), 1);
         assert_eq!(
-            props.default_host_name.unwrap(),
-            "myapp.azurewebsites.net"
+            resp.value[0].subscription_id.as_deref(),
+            Some("sub-123")
+        );
+        assert_eq!(resp.value[0].display_name.as_deref(), Some("My Sub"));
+    }
+
+    #[test]
+    fn resource_group_list_deserializes() {
+        let json = serde_json::json!({
+            "value": [
+                {
+                    "id": "/subscriptions/sub-1/resourceGroups/rg-1",
+                    "name": "rg-1",
+                    "location": "eastus"
+                }
+            ]
+        });
+        let resp: ResourceGroupListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.value.len(), 1);
+        assert_eq!(resp.value[0].name.as_deref(), Some("rg-1"));
+    }
+
+    #[test]
+    fn resource_list_deserializes() {
+        let json = serde_json::json!({
+            "value": [
+                {
+                    "id": "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Compute/virtualMachines/vm-1",
+                    "name": "vm-1",
+                    "type": "Microsoft.Compute/virtualMachines",
+                    "location": "westus2"
+                }
+            ]
+        });
+        let resp: ResourceListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.value.len(), 1);
+        assert_eq!(resp.value[0].name.as_deref(), Some("vm-1"));
+        assert_eq!(
+            resp.value[0].resource_type.as_deref(),
+            Some("Microsoft.Compute/virtualMachines")
         );
     }
 
     #[test]
-    fn deserialize_app_list_response() {
+    fn blob_container_list_deserializes() {
+        let json = serde_json::json!({
+            "containers": [
+                { "name": "my-container", "last_modified": "2024-01-01T00:00:00Z" }
+            ]
+        });
+        let resp: BlobContainerListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.containers.len(), 1);
+        assert_eq!(resp.containers[0].name.as_deref(), Some("my-container"));
+    }
+
+    #[test]
+    fn blob_item_list_deserializes() {
+        let json = serde_json::json!({
+            "blobs": [
+                {
+                    "name": "file.txt",
+                    "content_length": 1024,
+                    "content_type": "text/plain"
+                }
+            ]
+        });
+        let resp: BlobListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.blobs.len(), 1);
+        assert_eq!(resp.blobs[0].name.as_deref(), Some("file.txt"));
+        assert_eq!(resp.blobs[0].content_length, Some(1024));
+    }
+
+    #[test]
+    fn secret_list_deserializes() {
         let json = serde_json::json!({
             "value": [
-                { "name": "app1", "location": "eastus" },
-                { "name": "app2", "location": "westus" }
+                {
+                    "id": "https://myvault.vault.azure.net/secrets/my-secret",
+                    "attributes": { "enabled": true, "created": 1700000000 }
+                }
             ]
         });
-        let resp: AppListResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.value.len(), 2);
+        let resp: SecretListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.value.len(), 1);
+        assert!(resp.value[0]
+            .id
+            .as_deref()
+            .unwrap()
+            .contains("my-secret"));
     }
 
     #[test]
-    fn deserialize_subscription() {
+    fn secret_bundle_deserializes() {
         let json = serde_json::json!({
-            "id": "/subscriptions/sub-123",
-            "subscriptionId": "sub-123",
-            "displayName": "My Subscription",
-            "state": "Enabled",
-            "tenantId": "tenant-abc"
+            "value": "super-secret-value",
+            "id": "https://myvault.vault.azure.net/secrets/my-secret/abc123",
+            "attributes": { "enabled": true }
         });
-        let sub: Subscription = serde_json::from_value(json).unwrap();
-        assert_eq!(sub.subscription_id.unwrap(), "sub-123");
-        assert_eq!(sub.display_name.unwrap(), "My Subscription");
-        assert_eq!(sub.state.unwrap(), "Enabled");
+        let bundle: SecretBundle = serde_json::from_value(json).unwrap();
+        assert_eq!(bundle.value.as_deref(), Some("super-secret-value"));
     }
 
     #[test]
-    fn deserialize_azure_error_response() {
+    fn set_secret_request_serializes() {
+        let req = SetSecretRequest {
+            value: "my-value".into(),
+            tags: Some(serde_json::json!({ "env": "prod" })),
+            content_type: Some("text/plain".into()),
+            attributes: Some(SetSecretAttributes {
+                enabled: Some(true),
+            }),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["value"], "my-value");
+        assert_eq!(json["tags"]["env"], "prod");
+        assert_eq!(json["content_type"], "text/plain");
+    }
+
+    #[test]
+    fn set_secret_request_omits_none_fields() {
+        let req = SetSecretRequest {
+            value: "val".into(),
+            tags: None,
+            content_type: None,
+            attributes: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("tags").is_none());
+        assert!(json.get("content_type").is_none());
+        assert!(json.get("attributes").is_none());
+    }
+
+    #[test]
+    fn api_error_response_deserializes() {
         let json = serde_json::json!({
             "error": {
-                "code": "ResourceNotFound",
-                "message": "The Resource was not found."
+                "code": "AuthorizationFailed",
+                "message": "The client does not have permission"
             }
         });
-        let resp: AzureErrorResponse = serde_json::from_value(json).unwrap();
-        let err = resp.error.unwrap();
-        assert_eq!(err.code.unwrap(), "ResourceNotFound");
-        assert_eq!(err.message.unwrap(), "The Resource was not found.");
-    }
-
-    #[test]
-    fn deserialize_deployment_response() {
-        let json = serde_json::json!({
-            "id": "/subscriptions/sub/deployments/d1",
-            "name": "d1",
-            "type": "Microsoft.Web/sites/deployments",
-            "properties": {
-                "status": 4,
-                "message": "Deployment successful",
-                "active": true
-            }
-        });
-        let dep: DeploymentResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(dep.name.unwrap(), "d1");
-        let props = dep.properties.unwrap();
-        assert_eq!(props.status.unwrap(), 4);
-        assert!(props.active.unwrap());
-    }
-
-    #[test]
-    fn vm_with_tags() {
-        let json = serde_json::json!({
-            "name": "tagged-vm",
-            "location": "eastus",
-            "tags": {
-                "environment": "test",
-                "team": "platform"
-            }
-        });
-        let vm: VirtualMachine = serde_json::from_value(json).unwrap();
-        let tags = vm.tags.unwrap();
-        assert_eq!(tags["environment"], "test");
-    }
-
-    #[test]
-    fn vm_minimal_fields() {
-        let json = serde_json::json!({
-            "name": "minimal-vm",
-            "location": "westus2"
-        });
-        let vm: VirtualMachine = serde_json::from_value(json).unwrap();
-        assert_eq!(vm.name, "minimal-vm");
-        assert!(vm.id.is_none());
-        assert!(vm.properties.is_none());
-    }
-
-    #[test]
-    fn container_list_response() {
-        let json = serde_json::json!({
-            "Containers": [
-                { "Name": "c1" },
-                { "Name": "c2" }
-            ]
-        });
-        let resp: ContainerListResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.containers.unwrap().len(), 2);
+        let resp: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            resp.error.as_ref().unwrap().code.as_deref(),
+            Some("AuthorizationFailed")
+        );
     }
 }

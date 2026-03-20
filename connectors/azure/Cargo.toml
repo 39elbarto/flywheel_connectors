@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "FCP Azure connector for VMs, Storage, App Service, and Subscriptions"
+description = "FCP Azure connector for subscriptions, resource groups, blob storage, and Key Vault"
 
 [[bin]]
 name = "fcp-azure"
@@ -28,9 +28,8 @@ async-trait.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
 hex.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
-fcp-crypto.workspace = true
-fcp-testkit.workspace = true
 wiremock.workspace = true

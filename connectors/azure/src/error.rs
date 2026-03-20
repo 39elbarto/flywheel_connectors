@@ -14,8 +14,12 @@ pub enum AzureError {
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Azure API error {code}: {message}")]
-    Api { code: String, message: String },
+    #[error("Azure API error: {message} (status {status_code:?}, code {code:?})")]
+    Api {
+        message: String,
+        status_code: Option<u16>,
+        code: Option<String>,
+    },
 
     #[error("Rate limited (retry after {retry_after_ms}ms)")]
     RateLimited { retry_after_ms: u64 },
@@ -26,38 +30,32 @@ pub enum AzureError {
     #[error("Not found: {0}")]
     NotFound(String),
 
-    #[error("Async error: {0}")]
-    Async(String),
+    #[error("Validation error: {0}")]
+    Validation(String),
 
     #[error("Configuration error: {0}")]
     Config(String),
 
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+    #[error("Invalid response: {0}")]
+    InvalidResponse(String),
+
+    #[error("Async error: {0}")]
+    Async(String),
 }
 
 impl AzureError {
     #[must_use]
-    pub fn is_retryable(&self) -> bool {
+    pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(error) => error.is_timeout() || error.is_connect(),
-            Self::RateLimited { .. } => true,
-            Self::Api { code, .. } => {
-                matches!(
-                    code.as_str(),
-                    "InternalServerError"
-                        | "ServiceUnavailable"
-                        | "GatewayTimeout"
-                        | "ServerBusy"
-                        | "OperationNotAllowed"
-                )
-            }
+            Self::Http(_) | Self::RateLimited { .. } => true,
+            Self::Api { status_code, .. } => matches!(status_code, Some(429 | 500..=599)),
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::NotFound(_)
-            | Self::Async(_)
+            | Self::Validation(_)
             | Self::Config(_)
-            | Self::InvalidInput(_) => false,
+            | Self::InvalidResponse(_)
+            | Self::Async(_) => false,
         }
     }
 
@@ -82,10 +80,14 @@ impl AzureError {
             Self::Json(error) => FcpError::Internal {
                 message: format!("JSON parse error: {error}"),
             },
-            Self::Api { code, message } => FcpError::External {
+            Self::Api {
+                message,
+                status_code,
+                ..
+            } => FcpError::External {
                 service: "azure".into(),
-                message: format!("Azure API error {code}: {message}"),
-                status_code: None,
+                message: message.clone(),
+                status_code: *status_code,
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },
@@ -100,15 +102,15 @@ impl AzureError {
             Self::NotFound(resource) => FcpError::ResourceNotFound {
                 resource: resource.clone(),
             },
-            Self::Async(message) => FcpError::Internal {
-                message: format!("Async error: {message}"),
+            Self::Validation(message) => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
             },
             Self::Config(message) => FcpError::InvalidRequest {
                 code: 1001,
-                message: format!("Configuration error: {message}"),
+                message: message.clone(),
             },
-            Self::InvalidInput(message) => FcpError::InvalidRequest {
-                code: 1005,
+            Self::InvalidResponse(message) | Self::Async(message) => FcpError::Internal {
                 message: message.clone(),
             },
         }
@@ -153,131 +155,119 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_is_not_retryable() {
+    fn unauthorized_maps_to_fcp_unauthorized() {
         let err = AzureError::Unauthorized("bad token".into());
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert_eq!(message, "bad token");
+            }
+            other => panic!("expected unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validation_maps_to_invalid_request() {
+        let err = AzureError::Validation("subscription_id is required".into());
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert_eq!(message, "subscription_id is required");
+            }
+            other => panic!("expected invalid request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_maps_to_invalid_request_1001() {
+        let err = AzureError::Config("missing bearer token".into());
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1001);
+                assert_eq!(message, "missing bearer token");
+            }
+            other => panic!("expected invalid request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_maps_to_resource_not_found() {
+        let err = AzureError::NotFound("resource group rg-1".into());
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "resource group rg-1");
+            }
+            other => panic!("expected resource not found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_error_is_not_retryable() {
+        let err = AzureError::Json(serde_json::from_str::<String>("invalid").unwrap_err());
         assert!(!err.is_retryable());
         assert!(err.retry_after().is_none());
     }
 
     #[test]
-    fn not_found_maps_to_resource_not_found() {
-        let err = AzureError::NotFound("vm my-vm".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::ResourceNotFound { resource } => assert_eq!(resource, "vm my-vm"),
-            other => panic!("Expected ResourceNotFound, got {other:?}"),
-        }
+    fn api_error_5xx_is_retryable() {
+        let err = AzureError::Api {
+            message: "internal".into(),
+            status_code: Some(503),
+            code: None,
+        };
+        assert!(err.is_retryable());
     }
 
     #[test]
-    fn api_error_retryable_for_server_errors() {
-        let retryable = AzureError::Api {
-            code: "InternalServerError".into(),
-            message: "Internal".into(),
+    fn api_error_4xx_not_retryable() {
+        let err = AzureError::Api {
+            message: "bad".into(),
+            status_code: Some(400),
+            code: None,
         };
-        assert!(retryable.is_retryable());
-
-        let terminal = AzureError::Api {
-            code: "BadRequest".into(),
-            message: "Bad request".into(),
-        };
-        assert!(!terminal.is_retryable());
+        assert!(!err.is_retryable());
     }
 
     #[test]
-    fn config_error_maps_to_invalid_request() {
-        let err = AzureError::Config("missing access_token".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert!(message.contains("missing access_token"));
+    fn async_timeout_is_preserved() {
+        let err = AzureError::from_async_error(AsyncError::Timeout { timeout_ms: 3_000 });
+        assert_eq!(
+            err.to_string(),
+            "Async error: request deadline exceeded after 3000ms"
+        );
+    }
+
+    #[test]
+    fn async_cancelled_is_preserved() {
+        let err = AzureError::from_async_error(AsyncError::Cancelled);
+        assert_eq!(err.to_string(), "Async error: operation cancelled");
+    }
+
+    #[test]
+    fn invalid_response_maps_to_internal() {
+        let err = AzureError::InvalidResponse("unexpected XML".into());
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert_eq!(message, "unexpected XML");
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => panic!("expected internal, got {other:?}"),
         }
     }
 
     #[test]
     fn rate_limited_maps_to_fcp_rate_limited() {
         let err = AzureError::RateLimited {
-            retry_after_ms: 3_000,
+            retry_after_ms: 2_000,
         };
-        let fcp = err.to_fcp_error();
-        match fcp {
+        match err.to_fcp_error() {
             FcpError::RateLimited {
                 retry_after_ms,
                 violation,
             } => {
-                assert_eq!(retry_after_ms, 3_000);
+                assert_eq!(retry_after_ms, 2_000);
                 assert!(violation.is_none());
             }
-            other => panic!("Expected RateLimited, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn async_error_mapping_preserves_timeout() {
-        let err = AzureError::from_async_error(AsyncError::Timeout { timeout_ms: 1_500 });
-        assert_eq!(
-            err.to_string(),
-            "Async error: request deadline exceeded after 1500ms"
-        );
-    }
-
-    #[test]
-    fn async_error_mapping_cancelled() {
-        let err = AzureError::from_async_error(AsyncError::Cancelled);
-        assert_eq!(err.to_string(), "Async error: operation cancelled");
-    }
-
-    #[test]
-    fn invalid_input_maps_correctly() {
-        let err = AzureError::InvalidInput("resource_group is required".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1005);
-                assert!(message.contains("resource_group"));
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn json_error_not_retryable() {
-        let raw_err = serde_json::from_str::<serde_json::Value>("bad json").unwrap_err();
-        let err = AzureError::Json(raw_err);
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn api_service_unavailable_retryable() {
-        let err = AzureError::Api {
-            code: "ServiceUnavailable".into(),
-            message: "Try again later".into(),
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn api_gateway_timeout_retryable() {
-        let err = AzureError::Api {
-            code: "GatewayTimeout".into(),
-            message: "Gateway timed out".into(),
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn unauthorized_maps_to_fcp_unauthorized() {
-        let err = AzureError::Unauthorized("Token expired".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2001);
-                assert_eq!(message, "Token expired");
-            }
-            other => panic!("Expected Unauthorized, got {other:?}"),
+            other => panic!("expected rate limited, got {other:?}"),
         }
     }
 }

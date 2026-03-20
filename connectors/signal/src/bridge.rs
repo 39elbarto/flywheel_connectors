@@ -111,6 +111,8 @@ impl BridgeConfig {
         }
         let base_ms: u64 = 1_000;
         let raw_exp = consecutive_failures.saturating_sub(1);
+        // Cap exponent at 30 to prevent overflow: 2^30 * 1000 ≈ 1.07 billion ms,
+        // which fits in u64. Higher exponents would overflow the shift.
         let exponent = if raw_exp < 30 { raw_exp } else { 30 };
         let shift = match 1u64.checked_shl(exponent) {
             Some(v) => v,
@@ -155,6 +157,7 @@ impl BridgeState {
     /// Reset state to disconnected.
     pub const fn mark_disconnected(&mut self) {
         self.connected = false;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
     }
 
     /// Record a successful health check.
@@ -654,12 +657,14 @@ mod tests {
     }
 
     #[test]
-    fn mark_disconnected_clears_connected() {
+    fn mark_disconnected_clears_connected_and_increments_failures() {
         let mut state = BridgeState::default();
         state.record_health_success();
         assert!(state.connected);
+        assert_eq!(state.consecutive_failures, 0);
         state.mark_disconnected();
         assert!(!state.connected);
+        assert_eq!(state.consecutive_failures, 1);
     }
 
     #[test]
@@ -1000,7 +1005,7 @@ mod tests {
     async fn manager_sync_groups_success() {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/groups/+15551234567"))
+            .and(wiremock::matchers::path("/v1/groups/%2B15551234567"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
                     {

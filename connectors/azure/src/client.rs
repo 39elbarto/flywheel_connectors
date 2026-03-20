@@ -6,6 +6,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tracing::debug;
@@ -18,6 +19,31 @@ use crate::{
         SecretBundle, SecretListResponse, SetSecretRequest, SubscriptionListResponse,
     },
 };
+
+/// Percent-encode a value for safe inclusion in a URL path segment.
+/// Encodes all characters except ASCII alphanumerics, preventing path traversal
+/// and injection via slashes, dots, or other special characters.
+fn encode_path_segment(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
+
+/// Validate that a hostname component (storage account or vault name) contains
+/// only characters valid in Azure resource names (alphanumeric and hyphens).
+/// This prevents SSRF via hostname injection.
+fn validate_hostname_component(name: &str, label: &str) -> AzureResult<()> {
+    if name.is_empty() {
+        return Err(AzureError::Validation(format!("{label} must not be empty")));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(AzureError::Validation(format!(
+            "{label} contains invalid characters (only alphanumeric and hyphens allowed): {name}"
+        )));
+    }
+    Ok(())
+}
 
 pub const DEFAULT_MANAGEMENT_URL: &str = "https://management.azure.com";
 const ARM_API_VERSION: &str = "2022-12-01";
@@ -98,7 +124,8 @@ impl AzureClient {
         &self,
         subscription_id: &str,
     ) -> AzureResult<ResourceGroupListResponse> {
-        let endpoint = format!("/subscriptions/{subscription_id}/resourcegroups");
+        let safe_sub = encode_path_segment(subscription_id);
+        let endpoint = format!("/subscriptions/{safe_sub}/resourcegroups");
         self.arm_get(&endpoint, &[("api-version", ARM_API_VERSION)])
             .await
     }
@@ -108,8 +135,10 @@ impl AzureClient {
         subscription_id: &str,
         resource_group: &str,
     ) -> AzureResult<ResourceListResponse> {
+        let safe_sub = encode_path_segment(subscription_id);
+        let safe_rg = encode_path_segment(resource_group);
         let endpoint = format!(
-            "/subscriptions/{subscription_id}/resourceGroups/{resource_group}/resources"
+            "/subscriptions/{safe_sub}/resourceGroups/{safe_rg}/resources"
         );
         self.arm_get(&endpoint, &[("api-version", ARM_API_VERSION)])
             .await
@@ -129,6 +158,7 @@ impl AzureClient {
         storage_account: &str,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobContainerListResponse> {
+        validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
@@ -146,12 +176,11 @@ impl AzureClient {
         container: &str,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobListResponse> {
+        validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
-        let safe_container =
-            percent_encoding::utf8_percent_encode(container, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
+        let safe_container = encode_path_segment(container);
         let url = format!("{base}/{safe_container}");
         let query = [
             ("restype", "container"),
@@ -168,15 +197,12 @@ impl AzureClient {
         blob_name: &str,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobGetResponse> {
+        validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
-        let safe_container =
-            percent_encoding::utf8_percent_encode(container, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
-        let safe_blob =
-            percent_encoding::utf8_percent_encode(blob_name, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
+        let safe_container = encode_path_segment(container);
+        let safe_blob = encode_path_segment(blob_name);
         let url = format!("{base}/{safe_container}/{safe_blob}");
 
         let ctx = self.runtime.request_context();
@@ -248,15 +274,12 @@ impl AzureClient {
         content_type: Option<&str>,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobPutResponse> {
+        validate_hostname_component(storage_account, "storage_account")?;
         let base = blob_base_url
             .unwrap_or("https://{account}.blob.core.windows.net")
             .replace("{account}", storage_account);
-        let safe_container =
-            percent_encoding::utf8_percent_encode(container, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
-        let safe_blob =
-            percent_encoding::utf8_percent_encode(blob_name, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
+        let safe_container = encode_path_segment(container);
+        let safe_blob = encode_path_segment(blob_name);
         let url = format!("{base}/{safe_container}/{safe_blob}");
 
         let body_bytes = BASE64
@@ -321,6 +344,7 @@ impl AzureClient {
         vault_name: &str,
         vault_base_url: Option<&str>,
     ) -> AzureResult<SecretListResponse> {
+        validate_hostname_component(vault_name, "vault_name")?;
         let base = vault_base_url
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
@@ -335,12 +359,11 @@ impl AzureClient {
         secret_name: &str,
         vault_base_url: Option<&str>,
     ) -> AzureResult<SecretBundle> {
+        validate_hostname_component(vault_name, "vault_name")?;
         let base = vault_base_url
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
-        let safe_name =
-            percent_encoding::utf8_percent_encode(secret_name, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
+        let safe_name = encode_path_segment(secret_name);
         let url = format!("{base}/secrets/{safe_name}");
         let query = [("api-version", KEYVAULT_API_VERSION)];
         self.kv_get_json(&url, &query).await
@@ -353,12 +376,11 @@ impl AzureClient {
         request: &SetSecretRequest,
         vault_base_url: Option<&str>,
     ) -> AzureResult<SecretBundle> {
+        validate_hostname_component(vault_name, "vault_name")?;
         let base = vault_base_url
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
-        let safe_name =
-            percent_encoding::utf8_percent_encode(secret_name, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
+        let safe_name = encode_path_segment(secret_name);
         let url = format!("{base}/secrets/{safe_name}");
         let query = [("api-version", KEYVAULT_API_VERSION)];
 
@@ -652,7 +674,7 @@ mod tests {
         fcp_async_core::runtime::block_on_sync(async {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
-                .and(path("/subscriptions/sub-1/resourcegroups"))
+                .and(path("/subscriptions/sub%2D1/resourcegroups"))
                 .and(query_param("api-version", ARM_API_VERSION))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "value": [
@@ -676,7 +698,7 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path(
-                    "/subscriptions/sub-1/resourceGroups/rg-1/resources",
+                    "/subscriptions/sub%2D1/resourceGroups/rg%2D1/resources",
                 ))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "value": [
@@ -740,7 +762,7 @@ mod tests {
         fcp_async_core::runtime::block_on_sync(async {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
-                .and(path("/subscriptions/sub-missing/resourcegroups"))
+                .and(path("/subscriptions/sub%2Dmissing/resourcegroups"))
                 .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
                     "error": {
                         "code": "SubscriptionNotFound",
@@ -832,5 +854,43 @@ mod tests {
             None,
         );
         assert!(matches!(err, AzureError::Validation(_)));
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_slashes_and_dots() {
+        assert_eq!(encode_path_segment("safe123"), "safe123");
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment("../etc/passwd"), "%2E%2E%2Fetc%2Fpasswd");
+        assert_eq!(encode_path_segment("sub-1"), "sub%2D1");
+        assert_eq!(encode_path_segment("has space"), "has%20space");
+    }
+
+    #[test]
+    fn validate_hostname_rejects_slashes() {
+        let result = validate_hostname_component("evil.com/attack", "test");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, AzureError::Validation(_)));
+    }
+
+    #[test]
+    fn validate_hostname_rejects_empty() {
+        let result = validate_hostname_component("", "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_hostname_allows_valid_names() {
+        assert!(validate_hostname_component("mystorageaccount", "test").is_ok());
+        assert!(validate_hostname_component("my-vault-name", "test").is_ok());
+        assert!(validate_hostname_component("abc123", "test").is_ok());
+    }
+
+    #[test]
+    fn validate_hostname_rejects_special_chars() {
+        assert!(validate_hostname_component("a.b", "test").is_err());
+        assert!(validate_hostname_component("a:b", "test").is_err());
+        assert!(validate_hostname_component("a@b", "test").is_err());
+        assert!(validate_hostname_component("a/b", "test").is_err());
     }
 }

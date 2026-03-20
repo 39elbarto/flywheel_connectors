@@ -1047,12 +1047,12 @@ impl CloudflareConnector {
                         .input
                         .get("ttl")
                         .and_then(|v| v.as_u64())
-                        .map(|v| v as u32),
+                        .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
                     priority: req
                         .input
                         .get("priority")
                         .and_then(|v| v.as_u64())
-                        .map(|v| v as u16),
+                        .map(|v| u16::try_from(v).unwrap_or(u16::MAX)),
                     comment: req
                         .input
                         .get("comment")
@@ -1079,7 +1079,7 @@ impl CloudflareConnector {
                         .input
                         .get("ttl")
                         .and_then(|v| v.as_u64())
-                        .map(|v| v as u32),
+                        .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
                     comment: req
                         .input
                         .get("comment")

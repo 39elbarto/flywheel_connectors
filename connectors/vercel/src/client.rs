@@ -7,6 +7,8 @@ mod projects;
 
 use std::time::Duration;
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
@@ -327,6 +329,10 @@ impl VercelClient {
             }
         }
     }
+}
+
+fn encode_path_segment(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
 
 fn parse_error_response(

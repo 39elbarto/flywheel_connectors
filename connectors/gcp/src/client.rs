@@ -9,6 +9,40 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{GcpError, GcpResult};
 use crate::types::*;
 
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(GcpError::Api {
+            code: 1005,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(GcpError::Api {
+            code: 1005,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
+/// Validate a query string parameter to prevent injection.
+fn sanitize_query_param<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
+    if value.contains('&') || value.contains('?') || value.contains('#') {
+        return Err(GcpError::Api {
+            code: 1005,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
 /// GCP API client with retry support.
 pub struct GcpClient {
     client: Client,
@@ -85,6 +119,7 @@ impl GcpClient {
         runtime: &ConnectorRuntime,
         zone: &str,
     ) -> GcpResult<Vec<Instance>> {
+        let zone = sanitize_path_segment(zone, "zone")?;
         let url = format!(
             "{}/compute/v1/projects/{}/zones/{}/instances",
             self.compute_base, self.project_id, zone
@@ -114,6 +149,8 @@ impl GcpClient {
         zone: &str,
         instance_name: &str,
     ) -> GcpResult<Instance> {
+        let zone = sanitize_path_segment(zone, "zone")?;
+        let instance_name = sanitize_path_segment(instance_name, "instance_name")?;
         let url = format!(
             "{}/compute/v1/projects/{}/zones/{}/instances/{}",
             self.compute_base, self.project_id, zone, instance_name
@@ -127,6 +164,8 @@ impl GcpClient {
         zone: &str,
         instance_name: &str,
     ) -> GcpResult<serde_json::Value> {
+        let zone = sanitize_path_segment(zone, "zone")?;
+        let instance_name = sanitize_path_segment(instance_name, "instance_name")?;
         let url = format!(
             "{}/compute/v1/projects/{}/zones/{}/instances/{}/start",
             self.compute_base, self.project_id, zone, instance_name
@@ -140,6 +179,8 @@ impl GcpClient {
         zone: &str,
         instance_name: &str,
     ) -> GcpResult<serde_json::Value> {
+        let zone = sanitize_path_segment(zone, "zone")?;
+        let instance_name = sanitize_path_segment(instance_name, "instance_name")?;
         let url = format!(
             "{}/compute/v1/projects/{}/zones/{}/instances/{}/stop",
             self.compute_base, self.project_id, zone, instance_name
@@ -153,6 +194,8 @@ impl GcpClient {
         zone: &str,
         instance_name: &str,
     ) -> GcpResult<serde_json::Value> {
+        let zone = sanitize_path_segment(zone, "zone")?;
+        let instance_name = sanitize_path_segment(instance_name, "instance_name")?;
         let url = format!(
             "{}/compute/v1/projects/{}/zones/{}/instances/{}",
             self.compute_base, self.project_id, zone, instance_name
@@ -167,6 +210,7 @@ impl GcpClient {
         runtime: &ConnectorRuntime,
         bucket: &str,
     ) -> GcpResult<Vec<StorageObject>> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
         let url = format!("{}/storage/v1/b/{}/o", self.storage_base, bucket);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -193,6 +237,8 @@ impl GcpClient {
         bucket: &str,
         object_name: &str,
     ) -> GcpResult<StorageObject> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
+        let object_name = sanitize_path_segment(object_name, "object_name")?;
         let url = format!(
             "{}/storage/v1/b/{}/o/{}",
             self.storage_base, bucket, object_name
@@ -208,6 +254,11 @@ impl GcpClient {
         content: &str,
         content_type: Option<&str>,
     ) -> GcpResult<StorageObject> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
+        let object_name = sanitize_query_param(
+            sanitize_path_segment(object_name, "object_name")?,
+            "object_name",
+        )?;
         let url = format!(
             "{}/upload/storage/v1/b/{}/o?uploadType=media&name={}",
             self.storage_base, bucket, object_name
@@ -242,6 +293,8 @@ impl GcpClient {
         bucket: &str,
         object_name: &str,
     ) -> GcpResult<serde_json::Value> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
+        let object_name = sanitize_path_segment(object_name, "object_name")?;
         let url = format!(
             "{}/storage/v1/b/{}/o/{}",
             self.storage_base, bucket, object_name
@@ -256,6 +309,7 @@ impl GcpClient {
         runtime: &ConnectorRuntime,
         location: &str,
     ) -> GcpResult<Vec<CloudRunService>> {
+        let location = sanitize_path_segment(location, "location")?;
         let url = format!(
             "{}/v2/projects/{}/locations/{}/services",
             self.run_base, self.project_id, location
@@ -286,6 +340,11 @@ impl GcpClient {
         service_id: &str,
         image: &str,
     ) -> GcpResult<CloudRunService> {
+        let location = sanitize_path_segment(location, "location")?;
+        let service_id = sanitize_query_param(
+            sanitize_path_segment(service_id, "service_id")?,
+            "service_id",
+        )?;
         let url = format!(
             "{}/v2/projects/{}/locations/{}/services?serviceId={}",
             self.run_base, self.project_id, location, service_id
@@ -306,6 +365,8 @@ impl GcpClient {
         location: &str,
         service_name: &str,
     ) -> GcpResult<serde_json::Value> {
+        let location = sanitize_path_segment(location, "location")?;
+        let service_name = sanitize_path_segment(service_name, "service_name")?;
         let url = format!(
             "{}/v2/projects/{}/locations/{}/services/{}",
             self.run_base, self.project_id, location, service_name
@@ -673,6 +734,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(rt.project_id(), "test-project-123");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "zone").is_err());
+        assert!(sanitize_path_segment("foo/bar", "zone").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "zone").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "zone").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "zone").is_err());
+        assert!(sanitize_path_segment("", "zone").is_err());
+        assert!(sanitize_path_segment("  ", "zone").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("us-central1-a", "zone").unwrap(), "us-central1-a");
+    }
+
+    #[test]
+    fn sanitize_query_param_rejects_injection() {
+        assert!(sanitize_query_param("foo&bar=baz", "name").is_err());
+        assert!(sanitize_query_param("foo?x", "name").is_err());
+        assert!(sanitize_query_param("foo#frag", "name").is_err());
     }
 
     #[test]

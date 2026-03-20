@@ -12,6 +12,40 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{PayPalError, PayPalResult};
 use crate::types::*;
 
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PayPalResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(PayPalError::Api {
+            code: 1005,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(PayPalError::Api {
+            code: 1005,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
+/// Validate a query string parameter to prevent injection.
+fn sanitize_query_param<'a>(value: &'a str, field: &str) -> PayPalResult<&'a str> {
+    if value.contains('&') || value.contains('?') || value.contains('#') {
+        return Err(PayPalError::Api {
+            code: 1005,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
 /// PayPal API client with OAuth2 token management and retry support.
 pub struct PayPalClient {
     client: Client,
@@ -202,6 +236,7 @@ impl PayPalClient {
         runtime: &ConnectorRuntime,
         order_id: &str,
     ) -> PayPalResult<PayPalOrder> {
+        let order_id = sanitize_path_segment(order_id, "order_id")?;
         let url = format!("{}/v2/checkout/orders/{order_id}", self.base_url);
         self.get_json(runtime, &url).await
     }
@@ -211,6 +246,7 @@ impl PayPalClient {
         runtime: &ConnectorRuntime,
         order_id: &str,
     ) -> PayPalResult<PayPalOrder> {
+        let order_id = sanitize_path_segment(order_id, "order_id")?;
         let url = format!("{}/v2/checkout/orders/{order_id}/capture", self.base_url);
         self.post_json(runtime, &url, &json!({})).await
     }
@@ -223,6 +259,8 @@ impl PayPalClient {
         start_date: &str,
         end_date: &str,
     ) -> PayPalResult<TransactionSearchResponse> {
+        let start_date = sanitize_query_param(start_date, "start_date")?;
+        let end_date = sanitize_query_param(end_date, "end_date")?;
         let url = format!(
             "{}/v1/reporting/transactions?start_date={start_date}&end_date={end_date}&fields=all",
             self.base_url
@@ -235,6 +273,7 @@ impl PayPalClient {
         runtime: &ConnectorRuntime,
         capture_id: &str,
     ) -> PayPalResult<Capture> {
+        let capture_id = sanitize_path_segment(capture_id, "capture_id")?;
         let url = format!("{}/v2/payments/captures/{capture_id}", self.base_url);
         self.get_json(runtime, &url).await
     }
@@ -245,6 +284,7 @@ impl PayPalClient {
         capture_id: &str,
         refund_req: &RefundRequest,
     ) -> PayPalResult<Refund> {
+        let capture_id = sanitize_path_segment(capture_id, "capture_id")?;
         let url = format!("{}/v2/payments/captures/{capture_id}/refund", self.base_url);
         self.post_json(runtime, &url, &serde_json::to_value(refund_req).unwrap_or(json!({}))).await
     }
@@ -270,6 +310,7 @@ impl PayPalClient {
         runtime: &ConnectorRuntime,
         invoice_id: &str,
     ) -> PayPalResult<serde_json::Value> {
+        let invoice_id = sanitize_path_segment(invoice_id, "invoice_id")?;
         let url = format!("{}/v2/invoicing/invoices/{invoice_id}/send", self.base_url);
         self.post_json(runtime, &url, &json!({})).await
     }
@@ -478,6 +519,37 @@ mod tests {
         })
         .unwrap();
         assert!(!rt.base_url().ends_with('/'));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "order_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "order_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "order_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "order_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "order_id").is_err());
+        assert!(sanitize_path_segment("", "order_id").is_err());
+        assert!(sanitize_path_segment("  ", "order_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("5O190127TN364715T", "order_id").unwrap(), "5O190127TN364715T");
+    }
+
+    #[test]
+    fn sanitize_query_param_rejects_injection() {
+        assert!(sanitize_query_param("2024-01-01&foo=bar", "start_date").is_err());
+        assert!(sanitize_query_param("2024-01-01?x", "start_date").is_err());
+        assert!(sanitize_query_param("2024-01-01#frag", "start_date").is_err());
+    }
+
+    #[test]
+    fn sanitize_query_param_accepts_valid() {
+        assert_eq!(
+            sanitize_query_param("2024-01-01T00:00:00Z", "start_date").unwrap(),
+            "2024-01-01T00:00:00Z"
+        );
     }
 
     #[test]

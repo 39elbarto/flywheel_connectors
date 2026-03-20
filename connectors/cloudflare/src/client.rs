@@ -1,20 +1,36 @@
 use std::time::Duration;
 
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Client, RequestBuilder};
 use serde_json::json;
 use tracing::debug;
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
 
-/// Percent-encode a user-supplied value for safe interpolation into a URL path segment.
-/// This prevents path traversal attacks (e.g., `../` or `/` in zone_id, record_id, etc.).
-fn encode_path_segment(s: &str) -> String {
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
-}
-
 use crate::error::{CloudflareError, CloudflareResult};
 use crate::types::*;
+
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> CloudflareResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(CloudflareError::Api {
+            code: 1005,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(CloudflareError::Api {
+            code: 1005,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
 
 /// Cloudflare API client with retry support.
 pub struct CloudflareClient {
@@ -98,7 +114,8 @@ impl CloudflareClient {
         runtime: &ConnectorRuntime,
         zone_id: &str,
     ) -> CloudflareResult<Vec<DnsRecord>> {
-        let url = format!("{}/zones/{}/dns_records", self.base_url, encode_path_segment(zone_id));
+        let zone_id = sanitize_path_segment(zone_id, "zone_id")?;
+        let url = format!("{}/zones/{zone_id}/dns_records", self.base_url);
         self.get_list(runtime, &url).await
     }
 
@@ -108,7 +125,8 @@ impl CloudflareClient {
         zone_id: &str,
         record: &CreateDnsRecord,
     ) -> CloudflareResult<DnsRecord> {
-        let url = format!("{}/zones/{}/dns_records", self.base_url, encode_path_segment(zone_id));
+        let zone_id = sanitize_path_segment(zone_id, "zone_id")?;
+        let url = format!("{}/zones/{zone_id}/dns_records", self.base_url);
         self.post_json(
             runtime,
             &url,
@@ -124,7 +142,9 @@ impl CloudflareClient {
         record_id: &str,
         record: &UpdateDnsRecord,
     ) -> CloudflareResult<DnsRecord> {
-        let url = format!("{}/zones/{}/dns_records/{}", self.base_url, encode_path_segment(zone_id), encode_path_segment(record_id));
+        let zone_id = sanitize_path_segment(zone_id, "zone_id")?;
+        let record_id = sanitize_path_segment(record_id, "record_id")?;
+        let url = format!("{}/zones/{zone_id}/dns_records/{record_id}", self.base_url);
         self.put_json(
             runtime,
             &url,
@@ -139,7 +159,9 @@ impl CloudflareClient {
         zone_id: &str,
         record_id: &str,
     ) -> CloudflareResult<serde_json::Value> {
-        let url = format!("{}/zones/{}/dns_records/{}", self.base_url, encode_path_segment(zone_id), encode_path_segment(record_id));
+        let zone_id = sanitize_path_segment(zone_id, "zone_id")?;
+        let record_id = sanitize_path_segment(record_id, "record_id")?;
+        let url = format!("{}/zones/{zone_id}/dns_records/{record_id}", self.base_url);
         self.delete(runtime, &url).await
     }
 
@@ -158,9 +180,10 @@ impl CloudflareClient {
         runtime: &ConnectorRuntime,
         script_name: &str,
     ) -> CloudflareResult<WorkerScript> {
+        let script_name = sanitize_path_segment(script_name, "script_name")?;
         let url = format!(
-            "{}/accounts/{}/workers/scripts/{}",
-            self.base_url, self.account_id, encode_path_segment(script_name)
+            "{}/accounts/{}/workers/scripts/{script_name}",
+            self.base_url, self.account_id
         );
         self.get_single(runtime, &url).await
     }
@@ -171,9 +194,10 @@ impl CloudflareClient {
         script_name: &str,
         script_content: &str,
     ) -> CloudflareResult<WorkerScript> {
+        let script_name = sanitize_path_segment(script_name, "script_name")?;
         let url = format!(
-            "{}/accounts/{}/workers/scripts/{}",
-            self.base_url, self.account_id, encode_path_segment(script_name)
+            "{}/accounts/{}/workers/scripts/{script_name}",
+            self.base_url, self.account_id
         );
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -200,9 +224,10 @@ impl CloudflareClient {
         runtime: &ConnectorRuntime,
         script_name: &str,
     ) -> CloudflareResult<serde_json::Value> {
+        let script_name = sanitize_path_segment(script_name, "script_name")?;
         let url = format!(
-            "{}/accounts/{}/workers/scripts/{}",
-            self.base_url, self.account_id, encode_path_segment(script_name)
+            "{}/accounts/{}/workers/scripts/{script_name}",
+            self.base_url, self.account_id
         );
         self.delete(runtime, &url).await
     }
@@ -226,9 +251,10 @@ impl CloudflareClient {
         project_name: &str,
         branch: &str,
     ) -> CloudflareResult<PagesDeployment> {
+        let project_name = sanitize_path_segment(project_name, "project_name")?;
         let url = format!(
-            "{}/accounts/{}/pages/projects/{}/deployments",
-            self.base_url, self.account_id, encode_path_segment(project_name)
+            "{}/accounts/{}/pages/projects/{project_name}/deployments",
+            self.base_url, self.account_id
         );
         let body = json!({ "branch": branch });
         self.post_json(runtime, &url, &body).await
@@ -242,9 +268,11 @@ impl CloudflareClient {
         namespace_id: &str,
         key: &str,
     ) -> CloudflareResult<String> {
+        let namespace_id = sanitize_path_segment(namespace_id, "namespace_id")?;
+        let key = sanitize_path_segment(key, "key")?;
         let url = format!(
-            "{}/accounts/{}/storage/kv/namespaces/{}/values/{}",
-            self.base_url, self.account_id, encode_path_segment(namespace_id), encode_path_segment(key)
+            "{}/accounts/{}/storage/kv/namespaces/{namespace_id}/values/{key}",
+            self.base_url, self.account_id
         );
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -285,9 +313,11 @@ impl CloudflareClient {
         key: &str,
         value: &str,
     ) -> CloudflareResult<serde_json::Value> {
+        let namespace_id = sanitize_path_segment(namespace_id, "namespace_id")?;
+        let key = sanitize_path_segment(key, "key")?;
         let url = format!(
-            "{}/accounts/{}/storage/kv/namespaces/{}/values/{}",
-            self.base_url, self.account_id, encode_path_segment(namespace_id), encode_path_segment(key)
+            "{}/accounts/{}/storage/kv/namespaces/{namespace_id}/values/{key}",
+            self.base_url, self.account_id
         );
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -313,9 +343,11 @@ impl CloudflareClient {
         namespace_id: &str,
         key: &str,
     ) -> CloudflareResult<serde_json::Value> {
+        let namespace_id = sanitize_path_segment(namespace_id, "namespace_id")?;
+        let key = sanitize_path_segment(key, "key")?;
         let url = format!(
-            "{}/accounts/{}/storage/kv/namespaces/{}/values/{}",
-            self.base_url, self.account_id, encode_path_segment(namespace_id), encode_path_segment(key)
+            "{}/accounts/{}/storage/kv/namespaces/{namespace_id}/values/{key}",
+            self.base_url, self.account_id
         );
         self.delete(runtime, &url).await
     }
@@ -739,6 +771,29 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "zone_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "zone_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "zone_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "zone_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "zone_id").is_err());
+        assert!(sanitize_path_segment("", "zone_id").is_err());
+        assert!(sanitize_path_segment("  ", "zone_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            sanitize_path_segment("abc123", "zone_id").unwrap(),
+            "abc123"
+        );
+        assert_eq!(
+            sanitize_path_segment("zone-id-42", "zone_id").unwrap(),
+            "zone-id-42"
+        );
+    }
+
+    #[test]
     fn api_key_auth_secretless() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             CloudflareClient::new(
@@ -755,21 +810,5 @@ mod tests {
         })
         .unwrap();
         assert!(rt.is_secretless());
-    }
-
-    #[test]
-    fn encode_path_segment_prevents_traversal() {
-        assert_eq!(encode_path_segment("normal-id"), "normal%2Did");
-        assert_eq!(encode_path_segment("../../../etc/passwd"), "%2E%2E%2F%2E%2E%2F%2E%2E%2Fetc%2Fpasswd");
-        assert!(encode_path_segment("a/b").contains("%2F"));
-        assert!(!encode_path_segment("a/b").contains('/'));
-    }
-
-    #[test]
-    fn encode_path_segment_roundtrip_alphanumeric() {
-        // Pure alphanumeric stays readable (percent-encoded but decodable)
-        let encoded = encode_path_segment("abc123");
-        assert!(!encoded.contains('/'));
-        assert!(!encoded.contains(".."));
     }
 }

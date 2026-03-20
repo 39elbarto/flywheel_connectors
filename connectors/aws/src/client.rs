@@ -8,6 +8,40 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{AwsError, AwsResult};
 use crate::types::*;
 
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(AwsError::Api {
+            code: 1005,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(AwsError::Api {
+            code: 1005,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
+/// Validate a query string parameter to prevent injection.
+fn sanitize_query_param<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
+    if value.contains('&') || value.contains('?') || value.contains('#') {
+        return Err(AwsError::Api {
+            code: 1005,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
 /// AWS API client with retry support.
 /// Uses simplified REST without SigV4 signing (placeholder for future auth).
 pub struct AwsClient {
@@ -115,8 +149,10 @@ impl AwsClient {
         bucket: &str,
         prefix: Option<&str>,
     ) -> AwsResult<Vec<S3Object>> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
         let mut url = format!("{}/{bucket}", self.s3_url());
         if let Some(p) = prefix {
+            let p = sanitize_query_param(p, "prefix")?;
             url = format!("{url}?prefix={p}&list-type=2");
         } else {
             url = format!("{url}?list-type=2");
@@ -143,6 +179,8 @@ impl AwsClient {
         bucket: &str,
         key: &str,
     ) -> AwsResult<S3GetObjectResponse> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
+        let key = sanitize_path_segment(key, "key")?;
         let url = format!("{}/{bucket}/{key}", self.s3_url());
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -206,6 +244,8 @@ impl AwsClient {
         body: &str,
         content_type: Option<&str>,
     ) -> AwsResult<S3PutObjectResponse> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
+        let key = sanitize_path_segment(key, "key")?;
         let url = format!("{}/{bucket}/{key}", self.s3_url());
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -237,6 +277,8 @@ impl AwsClient {
         bucket: &str,
         key: &str,
     ) -> AwsResult<S3DeleteObjectResponse> {
+        let bucket = sanitize_path_segment(bucket, "bucket")?;
+        let key = sanitize_path_segment(key, "key")?;
         let url = format!("{}/{bucket}/{key}", self.s3_url());
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -285,6 +327,10 @@ impl AwsClient {
         runtime: &ConnectorRuntime,
         instance_id: &str,
     ) -> AwsResult<Ec2StateChange> {
+        let instance_id = sanitize_query_param(
+            sanitize_path_segment(instance_id, "instance_id")?,
+            "instance_id",
+        )?;
         let url = format!(
             "{}?Action=StartInstances&InstanceId.1={instance_id}&Version=2016-11-15",
             self.ec2_url()
@@ -310,6 +356,10 @@ impl AwsClient {
         runtime: &ConnectorRuntime,
         instance_id: &str,
     ) -> AwsResult<Ec2StateChange> {
+        let instance_id = sanitize_query_param(
+            sanitize_path_segment(instance_id, "instance_id")?,
+            "instance_id",
+        )?;
         let url = format!(
             "{}?Action=StopInstances&InstanceId.1={instance_id}&Version=2016-11-15",
             self.ec2_url()
@@ -335,6 +385,10 @@ impl AwsClient {
         runtime: &ConnectorRuntime,
         instance_id: &str,
     ) -> AwsResult<Ec2StateChange> {
+        let instance_id = sanitize_query_param(
+            sanitize_path_segment(instance_id, "instance_id")?,
+            "instance_id",
+        )?;
         let url = format!(
             "{}?Action=TerminateInstances&InstanceId.1={instance_id}&Version=2016-11-15",
             self.ec2_url()
@@ -384,6 +438,7 @@ impl AwsClient {
         function_name: &str,
         payload: &serde_json::Value,
     ) -> AwsResult<LambdaInvokeResponse> {
+        let function_name = sanitize_path_segment(function_name, "function_name")?;
         let url = format!(
             "{}/2015-03-31/functions/{function_name}/invocations",
             self.lambda_url()
@@ -670,6 +725,34 @@ mod tests {
         assert_eq!(rt.ec2_url(), "http://localhost:4567");
         assert_eq!(rt.lambda_url(), "http://localhost:4568");
         assert_eq!(rt.sts_url(), "http://localhost:4569");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "bucket").is_err());
+        assert!(sanitize_path_segment("foo/bar", "bucket").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "bucket").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "bucket").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "bucket").is_err());
+        assert!(sanitize_path_segment("", "bucket").is_err());
+        assert!(sanitize_path_segment("  ", "bucket").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("my-bucket", "bucket").unwrap(), "my-bucket");
+    }
+
+    #[test]
+    fn sanitize_query_param_rejects_injection() {
+        assert!(sanitize_query_param("foo&bar=baz", "prefix").is_err());
+        assert!(sanitize_query_param("foo?x", "prefix").is_err());
+        assert!(sanitize_query_param("foo#frag", "prefix").is_err());
+    }
+
+    #[test]
+    fn sanitize_query_param_accepts_valid() {
+        assert_eq!(sanitize_query_param("logs/2024/", "prefix").unwrap(), "logs/2024/");
     }
 
     #[test]

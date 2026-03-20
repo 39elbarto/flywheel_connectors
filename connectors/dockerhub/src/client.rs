@@ -8,6 +8,29 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{DockerHubError, DockerHubResult};
 use crate::types::*;
 
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DockerHubResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(DockerHubError::Api {
+            status: 400,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(DockerHubError::Api {
+            status: 400,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
 /// Docker Hub API client with retry support.
 pub struct DockerHubClient {
     client: Client,
@@ -113,6 +136,7 @@ impl DockerHubClient {
         runtime: &ConnectorRuntime,
         namespace: &str,
     ) -> DockerHubResult<Vec<Repository>> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
         let url = format!("{}/v2/repositories/{namespace}/", self.base_url);
         self.get_paginated(runtime, &url).await
     }
@@ -123,6 +147,8 @@ impl DockerHubClient {
         namespace: &str,
         name: &str,
     ) -> DockerHubResult<Repository> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "repository")?;
         let url = format!("{}/v2/repositories/{namespace}/{name}/", self.base_url);
         self.get_single(runtime, &url).await
     }
@@ -132,7 +158,8 @@ impl DockerHubClient {
         runtime: &ConnectorRuntime,
         req: &CreateRepositoryRequest,
     ) -> DockerHubResult<Repository> {
-        let url = format!("{}/v2/repositories/{}/", self.base_url, req.namespace);
+        let namespace = sanitize_path_segment(&req.namespace, "namespace")?;
+        let url = format!("{}/v2/repositories/{namespace}/", self.base_url);
         let body = serde_json::to_value(req).unwrap_or_default();
         self.post_json(runtime, &url, &body).await
     }
@@ -143,6 +170,8 @@ impl DockerHubClient {
         namespace: &str,
         name: &str,
     ) -> DockerHubResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "repository")?;
         let url = format!("{}/v2/repositories/{namespace}/{name}/", self.base_url);
         self.delete(runtime, &url).await
     }
@@ -155,6 +184,8 @@ impl DockerHubClient {
         namespace: &str,
         name: &str,
     ) -> DockerHubResult<Vec<Tag>> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "repository")?;
         let url = format!(
             "{}/v2/repositories/{namespace}/{name}/tags/",
             self.base_url
@@ -169,6 +200,9 @@ impl DockerHubClient {
         name: &str,
         tag: &str,
     ) -> DockerHubResult<Tag> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "repository")?;
+        let tag = sanitize_path_segment(tag, "tag")?;
         let url = format!(
             "{}/v2/repositories/{namespace}/{name}/tags/{tag}/",
             self.base_url
@@ -183,6 +217,9 @@ impl DockerHubClient {
         name: &str,
         tag: &str,
     ) -> DockerHubResult<serde_json::Value> {
+        let namespace = sanitize_path_segment(namespace, "namespace")?;
+        let name = sanitize_path_segment(name, "repository")?;
+        let tag = sanitize_path_segment(tag, "tag")?;
         let url = format!(
             "{}/v2/repositories/{namespace}/{name}/tags/{tag}/",
             self.base_url
@@ -549,6 +586,23 @@ mod tests {
         })
         .unwrap();
         assert_eq!(rt.bearer_token(), Some("my-pat"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "namespace").is_err());
+        assert!(sanitize_path_segment("foo/bar", "namespace").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "namespace").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "namespace").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "namespace").is_err());
+        assert!(sanitize_path_segment("", "namespace").is_err());
+        assert!(sanitize_path_segment("  ", "namespace").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("myuser", "namespace").unwrap(), "myuser");
+        assert_eq!(sanitize_path_segment("my-org", "namespace").unwrap(), "my-org");
     }
 
     #[test]

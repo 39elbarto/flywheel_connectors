@@ -213,13 +213,20 @@ impl AzureConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        input
+        let value = input
             .get(key)
-            .and_then(|value| value.as_str())
+            .and_then(|v| v.as_str())
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Missing string field: {key}"),
-            })
+            })?;
+        if value.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must not be empty"),
+            });
+        }
+        Ok(value)
     }
 }
 
@@ -1084,5 +1091,24 @@ mod tests {
     fn default_impl_works() {
         let connector = AzureConnector::default();
         assert_eq!(connector.id().as_str(), "fcp.azure");
+    }
+
+    #[test]
+    fn require_str_ok() {
+        assert_eq!(
+            AzureConnector::require_str(&json!({"k": "v"}), "k").unwrap(),
+            "v"
+        );
+    }
+
+    #[test]
+    fn require_str_miss() {
+        assert!(AzureConnector::require_str(&json!({}), "k").is_err());
+    }
+
+    #[test]
+    fn require_str_empty() {
+        assert!(AzureConnector::require_str(&json!({"k": ""}), "k").is_err());
+        assert!(AzureConnector::require_str(&json!({"k": "  "}), "k").is_err());
     }
 }

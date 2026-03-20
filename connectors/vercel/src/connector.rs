@@ -237,13 +237,20 @@ impl VercelConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        input
+        let value = input
             .get(key)
-            .and_then(|value| value.as_str())
+            .and_then(|v| v.as_str())
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Missing string field: {key}"),
-            })
+            })?;
+        if value.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must not be empty"),
+            });
+        }
+        Ok(value)
     }
 
     fn string_vec(input: &serde_json::Value, key: &str) -> FcpResult<Vec<String>> {
@@ -1011,6 +1018,25 @@ mod tests {
         let doctor = VercelConnector::new().doctor();
         assert!(!doctor.passed);
         assert_eq!(doctor.checks[0].name, "configuration");
+    }
+
+    #[test]
+    fn require_str_ok() {
+        assert_eq!(
+            VercelConnector::require_str(&json!({"k": "v"}), "k").unwrap(),
+            "v"
+        );
+    }
+
+    #[test]
+    fn require_str_miss() {
+        assert!(VercelConnector::require_str(&json!({}), "k").is_err());
+    }
+
+    #[test]
+    fn require_str_empty() {
+        assert!(VercelConnector::require_str(&json!({"k": ""}), "k").is_err());
+        assert!(VercelConnector::require_str(&json!({"k": "  "}), "k").is_err());
     }
 
     #[test]

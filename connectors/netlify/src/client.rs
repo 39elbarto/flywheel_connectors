@@ -9,6 +9,40 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{NetlifyError, NetlifyResult};
 use crate::types::*;
 
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> NetlifyResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(NetlifyError::Api {
+            status: 400,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(NetlifyError::Api {
+            status: 400,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
+/// Validate a query string parameter to prevent injection.
+fn sanitize_query_param<'a>(value: &'a str, field: &str) -> NetlifyResult<&'a str> {
+    if value.contains('&') || value.contains('?') || value.contains('#') {
+        return Err(NetlifyError::Api {
+            status: 400,
+            message: format!("{field} contains invalid characters"),
+        });
+    }
+    Ok(value)
+}
+
 /// Netlify API client with retry support.
 pub struct NetlifyClient {
     client: Client,
@@ -72,6 +106,7 @@ impl NetlifyClient {
         runtime: &ConnectorRuntime,
         site_id: &str,
     ) -> NetlifyResult<Site> {
+        let site_id = sanitize_path_segment(site_id, "site_id")?;
         let url = format!("{}/api/v1/sites/{site_id}", self.base_url);
         self.get_single(runtime, &url).await
     }
@@ -91,6 +126,7 @@ impl NetlifyClient {
         runtime: &ConnectorRuntime,
         site_id: &str,
     ) -> NetlifyResult<serde_json::Value> {
+        let site_id = sanitize_path_segment(site_id, "site_id")?;
         let url = format!("{}/api/v1/sites/{site_id}", self.base_url);
         self.delete(runtime, &url).await
     }
@@ -102,6 +138,7 @@ impl NetlifyClient {
         runtime: &ConnectorRuntime,
         site_id: &str,
     ) -> NetlifyResult<Vec<Deploy>> {
+        let site_id = sanitize_path_segment(site_id, "site_id")?;
         let url = format!("{}/api/v1/sites/{site_id}/deploys", self.base_url);
         self.get_list(runtime, &url).await
     }
@@ -112,6 +149,8 @@ impl NetlifyClient {
         site_id: &str,
         deploy_id: &str,
     ) -> NetlifyResult<Deploy> {
+        let site_id = sanitize_path_segment(site_id, "site_id")?;
+        let deploy_id = sanitize_path_segment(deploy_id, "deploy_id")?;
         let url = format!("{}/api/v1/sites/{site_id}/deploys/{deploy_id}", self.base_url);
         self.get_single(runtime, &url).await
     }
@@ -122,6 +161,7 @@ impl NetlifyClient {
         site_id: &str,
         req: &CreateDeployRequest,
     ) -> NetlifyResult<Deploy> {
+        let site_id = sanitize_path_segment(site_id, "site_id")?;
         let url = format!("{}/api/v1/sites/{site_id}/deploys", self.base_url);
         let body = serde_json::to_value(req).unwrap_or(json!({}));
         self.post_json(runtime, &url, &body).await
@@ -133,6 +173,8 @@ impl NetlifyClient {
         site_id: &str,
         deploy_id: &str,
     ) -> NetlifyResult<Deploy> {
+        let site_id = sanitize_path_segment(site_id, "site_id")?;
+        let deploy_id = sanitize_path_segment(deploy_id, "deploy_id")?;
         let url = format!(
             "{}/api/v1/sites/{site_id}/rollback/{deploy_id}",
             self.base_url
@@ -158,6 +200,8 @@ impl NetlifyClient {
         account_slug: &str,
         site_id: &str,
     ) -> NetlifyResult<Vec<EnvVar>> {
+        let account_slug = sanitize_path_segment(account_slug, "account_slug")?;
+        let site_id = sanitize_query_param(site_id, "site_id")?;
         let url = format!(
             "{}/api/v1/accounts/{account_slug}/env?site_id={site_id}",
             self.base_url
@@ -172,6 +216,8 @@ impl NetlifyClient {
         site_id: &str,
         req: &[SetEnvVarRequest],
     ) -> NetlifyResult<Vec<EnvVar>> {
+        let account_slug = sanitize_path_segment(account_slug, "account_slug")?;
+        let site_id = sanitize_query_param(site_id, "site_id")?;
         let url = format!(
             "{}/api/v1/accounts/{account_slug}/env?site_id={site_id}",
             self.base_url
@@ -187,6 +233,9 @@ impl NetlifyClient {
         site_id: &str,
         key: &str,
     ) -> NetlifyResult<serde_json::Value> {
+        let account_slug = sanitize_path_segment(account_slug, "account_slug")?;
+        let key = sanitize_path_segment(key, "key")?;
+        let site_id = sanitize_query_param(site_id, "site_id")?;
         let url = format!(
             "{}/api/v1/accounts/{account_slug}/env/{key}?site_id={site_id}",
             self.base_url
@@ -530,6 +579,22 @@ mod tests {
         })
         .unwrap();
         assert!(!rt2.is_secretless());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "site_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "site_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "site_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "site_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "site_id").is_err());
+        assert!(sanitize_path_segment("", "site_id").is_err());
+        assert!(sanitize_path_segment("  ", "site_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("site-abc123", "site_id").unwrap(), "site-abc123");
     }
 
     #[test]

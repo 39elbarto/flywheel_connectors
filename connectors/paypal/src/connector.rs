@@ -226,13 +226,20 @@ impl PayPalConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        input
+        let value = input
             .get(key)
             .and_then(|v| v.as_str())
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Missing: {key}"),
-            })
+            })?;
+        if value.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must not be empty"),
+            });
+        }
+        Ok(value)
     }
 }
 
@@ -1261,6 +1268,12 @@ mod tests {
     #[test]
     fn require_str_miss() {
         assert!(PayPalConnector::require_str(&json!({}), "k").is_err());
+    }
+
+    #[test]
+    fn require_str_empty() {
+        assert!(PayPalConnector::require_str(&json!({"k": ""}), "k").is_err());
+        assert!(PayPalConnector::require_str(&json!({"k": "  "}), "k").is_err());
     }
 
     #[test]

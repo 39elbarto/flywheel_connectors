@@ -295,13 +295,20 @@ impl DockerHubConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        input
+        let value = input
             .get(key)
             .and_then(|v| v.as_str())
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Missing: {key}"),
-            })
+            })?;
+        if value.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must not be empty"),
+            });
+        }
+        Ok(value)
     }
 }
 
@@ -1081,6 +1088,12 @@ mod tests {
         let input = json!({"namespace": "myuser"});
         let result = DockerHubConnector::require_str(&input, "namespace");
         assert_eq!(result.unwrap(), "myuser");
+    }
+
+    #[test]
+    fn require_str_empty() {
+        assert!(DockerHubConnector::require_str(&json!({"k": ""}), "k").is_err());
+        assert!(DockerHubConnector::require_str(&json!({"k": "  "}), "k").is_err());
     }
 
     #[test]

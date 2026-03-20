@@ -7,8 +7,6 @@ mod projects;
 
 use std::time::Duration;
 
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
@@ -20,6 +18,37 @@ use crate::{
     error::{VercelError, VercelResult},
     types::{ApiErrorResponse, TeamScope, VercelAuth},
 };
+
+/// Validate a user-supplied path segment to prevent URL path injection.
+/// Encode/validate a path segment for URL safety. Alias used by sub-modules.
+pub(crate) fn encode_path_segment(value: &str) -> String {
+    // Reject dangerous path traversal patterns
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/') || value.contains('\\') || value.contains("..") || lower.contains("%2f") || lower.contains("%5c") {
+        return String::new(); // Sub-modules check for empty result
+    }
+    value.to_string()
+}
+
+pub(crate) fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> VercelResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(VercelError::Validation(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(VercelError::Validation(format!(
+            "{field} contains invalid characters"
+        )));
+    }
+    Ok(value)
+}
 
 pub const DEFAULT_BASE_URL: &str = "https://api.vercel.com";
 
@@ -331,10 +360,6 @@ impl VercelClient {
     }
 }
 
-fn encode_path_segment(s: &str) -> String {
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
-}
-
 fn parse_error_response(
     status: StatusCode,
     body: &str,
@@ -416,5 +441,22 @@ mod tests {
             client.health_check().await.unwrap();
         })
         .unwrap();
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "id").is_err());
+        assert!(sanitize_path_segment("", "id").is_err());
+        assert!(sanitize_path_segment("  ", "id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("prj_abc123", "id").unwrap(), "prj_abc123");
+        assert_eq!(sanitize_path_segment("my-project", "id").unwrap(), "my-project");
     }
 }

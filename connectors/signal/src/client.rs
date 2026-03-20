@@ -20,7 +20,7 @@ use crate::types::{
 
 /// Percent-encode a value for safe inclusion in a URL path segment.
 fn encode_path_segment(s: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
 
@@ -152,7 +152,11 @@ impl SignalClient {
         runtime: &ConnectorRuntime,
         timeout_seconds: u64,
     ) -> SignalResult<Vec<SignalEnvelope>> {
-        let url = format!("{}/v1/receive/{}", self.daemon_url, encode_path_segment(&self.phone_number));
+        let url = format!(
+            "{}/v1/receive/{}",
+            self.daemon_url,
+            encode_path_segment(&self.phone_number)
+        );
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
@@ -210,7 +214,11 @@ impl SignalClient {
         runtime: &ConnectorRuntime,
         group_id: &str,
     ) -> SignalResult<GroupInfo> {
-        let url = format!("{}/v1/groups/{}", self.daemon_url, encode_path_segment(&self.phone_number));
+        let url = format!(
+            "{}/v1/groups/{}",
+            self.daemon_url,
+            encode_path_segment(&self.phone_number)
+        );
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
@@ -263,7 +271,11 @@ impl SignalClient {
     ///
     /// Returns an error if the API call fails.
     pub async fn list_groups(&self, runtime: &ConnectorRuntime) -> SignalResult<Vec<GroupInfo>> {
-        let url = format!("{}/v1/groups/{}", self.daemon_url, encode_path_segment(&self.phone_number));
+        let url = format!(
+            "{}/v1/groups/{}",
+            self.daemon_url,
+            encode_path_segment(&self.phone_number)
+        );
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 

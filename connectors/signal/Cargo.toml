@@ -40,4 +40,5 @@ hex.workspace = true
 percent-encoding.workspace = true
 
 [dev-dependencies]
+fcp-crypto = { path = "../../crates/fcp-crypto" }
 wiremock.workspace = true

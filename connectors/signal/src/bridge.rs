@@ -9,6 +9,7 @@
 //! - **Attachment transfer** — upload/download via signal-cli with base64 encoding
 //! - **Reconnection/backoff** — exponential backoff when daemon is unreachable
 
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -17,7 +18,13 @@ use tracing::{debug, info, warn};
 
 use crate::client::SignalClient;
 use crate::error::{SignalError, SignalResult};
-use crate::types::GroupInfo;
+use crate::types::{GroupInfo, SignalConfig};
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -66,6 +73,17 @@ impl Default for BridgeConfig {
             max_reconnect_delay_ms: default_max_reconnect_delay_ms(),
             health_check_interval_ms: default_health_check_interval_ms(),
             max_attachment_bytes: default_max_attachment_bytes(),
+        }
+    }
+}
+
+impl From<&SignalConfig> for BridgeConfig {
+    fn from(config: &SignalConfig) -> Self {
+        Self {
+            poll_interval_ms: config.poll_interval_ms,
+            max_reconnect_delay_ms: config.max_reconnect_delay_ms,
+            health_check_interval_ms: config.health_check_interval_ms,
+            max_attachment_bytes: config.max_attachment_bytes,
         }
     }
 }
@@ -137,6 +155,9 @@ pub struct BridgeState {
     /// Whether the daemon is currently reachable.
     pub connected: bool,
 
+    /// Timestamp of the last health probe attempt, successful or not.
+    pub last_probe_at: Option<Instant>,
+
     /// Timestamp of the last successful health check.
     pub last_health_check: Option<Instant>,
 
@@ -155,28 +176,33 @@ pub struct BridgeState {
 
 impl BridgeState {
     /// Reset state to disconnected.
-    pub const fn mark_disconnected(&mut self) {
+    pub fn mark_disconnected(&mut self) {
         self.connected = false;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.last_probe_at = Some(Instant::now());
     }
 
     /// Record a successful health check.
     pub fn record_health_success(&mut self) {
+        let now = Instant::now();
         self.connected = true;
-        self.last_health_check = Some(Instant::now());
+        self.last_probe_at = Some(now);
+        self.last_health_check = Some(now);
         self.consecutive_failures = 0;
     }
 
     /// Record a failed health check.
-    pub const fn record_health_failure(&mut self) {
+    pub fn record_health_failure(&mut self) {
         self.connected = false;
+        self.last_probe_at = Some(Instant::now());
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
     }
 
     /// Whether a health check is due based on the config interval.
     #[must_use]
     pub fn health_check_due(&self, interval_ms: u64) -> bool {
-        self.last_health_check
+        self.last_probe_at
+            .or(self.last_health_check)
             .is_none_or(|last| last.elapsed() >= Duration::from_millis(interval_ms))
     }
 
@@ -191,11 +217,10 @@ impl BridgeState {
     #[must_use]
     pub fn status_summary(&self) -> String {
         if self.connected {
-            let elapsed = self
-                .last_health_check
-                .map_or_else(|| String::from("unknown"), |t| {
-                    format!("{}ms ago", t.elapsed().as_millis())
-                });
+            let elapsed = self.last_health_check.map_or_else(
+                || String::from("unknown"),
+                |t| format!("{}ms ago", t.elapsed().as_millis()),
+            );
             format!("connected (last check {elapsed})")
         } else if self.consecutive_failures > 0 {
             format!(
@@ -285,7 +310,7 @@ pub fn decode_attachment(base64_data: &str, max_bytes: u64) -> SignalResult<Vec<
 #[derive(Debug)]
 pub struct BridgeManager {
     config: BridgeConfig,
-    pub(crate) state: BridgeState,
+    state: Mutex<BridgeState>,
 }
 
 impl BridgeManager {
@@ -298,7 +323,7 @@ impl BridgeManager {
         config.validate()?;
         Ok(Self {
             config,
-            state: BridgeState::default(),
+            state: Mutex::new(BridgeState::default()),
         })
     }
 
@@ -307,7 +332,7 @@ impl BridgeManager {
     pub fn with_defaults() -> Self {
         Self {
             config: BridgeConfig::default(),
-            state: BridgeState::default(),
+            state: Mutex::new(BridgeState::default()),
         }
     }
 
@@ -317,29 +342,42 @@ impl BridgeManager {
         &self.config
     }
 
-    /// Return a reference to the bridge state.
+    /// Return a snapshot of the bridge state.
     #[must_use]
-    pub const fn state(&self) -> &BridgeState {
-        &self.state
+    pub fn state(&self) -> BridgeState {
+        lock_unpoisoned(&self.state).clone()
     }
 
     /// Whether the daemon is currently reachable.
     #[must_use]
-    pub const fn is_connected(&self) -> bool {
-        self.state.connected
+    pub fn is_connected(&self) -> bool {
+        lock_unpoisoned(&self.state).connected
     }
 
     /// Number of consecutive failures.
     #[must_use]
-    pub const fn consecutive_failures(&self) -> u32 {
-        self.state.consecutive_failures
+    pub fn consecutive_failures(&self) -> u32 {
+        lock_unpoisoned(&self.state).consecutive_failures
     }
 
     /// Compute the current backoff delay in milliseconds.
     #[must_use]
-    pub const fn current_backoff_ms(&self) -> u64 {
-        self.config
-            .backoff_delay_ms(self.state.consecutive_failures)
+    pub fn current_backoff_ms(&self) -> u64 {
+        self.current_backoff_ms_for(self.consecutive_failures())
+    }
+
+    const fn current_backoff_ms_for(&self, consecutive_failures: u32) -> u64 {
+        self.config.backoff_delay_ms(consecutive_failures)
+    }
+
+    /// Record a successful bridge probe.
+    pub fn record_health_success(&self) {
+        lock_unpoisoned(&self.state).record_health_success();
+    }
+
+    /// Record a failed bridge probe.
+    pub fn record_health_failure(&self) {
+        lock_unpoisoned(&self.state).record_health_failure();
     }
 
     /// Perform a health check against the signal-cli daemon.
@@ -349,21 +387,21 @@ impl BridgeManager {
     /// # Errors
     ///
     /// Returns the underlying `SignalError` when the daemon is unreachable.
-    pub async fn health_check(&mut self, client: &SignalClient) -> SignalResult<()> {
+    pub async fn health_check(&self, client: &SignalClient) -> SignalResult<()> {
         debug!("Bridge health check starting");
         match client.health_check().await {
             Ok(()) => {
-                if !self.state.connected {
+                if !self.is_connected() {
                     info!("Signal daemon is now reachable");
                 }
-                self.state.record_health_success();
+                self.record_health_success();
                 Ok(())
             }
             Err(e) => {
-                self.state.record_health_failure();
+                self.record_health_failure();
                 let backoff = self.current_backoff_ms();
                 warn!(
-                    consecutive_failures = self.state.consecutive_failures,
+                    consecutive_failures = self.consecutive_failures(),
                     backoff_ms = backoff,
                     "Signal daemon health check failed: {e}"
                 );
@@ -375,8 +413,15 @@ impl BridgeManager {
     /// Whether a health check is currently due.
     #[must_use]
     pub fn health_check_due(&self) -> bool {
-        self.state
-            .health_check_due(self.config.health_check_interval_ms)
+        let state = lock_unpoisoned(&self.state);
+        let interval_ms = if state.consecutive_failures > 0 {
+            self.current_backoff_ms_for(state.consecutive_failures)
+        } else {
+            self.config.health_check_interval_ms
+        };
+        state
+            .last_probe_at
+            .is_none_or(|last| last.elapsed() >= Duration::from_millis(interval_ms))
     }
 
     /// Whether a receive poll is appropriate right now.
@@ -384,8 +429,8 @@ impl BridgeManager {
     /// Returns `false` if the daemon is not connected (should wait for
     /// reconnection backoff instead).
     #[must_use]
-    pub const fn should_poll(&self) -> bool {
-        self.state.connected
+    pub fn should_poll(&self) -> bool {
+        self.is_connected()
     }
 
     /// Return the configured poll interval as a `Duration`.
@@ -395,14 +440,14 @@ impl BridgeManager {
     }
 
     /// Update the receive cursor after processing messages.
-    pub fn advance_cursor(&mut self, cursor: String) {
-        self.state.receive_cursor = Some(cursor);
+    pub fn advance_cursor(&self, cursor: String) {
+        lock_unpoisoned(&self.state).receive_cursor = Some(cursor);
     }
 
-    /// Return the current receive cursor.
+    /// Return the current receive cursor snapshot.
     #[must_use]
-    pub fn receive_cursor(&self) -> Option<&str> {
-        self.state.receive_cursor.as_deref()
+    pub fn receive_cursor(&self) -> Option<String> {
+        lock_unpoisoned(&self.state).receive_cursor.clone()
     }
 
     /// Synchronize group list from the daemon.
@@ -414,28 +459,46 @@ impl BridgeManager {
     /// Returns the underlying `SignalError` when the group list cannot be
     /// fetched from the daemon.
     pub async fn sync_groups(
-        &mut self,
+        &self,
         client: &SignalClient,
         runtime: &fcp_sdk::migration::ConnectorRuntime,
     ) -> SignalResult<Vec<GroupInfo>> {
         debug!("Synchronizing Signal groups");
         let groups = client.list_groups(runtime).await?;
         info!(count = groups.len(), "Group sync complete");
-        self.state.cached_groups.clone_from(&groups);
-        self.state.last_group_sync = Some(Instant::now());
+        {
+            let mut state = lock_unpoisoned(&self.state);
+            state.cached_groups.clone_from(&groups);
+            state.last_group_sync = Some(Instant::now());
+        }
         Ok(groups)
     }
 
-    /// Return the cached group list.
+    /// Update or insert a single group in the cache.
+    pub fn upsert_group(&self, group: GroupInfo) {
+        let mut state = lock_unpoisoned(&self.state);
+        if let Some(existing) = state
+            .cached_groups
+            .iter_mut()
+            .find(|item| item.id == group.id)
+        {
+            *existing = group;
+        } else {
+            state.cached_groups.push(group);
+        }
+        state.last_group_sync = Some(Instant::now());
+    }
+
+    /// Return a snapshot of the cached group list.
     #[must_use]
-    pub fn cached_groups(&self) -> &[GroupInfo] {
-        &self.state.cached_groups
+    pub fn cached_groups(&self) -> Vec<GroupInfo> {
+        lock_unpoisoned(&self.state).cached_groups.clone()
     }
 
     /// Whether a group sync is due.
     #[must_use]
     pub fn group_sync_due(&self) -> bool {
-        self.state.group_sync_due()
+        lock_unpoisoned(&self.state).group_sync_due()
     }
 
     /// Encode an attachment for upload.
@@ -459,20 +522,21 @@ impl BridgeManager {
     }
 
     /// Reset bridge state (e.g., on shutdown).
-    pub fn reset(&mut self) {
-        self.state = BridgeState::default();
+    pub fn reset(&self) {
+        *lock_unpoisoned(&self.state) = BridgeState::default();
     }
 
     /// Build a diagnostic summary for `doctor` / `self_check`.
     #[must_use]
     pub fn diagnostic_summary(&self) -> BridgeDiagnostic {
+        let state = lock_unpoisoned(&self.state);
         BridgeDiagnostic {
-            connected: self.state.connected,
-            consecutive_failures: self.state.consecutive_failures,
-            current_backoff_ms: self.current_backoff_ms(),
-            cached_group_count: self.state.cached_groups.len(),
-            has_receive_cursor: self.state.receive_cursor.is_some(),
-            status_summary: self.state.status_summary(),
+            connected: state.connected,
+            consecutive_failures: state.consecutive_failures,
+            current_backoff_ms: self.current_backoff_ms_for(state.consecutive_failures),
+            cached_group_count: state.cached_groups.len(),
+            has_receive_cursor: state.receive_cursor.is_some(),
+            status_summary: state.status_summary(),
             poll_interval_ms: self.config.poll_interval_ms,
             health_check_interval_ms: self.config.health_check_interval_ms,
         }
@@ -618,6 +682,7 @@ mod tests {
     fn default_state_is_disconnected() {
         let state = BridgeState::default();
         assert!(!state.connected);
+        assert!(state.last_probe_at.is_none());
         assert!(state.last_health_check.is_none());
         assert_eq!(state.consecutive_failures, 0);
         assert!(state.receive_cursor.is_none());
@@ -630,6 +695,7 @@ mod tests {
         let mut state = BridgeState::default();
         state.record_health_success();
         assert!(state.connected);
+        assert!(state.last_probe_at.is_some());
         assert!(state.last_health_check.is_some());
         assert_eq!(state.consecutive_failures, 0);
     }
@@ -639,6 +705,7 @@ mod tests {
         let mut state = BridgeState::default();
         state.record_health_failure();
         assert!(!state.connected);
+        assert!(state.last_probe_at.is_some());
         assert_eq!(state.consecutive_failures, 1);
         state.record_health_failure();
         assert_eq!(state.consecutive_failures, 2);
@@ -711,8 +778,10 @@ mod tests {
 
     #[test]
     fn consecutive_failures_saturates() {
-        let mut state = BridgeState::default();
-        state.consecutive_failures = u32::MAX;
+        let mut state = BridgeState {
+            consecutive_failures: u32::MAX,
+            ..BridgeState::default()
+        };
         state.record_health_failure();
         assert_eq!(state.consecutive_failures, u32::MAX);
     }
@@ -753,7 +822,7 @@ mod tests {
     #[test]
     fn manager_poll_interval() {
         let manager = BridgeManager::with_defaults();
-        assert_eq!(manager.poll_interval(), Duration::from_millis(5_000));
+        assert_eq!(manager.poll_interval(), Duration::from_secs(5));
     }
 
     #[test]
@@ -764,17 +833,17 @@ mod tests {
 
     #[test]
     fn manager_cursor_advance() {
-        let mut manager = BridgeManager::with_defaults();
+        let manager = BridgeManager::with_defaults();
         assert!(manager.receive_cursor().is_none());
         manager.advance_cursor("1700000001000".into());
-        assert_eq!(manager.receive_cursor(), Some("1700000001000"));
+        assert_eq!(manager.receive_cursor().as_deref(), Some("1700000001000"));
     }
 
     #[test]
     fn manager_reset_clears_state() {
-        let mut manager = BridgeManager::with_defaults();
+        let manager = BridgeManager::with_defaults();
         manager.advance_cursor("some_cursor".into());
-        manager.state.record_health_success();
+        manager.record_health_success();
         assert!(manager.is_connected());
         manager.reset();
         assert!(!manager.is_connected());
@@ -809,15 +878,33 @@ mod tests {
 
     #[test]
     fn manager_diagnostic_after_failures() {
-        let mut manager = BridgeManager::with_defaults();
-        manager.state.record_health_failure();
-        manager.state.record_health_failure();
-        manager.state.record_health_failure();
+        let manager = BridgeManager::with_defaults();
+        manager.record_health_failure();
+        manager.record_health_failure();
+        manager.record_health_failure();
         let diag = manager.diagnostic_summary();
         assert!(!diag.connected);
         assert_eq!(diag.consecutive_failures, 3);
         assert_eq!(diag.current_backoff_ms, 4_000); // 1000 * 2^2
         assert!(diag.status_summary.contains("3 consecutive failures"));
+    }
+
+    #[test]
+    fn manager_health_check_due_respects_backoff_after_failure() {
+        let manager = BridgeManager::with_defaults();
+        manager.record_health_failure();
+        assert!(!manager.health_check_due());
+
+        {
+            let mut state = lock_unpoisoned(&manager.state);
+            state.last_probe_at = Some(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(2))
+                    .expect("checked subtraction"),
+            );
+        }
+
+        assert!(manager.health_check_due());
     }
 
     // -- Attachment encoding/decoding tests --
@@ -936,7 +1023,7 @@ mod tests {
         .unwrap();
 
         let client = SignalClient::new(&config).unwrap();
-        let mut manager = BridgeManager::with_defaults();
+        let manager = BridgeManager::with_defaults();
 
         assert!(!manager.is_connected());
         manager.health_check(&client).await.unwrap();
@@ -954,7 +1041,7 @@ mod tests {
         .unwrap();
 
         let client = SignalClient::new(&config).unwrap();
-        let mut manager = BridgeManager::with_defaults();
+        let manager = BridgeManager::with_defaults();
 
         let result = manager.health_check(&client).await;
         assert!(result.is_err());
@@ -987,11 +1074,11 @@ mod tests {
         .unwrap();
 
         let client = SignalClient::new(&config).unwrap();
-        let mut manager = BridgeManager::with_defaults();
+        let manager = BridgeManager::with_defaults();
 
         // Simulate some failures first
-        manager.state.record_health_failure();
-        manager.state.record_health_failure();
+        manager.record_health_failure();
+        manager.record_health_failure();
         assert_eq!(manager.consecutive_failures(), 2);
 
         // Now succeed
@@ -1035,7 +1122,7 @@ mod tests {
         let runtime = fcp_sdk::migration::ConnectorRuntime::new(
             fcp_sdk::migration::ConnectorRuntimeConfig::default(),
         );
-        let mut manager = BridgeManager::with_defaults();
+        let manager = BridgeManager::with_defaults();
 
         let groups = manager.sync_groups(&client, &runtime).await.unwrap();
         assert_eq!(groups.len(), 2);

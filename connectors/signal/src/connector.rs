@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
+    HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse,
+    OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
@@ -15,12 +15,13 @@ use fcp_sdk::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::bridge::BridgeManager;
 use crate::client::SignalClient;
 use crate::types::{
     GroupLookupRequest, IdentityRequest, ReceiveMessagesRequest, SendMessageRequest, SignalConfig,
-    TrustIdentityRequest,
+    SignalEnvelope, TrustIdentityRequest,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -106,6 +107,96 @@ impl SignalConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn bridge_ref(&self) -> FcpResult<&BridgeManager> {
+        self.bridge.as_ref().ok_or(FcpError::NotConfigured)
+    }
+
+    fn validate_attachment_payloads(&self, attachments: &[String]) -> FcpResult<()> {
+        let bridge = self.bridge_ref()?;
+        for attachment in attachments {
+            bridge
+                .decode_attachment(attachment)
+                .map_err(|error| error.to_fcp_error())?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_bridge_ready(&self, client: &SignalClient) -> FcpResult<()> {
+        let bridge = self.bridge_ref()?;
+        if bridge.health_check_due() {
+            bridge
+                .health_check(client)
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            return Ok(());
+        }
+
+        if bridge.is_connected() {
+            return Ok(());
+        }
+
+        let retry_after_ms = bridge.current_backoff_ms();
+        Err(FcpError::External {
+            service: "signal".into(),
+            message: format!(
+                "Signal bridge reconnect backoff active; retry after {retry_after_ms}ms"
+            ),
+            status_code: None,
+            retryable: true,
+            retry_after: Some(Duration::from_millis(retry_after_ms)),
+        })
+    }
+
+    fn remember_receive_cursor(&self, envelopes: &[SignalEnvelope]) -> Option<String> {
+        let Ok(bridge) = self.bridge_ref() else {
+            return None;
+        };
+
+        let cursor = envelopes
+            .iter()
+            .filter_map(|envelope| {
+                envelope.timestamp.or_else(|| {
+                    envelope
+                        .data_message
+                        .as_ref()
+                        .and_then(|message| message.timestamp)
+                })
+            })
+            .max()
+            .map(|timestamp| timestamp.to_string());
+
+        if let Some(cursor) = cursor.as_ref() {
+            bridge.advance_cursor(cursor.clone());
+        }
+
+        cursor
+    }
+
+    async fn maybe_sync_groups_after_receive(
+        &self,
+        client: &SignalClient,
+        runtime: &ConnectorRuntime,
+        envelopes: &[SignalEnvelope],
+    ) {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return;
+        };
+
+        let saw_group_event = envelopes.iter().any(|envelope| {
+            envelope
+                .data_message
+                .as_ref()
+                .and_then(|message| message.group_info.as_ref())
+                .is_some()
+        });
+
+        if bridge.group_sync_due() || saw_group_event {
+            if let Err(error) = bridge.sync_groups(client, runtime).await {
+                warn!(error = %error, "Signal group sync failed after receive poll");
+            }
+        }
+    }
+
     /// Run connector diagnostics.
     #[allow(clippy::too_many_lines)]
     pub fn doctor(&self) -> DoctorResult {
@@ -159,10 +250,16 @@ impl SignalConnector {
                         |bridge| {
                             let diag = bridge.diagnostic_summary();
                             format!(
-                                "Bridge: {} (poll={}ms, health_check={}ms)",
+                                "Bridge: {} (poll={}ms, health_check={}ms, cached_groups={}, receive_cursor={})",
                                 diag.status_summary,
                                 diag.poll_interval_ms,
-                                diag.health_check_interval_ms
+                                diag.health_check_interval_ms,
+                                diag.cached_group_count,
+                                if diag.has_receive_cursor {
+                                    "present"
+                                } else {
+                                    "none"
+                                }
                             )
                         },
                     ),
@@ -525,7 +622,9 @@ impl FcpConnector for SignalConnector {
         })?;
 
         // Initialize bridge manager with default config
-        let bridge = BridgeManager::with_defaults();
+        let bridge = BridgeManager::new((&config).into()).map_err(|e| FcpError::Internal {
+            message: format!("Failed to initialize Signal bridge state: {e}"),
+        })?;
         self.bridge = Some(bridge);
 
         self.client = Some(client);
@@ -574,6 +673,18 @@ impl FcpConnector for SignalConnector {
         } else {
             HealthSnapshot::degraded("not configured")
         };
+        if let Some(bridge) = &self.bridge {
+            let diag = bridge.diagnostic_summary();
+            if diag.consecutive_failures > 0 {
+                snapshot.status = HealthState::Degraded {
+                    reason: format!(
+                        "signal daemon unreachable ({} consecutive failures, backoff {}ms)",
+                        diag.consecutive_failures, diag.current_backoff_ms
+                    ),
+                };
+            }
+            snapshot.details = Some(json!({ "bridge": diag }));
+        }
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snapshot
@@ -587,21 +698,11 @@ impl FcpConnector for SignalConnector {
             ));
         };
 
-        // If bridge has recorded consecutive failures, report degraded with backoff info
-        if let Some(bridge) = &self.bridge {
-            let diag = bridge.diagnostic_summary();
-            if diag.consecutive_failures > 3 {
-                return Ok(SelfCheckReport::failed(
-                    "bridge_unreachable",
-                    format!(
-                        "Signal daemon unreachable ({} consecutive failures, backoff {}ms)",
-                        diag.consecutive_failures, diag.current_backoff_ms
-                    ),
-                ));
-            }
-        }
-
-        match client.health_check().await {
+        match if let Some(bridge) = &self.bridge {
+            bridge.health_check(client).await
+        } else {
+            client.health_check().await
+        } {
             Ok(()) => Ok(SelfCheckReport::ok()),
             Err(err) => {
                 if err.is_retryable() {
@@ -699,6 +800,8 @@ impl SignalConnector {
             OP_SEND_MESSAGE => {
                 let input: SendMessageRequest = parse_input(&req.input, operation)?;
                 input.validate()?;
+                self.validate_attachment_payloads(&input.attachments)?;
+                self.ensure_bridge_ready(client).await?;
 
                 let resp = client
                     .send_message(runtime, &input)
@@ -715,33 +818,55 @@ impl SignalConnector {
                 let timeout = input
                     .timeout_seconds
                     .unwrap_or_else(|| config.default_receive_timeout_seconds());
+                self.ensure_bridge_ready(client).await?;
 
                 let envelopes = client
                     .receive_messages(runtime, timeout)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
+                let cursor = self.remember_receive_cursor(&envelopes);
+                self.maybe_sync_groups_after_receive(client, runtime, &envelopes)
+                    .await;
+                let cached_group_count = self
+                    .bridge
+                    .as_ref()
+                    .map_or(0, |bridge| bridge.cached_groups().len());
 
                 json!({
                     "messages": envelopes,
-                    "count": envelopes.len()
+                    "count": envelopes.len(),
+                    "receive_cursor": cursor,
+                    "cached_group_count": cached_group_count
                 })
             }
             OP_LIST_GROUPS => {
-                let groups = client
-                    .list_groups(runtime)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                self.ensure_bridge_ready(client).await?;
+                let groups = if let Some(bridge) = &self.bridge {
+                    bridge
+                        .sync_groups(client, runtime)
+                        .await
+                        .map_err(|error| error.to_fcp_error())?
+                } else {
+                    client
+                        .list_groups(runtime)
+                        .await
+                        .map_err(|error| error.to_fcp_error())?
+                };
 
                 json!({ "groups": groups })
             }
             OP_GET_GROUP => {
                 let input: GroupLookupRequest = parse_input(&req.input, operation)?;
                 input.validate()?;
+                self.ensure_bridge_ready(client).await?;
 
                 let group = client
                     .get_group(runtime, &input.group_id)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
+                if let Some(bridge) = &self.bridge {
+                    bridge.upsert_group(group.clone());
+                }
 
                 serde_json::to_value(&group).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize group: {e}"),
@@ -750,6 +875,7 @@ impl SignalConnector {
             OP_GET_IDENTITY => {
                 let input: IdentityRequest = parse_input(&req.input, operation)?;
                 input.validate()?;
+                self.ensure_bridge_ready(client).await?;
 
                 let identity = client
                     .get_identity(runtime, &input.number)
@@ -763,6 +889,7 @@ impl SignalConnector {
             OP_TRUST_IDENTITY => {
                 let input: TrustIdentityRequest = parse_input(&req.input, operation)?;
                 input.validate()?;
+                self.ensure_bridge_ready(client).await?;
 
                 client
                     .trust_identity(runtime, &input)
@@ -786,6 +913,10 @@ impl SignalConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
 
     fn base_handshake() -> HandshakeRequest {
         HandshakeRequest {
@@ -803,6 +934,34 @@ mod tests {
             transport_caps: None,
             requested_instance_id: None,
         }
+    }
+
+    fn signed_token_for(
+        capability: &'static str,
+        operation: &'static str,
+    ) -> (HandshakeRequest, CapabilityToken) {
+        let signing_key = Ed25519SigningKey::generate();
+        let host_public_key = signing_key.verifying_key().to_bytes();
+        let now = Utc::now();
+        let expires = now + ChronoDuration::hours(1);
+
+        let token = CapabilityToken {
+            raw: CapabilityTokenBuilder::new()
+                .capability_id(capability)
+                .zone_id("z:work")
+                .principal("user:test")
+                .operations(&[operation])
+                .issuer("node:test")
+                .validity(now, expires)
+                .sign(&signing_key)
+                .expect("signed capability token"),
+        };
+
+        let mut handshake = base_handshake();
+        handshake.host_public_key = host_public_key;
+        handshake.capabilities_requested = vec![CapabilityId::from_static(capability)];
+
+        (handshake, token)
     }
 
     fn base_invoke(connector_id: &ConnectorId, operation: &'static str) -> InvokeRequest {
@@ -1122,6 +1281,27 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_applies_bridge_overrides() {
+        let mut connector = SignalConnector::new();
+        connector
+            .configure(json!({
+                "phone_number": "+15551234567",
+                "poll_interval_ms": 9_000,
+                "max_reconnect_delay_ms": 45_000,
+                "health_check_interval_ms": 12_000,
+                "max_attachment_bytes": 2_048
+            }))
+            .await
+            .unwrap();
+
+        let bridge = connector.bridge().unwrap();
+        assert_eq!(bridge.config().poll_interval_ms, 9_000);
+        assert_eq!(bridge.config().max_reconnect_delay_ms, 45_000);
+        assert_eq!(bridge.config().health_check_interval_ms, 12_000);
+        assert_eq!(bridge.config().max_attachment_bytes, 2_048);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_doctor_includes_bridge_check() {
         let mut connector = SignalConnector::new();
         connector
@@ -1138,13 +1318,7 @@ mod tests {
             .find(|check| check.name == "bridge_manager")
             .expect("bridge_manager check");
         assert!(bridge_check.passed);
-        assert!(
-            bridge_check
-                .message
-                .as_deref()
-                .unwrap()
-                .contains("Bridge:")
-        );
+        assert!(bridge_check.message.as_deref().unwrap().contains("Bridge:"));
     }
 
     #[test]
@@ -1170,18 +1344,8 @@ mod tests {
             .unwrap();
 
         // Simulate bridge failures
-        connector
-            .bridge
-            .as_mut()
-            .unwrap()
-            .state
-            .record_health_failure();
-        connector
-            .bridge
-            .as_mut()
-            .unwrap()
-            .state
-            .record_health_failure();
+        connector.bridge().unwrap().record_health_failure();
+        connector.bridge().unwrap().record_health_failure();
 
         let report = connector.doctor();
         let health_check = report
@@ -1200,6 +1364,25 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_health_degrades_after_bridge_failures() {
+        let mut connector = SignalConnector::new();
+        connector
+            .configure(json!({
+                "phone_number": "+15551234567"
+            }))
+            .await
+            .unwrap();
+
+        connector.bridge().unwrap().record_health_failure();
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Degraded { .. }));
+        assert_eq!(
+            health.details.unwrap()["bridge"]["consecutive_failures"],
+            serde_json::json!(1)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_shutdown_resets_bridge() {
         let mut connector = SignalConnector::new();
         connector
@@ -1210,17 +1393,8 @@ mod tests {
             .unwrap();
 
         // Set some bridge state
-        connector
-            .bridge
-            .as_mut()
-            .unwrap()
-            .advance_cursor("12345".into());
-        connector
-            .bridge
-            .as_mut()
-            .unwrap()
-            .state
-            .record_health_success();
+        connector.bridge().unwrap().advance_cursor("12345".into());
+        connector.bridge().unwrap().record_health_success();
         assert!(connector.bridge().unwrap().is_connected());
 
         connector
@@ -1250,12 +1424,7 @@ mod tests {
 
         // Simulate many consecutive failures
         for _ in 0..5 {
-            connector
-                .bridge
-                .as_mut()
-                .unwrap()
-                .state
-                .record_health_failure();
+            connector.bridge().unwrap().record_health_failure();
         }
 
         let report = connector.self_check().await.unwrap();
@@ -1280,5 +1449,103 @@ mod tests {
         assert!(bridge.group_sync_due());
         assert!(bridge.health_check_due());
         assert!(!bridge.should_poll());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_receive_messages_updates_cursor_and_group_cache() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/about"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/receive/%2B15551234567"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "timestamp": 1_700_000_001_000_u64,
+                        "dataMessage": {
+                            "timestamp": 1_700_000_001_000_u64,
+                            "message": "hello",
+                            "groupInfo": {
+                                "id": "group-1",
+                                "name": "Bridge group",
+                                "members": ["+15551111111"],
+                                "admins": ["+15551111111"]
+                            },
+                            "attachments": []
+                        }
+                    }
+                ])),
+            )
+            .mount(&mock_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/groups/%2B15551234567"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "id": "group-1",
+                        "name": "Bridge group",
+                        "members": ["+15551111111"],
+                        "admins": ["+15551111111"]
+                    }
+                ])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = SignalConnector::new();
+        connector
+            .configure(json!({
+                "daemon_url": mock_server.uri(),
+                "phone_number": "+15551234567"
+            }))
+            .await
+            .unwrap();
+        let (handshake, token) = signed_token_for(CAP_READ, OP_RECEIVE_MESSAGES);
+        connector.handshake(handshake).await.unwrap();
+
+        let mut req = base_invoke(connector.id(), OP_RECEIVE_MESSAGES);
+        req.capability_token = token;
+        req.input = json!({ "timeout_seconds": 1 });
+
+        let response = connector.invoke(req).await.unwrap();
+        let result = response.result.expect("receive response");
+        assert_eq!(result["count"], serde_json::json!(1));
+        assert_eq!(result["receive_cursor"], serde_json::json!("1700000001000"));
+        assert_eq!(result["cached_group_count"], serde_json::json!(1));
+        assert_eq!(
+            connector.bridge().unwrap().receive_cursor().as_deref(),
+            Some("1700000001000")
+        );
+        assert_eq!(connector.bridge().unwrap().cached_groups().len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_send_message_rejects_oversized_attachment_before_network() {
+        let mut connector = SignalConnector::new();
+        connector
+            .configure(json!({
+                "phone_number": "+15551234567",
+                "max_attachment_bytes": 4
+            }))
+            .await
+            .unwrap();
+        let (handshake, token) = signed_token_for(CAP_SEND, OP_SEND_MESSAGE);
+        connector.handshake(handshake).await.unwrap();
+
+        let attachment = base64::engine::general_purpose::STANDARD.encode(b"too-large");
+        let mut req = base_invoke(connector.id(), OP_SEND_MESSAGE);
+        req.capability_token = token;
+        req.input = json!({
+            "recipients": ["+15559876543"],
+            "message": "hello",
+            "attachments": [attachment]
+        });
+
+        let error = connector.invoke(req).await.unwrap_err();
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 }

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:b16d939a76d39e5e4ed473a744596e342c88663a0944ea734defe096c9609cb9"
+interface_hash = "blake3-256:fcp.interface.v2:ec526cda2b9845d2128c1b5e47baa72100ca65fb991773f314d02323b9016f8a"
 
 [connector]
 id = "fcp.supabase"
@@ -82,7 +82,7 @@ type = "object"
 type = "string"
 
 [provides.operations."supabase.delete".output_schema.properties.data]
-type = "array"
+description = "Returned row payload or empty object when PostgREST returns no representation"
 
 [provides.operations."supabase.delete".output_schema.properties.status_code]
 type = "integer"
@@ -195,7 +195,7 @@ type = "object"
 type = "string"
 
 [provides.operations."supabase.insert".output_schema.properties.data]
-type = "array"
+description = "Returned row payload or empty object when PostgREST returns no representation"
 
 [provides.operations."supabase.insert".output_schema.properties.status_code]
 type = "integer"
@@ -276,7 +276,7 @@ type = "string"
 type = "integer"
 
 [provides.operations."supabase.query".output_schema.properties.data]
-type = "array"
+description = "Returned row payload; may be an array or a single object when `single=true`"
 
 [provides.operations."supabase.query".output_schema.properties.status_code]
 type = "integer"
@@ -321,7 +321,7 @@ required = ["function"]
 type = "object"
 
 [provides.operations."supabase.rpc".input_schema.properties.args]
-type = "object"
+description = "Arbitrary JSON payload forwarded to the PostgREST RPC body"
 
 [provides.operations."supabase.rpc".input_schema.properties.function]
 type = "string"
@@ -336,7 +336,7 @@ type = "object"
 type = "string"
 
 [provides.operations."supabase.rpc".output_schema.properties.data]
-type = "array"
+description = "Arbitrary JSON payload returned by the Postgres function"
 
 [provides.operations."supabase.rpc".output_schema.properties.status_code]
 type = "integer"
@@ -658,7 +658,7 @@ type = "object"
 type = "string"
 
 [provides.operations."supabase.update".output_schema.properties.data]
-type = "array"
+description = "Returned row payload or empty object when PostgREST returns no representation"
 
 [provides.operations."supabase.update".output_schema.properties.status_code]
 type = "integer"
@@ -730,7 +730,7 @@ type = "object"
 type = "string"
 
 [provides.operations."supabase.upsert".output_schema.properties.data]
-type = "array"
+description = "Returned row payload or empty object when PostgREST returns no representation"
 
 [provides.operations."supabase.upsert".output_schema.properties.status_code]
 type = "integer"

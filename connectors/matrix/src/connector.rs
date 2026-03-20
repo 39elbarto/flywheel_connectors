@@ -90,15 +90,6 @@ impl MatrixRoomSummary {
                     .and_then(serde_json::Value::as_str)
                     .map(ToOwned::to_owned);
             }
-            "m.room.member" => {
-                if let Some(membership) = event
-                    .content
-                    .get("membership")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    self.membership = membership.to_string();
-                }
-            }
             _ => {}
         }
     }
@@ -196,11 +187,35 @@ impl MatrixConnector {
             .sync_state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::tracked_state_json_value(state.last_sync_token.as_deref(), &state.rooms)
+    }
+
+    fn tracked_state_json_value(
+        last_sync_token: Option<&str>,
+        rooms: &BTreeMap<String, MatrixRoomSummary>,
+    ) -> serde_json::Value {
         json!({
-            "last_sync_token": state.last_sync_token,
-            "tracked_rooms": state.rooms.len(),
-            "rooms": state.rooms.iter().map(|(room_id, summary)| summary.snapshot_json(room_id)).collect::<Vec<_>>(),
+            "last_sync_token": last_sync_token,
+            "tracked_rooms": rooms.len(),
+            "rooms": rooms.iter().map(|(room_id, summary)| summary.snapshot_json(room_id)).collect::<Vec<_>>(),
         })
+    }
+
+    fn preview_tracked_state_json(
+        &self,
+        next_batch: &str,
+        tracked_updates: &BTreeMap<String, MatrixRoomSummary>,
+    ) -> serde_json::Value {
+        let mut rooms = self
+            .sync_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rooms
+            .clone();
+        for (room_id, summary) in tracked_updates {
+            rooms.insert(room_id.clone(), summary.clone());
+        }
+        Self::tracked_state_json_value(Some(next_batch), &rooms)
     }
 }
 
@@ -1144,17 +1159,24 @@ impl MatrixConnector {
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 let projection = project_sync_response(&response);
-
-                if persist {
-                    let mut state = self
-                        .sync_state
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    state.last_sync_token = Some(response.next_batch.clone());
-                    for (room_id, summary) in &projection.tracked_updates {
-                        state.rooms.insert(room_id.clone(), summary.clone());
+                let tracked_state = if persist {
+                    {
+                        let mut state = self
+                            .sync_state
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        state.last_sync_token = Some(response.next_batch.clone());
+                        for (room_id, summary) in &projection.tracked_updates {
+                            state.rooms.insert(room_id.clone(), summary.clone());
+                        }
                     }
-                }
+                    self.tracked_state_json()
+                } else {
+                    self.preview_tracked_state_json(
+                        &response.next_batch,
+                        &projection.tracked_updates,
+                    )
+                };
 
                 json!({
                     "used_since": used_since,
@@ -1164,7 +1186,7 @@ impl MatrixConnector {
                     "message_events": projection.message_events,
                     "membership_changes": projection.membership_changes,
                     "state_changes": projection.state_changes,
-                    "tracked_state": self.tracked_state_json(),
+                    "tracked_state": tracked_state,
                 })
             }
             OP_GET_ROOM_STATE => {
@@ -1575,6 +1597,71 @@ mod tests {
                 .and_then(|summary| summary.name.as_deref()),
             Some("General")
         );
+        assert_eq!(
+            projection
+                .tracked_updates
+                .get("!room:matrix.org")
+                .map(|summary| summary.membership.as_str()),
+            Some("join")
+        );
+    }
+
+    #[test]
+    fn summarize_room_keeps_explicit_membership_label() {
+        let summary = summarize_room(
+            "!room:matrix.org",
+            "join",
+            &[Event {
+                event_id: Some("$member2".into()),
+                r#type: "m.room.member".into(),
+                state_key: Some("@bob:matrix.org".into()),
+                sender: Some("@bob:matrix.org".into()),
+                origin_server_ts: Some(200),
+                content: json!({ "membership": "leave" }),
+                room_id: Some("!room:matrix.org".into()),
+            }],
+        );
+
+        assert_eq!(summary.membership, "join");
+        assert_eq!(summary.member_count, Some(0));
+    }
+
+    #[test]
+    fn preview_tracked_state_applies_non_persistent_sync_delta() {
+        let connector = MatrixConnector::new();
+        {
+            let mut state = connector
+                .sync_state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.last_sync_token = Some("batch_1".into());
+            state.rooms.insert(
+                "!old:matrix.org".into(),
+                MatrixRoomSummary::with_membership("join"),
+            );
+        }
+
+        let preview = connector.preview_tracked_state_json(
+            "batch_2",
+            &BTreeMap::from([(
+                "!new:matrix.org".to_string(),
+                MatrixRoomSummary::with_membership("invite"),
+            )]),
+        );
+
+        assert_eq!(preview["last_sync_token"], "batch_2");
+        assert_eq!(preview["tracked_rooms"], 2);
+        assert!(
+            preview["rooms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|room| room["room_id"] == "!new:matrix.org" && room["membership"] == "invite")
+        );
+
+        let persisted = connector.tracked_state_json();
+        assert_eq!(persisted["last_sync_token"], "batch_1");
+        assert_eq!(persisted["tracked_rooms"], 1);
     }
 
     #[fcp_async_core::runtime::test]

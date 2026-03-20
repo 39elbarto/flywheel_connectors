@@ -93,6 +93,7 @@ async fn handle_message(connector: &mut SupabaseConnector, message: &str) -> ser
                 encode(&connector.handshake(req).await?)
             }
             "health" => encode(&connector.health().await),
+            "doctor" => encode(&connector.doctor()),
             "self_check" => encode(&connector.self_check().await?),
             "introspect" => encode(&connector.introspect()),
             "invoke" => {
@@ -161,5 +162,24 @@ async fn handle_message(connector: &mut SupabaseConnector, message: &str) -> ser
             }
             response
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_method_is_routed() {
+        let mut connector = SupabaseConnector::new();
+        let response = fcp_async_core::runtime::block_on_sync(handle_message(
+            &mut connector,
+            r#"{"jsonrpc":"2.0","id":1,"method":"doctor","params":{}}"#,
+        ))
+        .expect("doctor route should not fail");
+
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["status"], "unhealthy");
+        assert_eq!(response["result"]["ready"], false);
     }
 }

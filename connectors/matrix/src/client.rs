@@ -2,13 +2,14 @@
 
 use std::time::Duration;
 
-use reqwest::header::HeaderValue;
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderValue};
 use reqwest::{Client, RequestBuilder};
 
 use crate::error::{MatrixError, MatrixResult};
 use crate::types::{
-    CreateRoomRequest, CreateRoomResponse, JoinedRoomsResponse, MessagesResponse,
-    SendEventResponse, SyncResponse, WhoAmIResponse,
+    CreateRoomRequest, CreateRoomResponse, DownloadedMedia, Event, JoinedRoomsResponse,
+    MediaUploadResponse, MembersResponse, MessagesResponse, SendEventResponse, SyncResponse,
+    WhoAmIResponse,
 };
 
 const CREDENTIAL_ID_HEADER: &str = "x-fcp-credential-id";
@@ -120,6 +121,41 @@ impl MatrixClient {
         Ok(resp.joined_rooms)
     }
 
+    /// Fetch the full room state event set.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport or API errors.
+    pub async fn get_room_state(&self, room_id: &str) -> MatrixResult<Vec<Event>> {
+        let encoded = urlencoded(room_id);
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{encoded}/state",
+            self.homeserver_url
+        );
+        self.api_get(&url).await
+    }
+
+    /// List room members, optionally filtering by membership state.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport or API errors.
+    pub async fn list_members(
+        &self,
+        room_id: &str,
+        membership: Option<&str>,
+    ) -> MatrixResult<Vec<Event>> {
+        let encoded = urlencoded(room_id);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/_matrix/client/v3/rooms/{encoded}/members",
+            self.homeserver_url
+        ))
+        .map_err(|e| MatrixError::Config(format!("Invalid members URL: {e}")))?;
+        if let Some(membership) = membership {
+            url.query_pairs_mut().append_pair("membership", membership);
+        }
+        let resp: MembersResponse = self.api_get(url.as_str()).await?;
+        Ok(resp.chunk)
+    }
+
     /// Create a room.
     ///
     /// # Errors
@@ -203,6 +239,62 @@ impl MatrixClient {
             }
         }
         self.api_get(url.as_str()).await
+    }
+
+    /// Upload media to the homeserver.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport or API errors.
+    pub async fn upload_media(
+        &self,
+        content_type: &str,
+        data: Vec<u8>,
+        filename: Option<&str>,
+    ) -> MatrixResult<MediaUploadResponse> {
+        let mut url =
+            reqwest::Url::parse(&format!("{}/_matrix/media/v3/upload", self.homeserver_url))
+                .map_err(|e| MatrixError::Config(format!("Invalid upload URL: {e}")))?;
+        if let Some(filename) = filename {
+            url.query_pairs_mut().append_pair("filename", filename);
+        }
+
+        let resp = self
+            .authorize(self.client.post(url))
+            .header(CONTENT_TYPE, content_type)
+            .body(data)
+            .send()
+            .await
+            .map_err(MatrixError::Http)?;
+        self.handle_response(resp).await
+    }
+
+    /// Download media from the homeserver.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport or API errors.
+    pub async fn download_media(
+        &self,
+        server_name: &str,
+        media_id: &str,
+        allow_remote: bool,
+    ) -> MatrixResult<DownloadedMedia> {
+        let encoded_server = urlencoded(server_name);
+        let encoded_media = urlencoded(media_id);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/_matrix/media/v3/download/{encoded_server}/{encoded_media}",
+            self.homeserver_url
+        ))
+        .map_err(|e| MatrixError::Config(format!("Invalid download URL: {e}")))?;
+        if !allow_remote {
+            url.query_pairs_mut().append_pair("allow_remote", "false");
+        }
+
+        let resp = self
+            .authorize(self.client.get(url))
+            .send()
+            .await
+            .map_err(MatrixError::Http)?;
+        self.handle_binary_response(resp).await
     }
 
     // ─── Sync ───────────────────────────────────────────────────────────────
@@ -317,6 +409,45 @@ impl MatrixClient {
             return Err(MatrixError::from_matrix_response(status, &body));
         }
         resp.json().await.map_err(MatrixError::Http)
+    }
+
+    async fn handle_binary_response(
+        &self,
+        resp: reqwest::Response,
+    ) -> MatrixResult<DownloadedMedia> {
+        let status = resp.status().as_u16();
+        if status == 429 {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(30_000, |s| s * 1000);
+            return Err(MatrixError::RateLimited {
+                retry_after_ms: retry_after,
+            });
+        }
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MatrixError::from_matrix_response(status, &body));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let content_disposition = resp
+            .headers()
+            .get(CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let data = resp.bytes().await.map_err(MatrixError::Http)?.to_vec();
+        Ok(DownloadedMedia {
+            content_type,
+            content_disposition,
+            data,
+        })
     }
 }
 
@@ -482,6 +613,132 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.end.as_deref(), Some("next"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn get_room_state_parses_events() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/rooms/%21room%3Am.org/state",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "type": "m.room.name",
+                        "state_key": "",
+                        "content": { "name": "General" }
+                    }
+                ])),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let events = c.get_room_state("!room:m.org").await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state_key.as_deref(), Some(""));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn list_members_supports_membership_filter() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/rooms/%21room%3Am.org/members",
+            ))
+            .and(wiremock::matchers::query_param("membership", "join"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "chunk": [
+                        {
+                            "type": "m.room.member",
+                            "state_key": "@alice:m.org",
+                            "content": { "membership": "join", "displayname": "Alice" }
+                        }
+                    ]
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let members = c.list_members("!room:m.org", Some("join")).await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].state_key.as_deref(), Some("@alice:m.org"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sync_includes_since_and_timeout() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
+            .and(wiremock::matchers::query_param("since", "batch_1"))
+            .and(wiremock::matchers::query_param("timeout", "5000"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "next_batch": "batch_2"
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let response = c.sync(Some("batch_1"), 5000).await.unwrap();
+        assert_eq!(response.next_batch, "batch_2");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn upload_media_sends_filename_query_and_content_type() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/_matrix/media/v3/upload"))
+            .and(wiremock::matchers::query_param("filename", "greeting.txt"))
+            .and(wiremock::matchers::header("content-type", "text/plain"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content_uri": "mxc://matrix.org/media123"
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let response = c
+            .upload_media("text/plain", b"hello".to_vec(), Some("greeting.txt"))
+            .await
+            .unwrap();
+        assert_eq!(response.content_uri, "mxc://matrix.org/media123");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn download_media_returns_headers_and_bytes() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/media/v3/download/matrix.org/media123",
+            ))
+            .and(wiremock::matchers::query_param("allow_remote", "false"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .insert_header("content-disposition", "inline; filename=\"cat.png\"")
+                    .set_body_bytes(b"pngdata".to_vec()),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let media = c
+            .download_media("matrix.org", "media123", false)
+            .await
+            .unwrap();
+        assert_eq!(media.content_type.as_deref(), Some("image/png"));
+        assert_eq!(
+            media.content_disposition.as_deref(),
+            Some("inline; filename=\"cat.png\"")
+        );
+        assert_eq!(media.data, b"pngdata".to_vec());
     }
 
     #[fcp_async_core::runtime::test]

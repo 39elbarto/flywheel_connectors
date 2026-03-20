@@ -2108,6 +2108,7 @@ dependencies = [
  "fcp-sdk",
  "hex",
  "percent-encoding",
+ "quick-xml",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -2299,6 +2300,7 @@ dependencies = [
  "fcp-sdk",
  "fcp-testkit",
  "hex",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3411,6 +3413,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "fcp-async-core",
  "fcp-core",
  "fcp-sdk",
@@ -4338,8 +4341,10 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-sdk",
  "hex",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -4798,6 +4803,7 @@ dependencies = [
  "fcp-core",
  "fcp-sdk",
  "hex",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -8533,6 +8539,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "958f21e8e7ceb5a1aa7fa87fab28e7c75976e0bfe7e23ff069e0a260f894067d"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]

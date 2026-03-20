@@ -23,7 +23,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::client::TeamsClient;
-use crate::types::{Activity, TeamsAuth, TeamsConversationScope, TeamsConversationState};
+use crate::types::{
+    Activity, ActivityAccount, TeamsAuth, TeamsConversationScope, TeamsConversationState,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -344,15 +346,6 @@ impl TeamsConnector {
         }
     }
 
-    fn extract_host(url: &str) -> Option<&str> {
-        url.split("://")
-            .nth(1)
-            .unwrap_or(url)
-            .split('/')
-            .next()
-            .map(|host| host.split(':').next().unwrap_or(host))
-    }
-
     fn validate_activity_service_url(&self, activity: &Activity) -> FcpResult<()> {
         let Some(service_url) = activity.service_url.as_deref() else {
             return Ok(());
@@ -366,10 +359,16 @@ impl TeamsConnector {
         }
 
         match (
-            Self::extract_host(configured_url),
-            Self::extract_host(service_url),
+            reqwest::Url::parse(configured_url),
+            reqwest::Url::parse(service_url),
         ) {
-            (Some(configured_host), Some(actual_host)) if configured_host == actual_host => Ok(()),
+            (Ok(configured), Ok(actual))
+                if actual.scheme() == "https"
+                    && configured.scheme() == actual.scheme()
+                    && configured.host_str() == actual.host_str() =>
+            {
+                Ok(())
+            }
             _ => Err(FcpError::InvalidRequest {
                 code: 1001,
                 message: format!(
@@ -669,11 +668,11 @@ impl TeamsConnector {
             }
         }
 
-        if !activity.members_added.is_empty() {
-            state.members.clone_from(&activity.members_added);
-        } else if !activity.members_removed.is_empty() {
-            state.members.clone_from(&activity.members_removed);
-        }
+        Self::apply_member_deltas(
+            &mut state.members,
+            &activity.members_added,
+            &activity.members_removed,
+        );
 
         let state_snapshot = state.clone();
         drop(states);
@@ -684,6 +683,31 @@ impl TeamsConnector {
             "event": event,
             "conversation_state": state_snapshot,
         }))
+    }
+
+    fn apply_member_deltas(
+        members: &mut Vec<ActivityAccount>,
+        added: &[ActivityAccount],
+        removed: &[ActivityAccount],
+    ) {
+        for added_member in added {
+            if let Some(existing) = members
+                .iter_mut()
+                .find(|member| member.id == added_member.id)
+            {
+                *existing = added_member.clone();
+            } else {
+                members.push(added_member.clone());
+            }
+        }
+
+        if !removed.is_empty() {
+            members.retain(|member| {
+                !removed
+                    .iter()
+                    .any(|removed_member| removed_member.id == member.id)
+            });
+        }
     }
 
     async fn invoke_send_operation(
@@ -1944,6 +1968,116 @@ mod tests {
         assert_eq!(first["duplicate"], false);
         assert_eq!(second["duplicate"], true);
         assert_eq!(second["conversation_state"]["lastSequence"], 1);
+    }
+
+    #[test]
+    fn test_normalize_activity_conversation_update_applies_member_deltas() {
+        let connector = TeamsConnector::new();
+        let req = InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_members"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::from_static(OP_INGEST_ACTIVITY),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: Some("members-1".into()),
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let added: Activity = serde_json::from_value(json!({
+            "type": "conversationUpdate",
+            "id": "act_members_added",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "conversation": {
+                "id": "chat_members",
+                "conversationType": "groupChat"
+            },
+            "membersAdded": [
+                { "id": "user_a", "name": "Alice" },
+                { "id": "user_b", "name": "Bob" }
+            ]
+        }))
+        .unwrap();
+        let removed: Activity = serde_json::from_value(json!({
+            "type": "conversationUpdate",
+            "id": "act_members_removed",
+            "timestamp": "2026-01-01T00:01:00Z",
+            "conversation": {
+                "id": "chat_members",
+                "conversationType": "groupChat"
+            },
+            "membersRemoved": [
+                { "id": "user_a", "name": "Alice" }
+            ]
+        }))
+        .unwrap();
+
+        let added_state = connector.normalize_activity(&req, &added).unwrap();
+        let removed_state = connector.normalize_activity(&req, &removed).unwrap();
+
+        assert_eq!(
+            added_state["conversation_state"]["members"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let remaining = removed_state["conversation_state"]["members"]
+            .as_array()
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0]["id"], "user_b");
+        assert_eq!(removed_state["conversation_state"]["lastSequence"], 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_normalize_activity_rejects_insecure_service_url() {
+        let mut connector = TeamsConnector::new();
+        connector
+            .configure(json!({
+                "auth": { "mode": "access_token", "access_token": "token" },
+                "bot_service_url": "https://smba.trafficmanager.net/amer"
+            }))
+            .await
+            .unwrap();
+
+        let req = InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_service_url"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::from_static(OP_INGEST_ACTIVITY),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: Some("service-url-1".into()),
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let activity: Activity = serde_json::from_value(json!({
+            "type": "message",
+            "id": "act_insecure",
+            "serviceUrl": "http://smba.trafficmanager.net/amer/",
+            "conversation": {
+                "id": "chat_1",
+                "conversationType": "personal"
+            }
+        }))
+        .unwrap();
+
+        let error = connector.normalize_activity(&req, &activity).unwrap_err();
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 
     #[fcp_async_core::runtime::test]

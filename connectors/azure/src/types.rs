@@ -296,10 +296,7 @@ mod tests {
         });
         let resp: SubscriptionListResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.value.len(), 1);
-        assert_eq!(
-            resp.value[0].subscription_id.as_deref(),
-            Some("sub-123")
-        );
+        assert_eq!(resp.value[0].subscription_id.as_deref(), Some("sub-123"));
         assert_eq!(resp.value[0].display_name.as_deref(), Some("My Sub"));
     }
 
@@ -381,11 +378,7 @@ mod tests {
         });
         let resp: SecretListResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.value.len(), 1);
-        assert!(resp.value[0]
-            .id
-            .as_deref()
-            .unwrap()
-            .contains("my-secret"));
+        assert!(resp.value[0].id.as_deref().unwrap().contains("my-secret"));
     }
 
     #[test]

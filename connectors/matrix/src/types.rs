@@ -118,6 +118,8 @@ pub struct Event {
     pub event_id: Option<String>,
     pub r#type: String,
     #[serde(default)]
+    pub state_key: Option<String>,
+    #[serde(default)]
     pub sender: Option<String>,
     #[serde(default)]
     pub origin_server_ts: Option<u64>,
@@ -157,6 +159,27 @@ pub struct MessagesResponse {
     pub end: Option<String>,
 }
 
+/// Members response for a room.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MembersResponse {
+    #[serde(default)]
+    pub chunk: Vec<Event>,
+}
+
+/// Media upload response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MediaUploadResponse {
+    pub content_uri: String,
+}
+
+/// Downloaded media payload and metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedMedia {
+    pub content_type: Option<String>,
+    pub content_disposition: Option<String>,
+    pub data: Vec<u8>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Sync
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,18 +189,61 @@ pub struct MessagesResponse {
 pub struct SyncResponse {
     pub next_batch: String,
     #[serde(default)]
-    pub rooms: Option<SyncRooms>,
+    pub rooms: SyncRooms,
 }
 
 /// Sync rooms section.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct SyncRooms {
     #[serde(default)]
-    pub join: serde_json::Value,
+    pub join: std::collections::BTreeMap<String, JoinedSyncRoom>,
     #[serde(default)]
-    pub invite: serde_json::Value,
+    pub invite: std::collections::BTreeMap<String, InvitedSyncRoom>,
     #[serde(default)]
-    pub leave: serde_json::Value,
+    pub leave: std::collections::BTreeMap<String, LeftSyncRoom>,
+}
+
+/// Generic event list used by sync sections.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SyncEventList {
+    #[serde(default)]
+    pub events: Vec<Event>,
+}
+
+/// Timeline section for joined and left rooms.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SyncTimeline {
+    #[serde(default)]
+    pub events: Vec<Event>,
+    #[serde(default)]
+    pub prev_batch: Option<String>,
+    #[serde(default)]
+    pub limited: bool,
+}
+
+/// Joined room data returned by `/sync`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct JoinedSyncRoom {
+    #[serde(default)]
+    pub state: SyncEventList,
+    #[serde(default)]
+    pub timeline: SyncTimeline,
+}
+
+/// Invite-only room data returned by `/sync`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct InvitedSyncRoom {
+    #[serde(default)]
+    pub invite_state: SyncEventList,
+}
+
+/// Left room data returned by `/sync`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LeftSyncRoom {
+    #[serde(default)]
+    pub state: SyncEventList,
+    #[serde(default)]
+    pub timeline: SyncTimeline,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,6 +332,7 @@ mod tests {
         let event: Event = serde_json::from_value(json).unwrap();
         assert_eq!(event.r#type, "m.room.message");
         assert_eq!(event.sender, Some("@alice:matrix.org".into()));
+        assert_eq!(event.state_key, None);
     }
 
     #[test]
@@ -309,6 +376,47 @@ mod tests {
         });
         let resp: SyncResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.next_batch, "batch_token_123");
+        assert!(resp.rooms.join.is_empty());
+    }
+
+    #[test]
+    fn deserialize_sync_response_with_room_sections() {
+        let json = serde_json::json!({
+            "next_batch": "batch_token_123",
+            "rooms": {
+                "join": {
+                    "!room:matrix.org": {
+                        "state": {
+                            "events": [
+                                {
+                                    "type": "m.room.name",
+                                    "state_key": "",
+                                    "content": { "name": "General" }
+                                }
+                            ]
+                        },
+                        "timeline": {
+                            "events": [
+                                {
+                                    "event_id": "$1",
+                                    "type": "m.room.message",
+                                    "sender": "@alice:matrix.org",
+                                    "content": { "msgtype": "m.text", "body": "Hello" }
+                                }
+                            ],
+                            "prev_batch": "prev",
+                            "limited": false
+                        }
+                    }
+                }
+            }
+        });
+
+        let resp: SyncResponse = serde_json::from_value(json).unwrap();
+        let joined = resp.rooms.join.get("!room:matrix.org").unwrap();
+        assert_eq!(joined.state.events.len(), 1);
+        assert_eq!(joined.timeline.events.len(), 1);
+        assert_eq!(joined.timeline.prev_batch.as_deref(), Some("prev"));
     }
 
     #[test]
@@ -338,6 +446,37 @@ mod tests {
         });
         let resp: JoinedRoomsResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.joined_rooms.len(), 2);
+    }
+
+    #[test]
+    fn deserialize_members_response() {
+        let json = serde_json::json!({
+            "chunk": [
+                {
+                    "type": "m.room.member",
+                    "state_key": "@alice:matrix.org",
+                    "content": {
+                        "membership": "join",
+                        "displayname": "Alice"
+                    }
+                }
+            ]
+        });
+        let resp: MembersResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.chunk.len(), 1);
+        assert_eq!(
+            resp.chunk[0].state_key.as_deref(),
+            Some("@alice:matrix.org")
+        );
+    }
+
+    #[test]
+    fn deserialize_media_upload_response() {
+        let json = serde_json::json!({
+            "content_uri": "mxc://matrix.org/abc123"
+        });
+        let resp: MediaUploadResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.content_uri, "mxc://matrix.org/abc123");
     }
 
     #[test]

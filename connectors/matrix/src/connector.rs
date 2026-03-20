@@ -1,8 +1,11 @@
 //! Matrix connector implementation.
 
+use std::collections::BTreeMap;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
@@ -16,7 +19,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::MatrixClient;
-use crate::types::{CreateRoomRequest, MatrixAuth};
+use crate::types::{
+    CreateRoomRequest, Event, InvitedSyncRoom, JoinedSyncRoom, LeftSyncRoom, MatrixAuth,
+    SyncResponse,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -26,10 +32,104 @@ const OP_JOIN_ROOM: &str = "matrix.join_room";
 const OP_LEAVE_ROOM: &str = "matrix.leave_room";
 const OP_SEND_MESSAGE: &str = "matrix.send_message";
 const OP_GET_MESSAGES: &str = "matrix.get_messages";
+const OP_SYNC: &str = "matrix.sync";
+const OP_GET_ROOM_STATE: &str = "matrix.get_room_state";
+const OP_LIST_MEMBERS: &str = "matrix.list_members";
+const OP_UPLOAD_MEDIA: &str = "matrix.upload_media";
+const OP_DOWNLOAD_MEDIA: &str = "matrix.download_media";
 
 const CAP_READ: &str = "matrix.read";
 const CAP_WRITE: &str = "matrix.write";
 const CAP_MANAGE: &str = "matrix.manage";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MatrixRoomSummary {
+    membership: String,
+    name: Option<String>,
+    topic: Option<String>,
+    avatar_url: Option<String>,
+    member_count: Option<usize>,
+    last_event_ts: Option<u64>,
+}
+
+impl MatrixRoomSummary {
+    fn with_membership(membership: &str) -> Self {
+        Self {
+            membership: membership.to_string(),
+            ..Self::default()
+        }
+    }
+
+    fn record_event(&mut self, event: &Event) {
+        if let Some(timestamp) = event.origin_server_ts {
+            self.last_event_ts = Some(
+                self.last_event_ts
+                    .map_or(timestamp, |current| current.max(timestamp)),
+            );
+        }
+
+        match event.r#type.as_str() {
+            "m.room.name" => {
+                self.name = event
+                    .content
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            "m.room.topic" => {
+                self.topic = event
+                    .content
+                    .get("topic")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            "m.room.avatar" => {
+                self.avatar_url = event
+                    .content
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            "m.room.member" => {
+                if let Some(membership) = event
+                    .content
+                    .get("membership")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    self.membership = membership.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn snapshot_json(&self, room_id: &str) -> serde_json::Value {
+        json!({
+            "room_id": room_id,
+            "membership": self.membership,
+            "name": self.name,
+            "topic": self.topic,
+            "avatar_url": self.avatar_url,
+            "member_count": self.member_count,
+            "last_event_ts": self.last_event_ts,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SyncProjection {
+    room_summaries: Vec<serde_json::Value>,
+    message_events: Vec<serde_json::Value>,
+    membership_changes: Vec<serde_json::Value>,
+    state_changes: Vec<serde_json::Value>,
+    tracked_updates: BTreeMap<String, MatrixRoomSummary>,
+}
+
+#[derive(Debug, Default)]
+struct MatrixSyncState {
+    last_sync_token: Option<String>,
+    rooms: BTreeMap<String, MatrixRoomSummary>,
+}
 
 /// Matrix connector.
 #[derive(Debug)]
@@ -41,6 +141,7 @@ pub struct MatrixConnector {
     retry_config: HttpRetryConfig,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
+    sync_state: RwLock<MatrixSyncState>,
 }
 
 impl MatrixConnector {
@@ -55,6 +156,7 @@ impl MatrixConnector {
             retry_config: HttpRetryConfig::default(),
             started_at: Instant::now(),
             verifier: None,
+            sync_state: RwLock::new(MatrixSyncState::default()),
         }
     }
 
@@ -70,6 +172,10 @@ impl MatrixConnector {
         let configured = self.config.is_some();
         let client_ok = self.client.is_some();
         let runtime_ok = self.runtime.is_some();
+        let sync_state = self
+            .sync_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let passed = configured && client_ok && runtime_ok;
         json!({
             "passed": passed,
@@ -77,7 +183,23 @@ impl MatrixConnector {
                 { "name": "configuration", "passed": configured, "critical": true },
                 { "name": "client_initialized", "passed": client_ok, "critical": true },
                 { "name": "runtime", "passed": runtime_ok, "critical": true },
-            ]
+            ],
+            "sync_tracking": {
+                "last_sync_token": sync_state.last_sync_token,
+                "tracked_rooms": sync_state.rooms.len(),
+            }
+        })
+    }
+
+    fn tracked_state_json(&self) -> serde_json::Value {
+        let state = self
+            .sync_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        json!({
+            "last_sync_token": state.last_sync_token,
+            "tracked_rooms": state.rooms.len(),
+            "rooms": state.rooms.iter().map(|(room_id, summary)| summary.snapshot_json(room_id)).collect::<Vec<_>>(),
         })
     }
 }
@@ -264,6 +386,189 @@ pub fn operations_info() -> Vec<OperationInfo> {
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
+        OperationInfo {
+            id: OperationId::from_static(OP_SYNC),
+            summary: "Run a sync cycle".into(),
+            description: Some(
+                "Long-polls the homeserver sync endpoint, translates room/message/member deltas, and optionally updates the connector's in-memory sync cursor".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "since": { "type": "string", "description": "Optional explicit sync token. Falls back to the tracked token when omitted." },
+                    "timeout_ms": { "type": "integer", "default": 30000, "minimum": 0 },
+                    "persist": { "type": "boolean", "default": true, "description": "Whether to persist the returned next_batch token and tracked room summaries." }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "used_since": { "type": ["string", "null"] },
+                    "next_batch": { "type": "string" },
+                    "rooms": { "type": "array" },
+                    "message_events": { "type": "array" },
+                    "membership_changes": { "type": "array" },
+                    "state_changes": { "type": "array" },
+                    "tracked_state": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When you need a truthful incremental view of room timeline, membership, and state changes from the Matrix sync loop".into(),
+                common_mistakes: vec![
+                    "Use the returned next_batch token for subsequent sync calls".into(),
+                    "Set persist=false if you want to inspect a sync result without advancing tracked state".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![
+                    CapabilityId::from_static(OP_GET_ROOM_STATE),
+                    CapabilityId::from_static(OP_LIST_MEMBERS),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_GET_ROOM_STATE),
+            summary: "Get room state".into(),
+            description: Some("Fetches the current state event set for a room and summarizes the tracked room metadata".into()),
+            input_schema: json!({
+                "type": "object",
+                "required": ["room_id"],
+                "properties": {
+                    "room_id": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "room_id": { "type": "string" },
+                    "summary": { "type": "object" },
+                    "state_events": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When you need room metadata such as name, topic, avatar, or other stateful settings".into(),
+                common_mistakes: vec!["State events use state_key; empty state_key is common for singleton room settings".into()],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_SYNC)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_LIST_MEMBERS),
+            summary: "List room members".into(),
+            description: Some("Lists membership state events for a room, optionally filtering by membership kind".into()),
+            input_schema: json!({
+                "type": "object",
+                "required": ["room_id"],
+                "properties": {
+                    "room_id": { "type": "string" },
+                    "membership": { "type": "string", "description": "Optional Matrix membership filter such as join, invite, or leave" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "room_id": { "type": "string" },
+                    "members": { "type": "array" },
+                    "summary": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When you need the current membership roster or to inspect membership transitions for a room".into(),
+                common_mistakes: vec!["Membership filters apply to the returned room member events, not to sync state tracking".into()],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_GET_ROOM_STATE)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_UPLOAD_MEDIA),
+            summary: "Upload media".into(),
+            description: Some("Uploads raw media bytes to the homeserver and returns an MXC content URI".into()),
+            input_schema: json!({
+                "type": "object",
+                "required": ["content_type", "body_base64"],
+                "properties": {
+                    "content_type": { "type": "string" },
+                    "body_base64": { "type": "string", "description": "Base64-encoded file bytes" },
+                    "filename": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "content_uri": { "type": "string" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_WRITE),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "When you need to attach files or images before sending Matrix message content that references MXC media".into(),
+                common_mistakes: vec![
+                    "body_base64 must contain raw bytes, not a data URI".into(),
+                    "Use the returned content_uri in subsequent room message content".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_DOWNLOAD_MEDIA)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_DOWNLOAD_MEDIA),
+            summary: "Download media".into(),
+            description: Some("Downloads Matrix media by MXC URI or explicit server/media identifiers".into()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "mxc_uri": { "type": "string", "description": "Convenience MXC URI such as mxc://matrix.org/media123" },
+                    "server_name": { "type": "string" },
+                    "media_id": { "type": "string" },
+                    "allow_remote": { "type": "boolean", "default": true }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "content_type": { "type": ["string", "null"] },
+                    "content_disposition": { "type": ["string", "null"] },
+                    "size_bytes": { "type": "integer" },
+                    "data_base64": { "type": "string" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When you need to retrieve a previously uploaded Matrix media object".into(),
+                common_mistakes: vec![
+                    "Provide either mxc_uri or the explicit server_name/media_id pair".into(),
+                    "Large media responses are returned as base64 in the JSON result".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_UPLOAD_MEDIA)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
     ]
 }
 
@@ -316,6 +621,246 @@ fn optional_u32(input: &serde_json::Value, field: &str, default: u32) -> FcpResu
             })
         }
     }
+}
+
+fn optional_bool(input: &serde_json::Value, field: &str, default: bool) -> FcpResult<bool> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(default),
+        Some(value) => value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Field '{field}' must be a boolean"),
+        }),
+    }
+}
+
+fn parse_mxc_uri(uri: &str) -> FcpResult<(String, String)> {
+    let Some(rest) = uri.strip_prefix("mxc://") else {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "mxc_uri must start with mxc://".into(),
+        });
+    };
+
+    let mut parts = rest.splitn(2, '/');
+    let server_name = parts.next().unwrap_or_default();
+    let media_id = parts.next().unwrap_or_default();
+    if server_name.is_empty() || media_id.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "mxc_uri must include both server name and media id".into(),
+        });
+    }
+
+    Ok((server_name.to_string(), media_id.to_string()))
+}
+
+fn normalize_message_event(room_id: &str, event: &Event) -> serde_json::Value {
+    json!({
+        "room_id": room_id,
+        "event_id": event.event_id,
+        "sender": event.sender,
+        "origin_server_ts": event.origin_server_ts,
+        "msgtype": event.content.get("msgtype").and_then(serde_json::Value::as_str),
+        "body": event.content.get("body").and_then(serde_json::Value::as_str),
+        "url": event.content.get("url").and_then(serde_json::Value::as_str),
+    })
+}
+
+fn normalize_membership_event(room_id: &str, event: &Event) -> serde_json::Value {
+    json!({
+        "room_id": room_id,
+        "event_id": event.event_id,
+        "user_id": event.state_key,
+        "sender": event.sender,
+        "origin_server_ts": event.origin_server_ts,
+        "membership": event.content.get("membership").and_then(serde_json::Value::as_str),
+        "displayname": event.content.get("displayname").and_then(serde_json::Value::as_str),
+        "avatar_url": event.content.get("avatar_url").and_then(serde_json::Value::as_str),
+    })
+}
+
+fn normalize_state_event(room_id: &str, event: &Event) -> serde_json::Value {
+    json!({
+        "room_id": room_id,
+        "event_id": event.event_id,
+        "event_type": event.r#type,
+        "state_key": event.state_key,
+        "sender": event.sender,
+        "origin_server_ts": event.origin_server_ts,
+        "content": event.content,
+    })
+}
+
+fn summarize_room(room_id: &str, membership: &str, events: &[Event]) -> MatrixRoomSummary {
+    let mut summary = MatrixRoomSummary::with_membership(membership);
+    let mut joined_members = 0_usize;
+    let mut observed_membership = false;
+
+    for event in events {
+        summary.record_event(event);
+        if event.r#type == "m.room.member" {
+            observed_membership = true;
+            if event
+                .content
+                .get("membership")
+                .and_then(serde_json::Value::as_str)
+                == Some("join")
+            {
+                joined_members += 1;
+            }
+        }
+    }
+
+    if observed_membership {
+        summary.member_count = Some(joined_members);
+    }
+
+    let _ = room_id;
+    summary
+}
+
+fn project_state_events(projection: &mut SyncProjection, room_id: &str, events: &[Event]) -> usize {
+    let mut membership_events = 0_usize;
+
+    for event in events {
+        if event.r#type == "m.room.member" {
+            membership_events += 1;
+            projection
+                .membership_changes
+                .push(normalize_membership_event(room_id, event));
+        } else {
+            projection
+                .state_changes
+                .push(normalize_state_event(room_id, event));
+        }
+    }
+
+    membership_events
+}
+
+fn project_timeline_events(
+    projection: &mut SyncProjection,
+    summary: &mut MatrixRoomSummary,
+    room_id: &str,
+    events: &[Event],
+) -> usize {
+    let mut membership_events = 0_usize;
+
+    for event in events {
+        summary.record_event(event);
+        match event.r#type.as_str() {
+            "m.room.message" => projection
+                .message_events
+                .push(normalize_message_event(room_id, event)),
+            "m.room.member" => {
+                membership_events += 1;
+                projection
+                    .membership_changes
+                    .push(normalize_membership_event(room_id, event));
+            }
+            _ => projection
+                .state_changes
+                .push(normalize_state_event(room_id, event)),
+        }
+    }
+
+    membership_events
+}
+
+fn build_room_summary(
+    room_id: &str,
+    summary: &MatrixRoomSummary,
+    state_events: usize,
+    timeline_events: usize,
+    membership_events: usize,
+    prev_batch: Option<&str>,
+    limited: bool,
+) -> serde_json::Value {
+    let mut room_summary = summary.snapshot_json(room_id);
+    room_summary["state_event_count"] = json!(state_events);
+    room_summary["timeline_event_count"] = json!(timeline_events);
+    room_summary["membership_event_count"] = json!(membership_events);
+    room_summary["prev_batch"] = json!(prev_batch);
+    room_summary["limited"] = json!(limited);
+    room_summary
+}
+
+fn project_joined_room(projection: &mut SyncProjection, room_id: &str, room: &JoinedSyncRoom) {
+    let mut summary = summarize_room(room_id, "join", &room.state.events);
+    let state_events = room.state.events.len();
+    let timeline_events = room.timeline.events.len();
+    let membership_events = project_state_events(projection, room_id, &room.state.events)
+        + project_timeline_events(projection, &mut summary, room_id, &room.timeline.events);
+
+    projection.room_summaries.push(build_room_summary(
+        room_id,
+        &summary,
+        state_events,
+        timeline_events,
+        membership_events,
+        room.timeline.prev_batch.as_deref(),
+        room.timeline.limited,
+    ));
+    projection
+        .tracked_updates
+        .insert(room_id.to_string(), summary);
+}
+
+fn project_invited_room(projection: &mut SyncProjection, room_id: &str, room: &InvitedSyncRoom) {
+    let summary = summarize_room(room_id, "invite", &room.invite_state.events);
+    let membership_events = project_state_events(projection, room_id, &room.invite_state.events);
+
+    projection.room_summaries.push(build_room_summary(
+        room_id,
+        &summary,
+        room.invite_state.events.len(),
+        0,
+        membership_events,
+        None,
+        false,
+    ));
+    projection
+        .tracked_updates
+        .insert(room_id.to_string(), summary);
+}
+
+fn project_left_room(projection: &mut SyncProjection, room_id: &str, room: &LeftSyncRoom) {
+    let mut summary = summarize_room(room_id, "leave", &room.state.events);
+    let state_events = room.state.events.len();
+    let timeline_events = room.timeline.events.len();
+    let membership_events = project_state_events(projection, room_id, &room.state.events)
+        + project_timeline_events(projection, &mut summary, room_id, &room.timeline.events);
+
+    projection.room_summaries.push(build_room_summary(
+        room_id,
+        &summary,
+        state_events,
+        timeline_events,
+        membership_events,
+        room.timeline.prev_batch.as_deref(),
+        room.timeline.limited,
+    ));
+    projection
+        .tracked_updates
+        .insert(room_id.to_string(), summary);
+}
+
+fn project_sync_response(sync: &SyncResponse) -> SyncProjection {
+    let mut projection = SyncProjection::default();
+
+    for (room_id, room) in &sync.rooms.join {
+        project_joined_room(&mut projection, room_id, room);
+    }
+
+    for (room_id, room) in &sync.rooms.invite {
+        project_invited_room(&mut projection, room_id, room);
+    }
+
+    for (room_id, room) in &sync.rooms.leave {
+        project_left_room(&mut projection, room_id, room);
+    }
+
+    projection
 }
 
 #[async_trait]
@@ -498,8 +1043,9 @@ impl MatrixConnector {
 
         let operation = req.operation.as_str();
         let required_cap = match operation {
-            OP_JOINED_ROOMS | OP_GET_MESSAGES => CapabilityId::from_static(CAP_READ),
-            OP_SEND_MESSAGE => CapabilityId::from_static(CAP_WRITE),
+            OP_JOINED_ROOMS | OP_GET_MESSAGES | OP_SYNC | OP_GET_ROOM_STATE | OP_LIST_MEMBERS
+            | OP_DOWNLOAD_MEDIA => CapabilityId::from_static(CAP_READ),
+            OP_SEND_MESSAGE | OP_UPLOAD_MEDIA => CapabilityId::from_static(CAP_WRITE),
             OP_CREATE_ROOM | OP_JOIN_ROOM | OP_LEAVE_ROOM => CapabilityId::from_static(CAP_MANAGE),
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -581,6 +1127,135 @@ impl MatrixConnector {
                     "end": resp.end,
                 })
             }
+            OP_SYNC => {
+                let explicit_since = optional_str(&req.input, "since")?;
+                let timeout_ms = optional_u32(&req.input, "timeout_ms", 30_000)?;
+                let persist = optional_bool(&req.input, "persist", true)?;
+                let used_since = explicit_since.or_else(|| {
+                    self.sync_state
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .last_sync_token
+                        .clone()
+                });
+
+                let response = client
+                    .sync(used_since.as_deref(), timeout_ms)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                let projection = project_sync_response(&response);
+
+                if persist {
+                    let mut state = self
+                        .sync_state
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.last_sync_token = Some(response.next_batch.clone());
+                    for (room_id, summary) in &projection.tracked_updates {
+                        state.rooms.insert(room_id.clone(), summary.clone());
+                    }
+                }
+
+                json!({
+                    "used_since": used_since,
+                    "next_batch": response.next_batch,
+                    "persisted": persist,
+                    "rooms": projection.room_summaries,
+                    "message_events": projection.message_events,
+                    "membership_changes": projection.membership_changes,
+                    "state_changes": projection.state_changes,
+                    "tracked_state": self.tracked_state_json(),
+                })
+            }
+            OP_GET_ROOM_STATE => {
+                let room_id = require_str(&req.input, "room_id")?;
+                let events = client
+                    .get_room_state(room_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                let existing_membership = self
+                    .sync_state
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .rooms
+                    .get(room_id)
+                    .map_or_else(
+                        || "unknown".to_string(),
+                        |summary| summary.membership.clone(),
+                    );
+                let summary = summarize_room(room_id, &existing_membership, &events);
+                self.sync_state
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .rooms
+                    .insert(room_id.to_string(), summary.clone());
+                json!({
+                    "room_id": room_id,
+                    "summary": summary.snapshot_json(room_id),
+                    "state_events": events,
+                })
+            }
+            OP_LIST_MEMBERS => {
+                let room_id = require_str(&req.input, "room_id")?;
+                let membership = optional_str(&req.input, "membership")?;
+                let events = client
+                    .list_members(room_id, membership.as_deref())
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                let mut summary =
+                    summarize_room(room_id, membership.as_deref().unwrap_or("unknown"), &events);
+                summary.member_count = Some(events.len());
+                self.sync_state
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .rooms
+                    .insert(room_id.to_string(), summary.clone());
+                json!({
+                    "room_id": room_id,
+                    "members": events.iter().map(|event| normalize_membership_event(room_id, event)).collect::<Vec<_>>(),
+                    "summary": summary.snapshot_json(room_id),
+                })
+            }
+            OP_UPLOAD_MEDIA => {
+                let content_type = require_str(&req.input, "content_type")?;
+                let body_base64 = require_str(&req.input, "body_base64")?;
+                let filename = optional_str(&req.input, "filename")?;
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(body_base64)
+                    .map_err(|error| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("body_base64 must be valid base64: {error}"),
+                    })?;
+                let response = client
+                    .upload_media(content_type, data, filename.as_deref())
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "content_uri": response.content_uri,
+                })
+            }
+            OP_DOWNLOAD_MEDIA => {
+                let mxc_uri = optional_str(&req.input, "mxc_uri")?;
+                let allow_remote = optional_bool(&req.input, "allow_remote", true)?;
+                let (server_name, media_id) = if let Some(uri) = mxc_uri {
+                    parse_mxc_uri(&uri)?
+                } else {
+                    (
+                        require_str(&req.input, "server_name")?.to_string(),
+                        require_str(&req.input, "media_id")?.to_string(),
+                    )
+                };
+                let media = client
+                    .download_media(&server_name, &media_id, allow_remote)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "content_type": media.content_type,
+                    "content_disposition": media.content_disposition,
+                    "size_bytes": media.data.len(),
+                    "data_base64": base64::engine::general_purpose::STANDARD.encode(media.data),
+                })
+            }
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -599,7 +1274,7 @@ mod tests {
 
     #[test]
     fn operations_count() {
-        assert_eq!(operations_info().len(), 6);
+        assert_eq!(operations_info().len(), 11);
     }
 
     #[test]
@@ -633,8 +1308,26 @@ mod tests {
     fn introspection() {
         let c = MatrixConnector::new();
         let intro = c.introspect();
-        assert_eq!(intro.operations.len(), 6);
+        assert_eq!(intro.operations.len(), 11);
         assert!(!intro.event_caps.as_ref().unwrap().streaming);
+    }
+
+    #[test]
+    fn sync_and_media_operations_have_expected_safety_tiers() {
+        let ops = operations_info();
+        let sync = ops.iter().find(|op| op.id.as_str() == OP_SYNC).unwrap();
+        let upload = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_UPLOAD_MEDIA)
+            .unwrap();
+        let download = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_DOWNLOAD_MEDIA)
+            .unwrap();
+
+        assert_eq!(sync.safety_tier, SafetyTier::Safe);
+        assert_eq!(upload.safety_tier, SafetyTier::Risky);
+        assert_eq!(download.safety_tier, SafetyTier::Safe);
     }
 
     #[fcp_async_core::runtime::test]
@@ -805,6 +1498,83 @@ mod tests {
 
         let err = optional_u32(&json!({ "limit": "many" }), "limit", 20).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn optional_bool_rejects_invalid_types() {
+        let err = optional_bool(&json!({ "persist": "yes" }), "persist", true).unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_mxc_uri_requires_full_identifier() {
+        let parsed = parse_mxc_uri("mxc://matrix.org/media123").unwrap();
+        assert_eq!(parsed, ("matrix.org".to_string(), "media123".to_string()));
+        assert!(parse_mxc_uri("mxc://matrix.org").is_err());
+        assert!(parse_mxc_uri("https://matrix.org/media123").is_err());
+    }
+
+    #[test]
+    fn project_sync_response_translates_room_deltas() {
+        let sync = SyncResponse {
+            next_batch: "batch_2".into(),
+            rooms: crate::types::SyncRooms {
+                join: BTreeMap::from([(
+                    "!room:matrix.org".to_string(),
+                    crate::types::JoinedSyncRoom {
+                        state: crate::types::SyncEventList {
+                            events: vec![
+                                Event {
+                                    event_id: Some("$state1".into()),
+                                    r#type: "m.room.name".into(),
+                                    state_key: Some(String::new()),
+                                    sender: Some("@bot:matrix.org".into()),
+                                    origin_server_ts: Some(100),
+                                    content: json!({ "name": "General" }),
+                                    room_id: Some("!room:matrix.org".into()),
+                                },
+                                Event {
+                                    event_id: Some("$member1".into()),
+                                    r#type: "m.room.member".into(),
+                                    state_key: Some("@alice:matrix.org".into()),
+                                    sender: Some("@alice:matrix.org".into()),
+                                    origin_server_ts: Some(110),
+                                    content: json!({ "membership": "join", "displayname": "Alice" }),
+                                    room_id: Some("!room:matrix.org".into()),
+                                },
+                            ],
+                        },
+                        timeline: crate::types::SyncTimeline {
+                            events: vec![Event {
+                                event_id: Some("$msg1".into()),
+                                r#type: "m.room.message".into(),
+                                state_key: None,
+                                sender: Some("@alice:matrix.org".into()),
+                                origin_server_ts: Some(120),
+                                content: json!({ "msgtype": "m.text", "body": "Hello" }),
+                                room_id: Some("!room:matrix.org".into()),
+                            }],
+                            prev_batch: Some("prev".into()),
+                            limited: false,
+                        },
+                    },
+                )]),
+                ..crate::types::SyncRooms::default()
+            },
+        };
+
+        let projection = project_sync_response(&sync);
+        assert_eq!(projection.room_summaries.len(), 1);
+        assert_eq!(projection.message_events.len(), 1);
+        assert_eq!(projection.membership_changes.len(), 1);
+        assert_eq!(projection.state_changes.len(), 1);
+        assert_eq!(
+            projection
+                .tracked_updates
+                .get("!room:matrix.org")
+                .and_then(|summary| summary.name.as_deref()),
+            Some("General")
+        );
     }
 
     #[fcp_async_core::runtime::test]

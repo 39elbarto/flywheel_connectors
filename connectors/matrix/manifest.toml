@@ -43,5 +43,20 @@ id = "matrix.send_message"
 [[operations]]
 id = "matrix.get_messages"
 
+[[operations]]
+id = "matrix.sync"
+
+[[operations]]
+id = "matrix.get_room_state"
+
+[[operations]]
+id = "matrix.list_members"
+
+[[operations]]
+id = "matrix.upload_media"
+
+[[operations]]
+id = "matrix.download_media"
+
 [provisioning]
 note = "Requires a Matrix homeserver account with an access token. Create via Element or any Matrix client, then extract the token from settings."

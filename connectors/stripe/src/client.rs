@@ -9,9 +9,60 @@ use fcp_core::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::utf8_percent_encode;
 use reqwest::{Client, StatusCode, header};
 use tracing::debug;
+
+/// Percent-encoding set for Stripe path segments. Encodes everything that
+/// could enable path traversal or query injection while preserving characters
+/// commonly found in Stripe resource IDs (alphanumeric, `_`, `-`).
+const STRIPE_PATH_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'\\')
+    .add(b'?')
+    .add(b'&')
+    .add(b'=')
+    .add(b'<')
+    .add(b'>')
+    .add(b'{')
+    .add(b'}')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'|')
+    .add(b'`')
+    .add(b'@')
+    .add(b':')
+    .add(b';')
+    .add(b'+')
+    .add(b'.')
+    .add(b',');
+
+/// Percent-encoding set for Stripe query parameter values. Encodes characters
+/// that could break query string parsing (`&`, `=`, `+`, `#`) and other unsafe
+/// characters, while preserving characters safe in query values.
+const STRIPE_QUERY_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b'=')
+    .add(b'<')
+    .add(b'>')
+    .add(b'{')
+    .add(b'}')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'|')
+    .add(b'`')
+    .add(b'\\');
 
 use crate::{
     error::{StripeError, StripeResult},
@@ -493,15 +544,16 @@ impl StripeClient {
     // ── Encoding helpers ──────────────────────────────────────────
 
     /// Percent-encode a value for safe inclusion in a URL path segment.
-    /// Encodes everything except unreserved characters (RFC 3986).
+    /// Encodes slashes, dots, query chars, and other injection vectors while
+    /// preserving characters common in Stripe IDs (alphanumeric, `_`, `-`).
     fn encode_path_segment(s: &str) -> String {
-        utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+        utf8_percent_encode(s, STRIPE_PATH_SET).to_string()
     }
 
     /// Percent-encode a value for safe inclusion as a query parameter value.
-    /// Encodes everything except unreserved characters (RFC 3986).
+    /// Encodes `&`, `=`, `+`, `#` and other characters that could break query parsing.
     fn encode_query_value(s: &str) -> String {
-        utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+        utf8_percent_encode(s, STRIPE_QUERY_SET).to_string()
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────
@@ -1216,17 +1268,18 @@ mod tests {
 
     #[test]
     fn encode_path_segment_safe_chars_unchanged() {
-        // Normal Stripe IDs should pass through (only alphanumeric + underscore)
+        // Normal Stripe IDs (alphanumeric + underscore + hyphen) pass through
         let encoded = StripeClient::encode_path_segment("cus_123abc");
-        assert_eq!(encoded, "cus%5F123abc");
+        assert_eq!(encoded, "cus_123abc");
     }
 
     #[test]
     fn encode_path_segment_prevents_traversal() {
-        // Path traversal attempt must be encoded
+        // Path traversal attempt: slashes and dots must be encoded
         let encoded = StripeClient::encode_path_segment("../../../etc/passwd");
-        assert!(!encoded.contains("../"));
-        assert!(encoded.contains("%2E%2E%2F"));
+        assert!(!encoded.contains('/'));
+        assert!(encoded.contains("%2F"));
+        assert!(encoded.contains("%2E"));
     }
 
     #[test]
@@ -1258,9 +1311,13 @@ mod tests {
     }
 
     #[test]
-    fn encode_query_value_encodes_email_at_sign() {
-        let encoded = StripeClient::encode_query_value("user@example.com");
-        assert!(encoded.contains("%40"));
+    fn encode_query_value_encodes_injection_chars() {
+        // Ampersand and equals must be encoded to prevent query injection
+        let encoded = StripeClient::encode_query_value("val&other=injected");
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+        assert!(encoded.contains("%26"));
+        assert!(encoded.contains("%3D"));
     }
 
     #[fcp_async_core::runtime::test]

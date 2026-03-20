@@ -151,15 +151,15 @@ impl ConnectorErrorMapping for GitHubError {
     }
 
     fn to_fcp_error(&self) -> FcpError {
-        GitHubError::to_fcp_error(self)
+        Self::to_fcp_error(self)
     }
 
     fn is_retryable(&self) -> bool {
-        GitHubError::is_retryable(self)
+        Self::is_retryable(self)
     }
 
     fn retry_after(&self) -> Option<Duration> {
-        GitHubError::retry_after(self)
+        Self::retry_after(self)
     }
 }
 

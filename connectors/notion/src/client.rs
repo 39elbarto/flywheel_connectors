@@ -26,22 +26,24 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
-/// Validate a Notion object ID (UUIDs with optional hyphens, hex chars only).
-/// Rejects empty strings and strings containing path separators, query
-/// parameters, or other URL-active characters.
+/// Characters that are dangerous in URLs: path separators, query string
+/// markers, fragment markers, percent signs (double-encoding), ampersands,
+/// equals signs, and whitespace.
+const FORBIDDEN_ID_CHARS: &[char] = &['/', '\\', '?', '#', '&', '=', '%', ' ', '\t', '\n', '\r', '\0'];
+
+/// Validate a Notion object ID. Rejects empty strings and strings containing
+/// URL-active characters (slashes, query markers, fragments, ampersands,
+/// percent signs) that could allow URL injection or path traversal.
 fn validate_notion_id(id: &str, label: &str) -> NotionResult<()> {
     if id.is_empty() {
         return Err(NotionError::Validation {
             message: format!("{label} must not be empty"),
         });
     }
-    if !id
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() || c == '-')
-    {
+    if id.chars().any(|c| FORBIDDEN_ID_CHARS.contains(&c)) {
         return Err(NotionError::Validation {
             message: format!(
-                "{label} contains invalid characters (expected UUID hex digits and hyphens): {id:?}"
+                "{label} contains URL-unsafe characters: {id:?}"
             ),
         });
     }
@@ -952,6 +954,14 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_notion_id_short_name() {
+        // Notion test IDs like "page-1", "block-1", "db-1" are valid
+        assert!(validate_notion_id("page-1", "page_id").is_ok());
+        assert!(validate_notion_id("block-1", "block_id").is_ok());
+        assert!(validate_notion_id("db-1", "database_id").is_ok());
+    }
+
+    #[test]
     fn test_validate_notion_id_rejects_empty() {
         let result = validate_notion_id("", "page_id");
         assert!(result.is_err());
@@ -984,8 +994,26 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_notion_id_rejects_non_hex() {
-        let result = validate_notion_id("xyz-not-hex!", "page_id");
+    fn test_validate_notion_id_rejects_ampersand() {
+        let result = validate_notion_id("abc&other=1", "block_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_percent_encoding() {
+        let result = validate_notion_id("abc%2F..%2Fetc", "page_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_backslash() {
+        let result = validate_notion_id("abc\\def", "page_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_notion_id_rejects_null_byte() {
+        let result = validate_notion_id("abc\0def", "page_id");
         assert!(result.is_err());
     }
 

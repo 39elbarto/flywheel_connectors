@@ -83,6 +83,34 @@ impl fmt::Debug for S3Auth {
     }
 }
 
+/// Percent-encoding set for S3 bucket names in URL path segments. Encodes
+/// slashes and other injection vectors while preserving characters valid in
+/// S3 bucket names: lowercase alphanumeric, hyphens, dots.
+const S3_BUCKET_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'\\')
+    .add(b'?')
+    .add(b'&')
+    .add(b'=')
+    .add(b'<')
+    .add(b'>')
+    .add(b'{')
+    .add(b'}')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'|')
+    .add(b'`')
+    .add(b'@')
+    .add(b':')
+    .add(b';')
+    .add(b'+')
+    .add(b',');
+
 /// Percent-encoding set for S3 object key paths. Preserves `/`, `-`, `_`, `.`, `~`
 /// which are valid in S3 key names and URL paths.
 const S3_PATH_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
@@ -463,9 +491,10 @@ impl S3Client {
     // ── Internal helpers ─────────────────────────────────────────────────
 
     /// Percent-encode a bucket name for safe inclusion in a URL path segment.
+    /// Preserves characters valid in S3 bucket names (alphanumeric, hyphens, dots)
+    /// while encoding slashes, query chars, and other injection vectors.
     fn encode_bucket(bucket: &str) -> String {
-        percent_encoding::utf8_percent_encode(bucket, percent_encoding::NON_ALPHANUMERIC)
-            .to_string()
+        percent_encoding::utf8_percent_encode(bucket, S3_BUCKET_SET).to_string()
     }
 
     /// Build the URL for an object in a bucket.
@@ -1156,15 +1185,16 @@ mod tests {
     fn encode_bucket_normal_name() {
         // Standard bucket names use lowercase, digits, hyphens, dots
         let encoded = S3Client::encode_bucket("my-bucket-123");
-        // Hyphens and digits get encoded with NON_ALPHANUMERIC
+        assert_eq!(encoded, "my-bucket-123");
         assert!(!encoded.contains('/'));
     }
 
     #[test]
     fn encode_bucket_prevents_path_traversal() {
         let encoded = S3Client::encode_bucket("../../../etc/passwd");
-        assert!(!encoded.contains("../"));
-        assert!(encoded.contains("%2E%2E%2F"));
+        // Slashes must be encoded to prevent path traversal
+        assert!(!encoded.contains('/'));
+        assert!(encoded.contains("%2F"));
     }
 
     #[test]

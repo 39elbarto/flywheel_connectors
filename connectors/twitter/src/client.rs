@@ -688,12 +688,12 @@ impl TwitterApiClient {
 
     /// Retweet a tweet on behalf of the authenticated user.
     pub async fn retweet(&self, user_id: &str, tweet_id: &str) -> TwitterResult<RetweetResponse> {
-        let user_id = validate_numeric_id(user_id, "user_id")?;
-        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         #[derive(serde::Serialize)]
         struct RetweetBody {
             tweet_id: String,
         }
+        let user_id = validate_numeric_id(user_id, "user_id")?;
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         let body = RetweetBody {
             tweet_id: tweet_id.to_string(),
         };
@@ -715,12 +715,12 @@ impl TwitterApiClient {
 
     /// Like a tweet on behalf of the authenticated user.
     pub async fn like_tweet(&self, user_id: &str, tweet_id: &str) -> TwitterResult<LikeResponse> {
-        let user_id = validate_numeric_id(user_id, "user_id")?;
-        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         #[derive(serde::Serialize)]
         struct LikeBody {
             tweet_id: String,
         }
+        let user_id = validate_numeric_id(user_id, "user_id")?;
+        let tweet_id = validate_numeric_id(tweet_id, "tweet_id")?;
         let body = LikeBody {
             tweet_id: tweet_id.to_string(),
         };
@@ -766,13 +766,13 @@ impl TwitterApiClient {
         participant_id: &str,
         text: &str,
     ) -> TwitterResult<SendDmResponse> {
-        let participant_id = validate_numeric_id(participant_id, "participant_id")?;
         #[derive(serde::Serialize)]
         struct NewDmRequest {
             conversation_type: String,
             participant_ids: Vec<String>,
             message: SendDmRequest,
         }
+        let participant_id = validate_numeric_id(participant_id, "participant_id")?;
         let body = NewDmRequest {
             conversation_type: "Group".to_string(),
             participant_ids: vec![participant_id.to_string()],

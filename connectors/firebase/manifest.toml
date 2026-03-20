@@ -1,0 +1,336 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.firebase"
+name = "Firebase Connector"
+version = "0.1.0"
+description = "FCP connector for Firebase Firestore and Realtime Database"
+archetypes = [
+    "database",
+    "knowledge",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores Firebase project identity, Google auth mode, and session context."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."firebase.firestore.get"]
+description = "Get a Firestore document"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.get".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.list"]
+description = "List Firestore documents in a collection"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."firebase.firestore.list".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.create"]
+description = "Create a Firestore document"
+capability = "firebase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.create".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.update"]
+description = "Update a Firestore document"
+capability = "firebase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.update".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.delete"]
+description = "Delete a Firestore document"
+capability = "firebase.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "always"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.delete".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.query"]
+description = "Run a Firestore structured query"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."firebase.firestore.query".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.firestore.batch_write"]
+description = "Execute a Firestore batch write"
+capability = "firebase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.batch_write".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.rtdb.get"]
+description = "Read JSON from Realtime Database"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."firebase.rtdb.get".network_constraints]
+host_allow = ["*.firebaseio.com", "*.firebasedatabase.app"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.rtdb.set"]
+description = "Write JSON into Realtime Database"
+capability = "firebase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."firebase.rtdb.set".network_constraints]
+host_allow = ["*.firebaseio.com", "*.firebasedatabase.app"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.rtdb.delete"]
+description = "Delete JSON from Realtime Database"
+capability = "firebase.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "always"
+idempotency = "strict"
+
+[provides.operations."firebase.rtdb.delete".network_constraints]
+host_allow = ["*.firebaseio.com", "*.firebasedatabase.app"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.health"]
+description = "Check Firestore metadata reachability"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."firebase.health".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216

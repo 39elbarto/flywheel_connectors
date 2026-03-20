@@ -1,0 +1,600 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:sqlite-first-slice-placeholder"
+
+[connector]
+id = "fcp.sqlite"
+name = "SQLite Connector"
+version = "0.1.0"
+description = "FCP connector for local SQLite databases with safe query, schema, and transaction operations"
+archetypes = ["storage", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores the configured SQLite database path and transaction state."
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:community", "z:work"]
+
+[capabilities]
+required = ["storage.state"]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "network.dns",
+    "network.egress",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."sqlite.query"]
+description = "Execute a read-only parameterized SQL query"
+capability = "sqlite.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sqlite.query".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."sqlite.query".input_schema.properties.sql]
+type = "string"
+description = "A single read-only SQL statement"
+
+[provides.operations."sqlite.query".input_schema.properties.params]
+type = "array"
+description = "Positional query parameters"
+
+[provides.operations."sqlite.query".input_schema.properties.txn_id]
+type = "string"
+description = "Active transaction id when querying inside a transaction"
+
+[provides.operations."sqlite.query".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."sqlite.query".output_schema.properties.result]
+type = "object"
+
+[provides.operations."sqlite.query".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 52428800
+
+[provides.operations."sqlite.execute"]
+description = "Execute a mutating SQL statement"
+capability = "sqlite.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."sqlite.execute".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."sqlite.execute".input_schema.properties.sql]
+type = "string"
+description = "A single non-returning SQL statement"
+
+[provides.operations."sqlite.execute".input_schema.properties.params]
+type = "array"
+description = "Positional statement parameters"
+
+[provides.operations."sqlite.execute".input_schema.properties.txn_id]
+type = "string"
+description = "Active transaction id when executing inside a transaction"
+
+[provides.operations."sqlite.execute".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."sqlite.execute".output_schema.properties.result]
+type = "object"
+
+[provides.operations."sqlite.execute".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."sqlite.explain"]
+description = "Explain the query plan for a read-only SQL query"
+capability = "sqlite.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sqlite.explain".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."sqlite.explain".input_schema.properties.sql]
+type = "string"
+description = "A single read-only SQL statement"
+
+[provides.operations."sqlite.explain".input_schema.properties.params]
+type = "array"
+description = "Positional query parameters"
+
+[provides.operations."sqlite.explain".input_schema.properties.txn_id]
+type = "string"
+description = "Active transaction id when explaining inside a transaction"
+
+[provides.operations."sqlite.explain".output_schema]
+type = "object"
+required = ["plan"]
+
+[provides.operations."sqlite.explain".output_schema.properties.plan]
+type = "object"
+
+[provides.operations."sqlite.explain".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."sqlite.schema.tables"]
+description = "List application tables in the SQLite database"
+capability = "sqlite.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sqlite.schema.tables".input_schema]
+type = "object"
+
+[provides.operations."sqlite.schema.tables".input_schema.properties.txn_id]
+type = "string"
+description = "Active transaction id when introspecting inside a transaction"
+
+[provides.operations."sqlite.schema.tables".output_schema]
+type = "object"
+required = ["tables"]
+
+[provides.operations."sqlite.schema.tables".output_schema.properties.tables]
+type = "array"
+
+[provides.operations."sqlite.schema.tables".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."sqlite.schema.columns"]
+description = "Describe the columns for a SQLite table"
+capability = "sqlite.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sqlite.schema.columns".input_schema]
+type = "object"
+required = ["table"]
+
+[provides.operations."sqlite.schema.columns".input_schema.properties.table]
+type = "string"
+description = "Table name"
+
+[provides.operations."sqlite.schema.columns".input_schema.properties.txn_id]
+type = "string"
+description = "Active transaction id when introspecting inside a transaction"
+
+[provides.operations."sqlite.schema.columns".output_schema]
+type = "object"
+required = ["columns"]
+
+[provides.operations."sqlite.schema.columns".output_schema.properties.columns]
+type = "array"
+
+[provides.operations."sqlite.schema.columns".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."sqlite.transaction.begin"]
+description = "Begin a SQLite transaction"
+capability = "sqlite.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."sqlite.transaction.begin".input_schema]
+type = "object"
+
+[provides.operations."sqlite.transaction.begin".input_schema.properties.mode]
+type = "string"
+description = "Transaction mode: deferred, immediate, or exclusive"
+
+[provides.operations."sqlite.transaction.begin".output_schema]
+type = "object"
+required = ["transaction"]
+
+[provides.operations."sqlite.transaction.begin".output_schema.properties.transaction]
+type = "object"
+
+[provides.operations."sqlite.transaction.begin".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."sqlite.transaction.commit"]
+description = "Commit the active SQLite transaction"
+capability = "sqlite.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."sqlite.transaction.commit".input_schema]
+type = "object"
+required = ["txn_id"]
+
+[provides.operations."sqlite.transaction.commit".input_schema.properties.txn_id]
+type = "string"
+description = "Transaction id returned by sqlite.transaction.begin"
+
+[provides.operations."sqlite.transaction.commit".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."sqlite.transaction.commit".output_schema.properties.result]
+type = "object"
+
+[provides.operations."sqlite.transaction.commit".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."sqlite.transaction.rollback"]
+description = "Rollback the active SQLite transaction"
+capability = "sqlite.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."sqlite.transaction.rollback".input_schema]
+type = "object"
+required = ["txn_id"]
+
+[provides.operations."sqlite.transaction.rollback".input_schema.properties.txn_id]
+type = "string"
+description = "Transaction id returned by sqlite.transaction.begin"
+
+[provides.operations."sqlite.transaction.rollback".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."sqlite.transaction.rollback".output_schema.properties.result]
+type = "object"
+
+[provides.operations."sqlite.transaction.rollback".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."sqlite.batch"]
+description = "Execute multiple SQL statements atomically"
+capability = "sqlite.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."sqlite.batch".input_schema]
+type = "object"
+required = ["statements"]
+
+[provides.operations."sqlite.batch".input_schema.properties.statements]
+type = "array"
+description = "Statements to execute, each with sql and params"
+
+[provides.operations."sqlite.batch".input_schema.properties.txn_id]
+type = "string"
+description = "Active transaction id when batching inside a transaction"
+
+[provides.operations."sqlite.batch".output_schema]
+type = "object"
+required = ["results"]
+
+[provides.operations."sqlite.batch".output_schema.properties.results]
+type = "array"
+
+[provides.operations."sqlite.batch".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sqlite.health"]
+description = "Run a local database health probe"
+capability = "sqlite.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sqlite.health".input_schema]
+type = "object"
+
+[provides.operations."sqlite.health".output_schema]
+type = "object"
+required = ["health"]
+
+[provides.operations."sqlite.health".output_schema.properties.health]
+type = "object"
+
+[provides.operations."sqlite.health".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[provides.operations."sqlite.vacuum"]
+description = "Run VACUUM against the configured database"
+capability = "sqlite.admin"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."sqlite.vacuum".input_schema]
+type = "object"
+
+[provides.operations."sqlite.vacuum".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."sqlite.vacuum".output_schema.properties.result]
+type = "object"
+
+[provides.operations."sqlite.vacuum".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."sqlite.pragma"]
+description = "Read an allowlisted SQLite pragma value"
+capability = "sqlite.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sqlite.pragma".input_schema]
+type = "object"
+required = ["name"]
+
+[provides.operations."sqlite.pragma".input_schema.properties.name]
+type = "string"
+description = "Allowlisted pragma name"
+
+[provides.operations."sqlite.pragma".input_schema.properties.txn_id]
+type = "string"
+description = "Active transaction id when reading pragmas inside a transaction"
+
+[provides.operations."sqlite.pragma".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."sqlite.pragma".output_schema.properties.result]
+type = "object"
+
+[provides.operations."sqlite.pragma".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 25
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "sqlite.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sqlite.write"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sqlite.admin"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"sqlite.query" = ["sqlite.read"]
+"sqlite.explain" = ["sqlite.read"]
+"sqlite.schema.tables" = ["sqlite.read"]
+"sqlite.schema.columns" = ["sqlite.read"]
+"sqlite.health" = ["sqlite.read"]
+"sqlite.pragma" = ["sqlite.read"]
+"sqlite.execute" = ["sqlite.write"]
+"sqlite.transaction.begin" = ["sqlite.write"]
+"sqlite.transaction.commit" = ["sqlite.write"]
+"sqlite.transaction.rollback" = ["sqlite.write"]
+"sqlite.batch" = ["sqlite.write"]
+"sqlite.vacuum" = ["sqlite.admin"]

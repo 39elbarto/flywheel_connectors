@@ -1,0 +1,299 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.nextcloud-talk"
+name = "Nextcloud Talk"
+version = "0.1.0"
+description = "Self-hosted Nextcloud Talk collaboration connector"
+archetypes = ["operational", "bidirectional"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work", "z:project:*"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "system.privileged"]
+
+# Nextcloud Talk deployments are operator-configured and may live on public,
+# private, or tailnet addresses, so host-level constraints are intentionally
+# left to runtime configuration instead of being hardcoded in the manifest.
+
+[provides.operations."nextcloud_talk.health"]
+description = "Probe Nextcloud Talk reachability and capability surface"
+capability = "nextcloud_talk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.health".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.health".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.health".ai_hints]
+when_to_use = "Verify the configured Nextcloud server is reachable and exposes Talk."
+common_mistakes = ["Using a base URL with a query string or fragment."]
+related = ["nextcloud_talk.list_conversations", "nextcloud_talk.get_messages"]
+
+[provides.operations."nextcloud_talk.list_conversations"]
+description = "List visible Nextcloud Talk conversations"
+capability = "nextcloud_talk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.list_conversations".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.list_conversations".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.list_conversations".ai_hints]
+when_to_use = "Enumerate rooms before looking up room details, messages, or participants."
+common_mistakes = ["Expecting archived or inaccessible rooms to always appear."]
+related = ["nextcloud_talk.get_conversation", "nextcloud_talk.get_messages"]
+
+[provides.operations."nextcloud_talk.get_conversation"]
+description = "Get metadata for a single Nextcloud Talk conversation"
+capability = "nextcloud_talk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.get_conversation".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.get_conversation".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.get_conversation".ai_hints]
+when_to_use = "Fetch room metadata when you already know the conversation token."
+common_mistakes = ["Passing a room display name instead of the room token."]
+related = ["nextcloud_talk.list_conversations", "nextcloud_talk.list_participants"]
+
+[provides.operations."nextcloud_talk.create_conversation"]
+description = "Create a new Nextcloud Talk conversation"
+capability = "nextcloud_talk.manage"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+[provides.operations."nextcloud_talk.create_conversation".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.create_conversation".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.create_conversation".ai_hints]
+when_to_use = "Create a room before adding participants or sending messages."
+common_mistakes = ["Using the wrong numeric room_type for the intended conversation shape."]
+related = ["nextcloud_talk.add_participant", "nextcloud_talk.send_message"]
+
+[provides.operations."nextcloud_talk.get_messages"]
+description = "Fetch chat history or long-poll for new messages"
+capability = "nextcloud_talk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.get_messages".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.get_messages".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.get_messages".ai_hints]
+when_to_use = "Read recent chat activity or poll for new messages."
+common_mistakes = ["Using limits or timeouts outside the documented API bounds."]
+related = ["nextcloud_talk.send_message", "nextcloud_talk.set_read_marker"]
+
+[provides.operations."nextcloud_talk.poll_conversation_events"]
+description = "Poll inbound conversation events using the Talk long-poll fallback"
+capability = "nextcloud_talk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.poll_conversation_events".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.poll_conversation_events".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.poll_conversation_events".ai_hints]
+when_to_use = "Use this as the explicit polling fallback when you need event envelopes and resumable cursor metadata."
+common_mistakes = ["Forgetting to persist the returned cursor between polling iterations.", "Expecting this passive polling surface to also advance read markers or notification state."]
+related = ["nextcloud_talk.get_messages", "nextcloud_talk.set_read_marker"]
+
+[provides.operations."nextcloud_talk.send_message"]
+description = "Post a message into a Nextcloud Talk conversation"
+capability = "nextcloud_talk.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+[provides.operations."nextcloud_talk.send_message".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.send_message".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.send_message".ai_hints]
+when_to_use = "Send a new chat message to a room."
+common_mistakes = ["Targeting the room name instead of the room token."]
+related = ["nextcloud_talk.get_messages", "nextcloud_talk.add_reaction"]
+
+[provides.operations."nextcloud_talk.delete_message"]
+description = "Delete a chat message from a conversation"
+capability = "nextcloud_talk.manage"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.delete_message".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.delete_message".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.delete_message".ai_hints]
+when_to_use = "Remove a previously sent message when the caller has permission."
+common_mistakes = ["Assuming every room member can delete every message."]
+related = ["nextcloud_talk.get_messages"]
+
+[provides.operations."nextcloud_talk.set_read_marker"]
+description = "Update the read marker for a conversation"
+capability = "nextcloud_talk.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.set_read_marker".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.set_read_marker".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.set_read_marker".ai_hints]
+when_to_use = "Advance read state after consuming room history."
+common_mistakes = ["Passing a message ID from a different conversation."]
+related = ["nextcloud_talk.get_messages"]
+
+[provides.operations."nextcloud_talk.list_participants"]
+description = "List participants in a conversation"
+capability = "nextcloud_talk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.list_participants".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.list_participants".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.list_participants".ai_hints]
+when_to_use = "Inspect room membership, roles, and current participant status."
+common_mistakes = ["Forgetting that guests and federated users use different actor types."]
+related = ["nextcloud_talk.add_participant", "nextcloud_talk.remove_participant"]
+
+[provides.operations."nextcloud_talk.add_participant"]
+description = "Add a participant to a conversation"
+capability = "nextcloud_talk.manage"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+[provides.operations."nextcloud_talk.add_participant".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.add_participant".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.add_participant".ai_hints]
+when_to_use = "Invite or attach another participant to a room."
+common_mistakes = ["Choosing the wrong source for a non-user participant."]
+related = ["nextcloud_talk.list_participants"]
+
+[provides.operations."nextcloud_talk.remove_participant"]
+description = "Remove an attendee from a conversation"
+capability = "nextcloud_talk.manage"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.remove_participant".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.remove_participant".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.remove_participant".ai_hints]
+when_to_use = "Remove a participant when moderation or lifecycle policy requires it."
+common_mistakes = ["Passing an actor ID instead of the numeric attendee_id."]
+related = ["nextcloud_talk.list_participants"]
+
+[provides.operations."nextcloud_talk.get_call_state"]
+description = "List currently connected call participants"
+capability = "nextcloud_talk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.get_call_state".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.get_call_state".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.get_call_state".ai_hints]
+when_to_use = "Inspect live call presence for a room."
+common_mistakes = ["Assuming every conversation currently has an active call."]
+related = ["nextcloud_talk.get_conversation"]
+
+[provides.operations."nextcloud_talk.add_reaction"]
+description = "Add an emoji reaction to a chat message"
+capability = "nextcloud_talk.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.add_reaction".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.add_reaction".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.add_reaction".ai_hints]
+when_to_use = "Attach a reaction to an existing chat message."
+common_mistakes = ["Passing the wrong emoji payload string for the server."]
+related = ["nextcloud_talk.delete_reaction", "nextcloud_talk.get_messages"]
+
+[provides.operations."nextcloud_talk.delete_reaction"]
+description = "Remove an emoji reaction from a chat message"
+capability = "nextcloud_talk.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.delete_reaction".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.delete_reaction".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.delete_reaction".ai_hints]
+when_to_use = "Remove a previously added reaction from a message."
+common_mistakes = ["Using a different emoji string than the one originally applied."]
+related = ["nextcloud_talk.add_reaction", "nextcloud_talk.get_messages"]
+
+[provides.operations."nextcloud_talk.share_file"]
+description = "Share a Nextcloud file into a conversation"
+capability = "nextcloud_talk.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+[provides.operations."nextcloud_talk.share_file".input_schema]
+type = "object"
+[provides.operations."nextcloud_talk.share_file".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.share_file".ai_hints]
+when_to_use = "Create a share and post it into a room without manual link setup."
+common_mistakes = ["Passing a path that does not exist inside the target Nextcloud instance."]
+related = ["nextcloud_talk.send_message"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

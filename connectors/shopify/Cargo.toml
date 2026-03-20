@@ -1,0 +1,36 @@
+[package]
+name = "fcp-shopify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "FCP Shopify connector for Products, Orders, Customers, and Inventory"
+
+[[bin]]
+name = "fcp-shopify"
+path = "src/main.rs"
+
+[lib]
+name = "fcp_shopify"
+path = "src/lib.rs"
+
+[dependencies]
+fcp-core.workspace = true
+fcp-sdk.workspace = true
+fcp-async-core.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+async-trait.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+fcp-crypto.workspace = true
+fcp-testkit.workspace = true
+wiremock.workspace = true

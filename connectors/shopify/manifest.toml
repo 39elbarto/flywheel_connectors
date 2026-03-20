@@ -1,0 +1,150 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.shopify"
+name = "Shopify"
+version = "0.1.0"
+description = "Shopify Admin API connector for Products, Orders, Customers, and Inventory"
+archetypes = ["operational"]
+homepage = "https://shopify.dev/docs/api/admin-rest"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.products_list]
+summary = "List products"
+capability = "shopify.products.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.products_list.ai_hints]
+when_to_use = "When you need to list products in a Shopify store"
+
+[provides.operations.products_get]
+summary = "Get a product by ID"
+capability = "shopify.products.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.products_get.ai_hints]
+when_to_use = "When you need details of a specific product"
+
+[provides.operations.products_create]
+summary = "Create a product"
+capability = "shopify.products.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.products_create.ai_hints]
+when_to_use = "When you need to add a new product to Shopify"
+
+[provides.operations.products_update]
+summary = "Update a product"
+capability = "shopify.products.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.products_update.ai_hints]
+when_to_use = "When you need to modify an existing product"
+
+[provides.operations.products_delete]
+summary = "Delete a product"
+capability = "shopify.products.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.products_delete.ai_hints]
+when_to_use = "When you need to permanently remove a product"
+
+[provides.operations.orders_list]
+summary = "List orders"
+capability = "shopify.orders.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.orders_list.ai_hints]
+when_to_use = "When you need to list recent orders"
+
+[provides.operations.orders_get]
+summary = "Get an order by ID"
+capability = "shopify.orders.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.orders_get.ai_hints]
+when_to_use = "When you need details of a specific order"
+
+[provides.operations.orders_create]
+summary = "Create an order"
+capability = "shopify.orders.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.orders_create.ai_hints]
+when_to_use = "When you need to create a new order programmatically"
+
+[provides.operations.customers_list]
+summary = "List customers"
+capability = "shopify.customers.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.customers_list.ai_hints]
+when_to_use = "When you need to list store customers"
+
+[provides.operations.customers_get]
+summary = "Get a customer by ID"
+capability = "shopify.customers.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.customers_get.ai_hints]
+when_to_use = "When you need details of a specific customer"
+
+[provides.operations.inventory_list]
+summary = "List inventory levels"
+capability = "shopify.inventory.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.inventory_list.ai_hints]
+when_to_use = "When you need to check inventory levels"
+
+[provides.operations.health]
+summary = "Check Shopify API health"
+capability = "shopify.products.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to verify Shopify API credentials"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

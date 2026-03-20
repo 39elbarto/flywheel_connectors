@@ -1,0 +1,192 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.dockerhub"
+name = "Docker Hub"
+version = "0.1.0"
+description = "Docker Hub connector for Repositories, Tags, and Organizations"
+archetypes = ["operational"]
+homepage = "https://docs.docker.com/docker-hub/api/latest/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.repos_list]
+summary = "List repositories"
+capability = "dockerhub.repos.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.repos_list.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.repos_list.ai_hints]
+when_to_use = "When you need to list Docker Hub repositories"
+
+[provides.operations.repos_get]
+summary = "Get repository details"
+capability = "dockerhub.repos.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.repos_get.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.repos_get.ai_hints]
+when_to_use = "When you need details about a specific Docker Hub repository"
+
+[provides.operations.repos_create]
+summary = "Create a repository"
+capability = "dockerhub.repos.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.repos_create.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.repos_create.ai_hints]
+when_to_use = "When you need to create a new Docker Hub repository"
+
+[provides.operations.repos_delete]
+summary = "Delete a repository"
+capability = "dockerhub.repos.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.repos_delete.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.repos_delete.ai_hints]
+when_to_use = "When you need to permanently delete a Docker Hub repository"
+
+[provides.operations.tags_list]
+summary = "List tags for a repository"
+capability = "dockerhub.repos.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.tags_list.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.tags_list.ai_hints]
+when_to_use = "When you need to list tags for a Docker Hub repository"
+
+[provides.operations.tags_get]
+summary = "Get tag details"
+capability = "dockerhub.repos.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.tags_get.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.tags_get.ai_hints]
+when_to_use = "When you need details about a specific tag"
+
+[provides.operations.tags_delete]
+summary = "Delete a tag"
+capability = "dockerhub.repos.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.tags_delete.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.tags_delete.ai_hints]
+when_to_use = "When you need to delete a tag from a repository"
+
+[provides.operations.orgs_list]
+summary = "List organizations"
+capability = "dockerhub.orgs.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.orgs_list.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.orgs_list.ai_hints]
+when_to_use = "When you need to list Docker Hub organizations"
+
+[provides.operations.health]
+summary = "Verify API credentials"
+capability = "dockerhub.repos.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["hub.docker.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to verify Docker Hub credentials"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

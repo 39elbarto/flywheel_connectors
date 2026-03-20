@@ -1,0 +1,264 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.netlify"
+name = "Netlify"
+version = "0.1.0"
+description = "Netlify connector for Sites, Deploys, DNS, and Environment Variables"
+archetypes = ["operational"]
+homepage = "https://docs.netlify.com/api/get-started/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.sites_list]
+summary = "List Netlify sites"
+capability = "netlify.sites.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.sites_list.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.sites_list.ai_hints]
+when_to_use = "When you need to list all Netlify sites"
+
+[provides.operations.sites_get]
+summary = "Get site details"
+capability = "netlify.sites.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.sites_get.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.sites_get.ai_hints]
+when_to_use = "When you need info about a specific Netlify site"
+
+[provides.operations.sites_create]
+summary = "Create a new site"
+capability = "netlify.sites.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.sites_create.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.sites_create.ai_hints]
+when_to_use = "When you need to create a new Netlify site"
+
+[provides.operations.sites_delete]
+summary = "Delete a site"
+capability = "netlify.sites.write"
+risk = "critical"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.sites_delete.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.sites_delete.ai_hints]
+when_to_use = "When you need to permanently delete a Netlify site"
+
+[provides.operations.deploys_list]
+summary = "List deploys for a site"
+capability = "netlify.deploys.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.deploys_list.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deploys_list.ai_hints]
+when_to_use = "When you need to see deploy history for a site"
+
+[provides.operations.deploys_get]
+summary = "Get deploy details"
+capability = "netlify.deploys.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.deploys_get.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deploys_get.ai_hints]
+when_to_use = "When you need to check the status of a specific deploy"
+
+[provides.operations.deploys_create]
+summary = "Create a deploy"
+capability = "netlify.deploys.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.deploys_create.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deploys_create.ai_hints]
+when_to_use = "When you need to trigger a new deploy"
+
+[provides.operations.deploys_rollback]
+summary = "Rollback to a deploy"
+capability = "netlify.deploys.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.deploys_rollback.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.deploys_rollback.ai_hints]
+when_to_use = "When you need to rollback a site to a previous deploy"
+
+[provides.operations.dns_list_zones]
+summary = "List DNS zones"
+capability = "netlify.dns.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.dns_list_zones.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.dns_list_zones.ai_hints]
+when_to_use = "When you need to list Netlify DNS zones"
+
+[provides.operations.env_list]
+summary = "List environment variables"
+capability = "netlify.env.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.env_list.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.env_list.ai_hints]
+when_to_use = "When you need to list environment variables for a site"
+
+[provides.operations.env_set]
+summary = "Set environment variable"
+capability = "netlify.env.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.env_set.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.env_set.ai_hints]
+when_to_use = "When you need to set or update an environment variable"
+
+[provides.operations.env_delete]
+summary = "Delete environment variable"
+capability = "netlify.env.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.env_delete.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.env_delete.ai_hints]
+when_to_use = "When you need to remove an environment variable — may break builds"
+
+[provides.operations.health]
+summary = "Verify API token"
+capability = "netlify.sites.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["api.netlify.com"]
+port_allow = [443]
+require_tls = true
+deny_localhost = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to verify Netlify API credentials"
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

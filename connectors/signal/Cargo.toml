@@ -1,0 +1,42 @@
+[package]
+name = "fcp-signal"
+description = "Signal messenger connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_signal"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-signal"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-core = { path = "../../crates/fcp-core" }
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-sdk = { path = "../../crates/fcp-sdk" }
+
+base64.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true

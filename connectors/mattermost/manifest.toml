@@ -11,7 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:83032732650d5dd374f8edfd3c299ec224
 id = "fcp.mattermost"
 name = "Mattermost Connector"
 version = "0.1.0"
-description = "Self-hosted collaboration connector for Mattermost messaging"
+description = "Self-hosted collaboration connector for Mattermost team/channel/post/file workflows; first slice excludes System Console, SCIM/LDAP, plugin, and workspace-admin APIs"
 archetypes = ["operational", "bidirectional"]
 format = "native"
 

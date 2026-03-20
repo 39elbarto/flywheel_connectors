@@ -10,11 +10,12 @@ use std::time::{Duration, Instant};
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_core::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityId, CapabilityVerifier, ConnectorId,
-    EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId, Introspection,
-    InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy, Principal,
-    RiskLevel, SafetyTier, SessionId, SubscribeRequest, ThreadInfo, ThreadKind, TrustLevel, ZoneId,
+    AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityId, CapabilityVerifier,
+    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
+    Principal, ResourceTypeInfo, RiskLevel, SafetyTier, SessionId, SubscribeRequest, ThreadInfo,
+    ThreadKind, TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
@@ -128,22 +129,60 @@ impl MattermostConnector {
     ///
     /// Returns an error if the configuration JSON is invalid or the client cannot be built.
     pub fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
-        let config: MattermostConfig =
+        let mut config: MattermostConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 5001,
                 message: format!("invalid configuration: {e}"),
             })?;
 
-        let auth = if let Some(ref token) = config.token {
-            MattermostAuth::Token(token.clone())
-        } else if let Some(ref cred_id) = config.credential_id {
-            MattermostAuth::CredentialId(cred_id.clone())
-        } else {
+        config.base_url = config.base_url.trim().to_owned();
+        if config.base_url.is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 5001,
-                message: "either 'token' or 'credential_id' must be provided".to_string(),
+                message: "base_url is required for Mattermost's self-hosted deployment model"
+                    .to_string(),
             });
+        }
+
+        let token = config
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let credential_id = config
+            .credential_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let auth = match (token, credential_id) {
+            (Some(token), None) => MattermostAuth::Token(token),
+            (None, Some(credential_id)) => MattermostAuth::CredentialId(credential_id),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 5001,
+                    message:
+                        "configure exactly one auth mode: token (personal or bot access token) or credential_id"
+                            .to_string(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 5001,
+                    message:
+                        "either token (personal or bot access token) or credential_id must be provided"
+                            .to_string(),
+                });
+            }
         };
+
+        if config.request_timeout_ms == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 5001,
+                message: "request_timeout_ms must be greater than zero".to_string(),
+            });
+        }
 
         let timeout = Duration::from_millis(config.request_timeout_ms);
         let client = MattermostClient::new(&config.base_url, auth, timeout).map_err(|e| {
@@ -195,7 +234,7 @@ impl MattermostConnector {
                 min_buffer_events: SOCKET_EVENT_BUFFER_CAPACITY_U32,
                 requires_ack: false,
             }),
-            auth_caps: None,
+            auth_caps: Some(mattermost_auth_caps()),
             op_catalog_hash: None,
         })
     }
@@ -224,8 +263,8 @@ impl MattermostConnector {
         Introspection {
             operations: operations_info(),
             events: event_info(),
-            resource_types: vec![],
-            auth_caps: None,
+            resource_types: mattermost_resource_types(),
+            auth_caps: Some(mattermost_auth_caps()),
             event_caps: Some(EventCaps {
                 streaming: true,
                 replay: false,
@@ -1078,6 +1117,97 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ops
 }
 
+fn mattermost_auth_caps() -> AuthCaps {
+    AuthCaps {
+        methods: vec![
+            "personal_access_token".to_string(),
+            "bot_access_token".to_string(),
+            "credential_id".to_string(),
+        ],
+        oauth: None,
+    }
+}
+
+fn mattermost_resource_types() -> Vec<ResourceTypeInfo> {
+    vec![
+        ResourceTypeInfo {
+            name: "mattermost.user".into(),
+            uri_pattern: "mattermost://users/{user_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "username": {"type": "string"},
+                    "email": {"type": "string"},
+                    "roles": {"type": "string"}
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "mattermost.team".into(),
+            uri_pattern: "mattermost://teams/{team_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "display_name": {"type": "string"},
+                    "type": {"type": "string"}
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "mattermost.channel".into(),
+            uri_pattern: "mattermost://channels/{channel_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "team_id": {"type": "string"},
+                    "type": {"type": "string"},
+                    "display_name": {"type": "string"},
+                    "name": {"type": "string"}
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "mattermost.post".into(),
+            uri_pattern: "mattermost://posts/{post_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "channel_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "root_id": {"type": "string"},
+                    "message": {"type": "string"},
+                    "file_ids": {"type": "array", "items": {"type": "string"}}
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "mattermost.file".into(),
+            uri_pattern: "mattermost://files/{file_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "post_id": {"type": "string"},
+                    "channel_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "mime_type": {"type": "string"},
+                    "size": {"type": "integer"}
+                }
+            }),
+        },
+    ]
+}
+
 fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
         "mattermost.get_me"
@@ -1168,7 +1298,10 @@ fn user_and_team_operations() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "Use to discover available teams before listing channels.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Assuming a bot or personal token can see teams it has not been added to."
+                        .into(),
+                ],
                 examples: vec![r"{}".into()],
                 related: vec![
                     CapabilityId::from_static("mattermost.get_team"),
@@ -1226,7 +1359,10 @@ fn channel_and_post_read_operations() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "Use to enumerate the channels available in a team before reading or posting.".into(),
-                common_mistakes: vec!["Forgetting that user_id defaults to 'me'.".into()],
+                common_mistakes: vec![
+                    "Forgetting that user_id defaults to 'me'.".into(),
+                    "Expecting private or DM channels to appear when the acting identity is not a member.".into(),
+                ],
                 examples: vec![r#"{"team_id": "team123"}"#.into()],
                 related: vec![CapabilityId::from_static("mattermost.get_channel")],
             },
@@ -1461,7 +1597,10 @@ fn search_operations() -> Vec<OperationInfo> {
         idempotency: IdempotencyClass::BestEffort,
         ai_hints: AgentHint {
             when_to_use: "Use to search messages across a team's channels.".into(),
-            common_mistakes: vec!["Not specifying team_id.".into()],
+            common_mistakes: vec![
+                "Not specifying team_id.".into(),
+                "Expecting server-wide search; the first slice is team-scoped only.".into(),
+            ],
             examples: vec![r#"{"team_id": "t1", "terms": "deployment issue"}"#.into()],
             related: vec![
                 CapabilityId::from_static("mattermost.get_posts_for_channel"),
@@ -1514,6 +1653,7 @@ fn create_direct_channel_operation() -> OperationInfo {
             common_mistakes: vec![
                 "Passing fewer or more than two user IDs.".into(),
                 "Passing duplicate user IDs instead of the two participants.".into(),
+                "Assuming UI-level direct-message restrictions are the same as backend API authorization.".into(),
             ],
             examples: vec![r#"{"user_ids": ["user_a", "user_b"]}"#.into()],
             related: vec![
@@ -1556,6 +1696,7 @@ fn create_post_operation() -> OperationInfo {
             common_mistakes: vec![
                 "Forgetting to set channel_id.".into(),
                 "Not using root_id when replying to a thread.".into(),
+                "Using a bot token that has not been added to the target team or channel.".into(),
             ],
             examples: vec![
                 r#"{"channel_id": "abc123", "message": "Hello team!"}"#.into(),
@@ -1679,6 +1820,7 @@ fn upload_file_operation() -> OperationInfo {
             common_mistakes: vec![
                 "Passing raw bytes instead of base64-encoded content.".into(),
                 "Forgetting to carry the returned file IDs into create_post.".into(),
+                "Trying to upload as a bot that is not a member of the target channel.".into(),
             ],
             examples: vec![r#"{"channel_id": "abc123", "filename": "report.txt", "content_base64": "aGVsbG8="}"#.into()],
             related: vec![
@@ -1704,7 +1846,10 @@ fn delete_post_operation() -> OperationInfo {
         idempotency: IdempotencyClass::BestEffort,
         ai_hints: AgentHint {
             when_to_use: "Use to delete a message after verifying the post ID carefully.".into(),
-            common_mistakes: vec!["Deleting the wrong post by not verifying post_id first.".into()],
+            common_mistakes: vec![
+                "Deleting the wrong post by not verifying post_id first.".into(),
+                "Treating this connector like a workspace-admin surface; delete permissions still depend on the acting account and server policy.".into(),
+            ],
             examples: vec![r#"{"post_id": "abc123"}"#.into()],
             related: vec![CapabilityId::from_static("mattermost.get_post")],
         },
@@ -2264,6 +2409,31 @@ mod tests {
         assert!(introspection.operations.len() >= 16);
         assert!(introspection.events.len() >= 10);
         assert!(introspection.event_caps.as_ref().unwrap().streaming);
+        assert_eq!(
+            introspection.auth_caps.as_ref().unwrap().methods,
+            vec![
+                "personal_access_token".to_string(),
+                "bot_access_token".to_string(),
+                "credential_id".to_string()
+            ]
+        );
+        assert!(introspection.resource_types.len() >= 5);
+    }
+
+    #[test]
+    fn introspection_exposes_self_hosted_scope_resources() {
+        let introspection = MattermostConnector::new().introspect();
+        let resource_names = introspection
+            .resource_types
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(resource_names.contains("mattermost.user"));
+        assert!(resource_names.contains("mattermost.team"));
+        assert!(resource_names.contains("mattermost.channel"));
+        assert!(resource_names.contains("mattermost.post"));
+        assert!(resource_names.contains("mattermost.file"));
     }
 
     #[test]
@@ -2379,6 +2549,43 @@ mod tests {
             .expect("direct channel operation should exist");
         assert!(matches!(op.idempotency, IdempotencyClass::BestEffort));
         assert!(matches!(op.requires_approval, Some(ApprovalMode::None)));
+    }
+
+    #[test]
+    fn operations_do_not_expose_workspace_admin_capability() {
+        let ops = operations_info();
+        assert!(
+            ops.iter()
+                .all(|operation| operation.capability.as_str() != "mattermost.admin"),
+            "first-slice Mattermost connector should not expose workspace-admin operations"
+        );
+    }
+
+    #[test]
+    fn configure_rejects_ambiguous_auth_modes() {
+        let err = MattermostConnector::new()
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok_123",
+                "credential_id": "cred_123"
+            }))
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("configure exactly one auth mode"));
+    }
+
+    #[test]
+    fn configure_rejects_blank_base_url() {
+        let err = MattermostConnector::new()
+            .configure(json!({
+                "base_url": "   ",
+                "token": "tok_123"
+            }))
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("base_url is required"));
     }
 
     #[test]

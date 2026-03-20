@@ -9,10 +9,14 @@ use serde_json::Value;
 pub struct MattermostConfig {
     /// Base URL of the Mattermost server (e.g., `https://mattermost.example.com`).
     pub base_url: String,
-    /// Personal access token or bot token.
+    /// Personal access token or bot access token.
+    ///
+    /// Bot accounts are preferred for durable integrations, but self-hosted
+    /// deployments often start with personal access tokens when bot creation
+    /// is not enabled yet.
     #[serde(default)]
     pub token: Option<String>,
-    /// Credential ID for egress-proxy injection.
+    /// Credential ID for egress-proxy injection of a personal or bot token.
     #[serde(default)]
     pub credential_id: Option<String>,
     /// Request timeout in milliseconds.

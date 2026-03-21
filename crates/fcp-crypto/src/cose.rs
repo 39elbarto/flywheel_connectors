@@ -240,6 +240,16 @@ impl CwtClaims {
         self
     }
 
+    /// Set target instance ID for this token.
+    #[must_use]
+    pub fn target_instance(mut self, instance_id: &str) -> Self {
+        self.claims.insert(
+            fcp2_claims::INSTANCE_ID,
+            ciborium::Value::Text(instance_id.into()),
+        );
+        self
+    }
+
     /// Set custom claim.
     #[must_use]
     pub fn custom(mut self, key: i64, value: ciborium::Value) -> Self {
@@ -587,6 +597,13 @@ impl CapabilityTokenBuilder {
     #[must_use]
     pub fn operations(mut self, ops: &[&str]) -> Self {
         self.claims = self.claims.operations(ops);
+        self
+    }
+
+    /// Set target instance ID.
+    #[must_use]
+    pub fn target_instance(mut self, instance_id: &str) -> Self {
+        self.claims = self.claims.target_instance(instance_id);
         self
     }
 

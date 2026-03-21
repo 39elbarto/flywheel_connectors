@@ -1106,6 +1106,19 @@ impl CapabilityVerifier {
             });
         }
 
+        // 3.5. Check instance binding if present
+        if let Some(inst_val) = claims.get(fcp2_claims::INSTANCE_ID) {
+            if let Some(inst_str) = inst_val.as_text() {
+                if inst_str != self.instance_id.as_str() {
+                    return Err(FcpError::ZoneViolation {
+                        source_zone: self.zone_id.0.to_string(),
+                        target_zone: self.zone_id.0.to_string(),
+                        message: format!("Token instance mismatch: expected {}, got {}", self.instance_id.as_str(), inst_str),
+                    });
+                }
+            }
+        }
+
         // 4. Check operation grant
         // Extract 'caps' claim and check if operation is allowed
         // 'caps' is array of CapabilityGrant
@@ -2004,6 +2017,13 @@ mod tests {
     }
 
     #[test]
+    fn instance_id_display() {
+        let id = InstanceId::new();
+        assert!(id.as_str().starts_with("inst_"));
+        assert_eq!(id.as_str(), id.to_string());
+    }
+
+    #[test]
     fn operation_id_from_static() {
         let id = OperationId::from_static("op.send");
         assert_eq!(id.as_str(), "op.send");
@@ -2116,7 +2136,7 @@ mod tests {
             per_ms: 60_000,
             burst: Some(5),
             scope: Some("per_zone".into()),
-            pool_name: Some("api".into()),
+            pool_name: Some("shared.pool".into()),
         };
         assert!(rl.validate().is_ok());
     }
@@ -2336,10 +2356,10 @@ mod tests {
 
     #[test]
     fn provenance_elevated_can_access_higher() {
-        let p = Provenance::tainted(ZoneId::public()).elevated_with("token-123");
+        let p = Provenance::tainted(ZoneId::public()).elevated_with("high-elev-token");
         assert!(p.is_tainted());
-        assert!(p.elevated);
         assert!(p.can_access_higher_trust());
+        assert_eq!(p.elevation_token.as_deref(), Some("high-elev-token"));
     }
 
     #[test]
@@ -2951,10 +2971,7 @@ mod tests {
     #[test]
     fn id_validation_error_display_invalid_start() {
         let err = IdValidationError::InvalidStartChar { ch: '-' };
-        assert_eq!(
-            err.to_string(),
-            "identifier has invalid start character '-'"
-        );
+        assert_eq!(err.to_string(), "identifier has invalid start character '-'");
     }
 
     #[test]

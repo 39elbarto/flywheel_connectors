@@ -1,150 +1,471 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:2080b28004713881e4734dc4202a5b7e748c2ce62bcadc343c61cb33bfb2cad8"
 
 [connector]
 id = "fcp.shopify"
-name = "Shopify"
+name = "Shopify Connector"
 version = "0.1.0"
-description = "Shopify Admin API connector for Products, Orders, Customers, and Inventory"
+description = "Single-shop Shopify Admin REST connector for products, orders, customers, inventory levels, and shop-health verification"
 archetypes = ["operational"]
-homepage = "https://shopify.dev/docs/api/admin-rest"
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; one shop domain and one pre-provisioned Admin API token are injected at runtime."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work", "z:private"]
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = [
+    "z:public",
+    "z:community",
+]
 
 [capabilities]
-required = ["network.outbound"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "system.privileged",
+]
 
-[provides.operations.products_list]
-summary = "List products"
-capability = "shopify.products.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.products_list.ai_hints]
-when_to_use = "When you need to list products in a Shopify store"
-
-[provides.operations.products_get]
-summary = "Get a product by ID"
-capability = "shopify.products.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.products_get.ai_hints]
-when_to_use = "When you need details of a specific product"
-
-[provides.operations.products_create]
-summary = "Create a product"
-capability = "shopify.products.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.products_create.ai_hints]
-when_to_use = "When you need to add a new product to Shopify"
-
-[provides.operations.products_update]
-summary = "Update a product"
-capability = "shopify.products.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.products_update.ai_hints]
-when_to_use = "When you need to modify an existing product"
-
-[provides.operations.products_delete]
-summary = "Delete a product"
-capability = "shopify.products.write"
-risk = "high"
-safety_tier = "dangerous"
-idempotency = "strict"
-
-[provides.operations.products_delete.ai_hints]
-when_to_use = "When you need to permanently remove a product"
-
-[provides.operations.orders_list]
-summary = "List orders"
-capability = "shopify.orders.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.orders_list.ai_hints]
-when_to_use = "When you need to list recent orders"
-
-[provides.operations.orders_get]
-summary = "Get an order by ID"
-capability = "shopify.orders.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.orders_get.ai_hints]
-when_to_use = "When you need details of a specific order"
-
-[provides.operations.orders_create]
-summary = "Create an order"
-capability = "shopify.orders.write"
-risk = "high"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.orders_create.ai_hints]
-when_to_use = "When you need to create a new order programmatically"
-
-[provides.operations.customers_list]
-summary = "List customers"
+[provides.operations."shopify.customers.get"]
+description = "Fetch one customer by numeric Shopify customer ID from the configured shop."
 capability = "shopify.customers.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.customers_list.ai_hints]
-when_to_use = "When you need to list store customers"
+[provides.operations."shopify.customers.get".input_schema]
+required = ["customer_id"]
+type = "object"
 
-[provides.operations.customers_get]
-summary = "Get a customer by ID"
+[provides.operations."shopify.customers.get".input_schema.properties.customer_id]
+type = "integer"
+
+[provides.operations."shopify.customers.get".output_schema]
+type = "object"
+
+[provides.operations."shopify.customers.get".output_schema.properties.email]
+type = "string"
+
+[provides.operations."shopify.customers.get".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."shopify.customers.get".ai_hints]
+when_to_use = "Use when you need one customer from the configured shop by numeric customer ID."
+common_mistakes = [
+    "Passing a non-numeric identifier.",
+    "Expecting customer create/update/delete support; this first slice is read-only for customers.",
+]
+examples = []
+related = []
+
+[provides.operations."shopify.customers.list"]
+description = "List the first page of customers visible to the configured shop token."
 capability = "shopify.customers.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.customers_get.ai_hints]
-when_to_use = "When you need details of a specific customer"
+[provides.operations."shopify.customers.list".input_schema]
+type = "object"
 
-[provides.operations.inventory_list]
-summary = "List inventory levels"
+[provides.operations."shopify.customers.list".output_schema]
+type = "array"
+
+[provides.operations."shopify.customers.list".output_schema.items]
+type = "object"
+
+[provides.operations."shopify.customers.list".ai_hints]
+when_to_use = "Use when you need the first page of customer records from the configured shop."
+common_mistakes = [
+    "Expecting pagination or search filters; this slice returns only the first fixed page.",
+    "Echoing unnecessary customer PII into shared transcripts.",
+]
+examples = []
+related = []
+
+[provides.operations."shopify.health"]
+description = "Probe /shop.json to verify that the configured Admin API token can reach the configured Shopify shop."
+capability = "shopify.products.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."shopify.health".input_schema]
+type = "object"
+
+[provides.operations."shopify.health".output_schema]
+type = "object"
+
+[provides.operations."shopify.health".output_schema.properties.healthy]
+type = "boolean"
+
+[provides.operations."shopify.health".output_schema.properties.shop_id]
+type = "integer"
+
+[provides.operations."shopify.health".output_schema.properties.shop_name]
+type = "string"
+
+[provides.operations."shopify.health".ai_hints]
+when_to_use = "Use when you need to confirm the configured token can reach the configured shop."
+common_mistakes = ["Assuming this proves every optional scope is granted; it only verifies the /shop.json probe path."]
+examples = []
+related = []
+
+[provides.operations."shopify.inventory.list"]
+description = "List inventory levels for a single Shopify location_id in the configured shop."
 capability = "shopify.inventory.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.inventory_list.ai_hints]
-when_to_use = "When you need to check inventory levels"
-
-[provides.operations.health]
-summary = "Check Shopify API health"
-capability = "shopify.products.read"
-risk = "low"
-safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.health.ai_hints]
-when_to_use = "When you need to verify Shopify API credentials"
+[provides.operations."shopify.inventory.list".input_schema]
+required = ["location_id"]
+type = "object"
+
+[provides.operations."shopify.inventory.list".input_schema.properties.location_id]
+type = "integer"
+
+[provides.operations."shopify.inventory.list".output_schema]
+type = "array"
+
+[provides.operations."shopify.inventory.list".output_schema.items]
+type = "object"
+
+[provides.operations."shopify.inventory.list".ai_hints]
+when_to_use = "Use when you need inventory levels for one known location in the configured shop."
+common_mistakes = [
+    "Omitting location_id.",
+    "Expecting location discovery or inventory mutation operations from this slice.",
+]
+examples = []
+related = ["shopify.products.read"]
+
+[provides.operations."shopify.orders.create"]
+description = "Create an order record for the configured shop without running checkout, payment capture, or fulfillment orchestration."
+capability = "shopify.orders.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."shopify.orders.create".input_schema]
+required = ["line_items"]
+type = "object"
+
+[provides.operations."shopify.orders.create".input_schema.properties.email]
+type = "string"
+
+[provides.operations."shopify.orders.create".input_schema.properties.financial_status]
+type = "string"
+
+[provides.operations."shopify.orders.create".input_schema.properties.line_items]
+type = "array"
+
+[provides.operations."shopify.orders.create".output_schema]
+type = "object"
+
+[provides.operations."shopify.orders.create".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."shopify.orders.create".output_schema.properties.line_items]
+type = "array"
+
+[provides.operations."shopify.orders.create".ai_hints]
+when_to_use = "Use when you need to create a real order record in the configured shop."
+common_mistakes = [
+    "Omitting line_items with numeric variant_id values.",
+    "Expecting this call to charge payment, run checkout, or manage fulfillment.",
+]
+examples = []
+related = [
+    "shopify.orders.read",
+    "shopify.products.read",
+]
+
+[provides.operations."shopify.orders.get"]
+description = "Fetch one order by numeric Shopify order ID from the configured shop."
+capability = "shopify.orders.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."shopify.orders.get".input_schema]
+required = ["order_id"]
+type = "object"
+
+[provides.operations."shopify.orders.get".input_schema.properties.order_id]
+type = "integer"
+
+[provides.operations."shopify.orders.get".output_schema]
+type = "object"
+
+[provides.operations."shopify.orders.get".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."shopify.orders.get".output_schema.properties.line_items]
+type = "array"
+
+[provides.operations."shopify.orders.get".ai_hints]
+when_to_use = "Use when you need one order from the configured shop by numeric order ID."
+common_mistakes = [
+    "Passing a display name instead of a numeric order_id.",
+    "Expecting historical orders outside the default 60-day window without read_all_orders.",
+]
+examples = []
+related = ["shopify.orders.read"]
+
+[provides.operations."shopify.orders.list"]
+description = "List the first page of orders visible to the configured app installation for the configured shop."
+capability = "shopify.orders.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."shopify.orders.list".input_schema]
+type = "object"
+
+[provides.operations."shopify.orders.list".output_schema]
+type = "array"
+
+[provides.operations."shopify.orders.list".output_schema.items]
+type = "object"
+
+[provides.operations."shopify.orders.list".ai_hints]
+when_to_use = "Use when you need the first page of orders visible to the configured Shopify app installation."
+common_mistakes = [
+    "Expecting pagination or advanced filtering; this slice returns only the first fixed page.",
+    "Expecting orders older than 60 days without Shopify-approved read_all_orders scope.",
+]
+examples = []
+related = ["shopify.orders.write"]
+
+[provides.operations."shopify.products.create"]
+description = "Create a product in the configured shop through the legacy REST Admin product resource."
+capability = "shopify.products.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."shopify.products.create".input_schema]
+required = ["title"]
+type = "object"
+
+[provides.operations."shopify.products.create".input_schema.properties.body_html]
+type = "string"
+
+[provides.operations."shopify.products.create".input_schema.properties.product_type]
+type = "string"
+
+[provides.operations."shopify.products.create".input_schema.properties.status]
+type = "string"
+
+[provides.operations."shopify.products.create".input_schema.properties.tags]
+type = "string"
+
+[provides.operations."shopify.products.create".input_schema.properties.title]
+type = "string"
+
+[provides.operations."shopify.products.create".input_schema.properties.variants]
+type = "array"
+
+[provides.operations."shopify.products.create".input_schema.properties.vendor]
+type = "string"
+
+[provides.operations."shopify.products.create".output_schema]
+type = "object"
+
+[provides.operations."shopify.products.create".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."shopify.products.create".output_schema.properties.title]
+type = "string"
+
+[provides.operations."shopify.products.create".ai_hints]
+when_to_use = "Use when you need to create a real product in one configured Shopify shop."
+common_mistakes = [
+    "Forgetting that title is required.",
+    "Treating this as a dry-run; it mutates live catalog state in the configured shop.",
+]
+examples = []
+related = ["shopify.products.read"]
+
+[provides.operations."shopify.products.delete"]
+description = "Delete a product from the configured shop through Shopify's legacy REST Admin API."
+capability = "shopify.products.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."shopify.products.delete".input_schema]
+required = ["product_id"]
+type = "object"
+
+[provides.operations."shopify.products.delete".input_schema.properties.product_id]
+type = "integer"
+
+[provides.operations."shopify.products.delete".output_schema]
+type = "object"
+
+[provides.operations."shopify.products.delete".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."shopify.products.delete".ai_hints]
+when_to_use = "Use only when you need to permanently remove a product from the configured shop."
+common_mistakes = [
+    "Skipping operator confirmation for a destructive catalog action.",
+    "Assuming deleted products are easily restorable.",
+]
+examples = []
+related = ["shopify.products.read"]
+
+[provides.operations."shopify.products.get"]
+description = "Fetch one product by numeric Shopify product ID from the configured shop."
+capability = "shopify.products.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."shopify.products.get".input_schema]
+required = ["product_id"]
+type = "object"
+
+[provides.operations."shopify.products.get".input_schema.properties.product_id]
+description = "Numeric Shopify product ID."
+type = "integer"
+
+[provides.operations."shopify.products.get".output_schema]
+type = "object"
+
+[provides.operations."shopify.products.get".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."shopify.products.get".output_schema.properties.title]
+type = "string"
+
+[provides.operations."shopify.products.get".output_schema.properties.variants]
+type = "array"
+
+[provides.operations."shopify.products.get".ai_hints]
+when_to_use = "Use when you need one product from the configured shop by numeric product ID."
+common_mistakes = [
+    "Passing a handle, slug, or GraphQL gid instead of a numeric product_id.",
+    "Assuming product REST CRUD is the long-term Shopify API contract.",
+]
+examples = []
+related = ["shopify.products.read"]
+
+[provides.operations."shopify.products.list"]
+description = "List the first page of products for the configured shop via Shopify's legacy REST Admin API."
+capability = "shopify.products.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."shopify.products.list".input_schema]
+type = "object"
+
+[provides.operations."shopify.products.list".output_schema]
+type = "array"
+
+[provides.operations."shopify.products.list".output_schema.items]
+type = "object"
+
+[provides.operations."shopify.products.list".ai_hints]
+when_to_use = "Use when you need the first page of products from one configured Shopify shop."
+common_mistakes = [
+    "Expecting cursor pagination, filters, or bulk catalog sync; this slice returns only the first fixed page.",
+    "Treating REST product endpoints as the long-term Shopify surface; upstream considers them legacy.",
+]
+examples = []
+related = ["shopify.products.write"]
+
+[provides.operations."shopify.products.update"]
+description = "Update mutable product fields for an existing Shopify product in the configured shop."
+capability = "shopify.products.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."shopify.products.update".input_schema]
+required = ["product_id"]
+type = "object"
+
+[provides.operations."shopify.products.update".input_schema.properties.body_html]
+type = "string"
+
+[provides.operations."shopify.products.update".input_schema.properties.product_id]
+type = "integer"
+
+[provides.operations."shopify.products.update".input_schema.properties.product_type]
+type = "string"
+
+[provides.operations."shopify.products.update".input_schema.properties.status]
+type = "string"
+
+[provides.operations."shopify.products.update".input_schema.properties.tags]
+type = "string"
+
+[provides.operations."shopify.products.update".input_schema.properties.title]
+type = "string"
+
+[provides.operations."shopify.products.update".input_schema.properties.vendor]
+type = "string"
+
+[provides.operations."shopify.products.update".output_schema]
+type = "object"
+
+[provides.operations."shopify.products.update".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."shopify.products.update".output_schema.properties.title]
+type = "string"
+
+[provides.operations."shopify.products.update".ai_hints]
+when_to_use = "Use when you need to patch mutable product fields in the configured shop."
+common_mistakes = [
+    "Forgetting product_id.",
+    "Assuming retries are strictly replay-safe; upstream product updates are best-effort.",
+]
+examples = []
+related = ["shopify.products.read"]
 
 [sandbox]
 profile = "strict"
 memory_mb = 128
 cpu_percent = 25
 wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
 deny_exec = true
 deny_ptrace = true

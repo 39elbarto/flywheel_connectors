@@ -31,10 +31,11 @@ impl ShopifyClient {
         shop_domain: &str,
         access_token: String,
         api_version: &str,
+        request_timeout_ms: u64,
         retry_config: HttpRetryConfig,
     ) -> ShopifyResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_millis(request_timeout_ms))
             .build()
             .map_err(ShopifyError::Http)?;
 
@@ -442,6 +443,7 @@ mod tests {
                 "test-store.myshopify.com",
                 "shpat_secret".into(),
                 "2024-01",
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -460,6 +462,7 @@ mod tests {
                 "test.myshopify.com",
                 String::new(),
                 "2024-01",
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -473,6 +476,7 @@ mod tests {
                 "test.myshopify.com",
                 "token".into(),
                 "2024-01",
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -489,6 +493,7 @@ mod tests {
                 "my-store.myshopify.com",
                 "t".into(),
                 "2024-01",
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -508,6 +513,7 @@ mod tests {
                 "store.myshopify.com/",
                 "t".into(),
                 "2024-01",
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await

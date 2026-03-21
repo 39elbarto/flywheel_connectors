@@ -22,6 +22,20 @@ use crate::client::ShopifyClient;
 use crate::types::{CreateLineItem, CreateOrder, CreateProduct, CreateVariant, UpdateProduct};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const DEFAULT_LIST_LIMIT: u64 = 50;
+const SHOPIFY_IMPLEMENTATION_API: &str = "shopify_admin_rest";
+const SHOPIFY_IMPLEMENTATION_STATUS: &str = "legacy";
+const SHOPIFY_AUTH_MODEL: &str = "admin_api_access_token";
+const SHOPIFY_BINDING_MODEL: &str = "single_shop_single_app_install";
+const SHOPIFY_ORDER_HISTORY_SCOPE: &str = "read_all_orders";
+const SHOPIFY_FIRST_SLICE_NON_GOALS: &[&str] = &[
+    "OAuth installation and token exchange",
+    "Multi-shop routing or fan-out from a single connector instance",
+    "GraphQL Admin API migration",
+    "Webhook or streaming ingestion",
+    "Fulfillment order lifecycle operations",
+    "Cursor pagination or server-side filtering beyond the first fixed page",
+];
 
 const OP_PRODUCTS_LIST: &str = "shopify.products.list";
 const OP_PRODUCTS_GET: &str = "shopify.products.get";
@@ -56,7 +70,7 @@ pub struct ShopifyConfig {
 }
 
 fn default_api_version() -> String {
-    "2024-01".into()
+    "2026-01".into()
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -78,17 +92,53 @@ impl ShopifyConfig {
         if self.shop_domain.is_empty() {
             return Err("shop_domain is required".into());
         }
+        if self.shop_domain.contains("://")
+            || self.shop_domain.contains('/')
+            || self.shop_domain.contains('?')
+            || self.shop_domain.contains('#')
+        {
+            return Err(
+                "shop_domain must be a bare Shopify hostname like store.myshopify.com".into(),
+            );
+        }
+        if !self.shop_domain.ends_with(".myshopify.com")
+            || self
+                .shop_domain
+                .strip_suffix(".myshopify.com")
+                .is_none_or(str::is_empty)
+        {
+            return Err("shop_domain must end with .myshopify.com".into());
+        }
         if self.access_token.is_empty() {
             return Err("access_token is required".into());
+        }
+        if self.api_version.len() != 7
+            || !self.api_version.chars().enumerate().all(|(idx, ch)| {
+                if idx == 4 {
+                    ch == '-'
+                } else {
+                    ch.is_ascii_digit()
+                }
+            })
+        {
+            return Err("api_version must look like YYYY-MM".into());
         }
         Ok(())
     }
 
     fn from_value(val: serde_json::Value) -> FcpResult<Self> {
-        let config: Self = serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("Invalid configuration: {e}"),
-        })?;
+        let mut config: Self =
+            serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+        config.shop_domain = config
+            .shop_domain
+            .trim()
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        config.access_token = config.access_token.trim().to_owned();
+        config.api_version = config.api_version.trim().to_owned();
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
             message: e,
@@ -138,6 +188,90 @@ impl DoctorResult {
     }
 }
 
+fn contract_details(config: Option<&ShopifyConfig>) -> serde_json::Value {
+    json!({
+        "implementation": {
+            "api": SHOPIFY_IMPLEMENTATION_API,
+            "status": SHOPIFY_IMPLEMENTATION_STATUS,
+            "legacy_notes": [
+                "Shopify marks the REST Admin API as legacy upstream.",
+                "REST product CRUD remains a compatibility surface and should not be treated as the long-term Shopify contract."
+            ],
+        },
+        "auth_boundary": {
+            "binding": SHOPIFY_BINDING_MODEL,
+            "token_type": SHOPIFY_AUTH_MODEL,
+            "configured_shop_domain": config.map(|cfg| cfg.shop_domain.clone()),
+            "api_version": config.map(|cfg| cfg.api_version.clone()),
+            "oauth_installation_supported": false,
+            "multi_shop_supported": false,
+        },
+        "service_inventory": {
+            "products": {
+                "supported_operations": [
+                    OP_PRODUCTS_LIST,
+                    OP_PRODUCTS_GET,
+                    OP_PRODUCTS_CREATE,
+                    OP_PRODUCTS_UPDATE,
+                    OP_PRODUCTS_DELETE,
+                ],
+                "notes": [
+                    "Uses legacy REST Admin product endpoints against exactly one configured shop.",
+                    "List operations currently return only the first fixed page of results."
+                ],
+            },
+            "orders": {
+                "supported_operations": [
+                    OP_ORDERS_LIST,
+                    OP_ORDERS_GET,
+                    OP_ORDERS_CREATE,
+                ],
+                "notes": [
+                    "Orders older than 60 days require Shopify-approved read_all_orders scope in addition to the normal order scopes.",
+                    "Order creation writes an order record but does not run checkout, capture payment, or manage fulfillment."
+                ],
+            },
+            "customers": {
+                "supported_operations": [
+                    OP_CUSTOMERS_LIST,
+                    OP_CUSTOMERS_GET,
+                ],
+                "notes": [
+                    "Read-only customer access in this first slice; no customer mutations are exposed.",
+                    "List operations currently return only the first fixed page of results."
+                ],
+            },
+            "inventory": {
+                "supported_operations": [OP_INVENTORY_LIST],
+                "notes": [
+                    "Read-only inventory level lookup scoped to a single location_id.",
+                    "No inventory mutation or location discovery operations are exposed in this slice."
+                ],
+            },
+            "fulfillment": {
+                "supported": false,
+                "notes": [
+                    "Fulfillment and fulfillment-order workflows are intentionally deferred.",
+                    "Shopify fulfillment APIs use a more specialized scope and lifecycle model than this first slice."
+                ],
+            },
+        },
+        "non_goals": SHOPIFY_FIRST_SLICE_NON_GOALS,
+    })
+}
+
+fn with_self_check_details(
+    mut report: SelfCheckReport,
+    config: Option<&ShopifyConfig>,
+    probe: serde_json::Value,
+) -> SelfCheckReport {
+    report.details = Some(json!({
+        "contract": contract_details(config),
+        "probe": probe,
+    }));
+    report
+}
+
 #[derive(Debug)]
 pub struct ShopifyConnector {
     base: BaseConnector,
@@ -173,9 +307,17 @@ impl ShopifyConnector {
             name: "configuration".into(),
             passed: self.config.is_some(),
             message: if self.config.is_some() {
-                None
+                self.config.as_ref().map(|cfg| {
+                    format!(
+                        "Bound to {} with Admin API version {}.",
+                        cfg.shop_domain, cfg.api_version
+                    )
+                })
             } else {
-                Some("Not configured; run configure before handshake or invoke".into())
+                Some(
+                    "Not configured; provide one Admin API token and one *.myshopify.com shop domain before handshake or invoke."
+                        .into(),
+                )
             },
             critical: true,
         });
@@ -198,6 +340,33 @@ impl ShopifyConnector {
                 Some("ConnectorRuntime not initialized; re-run configure".into())
             },
             critical: true,
+        });
+        checks.push(DoctorCheck {
+            name: "auth_boundary".into(),
+            passed: self.config.is_some(),
+            message: Some(
+                "This connector is scoped to one shop/app install only; OAuth install, multi-shop fan-out, and delegated user auth are out of scope for the first slice."
+                    .into(),
+            ),
+            critical: false,
+        });
+        checks.push(DoctorCheck {
+            name: "implementation_substrate".into(),
+            passed: true,
+            message: Some(
+                "Current implementation uses Shopify's legacy REST Admin API; GraphQL migration is intentionally deferred to a later bead."
+                    .into(),
+            ),
+            critical: false,
+        });
+        checks.push(DoctorCheck {
+            name: "first_slice_inventory".into(),
+            passed: true,
+            message: Some(
+                "Supported today: products, orders, customers, and inventory-level reads plus limited product/order writes. Fulfillment, webhooks, and pagination beyond the first fixed page are non-goals."
+                    .into(),
+            ),
+            critical: false,
         });
         DoctorResult::from_checks(checks)
     }
@@ -247,92 +416,234 @@ fn operations_info() -> Vec<OperationInfo> {
             related: related.into_iter().map(CapabilityId::from_static).collect(),
         }
     };
+    let product_schema = || {
+        json!({
+            "type": "object",
+            "required": ["id", "title", "variants"],
+            "properties": {
+                "id": { "type": "integer" },
+                "title": { "type": "string" },
+                "vendor": { "type": ["string", "null"] },
+                "product_type": { "type": ["string", "null"] },
+                "status": { "type": ["string", "null"] },
+                "tags": { "type": ["string", "null"] },
+                "variants": { "type": "array", "items": { "type": "object" } }
+            }
+        })
+    };
+    let order_schema = || {
+        json!({
+            "type": "object",
+            "required": ["id", "line_items"],
+            "properties": {
+                "id": { "type": "integer" },
+                "name": { "type": ["string", "null"] },
+                "email": { "type": ["string", "null"] },
+                "financial_status": { "type": ["string", "null"] },
+                "fulfillment_status": { "type": ["string", "null"] },
+                "line_items": { "type": "array", "items": { "type": "object" } }
+            }
+        })
+    };
+    let customer_schema = || {
+        json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": { "type": "integer" },
+                "first_name": { "type": ["string", "null"] },
+                "last_name": { "type": ["string", "null"] },
+                "email": { "type": ["string", "null"] },
+                "phone": { "type": ["string", "null"] },
+                "orders_count": { "type": ["integer", "null"] },
+                "total_spent": { "type": ["string", "null"] }
+            }
+        })
+    };
+    let inventory_schema = || {
+        json!({
+            "type": "object",
+            "properties": {
+                "inventory_item_id": { "type": ["integer", "null"] },
+                "location_id": { "type": ["integer", "null"] },
+                "available": { "type": ["integer", "null"] },
+                "updated_at": { "type": ["string", "null"] }
+            }
+        })
+    };
     vec![
         OperationInfo {
             id: OperationId::from_static(OP_PRODUCTS_LIST),
             summary: "List products".into(),
-            description: None,
+            description: Some(
+                "List the first page of products for the configured shop via Shopify's legacy REST Admin API."
+                    .into(),
+            ),
             input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            output_schema: json!({"type":"array","items": product_schema()}),
             capability: CapabilityId::from_static(CAP_PRODUCTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "List products in the store",
-                vec![],
+                "List products in the configured Shopify shop.",
+                vec![
+                    format!(
+                        "This first slice returns only the first {} products and does not expose cursor pagination or server-side filtering.",
+                        DEFAULT_LIST_LIMIT
+                    ),
+                    "Do not treat this as proof that GraphQL product-model coverage or bulk catalog sync exists.".into(),
+                ],
                 vec![CAP_PRODUCTS_WRITE],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PRODUCTS_GET),
             summary: "Get product by ID".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["product_id"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Fetch one product by numeric Shopify product ID from the configured shop.".into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["product_id"],
+                "properties": {
+                    "product_id": {
+                        "type": "integer",
+                        "description": "Numeric Shopify product ID."
+                    }
+                }
+            }),
+            output_schema: product_schema(),
             capability: CapabilityId::from_static(CAP_PRODUCTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Get details of a specific product",
-                vec!["Use numeric product_id not handle".into()],
+                vec![
+                    "Use numeric product_id, not a handle, slug, or GraphQL gid.".into(),
+                    "REST product CRUD is a legacy compatibility surface upstream.".into(),
+                ],
                 vec![CAP_PRODUCTS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PRODUCTS_CREATE),
             summary: "Create a product".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["title"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Create a product in the configured shop through the legacy REST Admin product resource."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["title"],
+                "properties": {
+                    "title": { "type": "string" },
+                    "body_html": { "type": "string" },
+                    "vendor": { "type": "string" },
+                    "product_type": { "type": "string" },
+                    "status": { "type": "string" },
+                    "tags": { "type": "string" },
+                    "variants": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string" },
+                                "price": { "type": "string" },
+                                "sku": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }),
+            output_schema: product_schema(),
             capability: CapabilityId::from_static(CAP_PRODUCTS_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::None,
             ai_hints: hint(
                 "Create a new product",
-                vec!["title is required".into()],
+                vec![
+                    "title is required".into(),
+                    "This is a real catalog mutation on the configured shop and should be treated as operator-visible state.".into(),
+                ],
                 vec![CAP_PRODUCTS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PRODUCTS_UPDATE),
             summary: "Update a product".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["product_id"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Update mutable product fields for an existing Shopify product in the configured shop."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["product_id"],
+                "properties": {
+                    "product_id": { "type": "integer" },
+                    "title": { "type": "string" },
+                    "body_html": { "type": "string" },
+                    "vendor": { "type": "string" },
+                    "product_type": { "type": "string" },
+                    "status": { "type": "string" },
+                    "tags": { "type": "string" }
+                }
+            }),
+            output_schema: product_schema(),
             capability: CapabilityId::from_static(CAP_PRODUCTS_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: hint(
                 "Update an existing product",
-                vec!["product_id is required".into()],
+                vec![
+                    "product_id is required".into(),
+                    "Shopify product updates are upstream best-effort mutations; repeated retries can still trigger webhooks or race with concurrent admin edits.".into(),
+                ],
                 vec![CAP_PRODUCTS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PRODUCTS_DELETE),
             summary: "Delete a product".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["product_id"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Delete a product from the configured shop through Shopify's legacy REST Admin API."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["product_id"],
+                "properties": {
+                    "product_id": { "type": "integer" }
+                }
+            }),
+            output_schema: json!({
+                "type":"object",
+                "required":["deleted"],
+                "properties": {
+                    "deleted": { "type": "boolean" }
+                }
+            }),
             capability: CapabilityId::from_static(CAP_PRODUCTS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Delete a product (irreversible)",
-                vec!["Verify product_id first".into()],
+                vec![
+                    "Verify product_id first".into(),
+                    "Deletion is irreversible for the configured shop and REST product delete remains a legacy/deprecated upstream path.".into(),
+                ],
                 vec![CAP_PRODUCTS_READ],
             ),
             rate_limit: None,
@@ -341,116 +652,225 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_ORDERS_LIST),
             summary: "List orders".into(),
-            description: None,
+            description: Some(
+                "List the first page of orders visible to the configured app installation for the configured shop."
+                    .into(),
+            ),
             input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            output_schema: json!({"type":"array","items": order_schema()}),
             capability: CapabilityId::from_static(CAP_ORDERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: hint("List recent orders", vec![], vec![CAP_ORDERS_WRITE]),
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint(
+                "List recent orders available to the configured shop token.",
+                vec![
+                    format!(
+                        "This first slice returns only the first {} visible orders and does not expose cursor pagination or filters.",
+                        DEFAULT_LIST_LIMIT
+                    ),
+                    format!(
+                        "Orders older than 60 days require Shopify-approved {} scope in addition to normal order scopes.",
+                        SHOPIFY_ORDER_HISTORY_SCOPE
+                    ),
+                ],
+                vec![CAP_ORDERS_WRITE],
+            ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ORDERS_GET),
             summary: "Get order by ID".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["order_id"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Fetch one order by numeric Shopify order ID from the configured shop.".into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["order_id"],
+                "properties": {
+                    "order_id": { "type": "integer" }
+                }
+            }),
+            output_schema: order_schema(),
             capability: CapabilityId::from_static(CAP_ORDERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Get details of a specific order",
-                vec!["Use numeric order_id".into()],
+                vec![
+                    "Use numeric order_id, not a human display name.".into(),
+                    format!(
+                        "Historical orders beyond the default 60-day window require {} scope on the underlying Shopify app.",
+                        SHOPIFY_ORDER_HISTORY_SCOPE
+                    ),
+                ],
                 vec![CAP_ORDERS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ORDERS_CREATE),
             summary: "Create an order".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["line_items"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Create an order record for the configured shop without running checkout, payment capture, or fulfillment orchestration."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["line_items"],
+                "properties": {
+                    "line_items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["variant_id"],
+                            "properties": {
+                                "variant_id": { "type": "integer" },
+                                "quantity": { "type": "integer" }
+                            }
+                        }
+                    },
+                    "email": { "type": "string" },
+                    "financial_status": { "type": "string" }
+                }
+            }),
+            output_schema: order_schema(),
             capability: CapabilityId::from_static(CAP_ORDERS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::None,
             ai_hints: hint(
                 "Create a new order",
-                vec!["line_items with variant_id and quantity required".into()],
+                vec![
+                    "line_items with variant_id and quantity required".into(),
+                    "Creating an order here does not charge a payment method, run checkout, or manage fulfillment.".into(),
+                ],
                 vec![CAP_ORDERS_READ, CAP_PRODUCTS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_CUSTOMERS_LIST),
             summary: "List customers".into(),
-            description: None,
+            description: Some(
+                "List the first page of customers visible to the configured shop token.".into(),
+            ),
             input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            output_schema: json!({"type":"array","items": customer_schema()}),
             capability: CapabilityId::from_static(CAP_CUSTOMERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: hint("List store customers", vec![], vec![]),
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint(
+                "List customer records for the configured shop.",
+                vec![
+                    format!(
+                        "This first slice returns only the first {} customers and does not expose cursor pagination or filters.",
+                        DEFAULT_LIST_LIMIT
+                    ),
+                    "Avoid echoing unnecessary customer PII into shared transcripts.".into(),
+                ],
+                vec![],
+            ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_CUSTOMERS_GET),
             summary: "Get customer by ID".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["customer_id"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Fetch one customer by numeric Shopify customer ID from the configured shop."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["customer_id"],
+                "properties": {
+                    "customer_id": { "type": "integer" }
+                }
+            }),
+            output_schema: customer_schema(),
             capability: CapabilityId::from_static(CAP_CUSTOMERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Get a specific customer",
-                vec!["Use numeric customer_id".into()],
+                vec![
+                    "Use numeric customer_id".into(),
+                    "This slice is read-only for customers; there are no customer mutation operations yet.".into(),
+                ],
                 vec![],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_INVENTORY_LIST),
             summary: "List inventory levels".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["location_id"]}),
-            output_schema: json!({"type":"array"}),
+            description: Some(
+                "List inventory levels for a single Shopify location_id in the configured shop."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["location_id"],
+                "properties": {
+                    "location_id": { "type": "integer" }
+                }
+            }),
+            output_schema: json!({"type":"array","items": inventory_schema()}),
             capability: CapabilityId::from_static(CAP_INVENTORY_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Check inventory at a location",
-                vec!["location_id is required".into()],
+                vec![
+                    "location_id is required".into(),
+                    "This first slice does not discover locations or mutate inventory quantities.".into(),
+                ],
                 vec![CAP_PRODUCTS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check API credentials".into(),
-            description: None,
+            description: Some(
+                "Probe /shop.json to verify that the configured Admin API token can reach the configured Shopify shop."
+                    .into(),
+            ),
             input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"object"}),
+            output_schema: json!({
+                "type":"object",
+                "required":["healthy", "shop_id", "shop_name"],
+                "properties": {
+                    "healthy": { "type": "boolean" },
+                    "shop_id": { "type": "integer" },
+                    "shop_name": { "type": "string" },
+                    "shop_domain": { "type": ["string", "null"] },
+                    "plan_name": { "type": ["string", "null"] }
+                }
+            }),
             capability: CapabilityId::from_static(CAP_PRODUCTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Verify Shopify credentials", vec![], vec![]),
+            ai_hints: hint(
+                "Verify that the configured shop token can reach /shop.json.",
+                vec![
+                    "This validates the shop binding and token reachability, not every optional scope used by every operation.".into(),
+                ],
+                vec![],
+            ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
     ]
 }
@@ -471,18 +891,26 @@ impl FcpConnector for ShopifyConnector {
             &cfg.shop_domain,
             cfg.access_token.clone(),
             &cfg.api_version,
+            cfg.request_timeout_ms,
             cfg.retry.clone(),
         )
         .await
         .map_err(|e| FcpError::Internal {
             message: format!("Client init: {e}"),
         })?;
+        let shop_domain = cfg.shop_domain.clone();
+        let api_version = cfg.api_version.clone();
         self.client = Some(client);
         self.config = Some(cfg);
         self.verifier = None;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
-        info!(event = "shopify.configure", "Configured Shopify connector");
+        info!(
+            event = "shopify.configure",
+            shop_domain = %shop_domain,
+            api_version = %api_version,
+            "Configured Shopify connector"
+        );
         Ok(())
     }
 
@@ -519,38 +947,61 @@ impl FcpConnector for ShopifyConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snap = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let mut snap = match (&self.config, &self.client, &self.runtime) {
+            (None, _, _) => HealthSnapshot::degraded("not configured"),
+            (Some(_), None, _) => HealthSnapshot::error("client not initialized"),
+            (Some(_), _, None) => HealthSnapshot::error("runtime not initialized"),
+            (Some(_), Some(client), Some(_)) if client.is_secretless() => {
+                HealthSnapshot::degraded("admin api access token required")
+            }
+            (Some(_), Some(_), Some(_)) => HealthSnapshot::ready(),
         };
         snap.uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snap.details = Some(json!({
             "configured": self.config.is_some(),
             "handshaken": self.base.handshaken.load(Ordering::Acquire),
             "manifest_hash": Self::manifest_hash(),
+            "contract": contract_details(self.config.as_ref()),
         }));
         snap
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(_config) = &self.config else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+        let Some(config) = &self.config else {
+            return Ok(with_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+                json!({
+                    "reachable": false,
+                    "reason": "configure one Admin API token and one *.myshopify.com shop domain before running self_check"
+                }),
             ));
         };
 
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::failed(
-                "client_missing",
-                "Shopify HTTP client not initialized; re-run configure",
+            return Ok(with_self_check_details(
+                SelfCheckReport::failed(
+                    "client_missing",
+                    "Shopify HTTP client not initialized; re-run configure",
+                ),
+                Some(config),
+                json!({
+                    "reachable": false,
+                    "reason": "client missing"
+                }),
             ));
         };
         let Some(runtime) = &self.runtime else {
-            return Ok(SelfCheckReport::failed(
-                "runtime_missing",
-                "ConnectorRuntime not initialized; re-run configure",
+            return Ok(with_self_check_details(
+                SelfCheckReport::failed(
+                    "runtime_missing",
+                    "ConnectorRuntime not initialized; re-run configure",
+                ),
+                Some(config),
+                json!({
+                    "reachable": false,
+                    "reason": "runtime missing"
+                }),
             ));
         };
 
@@ -561,15 +1012,35 @@ impl FcpConnector for ShopifyConnector {
                     shop_name = %shop.name,
                     "Shopify self_check passed"
                 );
-                Ok(SelfCheckReport::ok())
+                Ok(with_self_check_details(
+                    SelfCheckReport::ok(),
+                    Some(config),
+                    json!({
+                        "reachable": true,
+                        "shop": {
+                            "id": shop.id,
+                            "name": shop.name,
+                            "domain": shop.domain,
+                            "plan_name": shop.plan_name,
+                        }
+                    }),
+                ))
             }
-            Err(error) if error.is_retryable() => Ok(SelfCheckReport::degraded(
-                "self_check_retryable",
-                error.to_string(),
+            Err(error) if error.is_retryable() => Ok(with_self_check_details(
+                SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                Some(config),
+                json!({
+                    "reachable": false,
+                    "retryable": true,
+                }),
             )),
-            Err(error) => Ok(SelfCheckReport::failed(
-                "self_check_failed",
-                error.to_string(),
+            Err(error) => Ok(with_self_check_details(
+                SelfCheckReport::failed("self_check_failed", error.to_string()),
+                Some(config),
+                json!({
+                    "reachable": false,
+                    "retryable": false,
+                }),
             )),
         }
     }
@@ -889,7 +1360,13 @@ impl ShopifyConnector {
                     .health_check(runtime)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                json!({"healthy": true, "shop_name": shop.name, "shop_id": shop.id})
+                json!({
+                    "healthy": true,
+                    "shop_id": shop.id,
+                    "shop_name": shop.name,
+                    "shop_domain": shop.domain,
+                    "plan_name": shop.plan_name,
+                })
             }
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -1057,6 +1534,13 @@ mod tests {
                 assert!(op.requires_approval.is_some(), "{}", op.id);
             }
         }
+    }
+
+    fn op(operation_id: &'static str) -> OperationInfo {
+        operations_info()
+            .into_iter()
+            .find(|op| op.id.as_str() == operation_id)
+            .unwrap_or_else(|| panic!("missing operation {operation_id}"))
     }
 
     #[test]
@@ -1280,6 +1764,15 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(h.status, fcp_core::HealthState::Ready));
+        assert_eq!(
+            h.details.as_ref().and_then(|d| {
+                d.get("contract")
+                    .and_then(|contract| contract.get("auth_boundary"))
+                    .and_then(|auth| auth.get("binding"))
+                    .and_then(|value| value.as_str())
+            }),
+            Some(SHOPIFY_BINDING_MODEL)
+        );
     }
 
     #[test]
@@ -1358,5 +1851,97 @@ mod tests {
             .filter(|o| o.safety_tier == SafetyTier::Dangerous)
             .count();
         assert_eq!(dangerous_count, 1, "Expected 1 dangerous operation");
+    }
+
+    #[test]
+    fn configure_rejects_non_shopify_hostname() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = ShopifyConnector::new();
+                c.configure(json!({"shop_domain":"https://example.com","access_token":"t"}))
+                    .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn configure_rejects_invalid_api_version() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = ShopifyConnector::new();
+                c.configure(json!({
+                    "shop_domain":"test.myshopify.com",
+                    "access_token":"t",
+                    "api_version":"latest"
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn product_list_contract_is_strict_and_page_limited() {
+        let op = op(OP_PRODUCTS_LIST);
+        assert_eq!(op.idempotency, IdempotencyClass::Strict);
+        assert_eq!(op.requires_approval, Some(ApprovalMode::None));
+        assert!(
+            op.ai_hints
+                .common_mistakes
+                .iter()
+                .any(|mistake| mistake.contains("first 50")),
+        );
+    }
+
+    #[test]
+    fn mutating_product_contract_is_truthful() {
+        let create = op(OP_PRODUCTS_CREATE);
+        assert_eq!(create.idempotency, IdempotencyClass::None);
+        assert_eq!(create.requires_approval, Some(ApprovalMode::Interactive));
+
+        let update = op(OP_PRODUCTS_UPDATE);
+        assert_eq!(update.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(update.requires_approval, Some(ApprovalMode::Interactive));
+
+        let delete = op(OP_PRODUCTS_DELETE);
+        assert_eq!(delete.idempotency, IdempotencyClass::Strict);
+        assert_eq!(delete.requires_approval, Some(ApprovalMode::Interactive));
+    }
+
+    #[test]
+    fn orders_contract_mentions_historical_scope_and_payment_boundary() {
+        let list = op(OP_ORDERS_LIST);
+        assert_eq!(list.idempotency, IdempotencyClass::Strict);
+        assert!(
+            list.ai_hints
+                .common_mistakes
+                .iter()
+                .any(|mistake| mistake.contains(SHOPIFY_ORDER_HISTORY_SCOPE)),
+        );
+
+        let create = op(OP_ORDERS_CREATE);
+        assert_eq!(create.idempotency, IdempotencyClass::None);
+        assert_eq!(create.requires_approval, Some(ApprovalMode::Interactive));
+        assert!(
+            create
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("payment")),
+        );
+    }
+
+    #[test]
+    fn doctor_includes_non_goal_guidance() {
+        let doctor = ShopifyConnector::new().doctor();
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "first_slice_inventory"
+                && check
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("Fulfillment"))
+        }),);
     }
 }

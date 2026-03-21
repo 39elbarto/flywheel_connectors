@@ -144,6 +144,10 @@ members = [
     "connectors/confluence",
     "connectors/zoom",
     "connectors/square",
+    "connectors/calendly",
+    "connectors/coda",
+    "connectors/mastodon",
+    "connectors/hackernews",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

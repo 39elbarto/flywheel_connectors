@@ -1,0 +1,114 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.coda"
+name = "Coda"
+version = "0.1.0"
+description = "Coda document platform connector for managing docs, pages, tables, rows, and formulas"
+archetype = "operational"
+homepage = "https://coda.io/developers/apis/v1"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.docs_list]
+summary = "List documents"
+capability = "coda.docs.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.docs_list.network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.docs_list.ai_hints]
+when_to_use = "When you need to list Coda documents accessible to the user"
+
+[provides.operations.docs_get]
+summary = "Get a single document"
+capability = "coda.docs.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.docs_get.network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.docs_get.ai_hints]
+when_to_use = "When you need details about a specific Coda document"
+
+[provides.operations.docs_create]
+summary = "Create a new document"
+capability = "coda.docs.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.docs_create.network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.docs_create.ai_hints]
+when_to_use = "When you need to create a new Coda document"
+
+[provides.operations.rows_delete]
+summary = "Delete rows from a table"
+capability = "coda.tables.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.rows_delete.network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.rows_delete.ai_hints]
+when_to_use = "When you need to delete rows from a Coda table"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

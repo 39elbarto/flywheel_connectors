@@ -1,0 +1,115 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.hackernews"
+name = "Hacker News"
+version = "0.1.0"
+description = "Hacker News API connector for stories, comments, users, and job listings"
+archetype = "read-only"
+homepage = "https://github.com/HackerNews/API"
+
+[zones]
+home = "z:public"
+allowed_sources = ["z:public", "z:work"]
+allowed_targets = ["z:public"]
+tailscale_tag = "tag:fcp-public"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.item_get]
+summary = "Get an item by ID"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.item_get.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
+
+[provides.operations.user_get]
+summary = "Get a user by username"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.user_get.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
+
+[provides.operations.top_stories]
+summary = "Get top story IDs"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.new_stories]
+summary = "Get new story IDs"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.best_stories]
+summary = "Get best story IDs"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.ask_stories]
+summary = "Get Ask HN story IDs"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.show_stories]
+summary = "Get Show HN story IDs"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.job_stories]
+summary = "Get job story IDs"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.health]
+summary = "Check HN API health"
+capability = "hackernews.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

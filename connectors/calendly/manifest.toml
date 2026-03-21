@@ -1,0 +1,135 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.calendly"
+name = "Calendly"
+version = "0.1.0"
+description = "Calendly scheduling platform connector for managing events, event types, invitees, and scheduling links"
+archetype = "operational"
+homepage = "https://developer.calendly.com/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.events_list]
+summary = "List scheduled events"
+capability = "calendly.events.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.events_list.network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.events_list.ai_hints]
+when_to_use = "When you need to list scheduled events for a user or organization"
+
+[provides.operations.events_get]
+summary = "Get a single event"
+capability = "calendly.events.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.events_get.network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.events_get.ai_hints]
+when_to_use = "When you need details about a specific scheduled event"
+
+[provides.operations.event_types_list]
+summary = "List event types"
+capability = "calendly.events.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.event_types_list.network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.event_types_list.ai_hints]
+when_to_use = "When you need to see available event types for scheduling"
+
+[provides.operations.scheduling_links_create]
+summary = "Create a scheduling link"
+capability = "calendly.scheduling.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.scheduling_links_create.network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.scheduling_links_create.ai_hints]
+when_to_use = "When you need to create a shareable scheduling link for an event type"
+
+[provides.operations.events_cancel]
+summary = "Cancel a scheduled event"
+capability = "calendly.events.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.events_cancel.network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.events_cancel.ai_hints]
+when_to_use = "When you need to cancel a scheduled event"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

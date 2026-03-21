@@ -1,0 +1,546 @@
+//! Coda API client.
+
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop,
+};
+use reqwest::{Client, RequestBuilder};
+use std::time::Duration;
+use tracing::{debug, warn};
+
+use crate::error::{CodaError, CodaResult};
+use crate::types::{
+    ApiErrorResponse, DeleteRowsResponse, Doc, Formula, Page, PaginatedResponse, Row, Table,
+    UpsertRowsResponse,
+};
+
+/// Coda API client with retry and runtime integration.
+pub struct CodaClient {
+    client: Client,
+    base_url: String,
+    api_token: String,
+    retry_config: HttpRetryConfig,
+}
+
+impl std::fmt::Debug for CodaClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodaClient")
+            .field("base_url", &self.base_url)
+            .field("api_token", &"[REDACTED]")
+            .field("retry_config", &self.retry_config)
+            .finish()
+    }
+}
+
+/// Sanitize a path segment to prevent path traversal.
+fn sanitize_path_segment(segment: &str) -> CodaResult<&str> {
+    if segment.is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains("..")
+        || segment.contains('\0')
+    {
+        return Err(CodaError::InvalidInput(
+            "Invalid path segment: contains illegal characters".into(),
+        ));
+    }
+    Ok(segment)
+}
+
+impl CodaClient {
+    /// Create a new Coda client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn new(
+        base_url: &str,
+        api_token: &str,
+        retry_config: HttpRetryConfig,
+    ) -> CodaResult<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(CodaError::Http)?;
+
+        Ok(Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_token: api_token.to_string(),
+            retry_config,
+        })
+    }
+
+    fn authenticate(&self, request: RequestBuilder) -> RequestBuilder {
+        if self.api_token.is_empty() {
+            request
+        } else {
+            request.bearer_auth(&self.api_token)
+        }
+    }
+
+    /// List documents.
+    pub async fn list_docs(
+        &self,
+        runtime: &ConnectorRuntime,
+        limit: Option<u32>,
+        page_token: Option<&str>,
+        query: Option<&str>,
+    ) -> CodaResult<PaginatedResponse<Doc>> {
+        let mut url = format!("{}/docs", self.base_url);
+        let mut sep = '?';
+        if let Some(l) = limit {
+            url.push_str(&format!("{sep}limit={l}"));
+            sep = '&';
+        }
+        if let Some(pt) = page_token {
+            url.push_str(&format!("{sep}pageToken={pt}"));
+            sep = '&';
+        }
+        if let Some(q) = query {
+            url.push_str(&format!("{sep}query={q}"));
+        }
+        self.get_json(runtime, &url).await
+    }
+
+    /// Get a single document.
+    pub async fn get_doc(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+    ) -> CodaResult<Doc> {
+        let id = sanitize_path_segment(doc_id)?;
+        let url = format!("{}/docs/{}", self.base_url, id);
+        self.get_json(runtime, &url).await
+    }
+
+    /// Create a new document.
+    pub async fn create_doc(
+        &self,
+        runtime: &ConnectorRuntime,
+        title: &str,
+        source_doc: Option<&str>,
+        folder_id: Option<&str>,
+    ) -> CodaResult<Doc> {
+        let url = format!("{}/docs", self.base_url);
+        let mut body = serde_json::json!({ "title": title });
+        if let Some(src) = source_doc {
+            body["sourceDoc"] = serde_json::json!(src);
+        }
+        if let Some(fid) = folder_id {
+            body["folderId"] = serde_json::json!(fid);
+        }
+        self.post_json(runtime, &url, &body).await
+    }
+
+    /// List pages in a document.
+    pub async fn list_pages(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        limit: Option<u32>,
+        page_token: Option<&str>,
+    ) -> CodaResult<PaginatedResponse<Page>> {
+        let id = sanitize_path_segment(doc_id)?;
+        let mut url = format!("{}/docs/{}/pages", self.base_url, id);
+        let mut sep = '?';
+        if let Some(l) = limit {
+            url.push_str(&format!("{sep}limit={l}"));
+            sep = '&';
+        }
+        if let Some(pt) = page_token {
+            url.push_str(&format!("{sep}pageToken={pt}"));
+        }
+        self.get_json(runtime, &url).await
+    }
+
+    /// List tables in a document.
+    pub async fn list_tables(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        limit: Option<u32>,
+        page_token: Option<&str>,
+    ) -> CodaResult<PaginatedResponse<Table>> {
+        let id = sanitize_path_segment(doc_id)?;
+        let mut url = format!("{}/docs/{}/tables", self.base_url, id);
+        let mut sep = '?';
+        if let Some(l) = limit {
+            url.push_str(&format!("{sep}limit={l}"));
+            sep = '&';
+        }
+        if let Some(pt) = page_token {
+            url.push_str(&format!("{sep}pageToken={pt}"));
+        }
+        self.get_json(runtime, &url).await
+    }
+
+    /// List rows in a table.
+    pub async fn list_rows(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        table_id: &str,
+        limit: Option<u32>,
+        page_token: Option<&str>,
+        query: Option<&str>,
+    ) -> CodaResult<PaginatedResponse<Row>> {
+        let did = sanitize_path_segment(doc_id)?;
+        let tid = sanitize_path_segment(table_id)?;
+        let mut url = format!("{}/docs/{}/tables/{}/rows", self.base_url, did, tid);
+        let mut sep = '?';
+        if let Some(l) = limit {
+            url.push_str(&format!("{sep}limit={l}"));
+            sep = '&';
+        }
+        if let Some(pt) = page_token {
+            url.push_str(&format!("{sep}pageToken={pt}"));
+            sep = '&';
+        }
+        if let Some(q) = query {
+            url.push_str(&format!("{sep}query={q}"));
+        }
+        self.get_json(runtime, &url).await
+    }
+
+    /// Upsert rows into a table.
+    pub async fn upsert_rows(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        table_id: &str,
+        body: &serde_json::Value,
+    ) -> CodaResult<UpsertRowsResponse> {
+        let did = sanitize_path_segment(doc_id)?;
+        let tid = sanitize_path_segment(table_id)?;
+        let url = format!("{}/docs/{}/tables/{}/rows", self.base_url, did, tid);
+        self.post_json(runtime, &url, body).await
+    }
+
+    /// Delete rows from a table.
+    pub async fn delete_rows(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        table_id: &str,
+        row_ids: &[String],
+    ) -> CodaResult<DeleteRowsResponse> {
+        let did = sanitize_path_segment(doc_id)?;
+        let tid = sanitize_path_segment(table_id)?;
+        let url = format!("{}/docs/{}/tables/{}/rows/delete", self.base_url, did, tid);
+        let body = serde_json::json!({ "rowIds": row_ids });
+        self.post_json(runtime, &url, &body).await
+    }
+
+    /// List formulas in a document.
+    pub async fn list_formulas(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        limit: Option<u32>,
+        page_token: Option<&str>,
+    ) -> CodaResult<PaginatedResponse<Formula>> {
+        let id = sanitize_path_segment(doc_id)?;
+        let mut url = format!("{}/docs/{}/formulas", self.base_url, id);
+        let mut sep = '?';
+        if let Some(l) = limit {
+            url.push_str(&format!("{sep}limit={l}"));
+            sep = '&';
+        }
+        if let Some(pt) = page_token {
+            url.push_str(&format!("{sep}pageToken={pt}"));
+        }
+        self.get_json(runtime, &url).await
+    }
+
+    /// Health check: validate API reachability with GET /whoami.
+    pub async fn health_check(&self) -> CodaResult<()> {
+        let url = format!("{}/whoami", self.base_url);
+        let resp = self
+            .authenticate(self.client.get(&url))
+            .send()
+            .await
+            .map_err(CodaError::Http)?;
+        let status = resp.status().as_u16();
+
+        if resp.status().is_success() {
+            Ok(())
+        } else if status == 429 {
+            let retry_after_ms = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30)
+                * 1000;
+            Err(CodaError::RateLimited { retry_after_ms })
+        } else if status == 401 {
+            Err(CodaError::Unauthorized("Invalid API token".into()))
+        } else {
+            Err(CodaError::Api {
+                status,
+                message: format!("Health check failed with HTTP {status}"),
+            })
+        }
+    }
+
+    /// Get the base URL (for diagnostics).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Check if using secretless mode.
+    pub fn is_secretless(&self) -> bool {
+        self.api_token.is_empty()
+    }
+
+    /// Generic GET with retry + JSON deserialization.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        runtime: &ConnectorRuntime,
+        url: &str,
+    ) -> CodaResult<T> {
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let url = url.to_string();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let token = self.api_token.clone();
+            async move {
+                debug!(attempt, url = %url, "Coda GET");
+                let request = if token.is_empty() {
+                    client.get(&url)
+                } else {
+                    client.get(&url).bearer_auth(&token)
+                };
+
+                match send_request(request, "GET").await {
+                    Ok(text) => match serde_json::from_str::<T>(&text) {
+                        Ok(v) => AttemptOutcome::Success(v),
+                        Err(e) => AttemptOutcome::Terminal(CodaError::Json(e)),
+                    },
+                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: e.retry_after(),
+                        error: e,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(e),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Generic POST with retry + JSON deserialization.
+    async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        runtime: &ConnectorRuntime,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> CodaResult<T> {
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let url = url.to_string();
+        let body = body.clone();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let token = self.api_token.clone();
+            let body = body.clone();
+            async move {
+                debug!(attempt, url = %url, "Coda POST");
+                let request = if token.is_empty() {
+                    client.post(&url)
+                } else {
+                    client.post(&url).bearer_auth(&token)
+                }
+                .json(&body);
+
+                match send_request(request, "POST").await {
+                    Ok(text) => match serde_json::from_str::<T>(&text) {
+                        Ok(v) => AttemptOutcome::Success(v),
+                        Err(e) => AttemptOutcome::Terminal(CodaError::Json(e)),
+                    },
+                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: e.retry_after(),
+                        error: e,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(e),
+                }
+            }
+        })
+        .await
+    }
+}
+
+/// Send a request and handle common error statuses.
+async fn send_request(
+    request: RequestBuilder,
+    label: &str,
+) -> CodaResult<String> {
+    let resp = request.send().await.map_err(CodaError::Http)?;
+    let status = resp.status().as_u16();
+
+    if status == 429 {
+        let retry_after_ms = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|s| s * 1000)
+            .unwrap_or(30_000);
+        return Err(CodaError::RateLimited { retry_after_ms });
+    }
+
+    if status == 401 {
+        return Err(CodaError::Unauthorized("Invalid API token".into()));
+    }
+
+    if status == 404 {
+        return Err(CodaError::NotFound("Resource not found".into()));
+    }
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let message = if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&text) {
+            api_err
+                .message
+                .unwrap_or_else(|| api_err.status_message.unwrap_or_else(|| text.clone()))
+        } else {
+            text
+        };
+        warn!(status, label, "Coda API error");
+        return Err(CodaError::Api { status, message });
+    }
+
+    resp.text().await.map_err(CodaError::Http)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn client_creation() {
+        let client = CodaClient::new(
+            "https://coda.io/apis/v1",
+            "test_token",
+            HttpRetryConfig::default(),
+        );
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn base_url_trimmed() {
+        let client = CodaClient::new(
+            "https://coda.io/apis/v1/",
+            "test_token",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        assert!(!client.base_url().ends_with('/'));
+    }
+
+    #[test]
+    fn secretless_detection() {
+        let client =
+            CodaClient::new("https://coda.io/apis/v1", "", HttpRetryConfig::default()).unwrap();
+        assert!(client.is_secretless());
+    }
+
+    #[test]
+    fn debug_redacts_api_token() {
+        let client = CodaClient::new(
+            "https://coda.io/apis/v1",
+            "super_secret_token_value",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        let debug_output = format!("{client:?}");
+        assert!(
+            !debug_output.contains("super_secret_token_value"),
+            "Debug output must not contain the raw api_token"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should show [REDACTED] for api_token"
+        );
+    }
+
+    #[test]
+    fn non_secretless() {
+        let client = CodaClient::new(
+            "https://coda.io/apis/v1",
+            "real_token",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        assert!(!client.is_secretless());
+    }
+
+    #[test]
+    fn sanitize_path_segment_valid() {
+        assert!(sanitize_path_segment("doc123").is_ok());
+        assert!(sanitize_path_segment("tbl-abc-456").is_ok());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../etc/passwd").is_err());
+        assert!(sanitize_path_segment("foo/bar").is_err());
+        assert!(sanitize_path_segment("").is_err());
+        assert!(sanitize_path_segment("foo\0bar").is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_check_success() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/whoami"))
+            .and(header("authorization", "Bearer test_tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "Test User",
+                "loginId": "test@example.com",
+                "type": "user"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            CodaClient::new(&mock_server.uri(), "test_tok", HttpRetryConfig::default()).unwrap();
+        assert!(client.health_check().await.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_check_401() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/whoami"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            CodaClient::new(&mock_server.uri(), "bad_tok", HttpRetryConfig::default()).unwrap();
+        let result = client.health_check().await;
+        assert!(matches!(result, Err(CodaError::Unauthorized(_))));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_check_429() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/whoami"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&mock_server)
+            .await;
+
+        let client =
+            CodaClient::new(&mock_server.uri(), "tok", HttpRetryConfig::default()).unwrap();
+        let result = client.health_check().await;
+        assert!(matches!(result, Err(CodaError::RateLimited { .. })));
+    }
+}

@@ -1,0 +1,114 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.mastodon"
+name = "Mastodon"
+version = "0.1.0"
+description = "Mastodon social network connector for timelines, statuses, accounts, notifications, and search"
+archetype = "operational"
+homepage = "https://docs.joinmastodon.org/api/"
+
+[zones]
+home = "z:social"
+allowed_sources = ["z:social", "z:private"]
+allowed_targets = ["z:social"]
+tailscale_tag = "tag:fcp-social"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.timeline_home]
+summary = "Get home timeline"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.timeline_public]
+summary = "Get public timeline"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.statuses_get]
+summary = "Get a single status"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.statuses_post]
+summary = "Post a new status"
+capability = "mastodon.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.statuses_delete]
+summary = "Delete a status"
+capability = "mastodon.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.statuses_favourite]
+summary = "Favourite a status"
+capability = "mastodon.write"
+risk = "low"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.statuses_boost]
+summary = "Boost a status"
+capability = "mastodon.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.accounts_get]
+summary = "Get an account by ID"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.accounts_verify]
+summary = "Verify current user credentials"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.notifications_list]
+summary = "List notifications"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.search]
+summary = "Search Mastodon"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.health]
+summary = "Check instance health"
+capability = "mastodon.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

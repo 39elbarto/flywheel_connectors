@@ -1,202 +1,735 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:8d79d6e6a1e8ea22960d4b7d806f636b3d070884e5b2629eef9ba1b9f54967db"
 
 [connector]
 id = "fcp.azure"
-name = "Azure"
+name = "Azure Connector"
 version = "0.1.0"
-description = "Azure connector for subscriptions, resource groups, blob storage, and Key Vault management"
-archetype = "cloud-control-plane"
-homepage = "https://learn.microsoft.com/en-us/rest/api/azure/"
+description = "FCP connector for Azure Resource Manager, Blob Storage, and Key Vault operations"
+archetypes = [
+    "operational",
+    "storage",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; configuration and HTTP runtime live only inside the current connector instance."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work", "z:private"]
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = [
+    "z:public",
+    "z:community",
+]
 
 [capabilities]
-required = ["network.outbound"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "system.privileged",
+]
 
-[provides.operations.list_subscriptions]
-summary = "List Azure subscriptions"
-capability = "azure.management.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.list_subscriptions.network_constraints]
-host_allow = ["management.azure.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.list_subscriptions.ai_hints]
-when_to_use = "When you need to enumerate Azure subscriptions available to the configured credentials"
-
-[provides.operations.list_resource_groups]
-summary = "List resource groups in a subscription"
-capability = "azure.management.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.list_resource_groups.network_constraints]
-host_allow = ["management.azure.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.list_resource_groups.ai_hints]
-when_to_use = "When you need to list resource groups within a specific Azure subscription"
-
-[provides.operations.list_resources]
-summary = "List resources in a resource group"
-capability = "azure.management.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.list_resources.network_constraints]
-host_allow = ["management.azure.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.list_resources.ai_hints]
-when_to_use = "When you need to enumerate resources within a specific Azure resource group"
-
-[provides.operations.blob_list_containers]
-summary = "List blob storage containers"
-capability = "azure.storage.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.blob_list_containers.network_constraints]
-host_allow = ["*.blob.core.windows.net"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.blob_list_containers.ai_hints]
-when_to_use = "When you need to list blob containers in an Azure storage account"
-
-[provides.operations.blob_list_blobs]
-summary = "List blobs in a container"
-capability = "azure.storage.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.blob_list_blobs.network_constraints]
-host_allow = ["*.blob.core.windows.net"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.blob_list_blobs.ai_hints]
-when_to_use = "When you need to list blobs within a specific Azure storage container"
-
-[provides.operations.blob_get]
-summary = "Download a blob"
-capability = "azure.storage.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.blob_get.network_constraints]
-host_allow = ["*.blob.core.windows.net"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.blob_get.ai_hints]
-when_to_use = "When you need to download or read the contents of a specific blob"
-
-[provides.operations.blob_put]
-summary = "Upload a blob"
-capability = "azure.storage.write"
-risk = "medium"
+[provides.operations."azure.keyvault.get_secret"]
+description = "Retrieve a secret value and metadata from Azure Key Vault."
+capability = "azure.keyvault.read"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.blob_put.network_constraints]
-host_allow = ["*.blob.core.windows.net"]
+[provides.operations."azure.keyvault.get_secret".input_schema]
+required = [
+    "vault_name",
+    "secret_name",
+]
+type = "object"
+
+[provides.operations."azure.keyvault.get_secret".input_schema.properties.secret_name]
+type = "string"
+
+[provides.operations."azure.keyvault.get_secret".input_schema.properties.vault_base_url]
+description = "Optional override for the Key Vault endpoint root, for example https://vault-name.vault.azure.net."
+type = "string"
+
+[provides.operations."azure.keyvault.get_secret".input_schema.properties.vault_name]
+type = "string"
+
+[provides.operations."azure.keyvault.get_secret".output_schema]
+type = "object"
+
+[provides.operations."azure.keyvault.get_secret".output_schema.properties.attributes]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."azure.keyvault.get_secret".output_schema.properties.id]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.keyvault.get_secret".output_schema.properties.tags]
+description = "Secret metadata tags returned by Azure Key Vault."
+
+[provides.operations."azure.keyvault.get_secret".output_schema.properties.value]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.keyvault.get_secret".network_constraints]
+host_allow = ["*.vault.azure.net"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
-[provides.operations.blob_put.ai_hints]
-when_to_use = "When you need to upload or overwrite a blob in an Azure storage container"
+[provides.operations."azure.keyvault.get_secret".ai_hints]
+when_to_use = "Retrieve the actual value of a specific secret from Azure Key Vault."
+common_mistakes = ["Logging or pasting the returned secret value into shared transcripts."]
+examples = []
+related = [
+    "azure.keyvault.list_secrets",
+    "azure.keyvault.set_secret",
+]
 
-[provides.operations.keyvault_list_secrets]
-summary = "List Key Vault secrets"
+[provides.operations."azure.keyvault.list_secrets"]
+description = "List Azure Key Vault secret metadata without returning secret values."
 capability = "azure.keyvault.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.keyvault_list_secrets.network_constraints]
+[provides.operations."azure.keyvault.list_secrets".input_schema]
+required = ["vault_name"]
+type = "object"
+
+[provides.operations."azure.keyvault.list_secrets".input_schema.properties.vault_base_url]
+description = "Optional override for the Key Vault endpoint root, for example https://vault-name.vault.azure.net."
+type = "string"
+
+[provides.operations."azure.keyvault.list_secrets".input_schema.properties.vault_name]
+type = "string"
+
+[provides.operations."azure.keyvault.list_secrets".output_schema]
+required = ["value"]
+type = "object"
+
+[provides.operations."azure.keyvault.list_secrets".output_schema.properties.next_link]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.keyvault.list_secrets".output_schema.properties.value]
+type = "array"
+
+[provides.operations."azure.keyvault.list_secrets".output_schema.properties.value.items]
+type = "object"
+
+[provides.operations."azure.keyvault.list_secrets".network_constraints]
 host_allow = ["*.vault.azure.net"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
 
-[provides.operations.keyvault_list_secrets.ai_hints]
-when_to_use = "When you need to list secret names stored in an Azure Key Vault"
+[provides.operations."azure.keyvault.list_secrets".ai_hints]
+when_to_use = "List secret names stored in an Azure Key Vault."
+common_mistakes = ["Expecting this operation to return secret values; it only returns metadata."]
+examples = []
+related = ["azure.keyvault.get_secret"]
 
-[provides.operations.keyvault_get_secret]
-summary = "Get a Key Vault secret value"
-capability = "azure.keyvault.read"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "none"
-
-[provides.operations.keyvault_get_secret.network_constraints]
-host_allow = ["*.vault.azure.net"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.keyvault_get_secret.ai_hints]
-when_to_use = "When you need to retrieve the actual value of a specific secret from Azure Key Vault"
-
-[provides.operations.keyvault_set_secret]
-summary = "Set a Key Vault secret"
+[provides.operations."azure.keyvault.set_secret"]
+description = "Create or update a secret value in Azure Key Vault."
 capability = "azure.keyvault.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.keyvault_set_secret.network_constraints]
+[provides.operations."azure.keyvault.set_secret".input_schema]
+required = [
+    "vault_name",
+    "secret_name",
+    "value",
+]
+type = "object"
+
+[provides.operations."azure.keyvault.set_secret".input_schema.properties.content_type]
+type = "string"
+
+[provides.operations."azure.keyvault.set_secret".input_schema.properties.enabled]
+type = "boolean"
+
+[provides.operations."azure.keyvault.set_secret".input_schema.properties.secret_name]
+type = "string"
+
+[provides.operations."azure.keyvault.set_secret".input_schema.properties.tags]
+description = "Optional metadata tags to attach to the secret."
+
+[provides.operations."azure.keyvault.set_secret".input_schema.properties.value]
+type = "string"
+
+[provides.operations."azure.keyvault.set_secret".input_schema.properties.vault_base_url]
+description = "Optional override for the Key Vault endpoint root, for example https://vault-name.vault.azure.net."
+type = "string"
+
+[provides.operations."azure.keyvault.set_secret".input_schema.properties.vault_name]
+type = "string"
+
+[provides.operations."azure.keyvault.set_secret".output_schema]
+type = "object"
+
+[provides.operations."azure.keyvault.set_secret".output_schema.properties.attributes]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."azure.keyvault.set_secret".output_schema.properties.id]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.keyvault.set_secret".output_schema.properties.tags]
+description = "Secret metadata tags returned by Azure Key Vault."
+
+[provides.operations."azure.keyvault.set_secret".output_schema.properties.value]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.keyvault.set_secret".network_constraints]
 host_allow = ["*.vault.azure.net"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
-[provides.operations.keyvault_set_secret.ai_hints]
-when_to_use = "When you need to create or update a secret in Azure Key Vault"
+[provides.operations."azure.keyvault.set_secret".ai_hints]
+when_to_use = "Create or update a secret in Azure Key Vault."
+common_mistakes = [
+    "Using a production vault for verification writes.",
+    "Forgetting this mutates live secret material.",
+]
+examples = []
+related = [
+    "azure.keyvault.get_secret",
+    "azure.keyvault.list_secrets",
+]
+
+[provides.operations."azure.management.list_resource_groups"]
+description = "List Azure resource groups within a specific subscription."
+capability = "azure.management.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.management.list_resource_groups".input_schema]
+required = ["subscription_id"]
+type = "object"
+
+[provides.operations."azure.management.list_resource_groups".input_schema.properties.subscription_id]
+type = "string"
+
+[provides.operations."azure.management.list_resource_groups".output_schema]
+required = ["value"]
+type = "object"
+
+[provides.operations."azure.management.list_resource_groups".output_schema.properties.next_link]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.management.list_resource_groups".output_schema.properties.value]
+type = "array"
+
+[provides.operations."azure.management.list_resource_groups".output_schema.properties.value.items]
+type = "object"
+
+[provides.operations."azure.management.list_resource_groups".network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."azure.management.list_resource_groups".ai_hints]
+when_to_use = "List resource groups within a specific Azure subscription."
+common_mistakes = ["Passing a display name instead of the Azure subscription ID."]
+examples = []
+related = [
+    "azure.management.list_subscriptions",
+    "azure.management.list_resources",
+]
+
+[provides.operations."azure.management.list_resources"]
+description = "List Azure resources within a specific resource group."
+capability = "azure.management.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.management.list_resources".input_schema]
+required = [
+    "subscription_id",
+    "resource_group",
+]
+type = "object"
+
+[provides.operations."azure.management.list_resources".input_schema.properties.resource_group]
+type = "string"
+
+[provides.operations."azure.management.list_resources".input_schema.properties.subscription_id]
+type = "string"
+
+[provides.operations."azure.management.list_resources".output_schema]
+required = ["value"]
+type = "object"
+
+[provides.operations."azure.management.list_resources".output_schema.properties.next_link]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.management.list_resources".output_schema.properties.value]
+type = "array"
+
+[provides.operations."azure.management.list_resources".output_schema.properties.value.items]
+type = "object"
+
+[provides.operations."azure.management.list_resources".network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."azure.management.list_resources".ai_hints]
+when_to_use = "Enumerate Azure resources within a specific Azure resource group."
+common_mistakes = ["Using the wrong subscription_id for the targeted resource group."]
+examples = []
+related = ["azure.management.list_resource_groups"]
+
+[provides.operations."azure.management.list_subscriptions"]
+description = "List Azure subscriptions visible to the configured credentials."
+capability = "azure.management.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.management.list_subscriptions".input_schema]
+type = "object"
+
+[provides.operations."azure.management.list_subscriptions".output_schema]
+required = ["value"]
+type = "object"
+
+[provides.operations."azure.management.list_subscriptions".output_schema.properties.next_link]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.management.list_subscriptions".output_schema.properties.value]
+type = "array"
+
+[provides.operations."azure.management.list_subscriptions".output_schema.properties.value.items]
+type = "object"
+
+[provides.operations."azure.management.list_subscriptions".network_constraints]
+host_allow = ["management.azure.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."azure.management.list_subscriptions".ai_hints]
+when_to_use = "Enumerate Azure subscriptions available to the configured credentials."
+common_mistakes = ["Assuming subscription visibility guarantees access to every resource group or storage account."]
+examples = []
+related = ["azure.management.list_resource_groups"]
+
+[provides.operations."azure.storage.blob_get"]
+description = "Download a blob and return its contents base64-encoded."
+capability = "azure.storage.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.storage.blob_get".input_schema]
+required = [
+    "storage_account",
+    "container",
+    "blob_name",
+]
+type = "object"
+
+[provides.operations."azure.storage.blob_get".input_schema.properties.blob_base_url]
+description = "Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."
+type = "string"
+
+[provides.operations."azure.storage.blob_get".input_schema.properties.blob_name]
+type = "string"
+
+[provides.operations."azure.storage.blob_get".input_schema.properties.container]
+type = "string"
+
+[provides.operations."azure.storage.blob_get".input_schema.properties.storage_account]
+type = "string"
+
+[provides.operations."azure.storage.blob_get".output_schema]
+required = ["content_base64"]
+type = "object"
+
+[provides.operations."azure.storage.blob_get".output_schema.properties.content_base64]
+type = "string"
+
+[provides.operations."azure.storage.blob_get".output_schema.properties.content_length]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."azure.storage.blob_get".output_schema.properties.content_type]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.storage.blob_get".network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 67108864
+
+[provides.operations."azure.storage.blob_get".ai_hints]
+when_to_use = "Download or read the contents of a specific blob."
+common_mistakes = ["Treating content_base64 as plain UTF-8 text instead of decoding it first."]
+examples = []
+related = [
+    "azure.storage.blob_list_blobs",
+    "azure.storage.blob_put",
+]
+
+[provides.operations."azure.storage.blob_list_blobs"]
+description = "List blobs within a specific Azure Storage container."
+capability = "azure.storage.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.storage.blob_list_blobs".input_schema]
+required = [
+    "storage_account",
+    "container",
+]
+type = "object"
+
+[provides.operations."azure.storage.blob_list_blobs".input_schema.properties.blob_base_url]
+description = "Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."
+type = "string"
+
+[provides.operations."azure.storage.blob_list_blobs".input_schema.properties.container]
+type = "string"
+
+[provides.operations."azure.storage.blob_list_blobs".input_schema.properties.storage_account]
+type = "string"
+
+[provides.operations."azure.storage.blob_list_blobs".output_schema]
+required = ["blobs"]
+type = "object"
+
+[provides.operations."azure.storage.blob_list_blobs".output_schema.properties.blobs]
+type = "array"
+
+[provides.operations."azure.storage.blob_list_blobs".output_schema.properties.blobs.items]
+type = "object"
+
+[provides.operations."azure.storage.blob_list_blobs".output_schema.properties.next_marker]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.storage.blob_list_blobs".network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."azure.storage.blob_list_blobs".ai_hints]
+when_to_use = "List blobs within a specific Azure storage container."
+common_mistakes = ["Forgetting that Azure evaluates container and blob names exactly as provided."]
+examples = []
+related = [
+    "azure.storage.blob_list_containers",
+    "azure.storage.blob_get",
+]
+
+[provides.operations."azure.storage.blob_list_containers"]
+description = "List blob containers for an Azure Storage account."
+capability = "azure.storage.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.storage.blob_list_containers".input_schema]
+required = ["storage_account"]
+type = "object"
+
+[provides.operations."azure.storage.blob_list_containers".input_schema.properties.blob_base_url]
+description = "Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."
+type = "string"
+
+[provides.operations."azure.storage.blob_list_containers".input_schema.properties.storage_account]
+type = "string"
+
+[provides.operations."azure.storage.blob_list_containers".output_schema]
+required = ["containers"]
+type = "object"
+
+[provides.operations."azure.storage.blob_list_containers".output_schema.properties.containers]
+type = "array"
+
+[provides.operations."azure.storage.blob_list_containers".output_schema.properties.containers.items]
+type = "object"
+
+[provides.operations."azure.storage.blob_list_containers".output_schema.properties.next_marker]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.storage.blob_list_containers".network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."azure.storage.blob_list_containers".ai_hints]
+when_to_use = "List blob containers in an Azure storage account."
+common_mistakes = ["Passing a full endpoint URL as storage_account instead of only the account name."]
+examples = []
+related = ["azure.storage.blob_list_blobs"]
+
+[provides.operations."azure.storage.blob_put"]
+description = "Upload or overwrite a blob in Azure Storage."
+capability = "azure.storage.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.storage.blob_put".input_schema]
+required = [
+    "storage_account",
+    "container",
+    "blob_name",
+    "content_base64",
+]
+type = "object"
+
+[provides.operations."azure.storage.blob_put".input_schema.properties.blob_base_url]
+description = "Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."
+type = "string"
+
+[provides.operations."azure.storage.blob_put".input_schema.properties.blob_name]
+type = "string"
+
+[provides.operations."azure.storage.blob_put".input_schema.properties.container]
+type = "string"
+
+[provides.operations."azure.storage.blob_put".input_schema.properties.content_base64]
+type = "string"
+
+[provides.operations."azure.storage.blob_put".input_schema.properties.content_type]
+type = "string"
+
+[provides.operations."azure.storage.blob_put".input_schema.properties.storage_account]
+type = "string"
+
+[provides.operations."azure.storage.blob_put".output_schema]
+required = ["created"]
+type = "object"
+
+[provides.operations."azure.storage.blob_put".output_schema.properties.blob_name]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.storage.blob_put".output_schema.properties.created]
+type = "boolean"
+
+[provides.operations."azure.storage.blob_put".network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."azure.storage.blob_put".ai_hints]
+when_to_use = "Upload or overwrite a blob in an Azure storage container."
+common_mistakes = [
+    "Sending raw bytes instead of base64-encoded content_base64.",
+    "Assuming the upload is preview-only when it can overwrite an existing blob.",
+]
+examples = []
+related = ["azure.storage.blob_get"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

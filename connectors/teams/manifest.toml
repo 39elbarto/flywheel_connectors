@@ -172,4 +172,4 @@ id = "teams.ingest_activity"
 id = "teams.get_conversation_state"
 
 [provisioning]
-note = "Requires Azure AD app registration with Microsoft Graph permissions (Team.ReadBasic.All, Channel.ReadBasic.All, ChannelMessage.Send, Chat.ReadWrite). Admin consent required for application permissions."
+note = "Requires a non-production Microsoft 365 tenant plus Azure AD app registration with the exact Microsoft Graph permissions you intend to exercise. `/me`-backed flows such as health, list_teams, and list_chats, plus standard send/reply/update message operations, require a delegated user bearer token; `credential_id` mode requires the host to inject that token at runtime. App-only client credentials require tenant admin consent and only cover a narrower subset of Graph reads plus migration-only Teams message send permissions, so they do not prove full connector readiness."

@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.aws"
 name = "AWS"
 version = "0.1.0"
-description = "AWS connector for S3, EC2, Lambda, and STS management"
+description = "AWS connector for S3, EC2, Lambda, and STS workflows; deterministic verification currently relies on custom endpoint overrides until SigV4 signing is implemented"
 archetype = "cloud-control-plane"
 homepage = "https://docs.aws.amazon.com/"
 

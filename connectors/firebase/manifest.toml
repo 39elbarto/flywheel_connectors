@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:10b73978440ef2be5f0c4e9420953dc10db64d939ed7e761d963a8d52bd784da"
 
 [connector]
 id = "fcp.firebase"
@@ -13,8 +13,8 @@ name = "Firebase Connector"
 version = "0.1.0"
 description = "FCP connector for Firebase Firestore and Realtime Database"
 archetypes = [
-    "database",
-    "knowledge",
+    "storage",
+    "operational",
 ]
 format = "wasi"
 
@@ -49,162 +49,6 @@ forbidden = [
     "network.listen",
 ]
 
-[provides.operations."firebase.firestore.get"]
-description = "Get a Firestore document"
-capability = "firebase.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-
-[provides.operations."firebase.firestore.get".network_constraints]
-host_allow = ["firestore.googleapis.com"]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 120000
-max_response_bytes = 16777216
-
-[provides.operations."firebase.firestore.list"]
-description = "List Firestore documents in a collection"
-capability = "firebase.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "none"
-
-[provides.operations."firebase.firestore.list".network_constraints]
-host_allow = ["firestore.googleapis.com"]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 120000
-max_response_bytes = 16777216
-
-[provides.operations."firebase.firestore.create"]
-description = "Create a Firestore document"
-capability = "firebase.write"
-risk_level = "medium"
-safety_tier = "risky"
-requires_approval = "policy"
-idempotency = "strict"
-
-[provides.operations."firebase.firestore.create".network_constraints]
-host_allow = ["firestore.googleapis.com"]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 120000
-max_response_bytes = 16777216
-
-[provides.operations."firebase.firestore.update"]
-description = "Update a Firestore document"
-capability = "firebase.write"
-risk_level = "medium"
-safety_tier = "risky"
-requires_approval = "policy"
-idempotency = "strict"
-
-[provides.operations."firebase.firestore.update".network_constraints]
-host_allow = ["firestore.googleapis.com"]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 120000
-max_response_bytes = 16777216
-
-[provides.operations."firebase.firestore.delete"]
-description = "Delete a Firestore document"
-capability = "firebase.write"
-risk_level = "high"
-safety_tier = "dangerous"
-requires_approval = "always"
-idempotency = "strict"
-
-[provides.operations."firebase.firestore.delete".network_constraints]
-host_allow = ["firestore.googleapis.com"]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 120000
-max_response_bytes = 16777216
-
-[provides.operations."firebase.firestore.query"]
-description = "Run a Firestore structured query"
-capability = "firebase.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "none"
-
-[provides.operations."firebase.firestore.query".network_constraints]
-host_allow = ["firestore.googleapis.com"]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 120000
-max_response_bytes = 33554432
-
 [provides.operations."firebase.firestore.batch_write"]
 description = "Execute a Firestore batch write"
 capability = "firebase.write"
@@ -212,6 +56,19 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
+
+[provides.operations."firebase.firestore.batch_write".input_schema]
+required = ["writes"]
+type = "object"
+
+[provides.operations."firebase.firestore.batch_write".input_schema.properties.labels]
+type = "object"
+
+[provides.operations."firebase.firestore.batch_write".input_schema.properties.writes]
+type = "array"
+
+[provides.operations."firebase.firestore.batch_write".output_schema]
+type = "object"
 
 [provides.operations."firebase.firestore.batch_write".network_constraints]
 host_allow = ["firestore.googleapis.com"]
@@ -231,16 +88,239 @@ connect_timeout_ms = 10000
 total_timeout_ms = 120000
 max_response_bytes = 33554432
 
-[provides.operations."firebase.rtdb.get"]
-description = "Read JSON from Realtime Database"
+[provides.operations."firebase.firestore.batch_write".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.firestore.create"]
+description = "Create a Firestore document"
+capability = "firebase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.create".input_schema]
+required = [
+    "collection_path",
+    "document",
+]
+type = "object"
+
+[provides.operations."firebase.firestore.create".input_schema.properties.collection_path]
+type = "string"
+
+[provides.operations."firebase.firestore.create".input_schema.properties.document]
+type = "object"
+
+[provides.operations."firebase.firestore.create".input_schema.properties.document_id]
+type = "string"
+
+[provides.operations."firebase.firestore.create".input_schema.properties.mask]
+type = "array"
+
+[provides.operations."firebase.firestore.create".output_schema]
+type = "object"
+
+[provides.operations."firebase.firestore.create".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.create".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.firestore.delete"]
+description = "Delete a Firestore document"
+capability = "firebase.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.delete".input_schema]
+required = ["document_path"]
+type = "object"
+
+[provides.operations."firebase.firestore.delete".input_schema.properties.current_exists]
+type = "boolean"
+
+[provides.operations."firebase.firestore.delete".input_schema.properties.current_update_time]
+type = "string"
+
+[provides.operations."firebase.firestore.delete".input_schema.properties.document_path]
+type = "string"
+
+[provides.operations."firebase.firestore.delete".output_schema]
+type = "object"
+
+[provides.operations."firebase.firestore.delete".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.delete".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.firestore.get"]
+description = "Get a Firestore document"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."firebase.firestore.get".input_schema]
+required = ["document_path"]
+type = "object"
+
+[provides.operations."firebase.firestore.get".input_schema.properties.document_path]
+type = "string"
+
+[provides.operations."firebase.firestore.get".input_schema.properties.mask]
+type = "array"
+
+[provides.operations."firebase.firestore.get".output_schema]
+type = "object"
+
+[provides.operations."firebase.firestore.get".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.get".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.firestore.list"]
+description = "List Firestore documents in a collection"
 capability = "firebase.read"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
 
-[provides.operations."firebase.rtdb.get".network_constraints]
-host_allow = ["*.firebaseio.com", "*.firebasedatabase.app"]
+[provides.operations."firebase.firestore.list".input_schema]
+required = ["collection_path"]
+type = "object"
+
+[provides.operations."firebase.firestore.list".input_schema.properties.collection_path]
+type = "string"
+
+[provides.operations."firebase.firestore.list".input_schema.properties.mask]
+type = "array"
+
+[provides.operations."firebase.firestore.list".input_schema.properties.order_by]
+type = "string"
+
+[provides.operations."firebase.firestore.list".input_schema.properties.page_size]
+type = "integer"
+
+[provides.operations."firebase.firestore.list".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."firebase.firestore.list".input_schema.properties.show_missing]
+type = "boolean"
+
+[provides.operations."firebase.firestore.list".output_schema]
+type = "object"
+
+[provides.operations."firebase.firestore.list".network_constraints]
+host_allow = ["firestore.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.list".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.firestore.query"]
+description = "Run a Firestore structured query"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."firebase.firestore.query".input_schema]
+required = ["structured_query"]
+type = "object"
+
+[provides.operations."firebase.firestore.query".input_schema.properties.parent_path]
+type = "string"
+
+[provides.operations."firebase.firestore.query".input_schema.properties.structured_query]
+type = "object"
+
+[provides.operations."firebase.firestore.query".output_schema]
+type = "object"
+
+[provides.operations."firebase.firestore.query".network_constraints]
+host_allow = ["firestore.googleapis.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -257,42 +337,50 @@ connect_timeout_ms = 10000
 total_timeout_ms = 120000
 max_response_bytes = 33554432
 
-[provides.operations."firebase.rtdb.set"]
-description = "Write JSON into Realtime Database"
+[provides.operations."firebase.firestore.query".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.firestore.update"]
+description = "Update a Firestore document"
 capability = "firebase.write"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
-idempotency = "best_effort"
-
-[provides.operations."firebase.rtdb.set".network_constraints]
-host_allow = ["*.firebaseio.com", "*.firebasedatabase.app"]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 120000
-max_response_bytes = 33554432
-
-[provides.operations."firebase.rtdb.delete"]
-description = "Delete JSON from Realtime Database"
-capability = "firebase.write"
-risk_level = "high"
-safety_tier = "dangerous"
-requires_approval = "always"
 idempotency = "strict"
 
-[provides.operations."firebase.rtdb.delete".network_constraints]
-host_allow = ["*.firebaseio.com", "*.firebasedatabase.app"]
+[provides.operations."firebase.firestore.update".input_schema]
+required = [
+    "document_path",
+    "document",
+]
+type = "object"
+
+[provides.operations."firebase.firestore.update".input_schema.properties.current_exists]
+type = "boolean"
+
+[provides.operations."firebase.firestore.update".input_schema.properties.current_update_time]
+type = "string"
+
+[provides.operations."firebase.firestore.update".input_schema.properties.document]
+type = "object"
+
+[provides.operations."firebase.firestore.update".input_schema.properties.document_path]
+type = "string"
+
+[provides.operations."firebase.firestore.update".input_schema.properties.mask]
+type = "array"
+
+[provides.operations."firebase.firestore.update".input_schema.properties.update_mask]
+type = "array"
+
+[provides.operations."firebase.firestore.update".output_schema]
+type = "object"
+
+[provides.operations."firebase.firestore.update".network_constraints]
+host_allow = ["firestore.googleapis.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -307,7 +395,13 @@ dns_max_ips = 16
 max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 120000
-max_response_bytes = 33554432
+max_response_bytes = 16777216
+
+[provides.operations."firebase.firestore.update".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
 
 [provides.operations."firebase.health"]
 description = "Check Firestore metadata reachability"
@@ -316,6 +410,12 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."firebase.health".input_schema]
+type = "object"
+
+[provides.operations."firebase.health".output_schema]
+type = "object"
 
 [provides.operations."firebase.health".network_constraints]
 host_allow = ["firestore.googleapis.com"]
@@ -334,3 +434,186 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 120000
 max_response_bytes = 16777216
+
+[provides.operations."firebase.health".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.rtdb.delete"]
+description = "Delete JSON from Realtime Database"
+capability = "firebase.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."firebase.rtdb.delete".input_schema]
+required = ["path"]
+type = "object"
+
+[provides.operations."firebase.rtdb.delete".input_schema.properties.path]
+type = "string"
+
+[provides.operations."firebase.rtdb.delete".input_schema.properties.silent]
+type = "boolean"
+
+[provides.operations."firebase.rtdb.delete".output_schema]
+type = "object"
+
+[provides.operations."firebase.rtdb.delete".network_constraints]
+host_allow = [
+    "*.firebaseio.com",
+    "*.firebasedatabase.app",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.rtdb.delete".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.rtdb.get"]
+description = "Read JSON from Realtime Database"
+capability = "firebase.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."firebase.rtdb.get".input_schema]
+type = "object"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.end_at]
+description = "Arbitrary JSON upper bound forwarded to Firebase"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.equal_to]
+description = "Arbitrary JSON equality value forwarded to Firebase"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.limit_to_first]
+type = "integer"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.limit_to_last]
+type = "integer"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.order_by]
+type = "string"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.path]
+type = "string"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.shallow]
+type = "boolean"
+
+[provides.operations."firebase.rtdb.get".input_schema.properties.start_at]
+description = "Arbitrary JSON lower bound forwarded to Firebase"
+
+[provides.operations."firebase.rtdb.get".output_schema]
+type = "object"
+
+[provides.operations."firebase.rtdb.get".network_constraints]
+host_allow = [
+    "*.firebaseio.com",
+    "*.firebasedatabase.app",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.rtdb.get".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."firebase.rtdb.set"]
+description = "Write JSON into Realtime Database"
+capability = "firebase.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."firebase.rtdb.set".input_schema]
+required = [
+    "path",
+    "value",
+]
+type = "object"
+
+[provides.operations."firebase.rtdb.set".input_schema.properties.path]
+type = "string"
+
+[provides.operations."firebase.rtdb.set".input_schema.properties.silent]
+type = "boolean"
+
+[provides.operations."firebase.rtdb.set".input_schema.properties.value]
+description = "Arbitrary JSON value written to the requested path"
+
+[provides.operations."firebase.rtdb.set".output_schema]
+type = "object"
+
+[provides.operations."firebase.rtdb.set".network_constraints]
+host_allow = [
+    "*.firebaseio.com",
+    "*.firebasedatabase.app",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 33554432
+
+[provides.operations."firebase.rtdb.set".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

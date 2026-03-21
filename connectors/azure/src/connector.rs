@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
@@ -14,7 +14,7 @@ use fcp_core::{
 use fcp_sdk::migration::HttpRetryConfig;
 use reqwest::Url;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -259,16 +259,45 @@ impl AzureConnector {
         });
 
         if let Some(config) = &self.config {
+            let (management_url_ok, management_message) =
+                match validate_management_url(&config.management_url) {
+                    Ok(()) => (
+                        true,
+                        format!(
+                            "Management URL accepted for Azure Resource Manager: {}",
+                            config.management_url
+                        ),
+                    ),
+                    Err(error) => (false, error),
+                };
             checks.push(DoctorCheck {
                 name: "management_url".into(),
-                passed: validate_management_url(&config.management_url).is_ok(),
-                message: Some(format!("Management URL: {}", config.management_url)),
+                passed: management_url_ok,
+                message: Some(management_message),
                 critical: false,
             });
             checks.push(DoctorCheck {
                 name: "auth_mode".into(),
                 passed: true,
                 message: Some(format!("Auth: {}", config.auth.redacted_label())),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                passed: !config.auth.is_secretless(),
+                message: Some(if config.auth.is_secretless() {
+                    "Configured with credential_id; the host or egress proxy must inject a concrete Azure bearer token before self_check or invoke can prove live readiness".into()
+                } else {
+                    "Bearer token is configured directly for self_check and invoke".into()
+                }),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "override_host_policy".into(),
+                passed: true,
+                message: Some(
+                    "blob_base_url must be https://<account>.blob.core.windows.net and vault_base_url must be https://<vault>.vault.azure.net; paths, query strings, fragments, embedded credentials, and non-443 ports are rejected".into(),
+                ),
                 critical: false,
             });
         }
@@ -323,10 +352,138 @@ fn schema(required: &[&str]) -> serde_json::Value {
     }
 }
 
+fn string_schema(description: &str) -> Value {
+    json!({
+        "type": "string",
+        "description": description,
+    })
+}
+
+fn nullable_string_schema(description: &str) -> Value {
+    json!({
+        "type": ["string", "null"],
+        "description": description,
+    })
+}
+
+fn nullable_bool_schema(description: &str) -> Value {
+    json!({
+        "type": ["boolean", "null"],
+        "description": description,
+    })
+}
+
+fn nullable_integer_schema(description: &str) -> Value {
+    json!({
+        "type": ["integer", "null"],
+        "description": description,
+    })
+}
+
+fn any_json_schema(description: &str) -> Value {
+    json!({ "description": description })
+}
+
+fn subscription_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "subscription_id": nullable_string_schema("Azure subscription identifier."),
+            "display_name": nullable_string_schema("Human-readable subscription name."),
+            "state": nullable_string_schema("Azure subscription lifecycle state."),
+            "tenant_id": nullable_string_schema("Microsoft Entra tenant associated with the subscription."),
+        },
+    })
+}
+
+fn resource_group_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": nullable_string_schema("Azure resource group resource ID."),
+            "name": nullable_string_schema("Azure resource group name."),
+            "location": nullable_string_schema("Azure region for the resource group."),
+            "tags": any_json_schema("Azure resource group tags as returned by ARM."),
+            "properties": any_json_schema("Azure resource group properties payload as returned by ARM."),
+        },
+    })
+}
+
+fn resource_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": nullable_string_schema("Azure resource ID."),
+            "name": nullable_string_schema("Azure resource name."),
+            "resource_type": nullable_string_schema("Azure resource type, for example Microsoft.Storage/storageAccounts."),
+            "location": nullable_string_schema("Azure region for the resource."),
+            "tags": any_json_schema("Azure resource tags as returned by ARM."),
+        },
+    })
+}
+
+fn blob_container_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": nullable_string_schema("Blob container name."),
+            "last_modified": nullable_string_schema("Last-modified timestamp reported by Azure Blob Storage."),
+            "public_access": nullable_string_schema("Public access level, when configured."),
+        },
+    })
+}
+
+fn blob_item_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": nullable_string_schema("Blob name."),
+            "content_length": nullable_integer_schema("Blob size in bytes."),
+            "content_type": nullable_string_schema("Blob content type."),
+            "last_modified": nullable_string_schema("Last-modified timestamp reported by Azure Blob Storage."),
+        },
+    })
+}
+
+fn secret_attributes_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "properties": {
+            "enabled": nullable_bool_schema("Whether the secret is enabled."),
+            "created": nullable_integer_schema("Unix timestamp when the secret version was created."),
+            "updated": nullable_integer_schema("Unix timestamp when the secret version was last updated."),
+        },
+    })
+}
+
+fn secret_item_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": nullable_string_schema("Azure Key Vault secret identifier."),
+            "attributes": secret_attributes_schema(),
+            "tags": any_json_schema("Secret metadata tags returned by Azure Key Vault."),
+        },
+    })
+}
+
+fn secret_bundle_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "value": nullable_string_schema("Secret value. Treat as sensitive and avoid logging it."),
+            "id": nullable_string_schema("Azure Key Vault secret identifier."),
+            "attributes": secret_attributes_schema(),
+            "tags": any_json_schema("Secret metadata tags returned by Azure Key Vault."),
+        },
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn op(
     id: &'static str,
     summary: &'static str,
+    description: &'static str,
     capability: &'static str,
     risk_level: RiskLevel,
     safety_tier: SafetyTier,
@@ -334,12 +491,14 @@ fn op(
     input_schema: serde_json::Value,
     output_schema: serde_json::Value,
     when_to_use: &'static str,
+    common_mistakes: &'static [&'static str],
+    related: &'static [&'static str],
     requires_approval: Option<ApprovalMode>,
 ) -> OperationInfo {
     OperationInfo {
         id: OperationId::from_static(id),
         summary: summary.into(),
-        description: None,
+        description: Some(description.into()),
         input_schema,
         output_schema,
         capability: CapabilityId::from_static(capability),
@@ -348,9 +507,15 @@ fn op(
         idempotency,
         ai_hints: AgentHint {
             when_to_use: when_to_use.into(),
-            common_mistakes: Vec::new(),
+            common_mistakes: common_mistakes
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
             examples: Vec::new(),
-            related: Vec::new(),
+            related: related
+                .iter()
+                .map(|value| CapabilityId::from_static(value))
+                .collect(),
         },
         rate_limit: None,
         requires_approval,
@@ -362,126 +527,317 @@ fn operations_info() -> Vec<OperationInfo> {
         op(
             OP_LIST_SUBSCRIPTIONS,
             "List Azure subscriptions",
+            "List Azure subscriptions visible to the configured credentials.",
             CAP_MANAGEMENT_READ,
             RiskLevel::Low,
             SafetyTier::Safe,
-            IdempotencyClass::None,
+            IdempotencyClass::Strict,
             schema(&[]),
-            schema(&[]),
+            json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "type": "array",
+                        "items": subscription_schema(),
+                    },
+                    "next_link": nullable_string_schema("Continuation URL for the next page of subscriptions."),
+                },
+            }),
             "Enumerate Azure subscriptions available to the configured credentials",
+            &[
+                "Assuming subscription visibility guarantees access to every resource group or storage account.",
+            ],
+            &[OP_LIST_RESOURCE_GROUPS],
             None,
         ),
         op(
             OP_LIST_RESOURCE_GROUPS,
             "List resource groups in a subscription",
+            "List Azure resource groups within a specific subscription.",
             CAP_MANAGEMENT_READ,
             RiskLevel::Low,
             SafetyTier::Safe,
-            IdempotencyClass::None,
-            schema(&["subscription_id"]),
-            schema(&[]),
+            IdempotencyClass::Strict,
+            json!({
+                "type": "object",
+                "required": ["subscription_id"],
+                "properties": {
+                    "subscription_id": string_schema("Azure subscription identifier."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "type": "array",
+                        "items": resource_group_schema(),
+                    },
+                    "next_link": nullable_string_schema("Continuation URL for the next page of resource groups."),
+                },
+            }),
             "List resource groups within a specific Azure subscription",
+            &["Passing a display name instead of the Azure subscription ID."],
+            &[OP_LIST_SUBSCRIPTIONS, OP_LIST_RESOURCES],
             None,
         ),
         op(
             OP_LIST_RESOURCES,
             "List resources in a resource group",
+            "List Azure resources within a specific resource group.",
             CAP_MANAGEMENT_READ,
             RiskLevel::Low,
             SafetyTier::Safe,
-            IdempotencyClass::None,
-            schema(&["subscription_id", "resource_group"]),
-            schema(&[]),
+            IdempotencyClass::Strict,
+            json!({
+                "type": "object",
+                "required": ["subscription_id", "resource_group"],
+                "properties": {
+                    "subscription_id": string_schema("Azure subscription identifier."),
+                    "resource_group": string_schema("Azure resource group name."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "type": "array",
+                        "items": resource_schema(),
+                    },
+                    "next_link": nullable_string_schema("Continuation URL for the next page of resources."),
+                },
+            }),
             "Enumerate resources within a specific Azure resource group",
+            &["Using the wrong subscription_id for the targeted resource group."],
+            &[OP_LIST_RESOURCE_GROUPS],
             None,
         ),
         op(
             OP_BLOB_LIST_CONTAINERS,
             "List blob storage containers",
+            "List blob containers for an Azure Storage account.",
             CAP_STORAGE_READ,
             RiskLevel::Low,
             SafetyTier::Safe,
-            IdempotencyClass::None,
-            schema(&["storage_account"]),
-            schema(&[]),
+            IdempotencyClass::Strict,
+            json!({
+                "type": "object",
+                "required": ["storage_account"],
+                "properties": {
+                    "storage_account": string_schema("Azure Storage account name."),
+                    "blob_base_url": string_schema("Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["containers"],
+                "properties": {
+                    "containers": {
+                        "type": "array",
+                        "items": blob_container_schema(),
+                    },
+                    "next_marker": nullable_string_schema("Azure continuation marker for the next page of containers."),
+                },
+            }),
             "List blob containers in an Azure storage account",
+            &["Passing a full endpoint URL as storage_account instead of only the account name."],
+            &[OP_BLOB_LIST_BLOBS],
             None,
         ),
         op(
             OP_BLOB_LIST_BLOBS,
             "List blobs in a container",
+            "List blobs within a specific Azure Storage container.",
             CAP_STORAGE_READ,
             RiskLevel::Low,
             SafetyTier::Safe,
-            IdempotencyClass::None,
-            schema(&["storage_account", "container"]),
-            schema(&[]),
+            IdempotencyClass::Strict,
+            json!({
+                "type": "object",
+                "required": ["storage_account", "container"],
+                "properties": {
+                    "storage_account": string_schema("Azure Storage account name."),
+                    "container": string_schema("Blob container name."),
+                    "blob_base_url": string_schema("Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["blobs"],
+                "properties": {
+                    "blobs": {
+                        "type": "array",
+                        "items": blob_item_schema(),
+                    },
+                    "next_marker": nullable_string_schema("Azure continuation marker for the next page of blobs."),
+                },
+            }),
             "List blobs within a specific Azure storage container",
+            &[
+                "Forgetting that container names and blob names are evaluated by Azure exactly as provided.",
+            ],
+            &[OP_BLOB_LIST_CONTAINERS, OP_BLOB_GET],
             None,
         ),
         op(
             OP_BLOB_GET,
             "Download a blob",
+            "Download a blob and return its contents base64-encoded.",
             CAP_STORAGE_READ,
             RiskLevel::Low,
             SafetyTier::Safe,
-            IdempotencyClass::None,
-            schema(&["storage_account", "container", "blob_name"]),
-            schema(&[]),
+            IdempotencyClass::Strict,
+            json!({
+                "type": "object",
+                "required": ["storage_account", "container", "blob_name"],
+                "properties": {
+                    "storage_account": string_schema("Azure Storage account name."),
+                    "container": string_schema("Blob container name."),
+                    "blob_name": string_schema("Blob name."),
+                    "blob_base_url": string_schema("Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["content_base64"],
+                "properties": {
+                    "content_base64": string_schema("Blob bytes encoded as base64."),
+                    "content_type": nullable_string_schema("Blob content type reported by Azure Storage."),
+                    "content_length": nullable_integer_schema("Blob size in bytes."),
+                },
+            }),
             "Download or read the contents of a specific blob",
+            &["Treating content_base64 as plain UTF-8 text instead of decoding it first."],
+            &[OP_BLOB_LIST_BLOBS, OP_BLOB_PUT],
             None,
         ),
         op(
             OP_BLOB_PUT,
             "Upload a blob",
+            "Upload or overwrite a blob in Azure Storage.",
             CAP_STORAGE_WRITE,
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::Strict,
-            schema(&[
-                "storage_account",
-                "container",
-                "blob_name",
-                "content_base64",
-            ]),
-            schema(&[]),
+            json!({
+                "type": "object",
+                "required": ["storage_account", "container", "blob_name", "content_base64"],
+                "properties": {
+                    "storage_account": string_schema("Azure Storage account name."),
+                    "container": string_schema("Blob container name."),
+                    "blob_name": string_schema("Blob name."),
+                    "content_base64": string_schema("Blob bytes encoded as base64."),
+                    "content_type": string_schema("Optional content type to send with the blob upload."),
+                    "blob_base_url": string_schema("Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["created"],
+                "properties": {
+                    "created": {
+                        "type": "boolean",
+                        "description": "Whether Azure Storage accepted the blob write.",
+                    },
+                    "blob_name": nullable_string_schema("Blob name echoed back by the connector."),
+                },
+            }),
             "Upload or overwrite a blob in an Azure storage container",
+            &[
+                "Sending raw bytes instead of base64-encoded content_base64.",
+                "Assuming the upload is preview-only when it can overwrite an existing blob.",
+            ],
+            &[OP_BLOB_GET],
             None,
         ),
         op(
             OP_KEYVAULT_LIST_SECRETS,
             "List Key Vault secrets",
+            "List Azure Key Vault secret metadata without returning secret values.",
             CAP_KEYVAULT_READ,
             RiskLevel::Low,
             SafetyTier::Safe,
-            IdempotencyClass::None,
-            schema(&["vault_name"]),
-            schema(&[]),
+            IdempotencyClass::Strict,
+            json!({
+                "type": "object",
+                "required": ["vault_name"],
+                "properties": {
+                    "vault_name": string_schema("Azure Key Vault name."),
+                    "vault_base_url": string_schema("Optional override for the Key Vault endpoint root, for example https://vault-name.vault.azure.net."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {
+                    "value": {
+                        "type": "array",
+                        "items": secret_item_schema(),
+                    },
+                    "next_link": nullable_string_schema("Continuation URL for the next page of secrets."),
+                },
+            }),
             "List secret names stored in an Azure Key Vault",
+            &["Expecting this operation to return secret values; it only returns metadata."],
+            &[OP_KEYVAULT_GET_SECRET],
             None,
         ),
         op(
             OP_KEYVAULT_GET_SECRET,
             "Get a Key Vault secret value",
+            "Retrieve a secret value and metadata from Azure Key Vault.",
             CAP_KEYVAULT_READ,
             RiskLevel::Medium,
             SafetyTier::Risky,
-            IdempotencyClass::None,
-            schema(&["vault_name", "secret_name"]),
-            schema(&[]),
+            IdempotencyClass::Strict,
+            json!({
+                "type": "object",
+                "required": ["vault_name", "secret_name"],
+                "properties": {
+                    "vault_name": string_schema("Azure Key Vault name."),
+                    "secret_name": string_schema("Azure Key Vault secret name."),
+                    "vault_base_url": string_schema("Optional override for the Key Vault endpoint root, for example https://vault-name.vault.azure.net."),
+                },
+            }),
+            secret_bundle_schema(),
             "Retrieve the actual value of a specific secret from Azure Key Vault",
+            &["Logging or pasting the returned secret value into shared transcripts."],
+            &[OP_KEYVAULT_LIST_SECRETS, OP_KEYVAULT_SET_SECRET],
             None,
         ),
         op(
             OP_KEYVAULT_SET_SECRET,
             "Set a Key Vault secret",
+            "Create or update a secret value in Azure Key Vault.",
             CAP_KEYVAULT_WRITE,
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
-            schema(&["vault_name", "secret_name", "value"]),
-            schema(&[]),
+            json!({
+                "type": "object",
+                "required": ["vault_name", "secret_name", "value"],
+                "properties": {
+                    "vault_name": string_schema("Azure Key Vault name."),
+                    "secret_name": string_schema("Azure Key Vault secret name."),
+                    "value": string_schema("Secret value to store in Azure Key Vault."),
+                    "tags": any_json_schema("Optional metadata tags to attach to the secret."),
+                    "content_type": string_schema("Optional content type metadata for the secret."),
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Optional enabled flag for the new secret version.",
+                    },
+                    "vault_base_url": string_schema("Optional override for the Key Vault endpoint root, for example https://vault-name.vault.azure.net."),
+                },
+            }),
+            secret_bundle_schema(),
             "Create or update a secret in Azure Key Vault",
+            &[
+                "Using a production vault for verification writes.",
+                "Forgetting this mutates live secret material.",
+            ],
+            &[OP_KEYVAULT_GET_SECRET, OP_KEYVAULT_LIST_SECRETS],
             Some(ApprovalMode::Interactive),
         ),
     ]
@@ -768,11 +1124,39 @@ impl FcpConnector for AzureConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
+        let credential_injection_required =
+            self.client.as_ref().is_some_and(AzureClient::is_secretless);
         let mut snapshot = if self.config.is_some() && self.client.is_some() {
-            HealthSnapshot::ready()
+            if credential_injection_required {
+                HealthSnapshot::degraded("credential injection required")
+            } else {
+                HealthSnapshot::ready()
+            }
         } else {
             HealthSnapshot::degraded("not configured")
         };
+        if credential_injection_required {
+            snapshot.status = HealthState::Degraded {
+                reason: "credential injection required".into(),
+            };
+        }
+        snapshot.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "auth_mode": self
+                .config
+                .as_ref()
+                .map(|config| config.auth.redacted_label()),
+            "management_url": self
+                .config
+                .as_ref()
+                .map(|config| config.management_url.clone()),
+            "credential_injection_required": credential_injection_required,
+            "supported_overrides": {
+                "blob_base_url": "https://<account>.blob.core.windows.net",
+                "vault_base_url": "https://<vault>.vault.azure.net",
+            },
+        }));
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snapshot
@@ -865,6 +1249,13 @@ mod tests {
         json!({
             "mode": "bearer_token",
             "bearer_token": "test-token"
+        })
+    }
+
+    fn valid_secretless_config() -> serde_json::Value {
+        json!({
+            "mode": "credential_id",
+            "credential_id": "00000000-0000-0000-0000-000000000001"
         })
     }
 
@@ -972,6 +1363,23 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_credential_injection_required() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = AzureConnector::new();
+            connector
+                .configure(valid_secretless_config())
+                .await
+                .unwrap();
+            let doctor = connector.doctor();
+            assert!(!doctor.passed);
+            assert!(doctor.checks.iter().any(|check| {
+                check.name == "credential_injection" && !check.passed && check.critical
+            }));
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn simulate_allows_requests() {
         fcp_async_core::runtime::block_on_sync(async {
             let response = AzureConnector::new()
@@ -1057,6 +1465,31 @@ mod tests {
     }
 
     #[test]
+    fn health_degraded_when_credential_injection_is_required() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = AzureConnector::new();
+            connector
+                .configure(valid_secretless_config())
+                .await
+                .unwrap();
+            let snapshot = connector.health().await;
+            assert!(!snapshot.is_ready());
+            assert!(matches!(
+                snapshot.status,
+                HealthState::Degraded { reason } if reason == "credential injection required"
+            ));
+            assert_eq!(
+                snapshot
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("credential_injection_required")),
+                Some(&json!(true))
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn self_check_returns_degraded_when_not_configured() {
         fcp_async_core::runtime::block_on_sync(async {
             let connector = AzureConnector::new();
@@ -1108,6 +1541,57 @@ mod tests {
         assert!(op_ids.contains(&OP_KEYVAULT_LIST_SECRETS));
         assert!(op_ids.contains(&OP_KEYVAULT_GET_SECRET));
         assert!(op_ids.contains(&OP_KEYVAULT_SET_SECRET));
+    }
+
+    #[test]
+    fn introspection_exposes_typed_management_output_schema() {
+        let connector = AzureConnector::new();
+        let introspection = connector.introspect();
+        let operation = introspection
+            .operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_LIST_SUBSCRIPTIONS)
+            .expect("list_subscriptions operation should exist");
+        assert_eq!(operation.idempotency, IdempotencyClass::Strict);
+        assert_eq!(operation.output_schema["required"], json!(["value"]));
+        assert_eq!(
+            operation.output_schema["properties"]["value"]["type"],
+            json!("array")
+        );
+        assert!(
+            operation
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("configured credentials"))
+        );
+    }
+
+    #[test]
+    fn introspection_exposes_blob_put_override_schema() {
+        let connector = AzureConnector::new();
+        let introspection = connector.introspect();
+        let operation = introspection
+            .operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_BLOB_PUT)
+            .expect("blob_put operation should exist");
+        assert_eq!(
+            operation.input_schema["required"],
+            json!([
+                "storage_account",
+                "container",
+                "blob_name",
+                "content_base64"
+            ])
+        );
+        assert_eq!(
+            operation.input_schema["properties"]["blob_base_url"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            operation.output_schema["properties"]["created"]["type"],
+            json!("boolean")
+        );
     }
 
     #[test]

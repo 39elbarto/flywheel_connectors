@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
-    sync::Mutex,
+    sync::{Mutex, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -20,14 +20,17 @@ use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConf
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::client::TeamsClient;
+use crate::error::TeamsError;
 use crate::types::{
     Activity, ActivityAccount, TeamsAuth, TeamsConversationScope, TeamsConversationState,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/teams_connector/<timestamp>";
 
 // Operation IDs
 const OP_LIST_TEAMS: &str = "teams.list_teams";
@@ -126,11 +129,59 @@ impl BoundedKeySet {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    requires_credential_injection: bool,
+    credential_material_configured: bool,
+    uses_client_credentials: bool,
+    full_connector_surface_supported: bool,
+    full_connector_surface_message: String,
+    graph_base_url: String,
+    graph_network_ok: bool,
+    graph_network_message: String,
+    bot_service_url: String,
+    bot_service_url_ok: bool,
+    bot_service_url_message: String,
+    tenant_hint_configured: bool,
+    retry: HttpRetryConfig,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
 /// Doctor check result.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
-    pub passed: bool,
+    pub ready: bool,
+    pub status: DoctorStatus,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
 }
 
 /// Single doctor check.
@@ -143,9 +194,197 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
-        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
+        let ready = checks.iter().filter(|c| c.critical).all(|c| c.passed);
+        let status = if checks.iter().any(|check| check.critical && !check.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|check| !check.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+        Self {
+            ready,
+            status,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+        }
+    }
+
+    const fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+}
+
+const fn auth_mode_label(auth: &TeamsAuth) -> &'static str {
+    match auth {
+        TeamsAuth::AccessToken { .. } => "access_token",
+        TeamsAuth::ClientCredentials { .. } => "client_credentials",
+        TeamsAuth::CredentialId { .. } => "credential_id",
+    }
+}
+
+fn graph_base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match reqwest::Url::parse(base_url) {
+        Ok(url) => url,
+        Err(error) => {
+            return (
+                false,
+                format!("graph_base_url must be an absolute URL: {error}"),
+            );
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "graph_base_url must include a host".into());
+    };
+
+    if is_local_test_host(host) {
+        return (
+            true,
+            format!("localhost test Graph endpoint accepted for verification: {base_url}"),
+        );
+    }
+
+    let mut problems = Vec::new();
+    if parsed.scheme() != "https" {
+        problems.push(format!("scheme must be https, got {}", parsed.scheme()));
+    }
+    if host != "graph.microsoft.com" {
+        problems.push(format!("host must be graph.microsoft.com, got {host}"));
+    }
+    if !matches!(parsed.path(), "/v1.0" | "/v1.0/" | "/beta" | "/beta/") {
+        problems.push(format!(
+            "path must be /v1.0 or /beta, got {}",
+            parsed.path()
+        ));
+    }
+    if parsed.query().is_some() {
+        problems.push("query strings are not allowed in graph_base_url".into());
+    }
+    if parsed.fragment().is_some() {
+        problems.push("fragments are not allowed in graph_base_url".into());
+    }
+
+    if problems.is_empty() {
+        (true, "Microsoft Graph production endpoint accepted".into())
+    } else {
+        (false, problems.join("; "))
+    }
+}
+
+fn bot_service_url_policy(bot_service_url: &str) -> (bool, String) {
+    let parsed = match reqwest::Url::parse(bot_service_url) {
+        Ok(url) => url,
+        Err(error) => {
+            return (
+                false,
+                format!("bot_service_url must be an absolute URL: {error}"),
+            );
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "bot_service_url must include a host".into());
+    };
+
+    if is_local_test_host(host) {
+        return (
+            true,
+            format!("localhost test Bot Framework endpoint accepted: {bot_service_url}"),
+        );
+    }
+
+    let mut problems = Vec::new();
+    if parsed.scheme() != "https" {
+        problems.push(format!("scheme must be https, got {}", parsed.scheme()));
+    }
+    if parsed.port().is_some_and(|port| port != 443) {
+        problems.push(format!(
+            "port must be 443 when specified, got {}",
+            parsed.port().unwrap_or_default()
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        problems.push("embedded credentials are not allowed in bot_service_url".into());
+    }
+    if parsed.query().is_some() {
+        problems.push("query strings are not allowed in bot_service_url".into());
+    }
+    if parsed.fragment().is_some() {
+        problems.push("fragments are not allowed in bot_service_url".into());
+    }
+
+    if problems.is_empty() {
+        (
+            true,
+            "Bot Framework service origin accepted; inbound activities must still match this host at runtime".into(),
+        )
+    } else {
+        (false, problems.join("; "))
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a dedicated non-production Microsoft 365 tenant, team, channel, and chat for verification.",
+            "Register an Azure AD application with the exact Microsoft Graph permissions required for the operations you plan to exercise.",
+            "Prefer delegated user tokens for `/me`-backed list/read flows and standard send/reply/update message operations.",
+        ],
+        dedicated_environment: "Do not point verification at production teams or chats. Message send, reply, and update operations are live mutations and should only target disposable collaboration surfaces.",
+        redaction_rules: vec![
+            "Never log access_token, client_secret, or injected bearer token values.",
+            "Treat credential_id values as sensitive internal references; do not paste them into shared transcripts.",
+            "Avoid publishing private tenant IDs, team IDs, channel IDs, chat IDs, or Bot Framework service URLs from internal environments.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "doctor/health/self_check reports that a token is missing in credential_id mode",
+                action: "Have the host or egress proxy inject a concrete bearer token at runtime, then rerun self_check before invoking live operations.",
+            },
+            RemediationHint {
+                code: "delegated_user_context_required",
+                symptom: "client_credentials mode is configured but `/me`-backed flows or standard send/reply/update operations cannot be proven ready",
+                action: "Use a delegated user bearer token (directly or via credential injection) for full connector readiness. App-only tokens are limited to a narrower Graph surface and Teams message send application permissions are reserved for migration scenarios.",
+            },
+            RemediationHint {
+                code: "admin_consent_or_permission_missing",
+                symptom: "Graph returns 403, insufficient privileges, or admin approval / consent errors",
+                action: "Grant tenant admin consent for the required Microsoft Graph application permissions, then verify the token contains the expected scopes or roles before rerunning self_check.",
+            },
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "doctor or self_check reports invalid Graph or Bot Framework endpoint policy",
+                action: "Use https://graph.microsoft.com/v1.0 (or /beta only when intentionally testing beta APIs) and a clean HTTPS Bot Framework service origin, or localhost-only mocks during deterministic verification.",
+            },
+            RemediationHint {
+                code: "graph_rate_limited",
+                symptom: "self_check or invoke receives HTTP 429 / Retry-After from Microsoft Graph",
+                action: "Honor Retry-After, reduce concurrent probes, and rerun verification after the throttle window expires.",
+            },
+            RemediationHint {
+                code: "token_invalid_or_expired",
+                symptom: "Graph returns 401 or invalid/expired authentication errors",
+                action: "Refresh or reacquire the delegated token, confirm the tenant matches the target environment, and rerun self_check.",
+            },
+        ],
+        rerun_commands: vec![
+            "rch exec -- cargo run -p fwc -- manifest fix connectors/teams/manifest.toml --check --json",
+            "rch exec -- cargo test -p fcp-teams -- --nocapture",
+            "rch exec -- cargo clippy -p fcp-teams --all-targets -- -D warnings",
+        ],
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
@@ -847,9 +1086,113 @@ impl TeamsConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| {
+            let (graph_network_ok, graph_network_message) =
+                graph_base_url_policy(&config.graph_base_url);
+            let (bot_service_url_ok, bot_service_url_message) =
+                bot_service_url_policy(&config.bot_service_url);
+            let requires_credential_injection =
+                matches!(&config.auth, TeamsAuth::CredentialId { .. });
+            let uses_client_credentials =
+                matches!(&config.auth, TeamsAuth::ClientCredentials { .. });
+            let full_connector_surface_message = match &config.auth {
+                TeamsAuth::AccessToken { .. } => "Delegated bearer token can satisfy `/me`-backed list/read flows and standard send/reply/update operations, assuming the Graph scopes are granted.".into(),
+                TeamsAuth::CredentialId { .. } => "Host-side credential injection is required. Inject a delegated user bearer token if you need `/me`-backed list/read flows and standard send/reply/update operations; app-only injection is only suitable for a narrower subset plus migration APIs.".into(),
+                TeamsAuth::ClientCredentials { .. } => "client_credentials acquires an app-only token, but this connector's `/me` readiness/list flows and standard send/reply/update operations require delegated user context. Microsoft Graph application permissions for Teams message sends are limited to migration scenarios, so app-only auth does not prove full connector readiness.".into(),
+            };
+
+            ProvisioningReadiness {
+                auth_mode: auth_mode_label(&config.auth),
+                requires_credential_injection,
+                credential_material_configured: !requires_credential_injection,
+                uses_client_credentials,
+                full_connector_surface_supported: !uses_client_credentials,
+                full_connector_surface_message,
+                graph_base_url: config.graph_base_url.clone(),
+                graph_network_ok,
+                graph_network_message,
+                bot_service_url: config.bot_service_url.clone(),
+                bot_service_url_ok,
+                bot_service_url_message,
+                tenant_hint_configured: config.tenant_id.is_some(),
+                retry: self.retry_config.clone(),
+            }
+        })
+    }
+
+    fn observability_payload(&self, provisioning: Option<&ProvisioningReadiness>) -> Value {
+        let conversation_state_count = lock_unpoisoned(&self.conversation_states).len();
+        let idempotent_cache_entries = lock_unpoisoned(&self.idempotent_results).entries.len();
+        let seen_activity_id_count = lock_unpoisoned(&self.seen_activity_ids).entries.len();
+
+        json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+            "observability": {
+                "conversation_state_count": conversation_state_count,
+                "idempotent_cache_entries": idempotent_cache_entries,
+                "seen_activity_id_count": seen_activity_id_count,
+                "retry_config": self.retry_config.clone(),
+            },
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        provisioning: Option<&ProvisioningReadiness>,
+    ) -> SelfCheckReport {
+        report.details = Some(self.observability_payload(provisioning));
+        report
+    }
+
+    fn classify_self_check_error(error: &TeamsError) -> SelfCheckReport {
+        match error {
+            TeamsError::Unauthorized(message) => SelfCheckReport::failed(
+                "token_invalid_or_expired",
+                format!("Microsoft Graph rejected the bearer token: {message}"),
+            ),
+            TeamsError::Forbidden(message) => {
+                let normalized = message.to_ascii_lowercase();
+                let reason_code = if normalized.contains("consent")
+                    || normalized.contains("insufficient")
+                    || normalized.contains("privilege")
+                    || normalized.contains("permission")
+                    || normalized.contains("authorization_requestdenied")
+                {
+                    "admin_consent_or_permission_missing"
+                } else {
+                    "graph_forbidden"
+                };
+                SelfCheckReport::failed(reason_code, message.clone())
+            }
+            TeamsError::RateLimited { retry_after_ms } => SelfCheckReport::degraded(
+                "graph_rate_limited",
+                format!(
+                    "Microsoft Graph throttled the Teams readiness probe; retry after {retry_after_ms}ms"
+                ),
+            ),
+            TeamsError::NotFound(message) => {
+                SelfCheckReport::failed("graph_endpoint_not_found", message.clone())
+            }
+            other if other.is_retryable() => {
+                SelfCheckReport::degraded("self_check_retryable", other.to_string())
+            }
+            other => SelfCheckReport::failed("self_check_failed", other.to_string()),
+        }
+    }
+
     /// Run connector diagnostics.
     #[must_use]
     pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self.provisioning_readiness();
         let mut checks = Vec::new();
 
         let configured = self.config.is_some();
@@ -878,62 +1221,73 @@ impl TeamsConnector {
 
         let runtime_ok = self.runtime.is_some();
         checks.push(DoctorCheck {
-            name: "runtime".into(),
+            name: "runtime_initialized".into(),
             passed: runtime_ok,
             message: Some(if runtime_ok {
                 "ConnectorRuntime initialized".into()
             } else {
-                "Runtime missing".into()
+                "ConnectorRuntime missing; re-run configure".into()
             }),
             critical: true,
         });
 
-        if let Some(config) = &self.config {
-            let allowed_hosts = ["graph.microsoft.com"];
-            let host_part = config
-                .graph_base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
+        if let Some(readiness) = &provisioning {
             checks.push(DoctorCheck {
-                name: "network_constraints".into(),
-                passed: host_ok,
-                message: Some(if host_ok {
-                    "Graph URL matches allowed host (graph.microsoft.com)".into()
-                } else {
-                    format!("Graph URL host {host_part} not in allowed list")
-                }),
+                name: "graph_network_constraints".into(),
+                passed: readiness.graph_network_ok,
+                message: Some(readiness.graph_network_message.clone()),
                 critical: true,
             });
-
-            let auth_mode = match &config.auth {
-                TeamsAuth::AccessToken { .. } => "access_token",
-                TeamsAuth::ClientCredentials { .. } => "client_credentials",
-                TeamsAuth::CredentialId { .. } => "credential_id",
-            };
-            let secretless = self.client.as_ref().is_some_and(TeamsClient::is_secretless);
             checks.push(DoctorCheck {
-                name: "credential_mode".into(),
-                passed: !secretless,
-                message: Some(if secretless {
-                    "Credential injection required via egress proxy".into()
+                name: "bot_service_url_policy".into(),
+                passed: readiness.bot_service_url_ok,
+                message: Some(readiness.bot_service_url_message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                passed: readiness.credential_material_configured,
+                message: Some(if readiness.requires_credential_injection {
+                    "Credential injection required via host or egress proxy before live readiness can be proven".into()
                 } else {
-                    format!("Auth mode: {auth_mode}")
+                    "Credential material configured directly".into()
+                }),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_surface_compatibility".into(),
+                passed: readiness.full_connector_surface_supported,
+                message: Some(readiness.full_connector_surface_message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "tenant_hint".into(),
+                passed: true,
+                message: Some(if readiness.tenant_hint_configured {
+                    "tenant_id hint configured for bot activity or tenant-scoped routing".into()
+                } else {
+                    "tenant_id hint not configured; acceptable unless your host routing depends on explicit tenant scoping".into()
                 }),
                 critical: false,
             });
         }
 
-        DoctorResult::from_checks(checks)
+        let result = DoctorResult::from_checks(checks, provisioning);
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "teams.provisioning.doctor",
+            status = result.status_label(),
+            check_count = result.checks.len(),
+            failed_checks,
+            "Teams doctor checks completed"
+        );
+        result
     }
 }
 
@@ -1551,47 +1905,110 @@ impl FcpConnector for TeamsConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self.provisioning_readiness();
+        let mut snapshot = match &provisioning {
+            Some(readiness) if !readiness.graph_network_ok || !readiness.bot_service_url_ok => {
+                HealthSnapshot::error("network constraints invalid")
+            }
+            Some(readiness) if readiness.uses_client_credentials => {
+                HealthSnapshot::degraded("delegated user context required")
+            }
+            Some(readiness) if readiness.requires_credential_injection => {
+                HealthSnapshot::degraded("credential injection required")
+            }
+            Some(_) if self.client.is_some() && self.runtime.is_some() => HealthSnapshot::ready(),
+            Some(_) | None => HealthSnapshot::degraded("not configured"),
         };
+        snapshot.details = Some(self.observability_payload(provisioning.as_ref()));
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+        let Some(config) = &self.config else {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+            ));
+        };
+        let provisioning = self.provisioning_readiness();
+        let Some(readiness) = provisioning.clone() else {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
             ));
         };
 
-        if client.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
-                "credential_injection_required",
-                "Configured with empty token; egress proxy injection required",
+        if !readiness.graph_network_ok || !readiness.bot_service_url_ok {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "network_constraints_invalid",
+                    format!(
+                        "{}; {}",
+                        readiness.graph_network_message, readiness.bot_service_url_message
+                    ),
+                ),
+                Some(&readiness),
             ));
         }
 
-        match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
-            Err(err) => {
-                if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
-                    ))
-                } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
-                    ))
-                }
-            }
+        let Some(client) = &self.client else {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "client_missing",
+                    "Teams Graph client not initialized; re-run configure",
+                ),
+                Some(&readiness),
+            ));
+        };
+
+        if self.runtime.is_none() {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "runtime_missing",
+                    "ConnectorRuntime not initialized; re-run configure",
+                ),
+                Some(&readiness),
+            ));
         }
+
+        if client.is_secretless() {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured in credential_id mode; the host or egress proxy must inject a delegated bearer token before Teams live readiness can be proven",
+                ),
+                Some(&readiness),
+            ));
+        }
+
+        // Microsoft Graph `/me` endpoints are delegated-only, and standard Teams
+        // message send/reply/update application permissions are reserved for
+        // migration scenarios. App-only tokens therefore cannot prove full
+        // connector readiness for this surface.
+        if matches!(&config.auth, TeamsAuth::ClientCredentials { .. }) {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "delegated_user_context_required",
+                    "client_credentials acquires an app-only token, but this connector's `/me` readiness/list flows and standard send/reply/update operations require delegated user context",
+                ),
+                Some(&readiness),
+            ));
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(error) => Self::classify_self_check_error(&error),
+        };
+        let report = self.attach_self_check_details(report, Some(&readiness));
+        info!(
+            event = "teams.provisioning.self_check",
+            status = ?report.status,
+            reason_code = report.reason_code.as_deref().unwrap_or("ok"),
+            "Teams self_check completed"
+        );
+        Ok(report)
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
@@ -1800,6 +2217,26 @@ impl TeamsConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manually_configured_connector(
+        auth: TeamsAuth,
+        client: TeamsClient,
+        graph_base_url: &str,
+    ) -> TeamsConnector {
+        let mut connector = TeamsConnector::new();
+        connector.config = Some(crate::types::TeamsConfig {
+            graph_base_url: graph_base_url.into(),
+            bot_service_url: "https://smba.trafficmanager.net/amer".into(),
+            auth,
+            tenant_id: None,
+            retry: HttpRetryConfig::default(),
+            timeout_ms: 1_000,
+        });
+        connector.client = Some(client);
+        connector.runtime = Some(ConnectorRuntime::new(ConnectorRuntimeConfig::default()));
+        connector.base.set_configured(true);
+        connector
+    }
 
     #[test]
     fn test_operations_info_count() {
@@ -2117,6 +2554,7 @@ mod tests {
         let connector = TeamsConnector::new();
         let health = connector.health().await;
         assert!(matches!(health.status, HealthState::Degraded { .. }));
+        assert!(health.details.is_some());
     }
 
     #[fcp_async_core::runtime::test]
@@ -2130,13 +2568,18 @@ mod tests {
             .unwrap();
         let health = connector.health().await;
         assert!(matches!(health.status, HealthState::Ready));
+        let details = health.details.unwrap();
+        assert_eq!(details["configured"], true);
+        assert_eq!(details["provisioning"]["auth_mode"], "access_token");
+        assert!(details["operator_guidance"]["common_remediation"].is_array());
     }
 
     #[test]
     fn test_doctor_before_configure() {
         let connector = TeamsConnector::new();
         let report = connector.doctor();
-        assert!(!report.passed);
+        assert!(!report.ready);
+        assert_eq!(report.status, DoctorStatus::Unhealthy);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2149,7 +2592,93 @@ mod tests {
             .await
             .unwrap();
         let report = connector.doctor();
-        assert!(report.passed);
+        assert!(report.ready);
+        assert_eq!(report.status, DoctorStatus::Healthy);
+        assert_eq!(
+            report.provisioning.as_ref().unwrap().graph_base_url,
+            "https://graph.microsoft.com/v1.0"
+        );
+    }
+
+    #[test]
+    fn test_doctor_flags_client_credentials_as_not_full_surface_ready() {
+        let client = TeamsClient::new(
+            "https://graph.microsoft.com/v1.0",
+            "tok",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let connector = manually_configured_connector(
+            TeamsAuth::ClientCredentials {
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                tenant_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            },
+            client,
+            "https://graph.microsoft.com/v1.0",
+        );
+
+        let report = connector.doctor();
+        assert!(!report.ready);
+        assert_eq!(report.status, DoctorStatus::Unhealthy);
+        let compatibility = report
+            .checks
+            .iter()
+            .find(|check| check.name == "auth_surface_compatibility")
+            .unwrap();
+        assert!(!compatibility.passed);
+        assert!(
+            compatibility
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("delegated user context")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_client_credentials_is_degraded() {
+        let client = TeamsClient::new(
+            "https://graph.microsoft.com/v1.0",
+            "tok",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let connector = manually_configured_connector(
+            TeamsAuth::ClientCredentials {
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                tenant_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            },
+            client,
+            "https://graph.microsoft.com/v1.0",
+        );
+
+        let health = connector.health().await;
+        assert!(matches!(
+            &health.status,
+            HealthState::Degraded { reason } if reason == "delegated user context required"
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_invalid_graph_url_is_error() {
+        let client = TeamsClient::new(
+            "http://graph.microsoft.com/v1.0",
+            "tok",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let connector = manually_configured_connector(
+            TeamsAuth::AccessToken {
+                access_token: "tok".into(),
+            },
+            client,
+            "http://graph.microsoft.com/v1.0",
+        );
+
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Error { .. }));
     }
 
     #[fcp_async_core::runtime::test]
@@ -2225,6 +2754,8 @@ mod tests {
         let connector = TeamsConnector::new();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(report.reason_code.as_deref(), Some("not_configured"));
+        assert!(report.details.is_some());
     }
 
     #[fcp_async_core::runtime::test]
@@ -2286,6 +2817,90 @@ mod tests {
 
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Failed);
-        assert_eq!(report.reason_code.as_deref(), Some("self_check_failed"));
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("token_invalid_or_expired")
+        );
+        assert!(report.details.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_requires_injection() {
+        let mut connector = TeamsConnector::new();
+        connector
+            .configure(json!({
+                "auth": { "mode": "credential_id", "credential_id": "cred_1" }
+            }))
+            .await
+            .unwrap();
+
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("credential_injection_required")
+        );
+        assert!(report.details.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_client_credentials_requires_delegated_context() {
+        let client = TeamsClient::new(
+            "https://graph.microsoft.com/v1.0",
+            "tok",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let connector = manually_configured_connector(
+            TeamsAuth::ClientCredentials {
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                tenant_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            },
+            client,
+            "https://graph.microsoft.com/v1.0",
+        );
+
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("delegated_user_context_required")
+        );
+        assert!(report.details.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_forbidden_maps_admin_consent_remediation() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/me"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                    "error": {
+                        "code": "Authorization_RequestDenied",
+                        "message": "Insufficient privileges to complete the operation. Admin consent is required."
+                    }
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = TeamsConnector::new();
+        connector
+            .configure(json!({
+                "graph_base_url": mock_server.uri(),
+                "auth": { "mode": "access_token", "access_token": "tok" }
+            }))
+            .await
+            .unwrap();
+
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("admin_consent_or_permission_missing")
+        );
+        assert!(report.details.is_some());
     }
 }

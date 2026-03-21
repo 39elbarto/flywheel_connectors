@@ -25,11 +25,15 @@ use crate::types::GcpAuth;
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/gcp_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/gcp_connector/<timestamp>";
+const COMPUTE_API_HOST: &str = "compute.googleapis.com";
+const STORAGE_API_HOST: &str = "storage.googleapis.com";
+const RUN_API_HOST: &str = "run.googleapis.com";
+const CRM_API_HOST: &str = "cloudresourcemanager.googleapis.com";
 const GCP_ALLOWED_HOSTS: &[&str] = &[
-    "compute.googleapis.com",
-    "storage.googleapis.com",
-    "run.googleapis.com",
-    "cloudresourcemanager.googleapis.com",
+    COMPUTE_API_HOST,
+    STORAGE_API_HOST,
+    RUN_API_HOST,
+    CRM_API_HOST,
 ];
 
 // ── Operation IDs ──
@@ -110,7 +114,26 @@ impl GcpConfig {
     }
 
     fn provisioning_readiness(&self) -> ProvisioningReadiness {
-        let (network_ok, network_message) = base_url_policy(&self.compute_base_url);
+        let service_endpoints = vec![
+            endpoint_policy("compute", &self.compute_base_url, COMPUTE_API_HOST),
+            endpoint_policy("storage", &self.storage_base_url, STORAGE_API_HOST),
+            endpoint_policy("run", &self.run_base_url, RUN_API_HOST),
+            endpoint_policy("crm", &self.crm_base_url, CRM_API_HOST),
+        ];
+        let network_ok = service_endpoints.iter().all(|endpoint| endpoint.ok);
+        let network_message = if network_ok {
+            format!(
+                "Validated {} GCP API endpoint policies",
+                service_endpoints.len()
+            )
+        } else {
+            service_endpoints
+                .iter()
+                .filter(|endpoint| !endpoint.ok)
+                .map(|endpoint| format!("{}: {}", endpoint.service, endpoint.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
 
         ProvisioningReadiness {
             auth_mode: self.auth.auth_mode(),
@@ -121,6 +144,7 @@ impl GcpConfig {
             network_ok,
             network_message,
             allowed_hosts: GCP_ALLOWED_HOSTS.to_vec(),
+            service_endpoints,
             project_scope_hint: "All GCP API calls target the configured project_id. Ensure the credentials have appropriate IAM permissions for the target project.",
         }
     }
@@ -136,7 +160,17 @@ struct ProvisioningReadiness {
     network_ok: bool,
     network_message: String,
     allowed_hosts: Vec<&'static str>,
+    service_endpoints: Vec<EndpointReadiness>,
     project_scope_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EndpointReadiness {
+    service: &'static str,
+    expected_host: &'static str,
+    override_configured: bool,
+    ok: bool,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,42 +251,74 @@ fn is_local_test_host(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
 }
 
-fn base_url_policy(base_url: &Option<String>) -> (bool, String) {
+fn endpoint_policy(
+    service: &'static str,
+    base_url: &Option<String>,
+    expected_host: &'static str,
+) -> EndpointReadiness {
     let Some(base_url) = base_url else {
-        return (true, "Using default GCP production API endpoints".into());
+        return EndpointReadiness {
+            service,
+            expected_host,
+            override_configured: false,
+            ok: true,
+            message: format!("Using default {service} GCP API endpoint ({expected_host})"),
+        };
     };
 
     let parsed = match Url::parse(base_url) {
         Ok(url) => url,
-        Err(error) => return (false, format!("base_url must be an absolute URL: {error}")),
+        Err(error) => {
+            return EndpointReadiness {
+                service,
+                expected_host,
+                override_configured: true,
+                ok: false,
+                message: format!("base_url must be an absolute URL: {error}"),
+            };
+        }
     };
 
     let Some(host) = parsed.host_str() else {
-        return (false, "base_url must include a host".into());
+        return EndpointReadiness {
+            service,
+            expected_host,
+            override_configured: true,
+            ok: false,
+            message: "base_url must include a host".into(),
+        };
     };
 
     if is_local_test_host(host) {
-        return (
-            true,
-            format!("localhost test endpoint accepted for verification: {base_url}"),
-        );
+        return EndpointReadiness {
+            service,
+            expected_host,
+            override_configured: true,
+            ok: true,
+            message: format!(
+                "localhost test endpoint accepted for {service} verification: {base_url}"
+            ),
+        };
     }
 
     let mut problems = Vec::new();
     if parsed.scheme() != "https" {
         problems.push(format!("scheme must be https, got {}", parsed.scheme()));
     }
-    if !GCP_ALLOWED_HOSTS.contains(&host) {
-        problems.push(format!(
-            "host must be one of {:?}, got {host}",
-            GCP_ALLOWED_HOSTS
-        ));
+    if host != expected_host {
+        problems.push(format!("host must be {expected_host}, got {host}"));
     }
 
-    if problems.is_empty() {
-        (true, "GCP production API endpoint accepted".into())
-    } else {
-        (false, problems.join("; "))
+    EndpointReadiness {
+        service,
+        expected_host,
+        override_configured: true,
+        ok: problems.is_empty(),
+        message: if problems.is_empty() {
+            format!("{service} GCP API endpoint accepted")
+        } else {
+            problems.join("; ")
+        },
     }
 }
 
@@ -287,7 +353,9 @@ fn operator_guidance() -> OperatorGuidance {
         ],
         rerun_commands: vec![
             "scripts/e2e/gcp_connector_verification.sh",
-            "rch exec -- cargo test -p fcp-gcp --lib",
+            "rch exec -- cargo run -q -p fwc -- manifest fix connectors/gcp/manifest.toml --check --json",
+            "rch exec -- cargo test -p fcp-gcp --test integration -- --nocapture",
+            "rch exec -- cargo test -p fcp-e2e --features gcp --test gcp_compliance_e2e -- --nocapture",
             "rch exec -- cargo clippy -p fcp-gcp --all-targets -- -D warnings",
         ],
         artifact_root_hint: ARTIFACT_ROOT_HINT,
@@ -816,7 +884,10 @@ impl FcpConnector for GcpConnector {
             "configured": self.config.is_some(),
             "handshaken": self.base.handshaken.load(Ordering::Acquire),
             "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
             "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
         }));
         snap
     }
@@ -1487,35 +1558,101 @@ mod tests {
     }
 
     #[test]
-    fn base_url_policy_default() {
-        let (ok, msg) = base_url_policy(&None);
-        assert!(ok);
-        assert!(msg.contains("default"));
+    fn endpoint_policy_default() {
+        let policy = endpoint_policy("compute", &None, COMPUTE_API_HOST);
+        assert!(policy.ok);
+        assert!(!policy.override_configured);
+        assert!(policy.message.contains("default"));
     }
 
     #[test]
-    fn base_url_policy_localhost() {
-        let (ok, msg) = base_url_policy(&Some("http://localhost:8080".into()));
-        assert!(ok);
-        assert!(msg.contains("localhost"));
+    fn endpoint_policy_localhost() {
+        let policy = endpoint_policy(
+            "storage",
+            &Some("http://localhost:8080".into()),
+            STORAGE_API_HOST,
+        );
+        assert!(policy.ok);
+        assert!(policy.message.contains("localhost"));
     }
 
     #[test]
-    fn base_url_policy_invalid_scheme() {
-        let (ok, _) = base_url_policy(&Some("http://compute.googleapis.com".into()));
-        assert!(!ok);
+    fn endpoint_policy_invalid_scheme() {
+        let policy = endpoint_policy(
+            "compute",
+            &Some("http://compute.googleapis.com".into()),
+            COMPUTE_API_HOST,
+        );
+        assert!(!policy.ok);
+        assert!(policy.message.contains("scheme must be https"));
     }
 
     #[test]
-    fn base_url_policy_valid() {
-        let (ok, _) = base_url_policy(&Some("https://compute.googleapis.com".into()));
-        assert!(ok);
+    fn endpoint_policy_valid() {
+        let policy = endpoint_policy(
+            "compute",
+            &Some("https://compute.googleapis.com".into()),
+            COMPUTE_API_HOST,
+        );
+        assert!(policy.ok);
     }
 
     #[test]
-    fn base_url_policy_unknown_host() {
-        let (ok, _) = base_url_policy(&Some("https://evil.example.com".into()));
-        assert!(!ok);
+    fn endpoint_policy_wrong_service_host() {
+        let policy = endpoint_policy(
+            "storage",
+            &Some("https://compute.googleapis.com".into()),
+            STORAGE_API_HOST,
+        );
+        assert!(!policy.ok);
+        assert!(policy.message.contains(STORAGE_API_HOST));
+    }
+
+    #[test]
+    fn provisioning_readiness_rejects_invalid_auxiliary_endpoint() {
+        let config = GcpConfig {
+            project_id: "test-project".into(),
+            auth: GcpAuth::AccessToken {
+                access_token: "ya29.test".into(),
+            },
+            retry: HttpRetryConfig::default(),
+            request_timeout_ms: default_timeout_ms(),
+            compute_base_url: None,
+            storage_base_url: Some("https://compute.googleapis.com".into()),
+            run_base_url: None,
+            crm_base_url: None,
+        };
+
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("storage"));
+        assert!(
+            readiness
+                .service_endpoints
+                .iter()
+                .any(|endpoint| endpoint.service == "storage" && !endpoint.ok)
+        );
+    }
+
+    #[test]
+    fn health_details_include_guidance_and_verification_metadata() {
+        let details = fcp_async_core::runtime::block_on_sync(async {
+            GcpConnector::new()
+                .health()
+                .await
+                .details
+                .expect("health details")
+        })
+        .unwrap();
+        assert!(details["operator_guidance"]["prerequisites"].is_array());
+        assert_eq!(
+            details["verification_script"],
+            "scripts/e2e/gcp_connector_verification.sh"
+        );
+        assert_eq!(
+            details["artifact_root_hint"],
+            "artifacts/e2e/gcp_connector/<timestamp>"
+        );
     }
 
     #[test]

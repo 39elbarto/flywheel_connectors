@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
 };
 use fcp_google_discovery::auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth};
-use serde::{Deserialize, Serialize};
+use reqwest::Url;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tracing::{info, instrument};
 
@@ -39,6 +40,13 @@ const HEALTH_OP: &str = "firebase.health";
 
 const FIREBASE_READ_CAPABILITY: &str = "firebase.read";
 const FIREBASE_WRITE_CAPABILITY: &str = "firebase.write";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/firebase_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/firebase_connector/<timestamp>";
+const FIRESTORE_ALLOWED_HOSTS: &[&str] = &["firestore.googleapis.com"];
+const REALTIME_DATABASE_ALLOWED_SUFFIXES: &[&str] = &["firebaseio.com", "firebasedatabase.app"];
+const GOOGLE_SCOPE_DATASTORE: &str = "https://www.googleapis.com/auth/datastore";
+const GOOGLE_SCOPE_REALTIME_DATABASE: &str = "https://www.googleapis.com/auth/firebase.database";
+const GOOGLE_SCOPE_CLOUD_PLATFORM: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 /// Validated Firebase connector configuration.
 #[derive(Debug, Clone)]
@@ -108,17 +116,113 @@ impl FirebaseConfig {
             required_scopes,
         })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (firestore_host_ok, firestore_host_message) =
+            firestore_endpoint_policy(&self.firestore_base_url);
+        let (realtime_database_host_ok, realtime_database_host_message) =
+            realtime_database_endpoint_policy(&self.realtime_database_url);
+        let firestore_scope_configured = scope_covers_firestore(&self.required_scopes);
+        let realtime_database_scope_configured =
+            scope_covers_realtime_database(&self.required_scopes);
+        let network_ok = firestore_host_ok && realtime_database_host_ok;
+
+        ProvisioningReadiness {
+            auth_mode: firebase_auth_redacted_label(&self.auth),
+            secret_material_configured: !firebase_auth_is_secretless(&self.auth),
+            requires_credential_injection: firebase_auth_is_secretless(&self.auth),
+            project_id: self.project_id.clone(),
+            database_id: self.database_id.clone(),
+            firestore: EndpointReadiness {
+                url: self.firestore_base_url.clone(),
+                host_ok: firestore_host_ok,
+                message: firestore_host_message.clone(),
+            },
+            realtime_database: EndpointReadiness {
+                url: self.realtime_database_url.clone(),
+                host_ok: realtime_database_host_ok,
+                message: realtime_database_host_message.clone(),
+            },
+            network_ok,
+            network_message: format!("{firestore_host_message}; {realtime_database_host_message}"),
+            request_timeout_ms: self.request_timeout_ms,
+            required_scopes: self.required_scopes.clone(),
+            scope_coverage: ScopeCoverage {
+                firestore: firestore_scope_configured,
+                realtime_database: realtime_database_scope_configured,
+                guidance: firebase_permissions_guidance(
+                    firestore_scope_configured,
+                    realtime_database_scope_configured,
+                    firebase_auth_is_secretless(&self.auth),
+                ),
+            },
+            host_policy_guidance: "Production verification must target https://firestore.googleapis.com/v1 plus a Firebase-hosted Realtime Database endpoint under *.firebaseio.com or *.firebasedatabase.app.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: String,
+    secret_material_configured: bool,
+    requires_credential_injection: bool,
+    project_id: String,
+    database_id: String,
+    firestore: EndpointReadiness,
+    realtime_database: EndpointReadiness,
+    network_ok: bool,
+    network_message: String,
+    request_timeout_ms: u64,
+    required_scopes: Vec<String>,
+    scope_coverage: ScopeCoverage,
+    host_policy_guidance: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EndpointReadiness {
+    url: String,
+    host_ok: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScopeCoverage {
+    firestore: bool,
+    realtime_database: bool,
+    guidance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
 }
 
 /// Doctor result returned by the `doctor` method.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DoctorResult {
+    ready: bool,
     status: DoctorStatus,
     checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 /// Connector readiness state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum DoctorStatus {
     Healthy,
@@ -127,7 +231,7 @@ enum DoctorStatus {
 }
 
 /// Single doctor check entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DoctorCheck {
     name: String,
     passed: bool,
@@ -138,7 +242,11 @@ struct DoctorCheck {
 
 impl DoctorResult {
     #[must_use]
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
+        let ready = checks
+            .iter()
+            .filter(|check| check.critical)
+            .all(|check| check.passed);
         let status = if checks.iter().any(|check| check.critical && !check.passed) {
             DoctorStatus::Unhealthy
         } else if checks.iter().any(|check| !check.passed) {
@@ -146,7 +254,72 @@ impl DoctorResult {
         } else {
             DoctorStatus::Healthy
         };
-        Self { status, checks }
+        Self {
+            ready,
+            status,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
+    }
+
+    const fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable Firebase project plus a non-production Firestore database and Realtime Database namespace.",
+            "Provision a Google credential that can read Firestore database metadata and, if you will test writes, mutate only synthetic staging fixtures.",
+            "Seed deterministic Firestore documents and Realtime Database paths before running destructive verification flows.",
+        ],
+        dedicated_environment: "Run verification only against staging Firebase data. Firestore delete and Realtime Database delete operations are destructive and should never target production documents or JSON subtrees.",
+        redaction_rules: vec![
+            "Never print raw bearer tokens, injected credentials, or Authorization headers.",
+            "Treat project_id, database_id, and Firebase hostnames as environment metadata; share them only when the environment is disposable or already public.",
+            "Do not paste private Firestore document bodies or Realtime Database payloads into shared logs unless they are synthetic fixtures.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "firestore_host_invalid",
+                symptom: "doctor/self_check reports an invalid Firestore base URL",
+                action: "Set firestore_base_url to https://firestore.googleapis.com/v1 unless you are deliberately fronting Google APIs through a compliant proxy.",
+            },
+            RemediationHint {
+                code: "realtime_database_host_invalid",
+                symptom: "doctor/self_check reports an invalid Realtime Database endpoint",
+                action: "Set realtime_database_url to the Firebase-hosted database root such as https://<project>.firebaseio.com or the regional *.firebasedatabase.app endpoint for the target database.",
+            },
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "configure succeeds with credential_id but self_check cannot prove live access",
+                action: "Ensure the host or egress proxy injects a concrete Google credential at runtime, then rerun self_check before invoking write or delete operations.",
+            },
+            RemediationHint {
+                code: "google_scopes_incomplete",
+                symptom: "doctor warns that required_scopes do not cover both Firestore and Realtime Database surfaces",
+                action: "Add datastore and firebase.database scopes, or use cloud-platform when the deployment policy allows a broader Google credential.",
+            },
+            RemediationHint {
+                code: "permissions_insufficient",
+                symptom: "self_check or invoke returns 401/403 from Firebase",
+                action: "Verify the bound Google principal has Firebase Rules and IAM coverage for the specific Firestore database and Realtime Database paths under test.",
+            },
+        ],
+        rerun_commands: vec![
+            "scripts/e2e/firebase_connector_verification.sh",
+            "fwc manifest fix connectors/firebase/manifest.toml --check --json",
+            "rch exec -- cargo test -p fcp-firebase --test integration -- --nocapture",
+            "rch exec -- cargo clippy -p fcp-firebase --all-targets -- -D warnings",
+        ],
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
@@ -171,6 +344,104 @@ impl FirebaseConnector {
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
         }
+    }
+
+    fn doctor(&self) -> DoctorResult {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(FirebaseConfig::provisioning_readiness);
+        let handshaken = self.session_id.is_some();
+        let mut checks = vec![
+            DoctorCheck {
+                name: "configuration".into(),
+                passed: self.config.is_some(),
+                message: self
+                    .config
+                    .as_ref()
+                    .map(|config| format!("Configured for Firebase project {}", config.project_id))
+                    .or_else(|| {
+                        Some("Not configured; call configure before handshake or invoke".into())
+                    }),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "client_initialized".into(),
+                passed: self.client.is_some(),
+                message: if self.client.is_some() {
+                    None
+                } else {
+                    Some("Firebase client not initialized; re-run configure".into())
+                },
+                critical: true,
+            },
+            DoctorCheck {
+                name: "handshake".into(),
+                passed: handshaken,
+                message: if handshaken {
+                    None
+                } else {
+                    Some("Handshake not completed".into())
+                },
+                critical: false,
+            },
+        ];
+
+        if let Some(readiness) = &provisioning {
+            checks.push(DoctorCheck {
+                name: "firestore_host_policy".into(),
+                passed: readiness.firestore.host_ok,
+                message: Some(readiness.firestore.message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "realtime_database_host_policy".into(),
+                passed: readiness.realtime_database.host_ok,
+                message: Some(readiness.realtime_database.message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "secret_material".into(),
+                passed: readiness.secret_material_configured,
+                message: Some(if readiness.secret_material_configured {
+                    "Concrete Google credential configured directly".into()
+                } else {
+                    "Secretless mode requires host-side credential injection before live verification"
+                        .into()
+                }),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "scope_coverage".into(),
+                passed: readiness.scope_coverage.firestore
+                    && readiness.scope_coverage.realtime_database,
+                message: Some(readiness.scope_coverage.guidance.clone()),
+                critical: false,
+            });
+        }
+
+        DoctorResult::from_checks(checks, provisioning)
+    }
+
+    fn attach_self_check_details(
+        mut report: SelfCheckReport,
+        provisioning: Option<&ProvisioningReadiness>,
+        live_probe: Option<&Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "provisioning": provisioning,
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+        }));
+        report
     }
 }
 
@@ -263,8 +534,19 @@ impl FirebaseConnector {
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
+        let client_initialized = self.client.is_some();
         let handshaken = self.session_id.is_some();
-        let status = if configured && handshaken {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(FirebaseConfig::provisioning_readiness);
+        let ready = configured
+            && client_initialized
+            && handshaken
+            && provisioning
+                .as_ref()
+                .is_none_or(|readiness| readiness.network_ok);
+        let status = if ready {
             "healthy"
         } else if configured {
             "degraded"
@@ -275,106 +557,107 @@ impl FirebaseConnector {
         Ok(json!({
             "status": status,
             "configured": configured,
+            "client_initialized": client_initialized,
             "handshaken": handshaken,
+            "ready": ready,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "details": {
+                "provisioning": provisioning,
+                "operator_guidance": operator_guidance(),
+                "verification_script": VERIFICATION_SCRIPT_PATH,
+                "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            }
         }))
     }
 
     /// Handle the `doctor` method.
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: self
-                .config
-                .as_ref()
-                .map(|config| format!("Configured for Firebase project {}", config.project_id))
-                .or_else(|| Some("Not configured — call configure first".into())),
-            critical: true,
-        });
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_some() {
-                None
-            } else {
-                Some("Firebase client not initialized".into())
-            },
-            critical: true,
-        });
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: self.session_id.is_some(),
-            message: if self.session_id.is_some() {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-
-        if let Some(config) = &self.config {
-            checks.push(DoctorCheck {
-                name: "firestore_host_policy".into(),
-                passed: host_is_allowed(&config.firestore_base_url, &["firestore.googleapis.com"]),
-                message: Some(format!("Firestore base URL: {}", config.firestore_base_url)),
-                critical: true,
-            });
-            checks.push(DoctorCheck {
-                name: "realtime_database_host_policy".into(),
-                passed: host_is_allowed_suffix(
-                    &config.realtime_database_url,
-                    &["firebaseio.com", "firebasedatabase.app"],
-                ),
-                message: Some(format!(
-                    "Realtime Database URL: {}",
-                    config.realtime_database_url
-                )),
-                critical: true,
-            });
-            checks.push(DoctorCheck {
-                name: "credential_injection".into(),
-                passed: !firebase_auth_is_secretless(&config.auth),
-                message: Some(if firebase_auth_is_secretless(&config.auth) {
-                    "Configured with credential_id; egress proxy injection required".into()
-                } else {
-                    format!(
-                        "Using Google auth mode {}",
-                        firebase_auth_redacted_label(&config.auth)
-                    )
-                }),
-                critical: false,
-            });
-        }
-
-        let result = DoctorResult::from_checks(checks);
+        let result = self.doctor();
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "firebase.provisioning.doctor",
+            status = result.status_label(),
+            check_count = result.checks.len(),
+            failed_checks,
+            "Firebase doctor checks completed"
+        );
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({ "status": "error" })))
     }
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        let report = match (&self.config, &self.client) {
-            (None, _) | (_, None) => {
-                SelfCheckReport::failed("not_configured", "Connector is not configured yet")
-            }
-            (Some(config), Some(_)) if firebase_auth_is_secretless(&config.auth) => {
-                SelfCheckReport::degraded(
-                    "credential_injection_required",
-                    "Configured with credential_id; live checks require egress proxy token materialization",
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(FirebaseConfig::provisioning_readiness);
+        let report = match (&self.config, &self.client, provisioning.as_ref()) {
+            (None, _, _) | (_, None, _) => Self::attach_self_check_details(
+                SelfCheckReport::failed("not_configured", "Connector is not configured yet"),
+                provisioning.as_ref(),
+                None,
+            ),
+            (Some(_), Some(_), Some(readiness)) if !readiness.network_ok => {
+                Self::attach_self_check_details(
+                    SelfCheckReport::failed(
+                        "network_constraints_invalid",
+                        readiness.network_message.clone(),
+                    ),
+                    provisioning.as_ref(),
+                    None,
                 )
             }
-            (_, Some(client)) => match client.health().await {
-                Ok(_) => SelfCheckReport::ok(),
-                Err(error) => {
-                    if error.is_retryable() {
-                        SelfCheckReport::degraded("self_check_retryable", error.to_string())
-                    } else {
-                        SelfCheckReport::failed("self_check_failed", error.to_string())
-                    }
+            (Some(config), Some(_), Some(_)) if firebase_auth_is_secretless(&config.auth) => {
+                Self::attach_self_check_details(
+                    SelfCheckReport::degraded(
+                        "credential_injection_required",
+                        "Configured with credential_id; live checks require host-side Google credential materialization",
+                    ),
+                    provisioning.as_ref(),
+                    None,
+                )
+            }
+            (Some(config), Some(client), Some(readiness)) => match client.health().await {
+                Ok(health) => {
+                    let live_probe = json!({
+                        "probe": "firestore.database.get",
+                        "database_resource": format!(
+                            "projects/{}/databases/{}",
+                            config.project_id, config.database_id
+                        ),
+                        "response": health,
+                        "network_ok": readiness.network_ok,
+                    });
+                    Self::attach_self_check_details(
+                        SelfCheckReport::ok(),
+                        provisioning.as_ref(),
+                        Some(&live_probe),
+                    )
                 }
+                Err(FirebaseError::Unauthorized { message }) => Self::attach_self_check_details(
+                    SelfCheckReport::failed("auth_invalid", message),
+                    provisioning.as_ref(),
+                    None,
+                ),
+                Err(error) if error.is_retryable() => Self::attach_self_check_details(
+                    SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                    provisioning.as_ref(),
+                    None,
+                ),
+                Err(error) => Self::attach_self_check_details(
+                    SelfCheckReport::failed("self_check_failed", error.to_string()),
+                    provisioning.as_ref(),
+                    None,
+                ),
             },
+            (Some(_), Some(_), None) => Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "self_check_failed",
+                    "Provisioning state could not be derived from the current configuration",
+                ),
+                None,
+                None,
+            ),
         };
 
         serde_json::to_value(report).map_err(|error| FcpError::Internal {
@@ -625,8 +908,8 @@ fn parse_string_array_field(params: &Value, field: &str) -> FcpResult<Option<Vec
 
 fn default_required_scopes() -> Vec<String> {
     vec![
-        "https://www.googleapis.com/auth/datastore".into(),
-        "https://www.googleapis.com/auth/firebase.database".into(),
+        GOOGLE_SCOPE_DATASTORE.into(),
+        GOOGLE_SCOPE_REALTIME_DATABASE.into(),
     ]
 }
 
@@ -635,13 +918,13 @@ fn default_realtime_database_url(project_id: &str) -> String {
 }
 
 fn host_is_allowed(url: &str, hosts: &[&str]) -> bool {
-    reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+    Url::parse(url).ok().is_some_and(|parsed| {
         parsed.scheme() == "https" && parsed.host_str().is_some_and(|host| hosts.contains(&host))
     })
 }
 
 fn host_is_allowed_suffix(url: &str, suffixes: &[&str]) -> bool {
-    reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+    Url::parse(url).ok().is_some_and(|parsed| {
         parsed.scheme() == "https"
             && parsed.host_str().is_some_and(|host| {
                 suffixes
@@ -649,6 +932,102 @@ fn host_is_allowed_suffix(url: &str, suffixes: &[&str]) -> bool {
                     .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
             })
     })
+}
+
+fn firestore_endpoint_policy(url: &str) -> (bool, String) {
+    match Url::parse(url) {
+        Ok(parsed) => {
+            let Some(host) = parsed.host_str() else {
+                return (false, "Firestore base URL must include a host".into());
+            };
+            if parsed.scheme() != "https" {
+                return (
+                    false,
+                    format!("Firestore base URL must use https, got {}", parsed.scheme()),
+                );
+            }
+            if FIRESTORE_ALLOWED_HOSTS.contains(&host) {
+                (true, format!("Firestore endpoint accepted: {url}"))
+            } else {
+                (
+                    false,
+                    format!(
+                        "Firestore host must be one of {FIRESTORE_ALLOWED_HOSTS:?}, got {host}"
+                    ),
+                )
+            }
+        }
+        Err(error) => (false, format!("invalid firestore_base_url: {error}")),
+    }
+}
+
+fn realtime_database_endpoint_policy(url: &str) -> (bool, String) {
+    match Url::parse(url) {
+        Ok(parsed) => {
+            let Some(host) = parsed.host_str() else {
+                return (false, "Realtime Database URL must include a host".into());
+            };
+            if parsed.scheme() != "https" {
+                return (
+                    false,
+                    format!(
+                        "Realtime Database URL must use https, got {}",
+                        parsed.scheme()
+                    ),
+                );
+            }
+            if REALTIME_DATABASE_ALLOWED_SUFFIXES
+                .iter()
+                .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+            {
+                (true, format!("Realtime Database endpoint accepted: {url}"))
+            } else {
+                (
+                    false,
+                    format!(
+                        "Realtime Database host must end with one of {REALTIME_DATABASE_ALLOWED_SUFFIXES:?}, got {host}"
+                    ),
+                )
+            }
+        }
+        Err(error) => (false, format!("invalid realtime_database_url: {error}")),
+    }
+}
+
+fn scope_covers_firestore(scopes: &[String]) -> bool {
+    scopes.iter().any(|scope| {
+        matches!(
+            scope.as_str(),
+            GOOGLE_SCOPE_DATASTORE | GOOGLE_SCOPE_CLOUD_PLATFORM
+        )
+    })
+}
+
+fn scope_covers_realtime_database(scopes: &[String]) -> bool {
+    scopes.iter().any(|scope| {
+        matches!(
+            scope.as_str(),
+            GOOGLE_SCOPE_REALTIME_DATABASE | GOOGLE_SCOPE_CLOUD_PLATFORM
+        )
+    })
+}
+
+fn firebase_permissions_guidance(
+    firestore_scope_configured: bool,
+    realtime_database_scope_configured: bool,
+    secretless: bool,
+) -> String {
+    match (
+        firestore_scope_configured,
+        realtime_database_scope_configured,
+        secretless,
+    ) {
+        (true, true, true) => "Secretless mode is configured. The injected Google credential must still carry Firestore and Realtime Database access for the target Firebase project.".into(),
+        (true, true, false) => "Configured scopes cover both Firestore and Realtime Database. Live permissions still depend on the Google principal bound to the access token.".into(),
+        (false, true, _) => "Configured required_scopes omit Firestore access. Add https://www.googleapis.com/auth/datastore or cloud-platform before relying on Firestore reads or writes.".into(),
+        (true, false, _) => "Configured required_scopes omit Realtime Database access. Add https://www.googleapis.com/auth/firebase.database or cloud-platform before relying on RTDB reads or writes.".into(),
+        (false, false, _) => "Configured required_scopes omit both Firestore and Realtime Database access. Add datastore plus firebase.database scopes, or use cloud-platform when the deployment policy permits broader Google access.".into(),
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -754,7 +1133,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static(FIRESTORE_UPDATE_OP)],
             },
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Policy),
         },
         OperationInfo {
             id: OperationId::from_static(FIRESTORE_UPDATE_OP),
@@ -784,7 +1163,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static(FIRESTORE_CREATE_OP)],
             },
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Policy),
         },
         OperationInfo {
             id: OperationId::from_static(FIRESTORE_DELETE_OP),
@@ -811,7 +1190,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static(FIRESTORE_GET_OP)],
             },
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(FIRESTORE_QUERY_OP),
@@ -863,7 +1242,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static(FIRESTORE_UPDATE_OP)],
             },
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Policy),
         },
         OperationInfo {
             id: OperationId::from_static(RTDB_GET_OP),
@@ -921,7 +1300,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static(RTDB_GET_OP)],
             },
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Policy),
         },
         OperationInfo {
             id: OperationId::from_static(RTDB_DELETE_OP),
@@ -947,7 +1326,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static(RTDB_GET_OP)],
             },
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(HEALTH_OP),
@@ -1067,5 +1446,42 @@ mod tests {
         let connector = FirebaseConnector::new();
         let doctor = connector.handle_doctor().await.unwrap();
         assert_eq!(doctor["status"], "unhealthy");
+        assert_eq!(doctor["ready"], false);
+        assert_eq!(doctor["verification_script"], VERIFICATION_SCRIPT_PATH);
+        assert_eq!(
+            doctor["operator_guidance"]["artifact_root_hint"],
+            ARTIFACT_ROOT_HINT
+        );
+    }
+
+    #[test]
+    fn mutation_operations_require_approval_metadata() {
+        let operations = typed_operations_info();
+        let find = |id: &str| operations.iter().find(|op| op.id.as_str() == id).unwrap();
+
+        assert_eq!(
+            find(FIRESTORE_CREATE_OP).requires_approval,
+            Some(ApprovalMode::Policy)
+        );
+        assert_eq!(
+            find(FIRESTORE_UPDATE_OP).requires_approval,
+            Some(ApprovalMode::Policy)
+        );
+        assert_eq!(
+            find(FIRESTORE_BATCH_WRITE_OP).requires_approval,
+            Some(ApprovalMode::Policy)
+        );
+        assert_eq!(
+            find(RTDB_SET_OP).requires_approval,
+            Some(ApprovalMode::Policy)
+        );
+        assert_eq!(
+            find(FIRESTORE_DELETE_OP).requires_approval,
+            Some(ApprovalMode::Interactive)
+        );
+        assert_eq!(
+            find(RTDB_DELETE_OP).requires_approval,
+            Some(ApprovalMode::Interactive)
+        );
     }
 }

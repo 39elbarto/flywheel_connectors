@@ -52,6 +52,17 @@ fn sanitize_query_param<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
     Ok(value)
 }
 
+fn normalize_base_url_override(base_url: Option<String>) -> Option<String> {
+    base_url.and_then(|value| {
+        let trimmed = value.trim().trim_end_matches('/').to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
 /// AWS API client with retry support.
 /// Uses simplified REST without SigV4 signing (placeholder for future auth).
 pub struct AwsClient {
@@ -75,17 +86,19 @@ impl std::fmt::Debug for AwsClient {
 }
 
 impl AwsClient {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         auth: AwsAuth,
         region: &str,
         retry_config: HttpRetryConfig,
+        request_timeout_ms: u64,
         s3_base_url: Option<String>,
         ec2_base_url: Option<String>,
         lambda_base_url: Option<String>,
         sts_base_url: Option<String>,
     ) -> AwsResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_millis(request_timeout_ms))
             .build()
             .map_err(AwsError::Http)?;
 
@@ -94,10 +107,10 @@ impl AwsClient {
             auth,
             region: region.to_string(),
             retry_config,
-            s3_base_url,
-            ec2_base_url,
-            lambda_base_url,
-            sts_base_url,
+            s3_base_url: normalize_base_url_override(s3_base_url),
+            ec2_base_url: normalize_base_url_override(ec2_base_url),
+            lambda_base_url: normalize_base_url_override(lambda_base_url),
+            sts_base_url: normalize_base_url_override(sts_base_url),
         })
     }
 
@@ -629,6 +642,7 @@ mod tests {
                 },
                 "us-east-1",
                 HttpRetryConfig::default(),
+                30_000,
                 None,
                 None,
                 None,
@@ -656,6 +670,7 @@ mod tests {
                 },
                 "us-east-1",
                 HttpRetryConfig::default(),
+                30_000,
                 None,
                 None,
                 None,
@@ -676,6 +691,7 @@ mod tests {
                 },
                 "us-east-1",
                 HttpRetryConfig::default(),
+                30_000,
                 None,
                 None,
                 None,
@@ -699,6 +715,7 @@ mod tests {
                 },
                 "eu-west-1",
                 HttpRetryConfig::default(),
+                30_000,
                 None,
                 None,
                 None,
@@ -722,10 +739,11 @@ mod tests {
                 },
                 "us-east-1",
                 HttpRetryConfig::default(),
-                Some("http://localhost:4566".into()),
-                Some("http://localhost:4567".into()),
+                30_000,
+                Some(" http://localhost:4566/ ".into()),
+                Some("http://localhost:4567///".into()),
                 Some("http://localhost:4568".into()),
-                Some("http://localhost:4569".into()),
+                Some(" http://localhost:4569 ".into()),
             )
             .await
             .unwrap()
@@ -782,6 +800,7 @@ mod tests {
                 },
                 "ap-southeast-1",
                 HttpRetryConfig::default(),
+                30_000,
                 None,
                 None,
                 None,
@@ -798,5 +817,15 @@ mod tests {
             "https://lambda.ap-southeast-1.amazonaws.com"
         );
         assert_eq!(rt.sts_url(), "https://sts.amazonaws.com");
+    }
+
+    #[test]
+    fn normalize_base_url_override_trims_empty_values() {
+        assert_eq!(normalize_base_url_override(None), None);
+        assert_eq!(normalize_base_url_override(Some("   ".into())), None);
+        assert_eq!(
+            normalize_base_url_override(Some(" https://example.test/api/ ".into())),
+            Some("https://example.test/api".into())
+        );
     }
 }

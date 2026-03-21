@@ -1,5 +1,6 @@
 //! AWS connector implementation.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ use fcp_core::{
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::client::AwsClient;
 use crate::types::AwsAuth;
@@ -43,6 +45,13 @@ const CAP_EC2_WRITE: &str = "aws.ec2.write";
 const CAP_LAMBDA_READ: &str = "aws.lambda.read";
 const CAP_LAMBDA_WRITE: &str = "aws.lambda.write";
 const CAP_IAM_READ: &str = "aws.iam.read";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/aws_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/aws_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 3] = [
+    "rch exec -- cargo check -p fcp-aws --all-targets",
+    "rch exec -- cargo test -p fcp-aws",
+    "rch exec -- cargo clippy -p fcp-aws --all-targets -- -D warnings",
+];
 
 #[derive(Clone, serde::Deserialize)]
 pub struct AwsConfig {
@@ -81,6 +90,24 @@ impl std::fmt::Debug for AwsConfig {
 }
 
 impl AwsConfig {
+    fn normalize(&mut self) {
+        self.region = self.region.trim().to_string();
+        self.auth.access_key_id = self.auth.access_key_id.trim().to_string();
+        self.auth.secret_access_key = self.auth.secret_access_key.trim().to_string();
+        self.auth.session_token = self.auth.session_token.take().and_then(|token| {
+            let trimmed = token.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        normalize_endpoint_override(&mut self.s3_base_url);
+        normalize_endpoint_override(&mut self.ec2_base_url);
+        normalize_endpoint_override(&mut self.lambda_base_url);
+        normalize_endpoint_override(&mut self.sts_base_url);
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.region.is_empty() {
             return Err("region is required".into());
@@ -91,26 +118,213 @@ impl AwsConfig {
         if self.auth.secret_access_key.is_empty() {
             return Err("secret_access_key is required".into());
         }
+        if self.request_timeout_ms == 0 {
+            return Err("request_timeout_ms must be greater than 0".into());
+        }
+        if let Some(url) = &self.s3_base_url {
+            validate_endpoint_override(url, "s3_base_url")?;
+        }
+        if let Some(url) = &self.ec2_base_url {
+            validate_endpoint_override(url, "ec2_base_url")?;
+        }
+        if let Some(url) = &self.lambda_base_url {
+            validate_endpoint_override(url, "lambda_base_url")?;
+        }
+        if let Some(url) = &self.sts_base_url {
+            validate_endpoint_override(url, "sts_base_url")?;
+        }
         Ok(())
     }
 
     fn from_value(val: serde_json::Value) -> FcpResult<Self> {
-        let config: Self = serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("Invalid configuration: {e}"),
-        })?;
+        let mut config: Self =
+            serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+        config.normalize();
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
             message: e,
         })?;
         Ok(config)
     }
+
+    fn auth_mode(&self) -> &'static str {
+        if self.auth.session_token.is_some() {
+            "static_keys_with_session_token"
+        } else {
+            "static_keys"
+        }
+    }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let endpoint_overrides = EndpointOverrideReadiness::from_config(self);
+        ProvisioningReadiness {
+            auth_mode: self.auth_mode(),
+            request_timeout_ms: self.request_timeout_ms,
+            endpoint_overrides: endpoint_overrides.clone(),
+            aws_sigv4_supported: false,
+            sts_self_check_supported: endpoint_overrides.sts.is_some(),
+        }
+    }
+}
+
+fn normalize_endpoint_override(url: &mut Option<String>) {
+    *url = url.take().and_then(|value| {
+        let trimmed = value.trim().trim_end_matches('/').to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.ends_with(".localhost")
+}
+
+fn validate_endpoint_override(url: &str, label: &str) -> Result<(), String> {
+    let parsed =
+        Url::parse(url).map_err(|error| format!("{label} must be a valid URL: {error}"))?;
+    let Some(host) = parsed.host_str() else {
+        return Err(format!("{label} must include a host"));
+    };
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_local_test_host(host)) {
+        return Err(format!(
+            "{label} must use https unless it targets localhost for verification"
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("{label} must not include embedded credentials"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "{label} must not include a query string or fragment"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct EndpointOverrideReadiness {
+    s3: Option<String>,
+    ec2: Option<String>,
+    lambda: Option<String>,
+    sts: Option<String>,
+    missing_sigv4_overrides: Vec<&'static str>,
+}
+
+impl EndpointOverrideReadiness {
+    fn from_config(config: &AwsConfig) -> Self {
+        let mut missing_sigv4_overrides = Vec::new();
+        if config.s3_base_url.is_none() {
+            missing_sigv4_overrides.push("s3");
+        }
+        if config.ec2_base_url.is_none() {
+            missing_sigv4_overrides.push("ec2");
+        }
+        if config.lambda_base_url.is_none() {
+            missing_sigv4_overrides.push("lambda");
+        }
+        if config.sts_base_url.is_none() {
+            missing_sigv4_overrides.push("sts");
+        }
+        Self {
+            s3: config.s3_base_url.clone(),
+            ec2: config.ec2_base_url.clone(),
+            lambda: config.lambda_base_url.clone(),
+            sts: config.sts_base_url.clone(),
+            missing_sigv4_overrides,
+        }
+    }
+
+    fn fully_overridden(&self) -> bool {
+        self.missing_sigv4_overrides.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    request_timeout_ms: u64,
+    endpoint_overrides: EndpointOverrideReadiness,
+    aws_sigv4_supported: bool,
+    sts_self_check_supported: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use non-production verification endpoints for S3, EC2, Lambda, and STS until SigV4 signing exists in this connector.",
+            "Configure all four *_base_url overrides if you need the full operation surface to be live-ready.",
+            "Keep access_key_id, secret_access_key, and optional session_token out of logs and shared transcripts.",
+        ],
+        limitations: vec![
+            "This connector currently sends placeholder X-Aws-* headers rather than SigV4-signed AWS requests.",
+            "Default AWS production endpoints are expected to reject self_check and invoke traffic until SigV4 support is implemented.",
+            "A custom sts_base_url is required for deterministic self_check coverage in tests and staging.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "request_signing_not_implemented",
+                symptom: "doctor or health reports missing SigV4-compatible overrides",
+                action: "Point s3_base_url, ec2_base_url, lambda_base_url, and sts_base_url at verification stubs or a signing proxy, or implement SigV4 signing before using default AWS endpoints.",
+            },
+            RemediationHint {
+                code: "self_check_unsupported_on_default_sts",
+                symptom: "self_check degrades before making a network call",
+                action: "Set sts_base_url to a verification endpoint that accepts the connector's header-based auth or routes the request through a SigV4 signer.",
+            },
+            RemediationHint {
+                code: "auth_failed",
+                symptom: "self_check returns Unauthorized against a custom STS endpoint",
+                action: "Verify the custom STS verifier accepts X-Aws-Access-Key-Id / X-Aws-Secret-Access-Key / X-Aws-Security-Token headers or inject a signing proxy.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
+fn override_summary(overrides: &EndpointOverrideReadiness) -> String {
+    if overrides.fully_overridden() {
+        return "Custom verification endpoints configured for s3, ec2, lambda, and sts".into();
+    }
+    format!(
+        "Missing overrides for {}",
+        overrides.missing_sigv4_overrides.join(", ")
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
 }
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
@@ -120,9 +334,15 @@ pub struct DoctorCheck {
     critical: bool,
 }
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
-        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
+        let ready = checks.iter().filter(|c| c.critical).all(|c| c.passed);
+        Self {
+            ready,
+            passed: ready,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+        }
     }
 }
 
@@ -155,15 +375,35 @@ impl AwsConnector {
         format!("sha256:{}", hex::encode(h.finalize()))
     }
 
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        provisioning: Option<ProvisioningReadiness>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
+    }
+
     pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self.config.as_ref().map(AwsConfig::provisioning_readiness);
         let mut checks = Vec::new();
         checks.push(DoctorCheck {
             name: "configuration".into(),
             passed: self.config.is_some(),
             message: if self.config.is_some() {
-                None
+                Some("Configuration loaded".into())
             } else {
-                Some("Not configured".into())
+                Some("Not configured; run configure before handshake or invoke".into())
             },
             critical: true,
         });
@@ -171,9 +411,9 @@ impl AwsConnector {
             name: "client".into(),
             passed: self.client.is_some(),
             message: if self.client.is_some() {
-                None
+                Some("Client initialized".into())
             } else {
-                Some("Client not initialized".into())
+                Some("Client not initialized; re-run configure".into())
             },
             critical: true,
         });
@@ -181,33 +421,68 @@ impl AwsConnector {
             name: "runtime".into(),
             passed: self.runtime.is_some(),
             message: if self.runtime.is_some() {
-                None
+                Some("Runtime initialized".into())
             } else {
-                Some("Runtime not initialized".into())
+                Some("Runtime not initialized; re-run configure".into())
             },
             critical: true,
         });
-        if let Some(cfg) = &self.config {
+        if let (Some(cfg), Some(readiness)) = (&self.config, &provisioning) {
             checks.push(DoctorCheck {
                 name: "region".into(),
                 passed: !cfg.region.is_empty(),
                 message: Some(format!("Region: {}", cfg.region)),
                 critical: false,
             });
-            if let Some(client) = &self.client {
-                checks.push(DoctorCheck {
-                    name: "credential_mode".into(),
-                    passed: true,
-                    message: Some(if client.is_secretless() {
-                        "Secretless".into()
-                    } else {
-                        "Direct".into()
-                    }),
-                    critical: false,
-                });
-            }
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "request_timeout_ms".into(),
+                passed: readiness.request_timeout_ms > 0,
+                message: Some(format!(
+                    "HTTP timeout configured to {}ms",
+                    readiness.request_timeout_ms
+                )),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "endpoint_overrides".into(),
+                passed: readiness.endpoint_overrides.fully_overridden(),
+                message: Some(override_summary(&readiness.endpoint_overrides)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "request_signing".into(),
+                passed: readiness.endpoint_overrides.fully_overridden(),
+                message: Some(if readiness.endpoint_overrides.fully_overridden() {
+                    "All supported AWS service families are routed through custom verification endpoints".into()
+                } else {
+                    format!(
+                        "SigV4 request signing is not implemented; default AWS endpoints remain active for {}",
+                        readiness
+                            .endpoint_overrides
+                            .missing_sigv4_overrides
+                            .join(", ")
+                    )
+                }),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "sts_self_check_target".into(),
+                passed: readiness.sts_self_check_supported,
+                message: Some(if let Some(sts_url) = &readiness.endpoint_overrides.sts {
+                    format!("Self-check will probe custom STS endpoint: {sts_url}")
+                } else {
+                    "Self-check cannot safely probe default STS because SigV4 signing is not implemented; set sts_base_url to a verification endpoint or signing proxy".into()
+                }),
+                critical: false,
+            });
         }
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
@@ -516,6 +791,7 @@ impl FcpConnector for AwsConnector {
             cfg.auth.clone(),
             &cfg.region,
             cfg.retry.clone(),
+            cfg.request_timeout_ms,
             cfg.s3_base_url.clone(),
             cfg.ec2_base_url.clone(),
             cfg.lambda_base_url.clone(),
@@ -566,37 +842,81 @@ impl FcpConnector for AwsConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snap = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self.config.as_ref().map(AwsConfig::provisioning_readiness);
+        let mut snap = match &provisioning {
+            None => HealthSnapshot::degraded("not configured"),
+            Some(_) if self.client.is_none() => HealthSnapshot::error("client not initialized"),
+            Some(_) if self.runtime.is_none() => HealthSnapshot::error("runtime not initialized"),
+            Some(readiness) if !readiness.endpoint_overrides.fully_overridden() => {
+                HealthSnapshot::degraded(
+                    "default AWS endpoints still require SigV4 request signing",
+                )
+            }
+            Some(_) => HealthSnapshot::ready(),
         };
         snap.uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snap.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+        }));
         snap
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        let Some(config) = &self.config else {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+            ));
+        };
+        let provisioning = config.provisioning_readiness();
+
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "client_missing",
+                    "AWS HTTP client not initialized; re-run configure",
+                ),
+                Some(provisioning),
             ));
         };
         let Some(runtime) = &self.runtime else {
-            return Ok(SelfCheckReport::degraded("no_runtime", "No runtime"));
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "runtime_missing",
+                    "ConnectorRuntime not initialized; re-run configure",
+                ),
+                Some(provisioning),
+            ));
         };
-        match client.health_check(runtime).await {
-            Ok(h) if h.authenticated => Ok(SelfCheckReport::ok()),
-            Ok(_) => Ok(SelfCheckReport::degraded(
+        if !provisioning.sts_self_check_supported {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "self_check_unsupported_on_default_sts",
+                    "Self-check is not safe against the default AWS STS endpoint because SigV4 signing is not implemented; set sts_base_url to a verification endpoint or signing proxy",
+                ),
+                Some(provisioning),
+            ));
+        };
+        let report = match client.health_check(runtime).await {
+            Ok(h) if h.authenticated => SelfCheckReport::ok(),
+            Ok(_) => SelfCheckReport::degraded(
                 "auth_failed",
-                "Authentication check failed",
-            )),
-            Err(e) if e.is_retryable() => Ok(SelfCheckReport::degraded(
-                "self_check_retryable",
-                e.to_string(),
-            )),
-            Err(e) => Ok(SelfCheckReport::failed("self_check_failed", e.to_string())),
-        }
+                "Custom STS endpoint returned an unauthenticated result",
+            ),
+            Err(error) if error.is_retryable() => {
+                SelfCheckReport::degraded("self_check_retryable", error.to_string())
+            }
+            Err(error) => SelfCheckReport::failed("self_check_failed", error.to_string()),
+        };
+        Ok(self.attach_self_check_details(report, Some(provisioning)))
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
@@ -847,6 +1167,18 @@ mod tests {
         })
     }
 
+    fn tc_with_overrides() -> serde_json::Value {
+        json!({
+            "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+            "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "region": "us-east-1",
+            "s3_base_url": "http://localhost:4566",
+            "ec2_base_url": "http://localhost:4567",
+            "lambda_base_url": "http://localhost:4568",
+            "sts_base_url": "http://localhost:4569"
+        })
+    }
+
     fn handshake_req() -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
@@ -979,21 +1311,107 @@ mod tests {
     }
 
     #[test]
+    fn configure_zero_timeout_rejected() {
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(json!({
+                "access_key_id": "k",
+                "secret_access_key": "s",
+                "region": "us-east-1",
+                "request_timeout_ms": 0
+            }))
+            .await
+        })
+        .unwrap()
+        .unwrap_err();
+        assert!(err.to_string().contains("request_timeout_ms"));
+    }
+
+    #[test]
+    fn configure_invalid_override_url_rejected() {
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(json!({
+                "access_key_id": "k",
+                "secret_access_key": "s",
+                "region": "us-east-1",
+                "sts_base_url": "http://example.com"
+            }))
+            .await
+        })
+        .unwrap()
+        .unwrap_err();
+        assert!(err.to_string().contains("sts_base_url"));
+    }
+
+    #[test]
+    fn configure_trims_fields_and_normalizes_overrides() {
+        let connector = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(json!({
+                "access_key_id": "  k  ",
+                "secret_access_key": "  s  ",
+                "region": "  us-west-2  ",
+                "session_token": "  tok  ",
+                "s3_base_url": " http://localhost:4566/ "
+            }))
+            .await
+            .unwrap();
+            c
+        })
+        .unwrap();
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.region, "us-west-2");
+        assert_eq!(config.auth.access_key_id, "k");
+        assert_eq!(config.auth.secret_access_key, "s");
+        assert_eq!(config.auth.session_token.as_deref(), Some("tok"));
+        assert_eq!(config.s3_base_url.as_deref(), Some("http://localhost:4566"));
+    }
+
+    #[test]
     fn doctor_unconfigured() {
         assert!(!AwsConnector::new().doctor().passed);
     }
 
     #[test]
     fn doctor_configured() {
+        let doctor = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.doctor()
+        })
+        .unwrap();
+        assert!(!doctor.passed);
+        let signing = doctor
+            .checks
+            .iter()
+            .find(|check| check.name == "request_signing")
+            .unwrap();
+        assert!(!signing.passed);
         assert!(
-            fcp_async_core::runtime::block_on_sync(async {
-                let mut c = AwsConnector::new();
-                c.configure(tc()).await.unwrap();
-                c.doctor()
-            })
-            .unwrap()
-            .passed
+            signing
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("SigV4 request signing is not implemented")
         );
+    }
+
+    #[test]
+    fn doctor_configured_with_full_overrides_passes() {
+        let doctor = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(tc_with_overrides()).await.unwrap();
+            c.doctor()
+        })
+        .unwrap();
+        assert!(doctor.passed);
+        let endpoint_overrides = doctor
+            .checks
+            .iter()
+            .find(|check| check.name == "endpoint_overrides")
+            .unwrap();
+        assert!(endpoint_overrides.passed);
     }
 
     #[test]
@@ -1201,7 +1619,22 @@ mod tests {
             c.health().await
         })
         .unwrap();
+        assert!(matches!(h.status, fcp_core::HealthState::Degraded { .. }));
+    }
+
+    #[test]
+    fn health_configured_with_full_overrides_is_ready() {
+        let h = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(tc_with_overrides()).await.unwrap();
+            c.health().await
+        })
+        .unwrap();
         assert!(matches!(h.status, fcp_core::HealthState::Ready));
+        assert_eq!(
+            h.details.as_ref().unwrap()["provisioning"]["endpoint_overrides"]["missing_sigv4_overrides"],
+            json!([])
+        );
     }
 
     #[test]
@@ -1328,7 +1761,8 @@ mod tests {
         .unwrap();
         let names: Vec<_> = d.checks.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"region"));
-        assert!(names.contains(&"credential_mode"));
+        assert!(names.contains(&"auth_mode"));
+        assert!(names.contains(&"request_signing"));
     }
 
     #[test]
@@ -1357,6 +1791,26 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(r.status != fcp_core::SelfCheckStatus::Ok);
+    }
+
+    #[test]
+    fn self_check_requires_custom_sts_target() {
+        let report = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.self_check().await
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("self_check_unsupported_on_default_sts")
+        );
+        assert_eq!(
+            report.details.as_ref().unwrap()["provisioning"]["sts_self_check_supported"],
+            json!(false)
+        );
     }
 
     #[test]

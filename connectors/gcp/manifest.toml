@@ -1,282 +1,518 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:e9993ca5946bb15a9a8abeac3f65a2bc4adca7834686a2a494f901074bd47e7d"
 
 [connector]
 id = "fcp.gcp"
 name = "Google Cloud Platform"
 version = "0.1.0"
 description = "GCP connector for Compute Engine, Cloud Storage, Cloud Run, and Projects"
-archetype = "cloud-control-plane"
-homepage = "https://cloud.google.com/apis"
+archetypes = ["operational", "storage"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; configuration and HTTP runtime live only inside the current connector instance."
 
 [zones]
 home = "z:work"
 allowed_sources = ["z:work", "z:private"]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = ["z:public", "z:community"]
 
 [capabilities]
-required = ["network.outbound"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "network.listen", "system.privileged"]
 
-[provides.operations.compute_list_instances]
-summary = "List Compute Engine instances in a zone"
+[provides.operations."gcp.compute.list_instances"]
+description = "List Compute Engine instances in a zone"
 capability = "gcp.compute.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["zone"] }
+output_schema = { type = "array" }
 
-[provides.operations.compute_list_instances.network_constraints]
+[provides.operations."gcp.compute.list_instances".network_constraints]
 host_allow = ["compute.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.compute_list_instances.ai_hints]
-when_to_use = "When you need to list VMs in a specific zone"
+[provides.operations."gcp.compute.list_instances".ai_hints]
+when_to_use = "List VMs in a zone"
+common_mistakes = ["Specify zone like us-central1-a"]
+examples = []
+related = ["gcp.compute.write"]
 
-[provides.operations.compute_get_instance]
-summary = "Get a Compute Engine instance"
+[provides.operations."gcp.compute.get_instance"]
+description = "Get a Compute Engine instance"
 capability = "gcp.compute.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["zone", "instance"] }
+output_schema = { type = "object" }
 
-[provides.operations.compute_get_instance.network_constraints]
+[provides.operations."gcp.compute.get_instance".network_constraints]
 host_allow = ["compute.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.compute_get_instance.ai_hints]
-when_to_use = "When you need details of a specific VM instance"
+[provides.operations."gcp.compute.get_instance".ai_hints]
+when_to_use = "Get details of a specific VM"
+common_mistakes = []
+examples = []
+related = ["gcp.compute.read"]
 
-[provides.operations.compute_start_instance]
-summary = "Start a Compute Engine instance"
+[provides.operations."gcp.compute.start_instance"]
+description = "Start a Compute Engine instance"
 capability = "gcp.compute.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["zone", "instance"] }
+output_schema = { type = "object" }
 
-[provides.operations.compute_start_instance.network_constraints]
+[provides.operations."gcp.compute.start_instance".network_constraints]
 host_allow = ["compute.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.compute_start_instance.ai_hints]
-when_to_use = "When you need to start a stopped VM"
+[provides.operations."gcp.compute.start_instance".ai_hints]
+when_to_use = "Start a stopped VM"
+common_mistakes = ["VM must be in TERMINATED state"]
+examples = []
+related = ["gcp.compute.read"]
 
-[provides.operations.compute_stop_instance]
-summary = "Stop a Compute Engine instance"
+[provides.operations."gcp.compute.stop_instance"]
+description = "Stop a Compute Engine instance"
 capability = "gcp.compute.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["zone", "instance"] }
+output_schema = { type = "object" }
 
-[provides.operations.compute_stop_instance.network_constraints]
+[provides.operations."gcp.compute.stop_instance".network_constraints]
 host_allow = ["compute.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.compute_stop_instance.ai_hints]
-when_to_use = "When you need to stop a running VM"
+[provides.operations."gcp.compute.stop_instance".ai_hints]
+when_to_use = "Stop a running VM"
+common_mistakes = ["VM must be in RUNNING state"]
+examples = []
+related = ["gcp.compute.read"]
 
-[provides.operations.compute_delete_instance]
-summary = "Delete a Compute Engine instance"
+[provides.operations."gcp.compute.delete_instance"]
+description = "Delete a Compute Engine instance"
 capability = "gcp.compute.write"
-risk = "critical"
+risk_level = "critical"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
+input_schema = { type = "object", required = ["zone", "instance"] }
+output_schema = { type = "object" }
 
-[provides.operations.compute_delete_instance.network_constraints]
+[provides.operations."gcp.compute.delete_instance".network_constraints]
 host_allow = ["compute.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.compute_delete_instance.ai_hints]
-when_to_use = "When you need to permanently delete a VM — irreversible"
+[provides.operations."gcp.compute.delete_instance".ai_hints]
+when_to_use = "Permanently delete a VM (irreversible)"
+common_mistakes = ["Verify instance name first"]
+examples = []
+related = ["gcp.compute.read"]
 
-[provides.operations.storage_list_objects]
-summary = "List objects in a Cloud Storage bucket"
+[provides.operations."gcp.storage.list_objects"]
+description = "List objects in a Cloud Storage bucket"
 capability = "gcp.storage.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["bucket"] }
+output_schema = { type = "array" }
 
-[provides.operations.storage_list_objects.network_constraints]
+[provides.operations."gcp.storage.list_objects".network_constraints]
 host_allow = ["storage.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.storage_list_objects.ai_hints]
-when_to_use = "When you need to list files in a Cloud Storage bucket"
+[provides.operations."gcp.storage.list_objects".ai_hints]
+when_to_use = "List files in a bucket"
+common_mistakes = []
+examples = []
+related = ["gcp.storage.write"]
 
-[provides.operations.storage_get_object]
-summary = "Get metadata for a Cloud Storage object"
+[provides.operations."gcp.storage.get_object"]
+description = "Get metadata for a Cloud Storage object"
 capability = "gcp.storage.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["bucket", "object"] }
+output_schema = { type = "object" }
 
-[provides.operations.storage_get_object.network_constraints]
+[provides.operations."gcp.storage.get_object".network_constraints]
 host_allow = ["storage.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.storage_get_object.ai_hints]
-when_to_use = "When you need metadata for a specific object in a bucket"
+[provides.operations."gcp.storage.get_object".ai_hints]
+when_to_use = "Get object metadata"
+common_mistakes = []
+examples = []
+related = ["gcp.storage.read"]
 
-[provides.operations.storage_upload_object]
-summary = "Upload an object to Cloud Storage"
+[provides.operations."gcp.storage.upload_object"]
+description = "Upload an object to Cloud Storage"
 capability = "gcp.storage.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["bucket", "object", "content"] }
+output_schema = { type = "object" }
 
-[provides.operations.storage_upload_object.network_constraints]
+[provides.operations."gcp.storage.upload_object".network_constraints]
 host_allow = ["storage.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.storage_upload_object.ai_hints]
-when_to_use = "When you need to upload a file to a Cloud Storage bucket"
+[provides.operations."gcp.storage.upload_object".ai_hints]
+when_to_use = "Upload a file to a bucket"
+common_mistakes = ["Overwrites existing objects with same name"]
+examples = []
+related = ["gcp.storage.read"]
 
-[provides.operations.storage_delete_object]
-summary = "Delete a Cloud Storage object"
+[provides.operations."gcp.storage.delete_object"]
+description = "Delete a Cloud Storage object"
 capability = "gcp.storage.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
+input_schema = { type = "object", required = ["bucket", "object"] }
+output_schema = { type = "object" }
 
-[provides.operations.storage_delete_object.network_constraints]
+[provides.operations."gcp.storage.delete_object".network_constraints]
 host_allow = ["storage.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.storage_delete_object.ai_hints]
-when_to_use = "When you need to remove an object from a bucket — irreversible unless versioned"
+[provides.operations."gcp.storage.delete_object".ai_hints]
+when_to_use = "Remove object from bucket (irreversible unless versioned)"
+common_mistakes = ["Verify object name first"]
+examples = []
+related = ["gcp.storage.read"]
 
-[provides.operations.run_list_services]
-summary = "List Cloud Run services"
+[provides.operations."gcp.run.list_services"]
+description = "List Cloud Run services"
 capability = "gcp.run.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["location"] }
+output_schema = { type = "array" }
 
-[provides.operations.run_list_services.network_constraints]
+[provides.operations."gcp.run.list_services".network_constraints]
 host_allow = ["run.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.run_list_services.ai_hints]
-when_to_use = "When you need to list deployed Cloud Run services"
+[provides.operations."gcp.run.list_services".ai_hints]
+when_to_use = "List deployed Cloud Run services"
+common_mistakes = []
+examples = []
+related = ["gcp.run.write"]
 
-[provides.operations.run_deploy_service]
-summary = "Deploy a Cloud Run service"
+[provides.operations."gcp.run.deploy_service"]
+description = "Deploy a Cloud Run service"
 capability = "gcp.run.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["location", "service_id", "image"] }
+output_schema = { type = "object" }
 
-[provides.operations.run_deploy_service.network_constraints]
+[provides.operations."gcp.run.deploy_service".network_constraints]
 host_allow = ["run.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.run_deploy_service.ai_hints]
-when_to_use = "When you need to deploy a container image to Cloud Run"
+[provides.operations."gcp.run.deploy_service".ai_hints]
+when_to_use = "Deploy container image to Cloud Run"
+common_mistakes = ["Image must be in a registry accessible to the project"]
+examples = []
+related = ["gcp.run.read"]
 
-[provides.operations.run_delete_service]
-summary = "Delete a Cloud Run service"
+[provides.operations."gcp.run.delete_service"]
+description = "Delete a Cloud Run service"
 capability = "gcp.run.write"
-risk = "critical"
+risk_level = "critical"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
+input_schema = { type = "object", required = ["location", "service"] }
+output_schema = { type = "object" }
 
-[provides.operations.run_delete_service.network_constraints]
+[provides.operations."gcp.run.delete_service".network_constraints]
 host_allow = ["run.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.run_delete_service.ai_hints]
-when_to_use = "When you need to permanently delete a Cloud Run service — irreversible"
+[provides.operations."gcp.run.delete_service".ai_hints]
+when_to_use = "Permanently delete a Cloud Run service (irreversible)"
+common_mistakes = ["Verify service name first"]
+examples = []
+related = ["gcp.run.read"]
 
-[provides.operations.projects_get]
-summary = "Get project information"
+[provides.operations."gcp.projects.get"]
+description = "Get project information"
 capability = "gcp.iam.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
 
-[provides.operations.projects_get.network_constraints]
+[provides.operations."gcp.projects.get".network_constraints]
 host_allow = ["cloudresourcemanager.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.projects_get.ai_hints]
-when_to_use = "When you need to verify GCP project metadata"
+[provides.operations."gcp.projects.get".ai_hints]
+when_to_use = "Get GCP project metadata"
+common_mistakes = []
+examples = []
+related = []
 
-[provides.operations.health]
-summary = "Check GCP API health"
+[provides.operations."gcp.health"]
+description = "Check GCP API health"
 capability = "gcp.iam.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
 
-[provides.operations.health.network_constraints]
+[provides.operations."gcp.health".network_constraints]
 host_allow = ["cloudresourcemanager.googleapis.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.health.ai_hints]
-when_to_use = "When you need to verify GCP credentials and connectivity"
+[provides.operations."gcp.health".ai_hints]
+when_to_use = "Check credentials and API connectivity"
+common_mistakes = []
+examples = []
+related = []
 
 [sandbox]
 profile = "strict"
 memory_mb = 128
 cpu_percent = 25
 wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
 deny_ptrace = true

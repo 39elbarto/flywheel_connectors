@@ -362,7 +362,8 @@ const fn self_check_reason_code(error: &MysqlError) -> &'static str {
         | MysqlError::Query(_)
         | MysqlError::Transaction(_)
         | MysqlError::Schema(_)
-        | MysqlError::ConstraintViolation(_) => "health_probe_failed",
+        | MysqlError::ConstraintViolation(_)
+        | MysqlError::InvalidInput(_) => "health_probe_failed",
     }
 }
 

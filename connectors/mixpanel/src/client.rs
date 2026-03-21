@@ -226,7 +226,8 @@ impl MixpanelClient {
 
     /// List saved funnels.
     pub async fn list_funnels(&self) -> MixpanelResult<serde_json::Value> {
-        self.get(&format!("/funnels/list?project_id={}", self.project_id))
+        let safe_pid = sanitize_path_segment(&self.project_id, "project_id")?;
+        self.get(&format!("/funnels/list?project_id={safe_pid}"))
             .await
     }
 
@@ -240,6 +241,31 @@ impl MixpanelClient {
         });
         self.post("/insights", &body).await
     }
+}
+
+/// Validate a value intended for use as a URL path segment.
+///
+/// Rejects empty strings, path traversal sequences, slashes,
+/// and percent-encoded equivalents.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> MixpanelResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(MixpanelError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(MixpanelError::InvalidInput(format!(
+            "{field} contains invalid characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 #[cfg(test)]
@@ -437,5 +463,50 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
         );
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("12345", "project_id").unwrap(), "12345");
+    }
+
+    #[test]
+    fn sanitize_path_segment_trims_whitespace() {
+        assert_eq!(sanitize_path_segment("  abc  ", "f").unwrap(), "abc");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("   ", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("../etc/passwd", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("foo\\bar", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("foo..bar", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("foo%2fbar", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        assert!(sanitize_path_segment("foo%5Cbar", "project_id").is_err());
     }
 }

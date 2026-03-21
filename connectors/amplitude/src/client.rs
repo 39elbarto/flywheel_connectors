@@ -182,9 +182,43 @@ impl AmplitudeClient {
         start: &str,
         end: &str,
     ) -> AmplitudeResult<serde_json::Value> {
-        self.get(&format!("/export?start={start}&end={end}")).await
+        let safe_start = encode_query_value(start, "start")?;
+        let safe_end = encode_query_value(end, "end")?;
+        self.get(&format!("/export?start={safe_start}&end={safe_end}"))
+            .await
     }
 }
+
+/// Percent-encode a value for safe inclusion in a URL query string.
+///
+/// Rejects empty values and encodes characters that could alter URL
+/// structure (`&`, `=`, `#`, `?`, `/`, `\`, `%` unless already part of a
+/// valid percent-encoded triplet is not assumed -- we encode `%`
+/// unconditionally to prevent double-encoding attacks).
+fn encode_query_value(value: &str, field: &str) -> AmplitudeResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AmplitudeError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let mut encoded = String::with_capacity(trimmed.len() * 2);
+    for byte in trimmed.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(HEX_UPPER[(byte >> 4) as usize] as char);
+                encoded.push(HEX_UPPER[(byte & 0x0F) as usize] as char);
+            }
+        }
+    }
+    Ok(encoded)
+}
+
+const HEX_UPPER: [u8; 16] = *b"0123456789ABCDEF";
 
 #[cfg(test)]
 mod tests {
@@ -420,5 +454,56 @@ mod tests {
         assert!(dbg.contains("AmplitudeAuth"));
         assert!(dbg.contains("api_key"));
         assert!(dbg.contains("secret_key"));
+    }
+
+    #[test]
+    fn encode_query_value_plain_date() {
+        assert_eq!(encode_query_value("20260101", "start").unwrap(), "20260101");
+    }
+
+    #[test]
+    fn encode_query_value_encodes_ampersand() {
+        let encoded = encode_query_value("a&b=c", "start").unwrap();
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+        assert!(encoded.contains("%26"));
+    }
+
+    #[test]
+    fn encode_query_value_encodes_hash() {
+        let encoded = encode_query_value("a#frag", "start").unwrap();
+        assert!(!encoded.contains('#'));
+        assert!(encoded.contains("%23"));
+    }
+
+    #[test]
+    fn encode_query_value_encodes_slash() {
+        let encoded = encode_query_value("2026/01/01", "start").unwrap();
+        assert!(!encoded.contains('/'));
+        assert!(encoded.contains("%2F"));
+    }
+
+    #[test]
+    fn encode_query_value_encodes_percent() {
+        let encoded = encode_query_value("100%done", "start").unwrap();
+        assert!(encoded.contains("%25"));
+    }
+
+    #[test]
+    fn encode_query_value_rejects_empty() {
+        assert!(encode_query_value("", "start").is_err());
+    }
+
+    #[test]
+    fn encode_query_value_rejects_whitespace_only() {
+        assert!(encode_query_value("   ", "end").is_err());
+    }
+
+    #[test]
+    fn encode_query_value_allows_dash_underscore_dot_tilde() {
+        assert_eq!(
+            encode_query_value("2026-01-01_v1.0~rc", "start").unwrap(),
+            "2026-01-01_v1.0~rc"
+        );
     }
 }

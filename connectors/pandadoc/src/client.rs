@@ -217,7 +217,8 @@ impl PandaDocClient {
 
     /// Get a document by ID.
     pub async fn get_document(&self, document_id: &str) -> PandaDocResult<serde_json::Value> {
-        self.get(&format!("/documents/{document_id}"), None).await
+        let safe_id = sanitize_path_segment(document_id, "document_id")?;
+        self.get(&format!("/documents/{safe_id}"), None).await
     }
 
     /// Create a document from a template.
@@ -234,13 +235,15 @@ impl PandaDocClient {
         document_id: &str,
         body: &serde_json::Value,
     ) -> PandaDocResult<serde_json::Value> {
-        self.post(&format!("/documents/{document_id}/send"), body)
+        let safe_id = sanitize_path_segment(document_id, "document_id")?;
+        self.post(&format!("/documents/{safe_id}/send"), body)
             .await
     }
 
     /// Delete a document.
     pub async fn delete_document(&self, document_id: &str) -> PandaDocResult<serde_json::Value> {
-        self.delete(&format!("/documents/{document_id}")).await
+        let safe_id = sanitize_path_segment(document_id, "document_id")?;
+        self.delete(&format!("/documents/{safe_id}")).await
     }
 
     // -- Templates --
@@ -249,6 +252,31 @@ impl PandaDocClient {
     pub async fn list_templates(&self) -> PandaDocResult<serde_json::Value> {
         self.get("/templates", None).await
     }
+}
+
+/// Validate a value intended for use as a URL path segment.
+///
+/// Rejects empty strings, path traversal sequences, slashes,
+/// and percent-encoded equivalents.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PandaDocResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PandaDocError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(PandaDocError::InvalidInput(format!(
+            "{field} contains invalid characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 #[cfg(test)]
@@ -404,5 +432,50 @@ mod tests {
         let cloned = cred.clone();
         assert!(cred.is_secretless());
         assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("doc_abc123", "document_id").unwrap(), "doc_abc123");
+    }
+
+    #[test]
+    fn sanitize_path_segment_trims_whitespace() {
+        assert_eq!(sanitize_path_segment("  abc  ", "f").unwrap(), "abc");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("   ", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("../etc/passwd", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("foo\\bar", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("foo..bar", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("foo%2fbar", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        assert!(sanitize_path_segment("foo%5Cbar", "document_id").is_err());
     }
 }

@@ -12,6 +12,28 @@ use tracing::{debug, warn};
 use crate::error::{WhatsAppError, WhatsAppResult};
 use crate::types::{ApiErrorResponse, ProfileResponse, SendMessageResponse};
 
+/// Validate a URL path segment to prevent path-traversal attacks.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> WhatsAppResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(WhatsAppError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(WhatsAppError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(trimmed)
+}
+
 /// WhatsApp API client with retry and runtime integration.
 pub struct WhatsAppClient {
     client: Client,
@@ -121,7 +143,8 @@ impl WhatsAppClient {
         runtime: &ConnectorRuntime,
         body: &serde_json::Value,
     ) -> WhatsAppResult<SendMessageResponse> {
-        let url = format!("{}/{}/messages", self.base_url, self.phone_number_id);
+        let safe_id = sanitize_path_segment(&self.phone_number_id, "phone_number_id")?;
+        let url = format!("{}/{safe_id}/messages", self.base_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body_clone = body.clone();
@@ -217,9 +240,10 @@ impl WhatsAppClient {
     ///
     /// Returns an error if the API call fails.
     pub async fn get_profile(&self, runtime: &ConnectorRuntime) -> WhatsAppResult<ProfileResponse> {
+        let safe_id = sanitize_path_segment(&self.phone_number_id, "phone_number_id")?;
         let url = format!(
-            "{}/{}/whatsapp_business_profile",
-            self.base_url, self.phone_number_id
+            "{}/{safe_id}/whatsapp_business_profile",
+            self.base_url
         );
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -294,7 +318,8 @@ impl WhatsAppClient {
     ///
     /// Returns an error if the API is unreachable.
     pub async fn health_check(&self) -> WhatsAppResult<()> {
-        let url = format!("{}/{}", self.base_url, self.phone_number_id);
+        let safe_id = sanitize_path_segment(&self.phone_number_id, "phone_number_id")?;
+        let url = format!("{}/{safe_id}", self.base_url);
         let resp = authenticate(self.client.get(&url), &self.access_token)
             .send()
             .await
@@ -454,5 +479,67 @@ mod tests {
         )
         .unwrap();
         assert!(client.health_check().await.is_ok());
+    }
+
+    // ── sanitize_path_segment tests ─────────────────────────────────
+
+    #[test]
+    fn sanitize_path_segment_valid() {
+        assert_eq!(sanitize_path_segment("123456", "phone_number_id").unwrap(), "123456");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        let err = sanitize_path_segment("", "phone_number_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        let err = sanitize_path_segment("   ", "phone_number_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        let err = sanitize_path_segment("123/456", "phone_number_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        let err = sanitize_path_segment("123\\456", "phone_number_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        let err = sanitize_path_segment("123..456", "phone_number_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        let err = sanitize_path_segment("123%2f456", "phone_number_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        let err = sanitize_path_segment("123%5Cdef", "phone_number_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_check_rejects_traversal_phone_number_id() {
+        let client = WhatsAppClient::new(
+            "https://graph.facebook.com/v21.0",
+            "../admin",
+            "tok",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        let err = client.health_check().await.unwrap_err();
+        assert!(matches!(err, WhatsAppError::InvalidInput(_)));
     }
 }

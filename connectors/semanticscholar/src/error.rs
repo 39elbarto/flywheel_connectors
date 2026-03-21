@@ -40,6 +40,10 @@ pub enum SemanticScholarError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (path traversal, empty field, etc.)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl SemanticScholarError {
@@ -48,7 +52,7 @@ impl SemanticScholarError {
         match self {
             Self::Http(_) | Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
-            _ => false,
+            Self::Json(_) | Self::Unauthorized | Self::Forbidden | Self::NotFound { .. } | Self::InvalidInput(_) => false,
         }
     }
 
@@ -110,6 +114,10 @@ impl SemanticScholarError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1008,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

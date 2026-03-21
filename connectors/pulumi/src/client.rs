@@ -13,6 +13,28 @@ use crate::{
     types::ApiErrorResponse,
 };
 
+/// Validate a URL path segment to prevent path-traversal attacks.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PulumiResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PulumiError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(PulumiError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(trimmed)
+}
+
 /// Default `Pulumi` API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.pulumi.com/api";
 
@@ -215,7 +237,10 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.get(&format!("/stacks/{organization}/{project}/{stack}"), None)
+        let org = sanitize_path_segment(organization, "organization")?;
+        let proj = sanitize_path_segment(project, "project")?;
+        let stk = sanitize_path_segment(stack, "stack")?;
+        self.get(&format!("/stacks/{org}/{proj}/{stk}"), None)
             .await
     }
 
@@ -226,8 +251,11 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
+        let org = sanitize_path_segment(organization, "organization")?;
+        let proj = sanitize_path_segment(project, "project")?;
+        let _stk = sanitize_path_segment(stack, "stack")?;
         let body = serde_json::json!({"stackName": stack});
-        self.post(&format!("/stacks/{organization}/{project}"), &body)
+        self.post(&format!("/stacks/{org}/{proj}"), &body)
             .await
     }
 
@@ -238,7 +266,10 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.delete(&format!("/stacks/{organization}/{project}/{stack}"))
+        let org = sanitize_path_segment(organization, "organization")?;
+        let proj = sanitize_path_segment(project, "project")?;
+        let stk = sanitize_path_segment(stack, "stack")?;
+        self.delete(&format!("/stacks/{org}/{proj}/{stk}"))
             .await
     }
 
@@ -249,8 +280,11 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
+        let org = sanitize_path_segment(organization, "organization")?;
+        let proj = sanitize_path_segment(project, "project")?;
+        let stk = sanitize_path_segment(stack, "stack")?;
         self.get(
-            &format!("/stacks/{organization}/{project}/{stack}/export"),
+            &format!("/stacks/{org}/{proj}/{stk}/export"),
             None,
         )
         .await
@@ -265,8 +299,11 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
+        let org = sanitize_path_segment(organization, "organization")?;
+        let proj = sanitize_path_segment(project, "project")?;
+        let stk = sanitize_path_segment(stack, "stack")?;
         self.get(
-            &format!("/stacks/{organization}/{project}/{stack}/updates"),
+            &format!("/stacks/{org}/{proj}/{stk}/updates"),
             None,
         )
         .await
@@ -276,6 +313,7 @@ impl PulumiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::FcpError;
 
     #[test]
     fn auth_debug_redacts_token() {
@@ -450,5 +488,75 @@ mod tests {
         let dbg = format!("{auth:?}");
         assert!(dbg.contains("redacted"));
         assert!(!dbg.contains(&"a".repeat(100)));
+    }
+
+    // ── sanitize_path_segment tests ─────────────────────────────────
+
+    #[test]
+    fn sanitize_path_segment_valid() {
+        assert_eq!(sanitize_path_segment("my-org", "organization").unwrap(), "my-org");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        let err = sanitize_path_segment("", "organization").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        let err = sanitize_path_segment("   ", "project").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        let err = sanitize_path_segment("org/../admin", "organization").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        let err = sanitize_path_segment("org\\admin", "organization").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        let err = sanitize_path_segment("org..admin", "organization").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        let err = sanitize_path_segment("org%2fadmin", "organization").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        let err = sanitize_path_segment("org%5Cadmin", "organization").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_allows_hyphens_and_underscores() {
+        assert_eq!(
+            sanitize_path_segment("my-org_123", "organization").unwrap(),
+            "my-org_123"
+        );
+    }
+
+    #[test]
+    fn sanitize_invalid_input_not_retryable() {
+        let err = PulumiError::InvalidInput("test".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn sanitize_invalid_input_to_fcp_error() {
+        let err = PulumiError::InvalidInput("bad org".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::InvalidRequest { .. }));
     }
 }

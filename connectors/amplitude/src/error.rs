@@ -40,6 +40,10 @@ pub enum AmplitudeError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (client-side validation)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl AmplitudeError {
@@ -110,6 +114,9 @@ impl AmplitudeError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }
@@ -708,5 +715,34 @@ mod tests {
             message: "srv err".into(),
         };
         assert!(api_retryable.is_retryable());
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        let err = AmplitudeError::InvalidInput("start must not be empty".into());
+        assert_eq!(err.to_string(), "Invalid input: start must not be empty");
+    }
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        assert!(!AmplitudeError::InvalidInput("bad".into()).is_retryable());
+    }
+
+    #[test]
+    fn invalid_input_retry_after_none() {
+        assert_eq!(
+            AmplitudeError::InvalidInput("bad".into()).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_internal() {
+        match AmplitudeError::InvalidInput("bad field".into()).to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("bad field"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 }

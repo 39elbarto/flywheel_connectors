@@ -13,6 +13,28 @@ use crate::{
     types::ApiErrorResponse,
 };
 
+/// Validate a URL path segment to prevent path-traversal attacks.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SemanticScholarResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SemanticScholarError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(SemanticScholarError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(trimmed)
+}
+
 /// Default Semantic Scholar API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.semanticscholar.org/graph/v1";
 
@@ -240,9 +262,10 @@ impl SemanticScholarClient {
         paper_id: &str,
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
+        let pid = sanitize_path_segment(paper_id, "paper_id")?;
         let f = fields.unwrap_or(DEFAULT_PAPER_DETAIL_FIELDS);
         self.get(
-            &format!("/paper/{paper_id}"),
+            &format!("/paper/{pid}"),
             Some(&[("fields", f.to_string())]),
         )
         .await
@@ -255,12 +278,13 @@ impl SemanticScholarClient {
         limit: Option<i64>,
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
+        let pid = sanitize_path_segment(paper_id, "paper_id")?;
         let f = fields.unwrap_or(DEFAULT_CITATION_FIELDS);
         let mut q = vec![("fields", f.to_string())];
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/paper/{paper_id}/citations"), Some(&q))
+        self.get(&format!("/paper/{pid}/citations"), Some(&q))
             .await
     }
 
@@ -271,12 +295,13 @@ impl SemanticScholarClient {
         limit: Option<i64>,
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
+        let pid = sanitize_path_segment(paper_id, "paper_id")?;
         let f = fields.unwrap_or(DEFAULT_CITATION_FIELDS);
         let mut q = vec![("fields", f.to_string())];
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/paper/{paper_id}/references"), Some(&q))
+        self.get(&format!("/paper/{pid}/references"), Some(&q))
             .await
     }
 
@@ -287,12 +312,13 @@ impl SemanticScholarClient {
         limit: Option<i64>,
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
+        let pid = sanitize_path_segment(paper_id, "paper_id")?;
         let f = fields.unwrap_or(DEFAULT_CITATION_FIELDS);
         let mut q = vec![("fields", f.to_string())];
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/paper/{paper_id}/recommendations"), Some(&q))
+        self.get(&format!("/paper/{pid}/recommendations"), Some(&q))
             .await
     }
 
@@ -304,9 +330,10 @@ impl SemanticScholarClient {
         author_id: &str,
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
+        let aid = sanitize_path_segment(author_id, "author_id")?;
         let f = fields.unwrap_or(DEFAULT_AUTHOR_FIELDS);
         self.get(
-            &format!("/author/{author_id}"),
+            &format!("/author/{aid}"),
             Some(&[("fields", f.to_string())]),
         )
         .await
@@ -319,12 +346,13 @@ impl SemanticScholarClient {
         limit: Option<i64>,
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
+        let aid = sanitize_path_segment(author_id, "author_id")?;
         let f = fields.unwrap_or(DEFAULT_AUTHOR_PAPERS_FIELDS);
         let mut q = vec![("fields", f.to_string())];
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/author/{author_id}/papers"), Some(&q))
+        self.get(&format!("/author/{aid}/papers"), Some(&q))
             .await
     }
 }
@@ -338,6 +366,7 @@ fn redact_credential_id(id: &CredentialId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::FcpError;
 
     #[test]
     fn auth_debug_redacts_key() {
@@ -602,5 +631,75 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
         assert!(!dbg.contains("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    // ── sanitize_path_segment tests ─────────────────────────────────
+
+    #[test]
+    fn sanitize_path_segment_valid() {
+        assert_eq!(sanitize_path_segment("abc123def", "paper_id").unwrap(), "abc123def");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        let err = sanitize_path_segment("", "paper_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        let err = sanitize_path_segment("   ", "paper_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        let err = sanitize_path_segment("abc/def", "paper_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        let err = sanitize_path_segment("abc\\def", "paper_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        let err = sanitize_path_segment("abc..def", "paper_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        let err = sanitize_path_segment("abc%2fdef", "paper_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        let err = sanitize_path_segment("abc%5Cdef", "paper_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_allows_hyphens_and_underscores() {
+        assert_eq!(
+            sanitize_path_segment("paper-id_123", "paper_id").unwrap(),
+            "paper-id_123"
+        );
+    }
+
+    #[test]
+    fn sanitize_invalid_input_not_retryable() {
+        let err = SemanticScholarError::InvalidInput("test".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn sanitize_invalid_input_to_fcp_error() {
+        let err = SemanticScholarError::InvalidInput("bad id".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::InvalidRequest { .. }));
     }
 }

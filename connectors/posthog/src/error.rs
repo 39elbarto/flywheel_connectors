@@ -42,6 +42,10 @@ pub enum PostHogError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (client-side validation)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl PostHogError {
@@ -112,6 +116,9 @@ impl PostHogError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }
@@ -695,5 +702,37 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("120000"));
         assert!(display.contains("retry after"));
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        let err = PostHogError::InvalidInput("project_id must not be empty".into());
+        assert_eq!(
+            err.to_string(),
+            "Invalid input: project_id must not be empty"
+        );
+    }
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        assert!(!PostHogError::InvalidInput("bad".into()).is_retryable());
+    }
+
+    #[test]
+    fn invalid_input_retry_after_none() {
+        assert_eq!(
+            PostHogError::InvalidInput("bad".into()).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_internal() {
+        match PostHogError::InvalidInput("bad field".into()).to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("bad field"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 }

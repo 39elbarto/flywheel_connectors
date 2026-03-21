@@ -181,11 +181,12 @@ impl AlgoliaClient {
         query: &str,
         hits_per_page: Option<i64>,
     ) -> AlgoliaResult<serde_json::Value> {
+        let safe_index = sanitize_path_segment(index_name, "index_name")?;
         let mut body = serde_json::json!({ "query": query });
         if let Some(hpp) = hits_per_page {
             body["hitsPerPage"] = serde_json::json!(hpp);
         }
-        self.post(&format!("/indexes/{index_name}/query"), &body)
+        self.post(&format!("/indexes/{safe_index}/query"), &body)
             .await
     }
 
@@ -204,7 +205,9 @@ impl AlgoliaClient {
         index_name: &str,
         object_id: &str,
     ) -> AlgoliaResult<serde_json::Value> {
-        self.get(&format!("/indexes/{index_name}/{object_id}"))
+        let safe_index = sanitize_path_segment(index_name, "index_name")?;
+        let safe_oid = sanitize_path_segment(object_id, "object_id")?;
+        self.get(&format!("/indexes/{safe_index}/{safe_oid}"))
             .await
     }
 
@@ -214,9 +217,36 @@ impl AlgoliaClient {
         index_name: &str,
         object_id: &str,
     ) -> AlgoliaResult<serde_json::Value> {
-        self.delete(&format!("/indexes/{index_name}/{object_id}"))
+        let safe_index = sanitize_path_segment(index_name, "index_name")?;
+        let safe_oid = sanitize_path_segment(object_id, "object_id")?;
+        self.delete(&format!("/indexes/{safe_index}/{safe_oid}"))
             .await
     }
+}
+
+/// Validate a value intended for use as a URL path segment.
+///
+/// Rejects empty strings, path traversal sequences, slashes,
+/// and percent-encoded equivalents.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AlgoliaResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AlgoliaError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(AlgoliaError::InvalidInput(format!(
+            "{field} contains invalid characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 #[cfg(test)]
@@ -421,5 +451,50 @@ mod tests {
         let label = auth.redacted_label();
         assert!(!label.contains("my-super-secret-algolia-key-12345"));
         assert!(label.contains("APP"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("my-index", "index_name").unwrap(), "my-index");
+    }
+
+    #[test]
+    fn sanitize_path_segment_trims_whitespace() {
+        assert_eq!(sanitize_path_segment("  abc  ", "f").unwrap(), "abc");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "index_name").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("   ", "index_name").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("../etc/passwd", "index_name").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("foo\\bar", "index_name").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("foo..bar", "index_name").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("foo%2fbar", "index_name").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        assert!(sanitize_path_segment("foo%5Cbar", "index_name").is_err());
     }
 }

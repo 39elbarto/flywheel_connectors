@@ -14,6 +14,40 @@ use crate::{
     types::ApiErrorResponse,
 };
 
+/// Validate a SQL identifier to prevent injection attacks.
+///
+/// Allows alphanumeric characters, underscores, and dots (for qualified names
+/// like `schema.table`). Must start with a letter or underscore.
+fn validate_sql_identifier<'a>(value: &'a str, field: &str) -> MysqlResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(MysqlError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    // Must start with a letter or underscore
+    let first = value.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return Err(MysqlError::InvalidInput(format!(
+            "{field} must start with a letter or underscore"
+        )));
+    }
+    // Only allow alphanumeric, underscore, dot (for qualified names)
+    for ch in value.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.' {
+            return Err(MysqlError::InvalidInput(format!(
+                "{field} contains invalid character '{ch}'"
+            )));
+        }
+    }
+    // Reject consecutive dots or leading/trailing dots
+    if value.starts_with('.') || value.ends_with('.') || value.contains("..") {
+        return Err(MysqlError::InvalidInput(format!(
+            "{field} has invalid dot placement"
+        )));
+    }
+    Ok(value)
+}
+
 /// Default `MySQL` REST API base URL.
 ///
 /// Users must configure this to their actual `MySQL` proxy endpoint.
@@ -223,6 +257,7 @@ impl MysqlClient {
     /// List columns for a table.
     #[instrument(skip(self), fields(base_url = %self.base_url))]
     pub async fn list_columns(&self, table: &str) -> MysqlResult<serde_json::Value> {
+        let table = validate_sql_identifier(table, "table")?;
         debug!(table, "listing columns");
 
         let url = format!("{}/schema/columns/{table}", self.base_url);
@@ -234,6 +269,7 @@ impl MysqlClient {
     /// List indexes for a table.
     #[instrument(skip(self), fields(base_url = %self.base_url))]
     pub async fn list_indexes(&self, table: &str) -> MysqlResult<serde_json::Value> {
+        let table = validate_sql_identifier(table, "table")?;
         debug!(table, "listing indexes");
 
         let url = format!("{}/schema/indexes/{table}", self.base_url);
@@ -314,6 +350,7 @@ impl MysqlClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::FcpError;
 
     #[test]
     fn auth_api_key_redacts_in_debug() {
@@ -382,5 +419,109 @@ mod tests {
     fn retry_config_has_sane_defaults() {
         let client = MysqlClient::new(MysqlAuth::ApiKey("key".into()), None).unwrap();
         assert_eq!(client.retry_config().max_retries, 2);
+    }
+
+    // ── validate_sql_identifier tests ───────────────────────────────
+
+    #[test]
+    fn validate_sql_identifier_simple() {
+        assert_eq!(validate_sql_identifier("users", "table").unwrap(), "users");
+    }
+
+    #[test]
+    fn validate_sql_identifier_qualified_name() {
+        assert_eq!(
+            validate_sql_identifier("mydb.users", "table").unwrap(),
+            "mydb.users"
+        );
+    }
+
+    #[test]
+    fn validate_sql_identifier_allows_underscore_start() {
+        assert_eq!(
+            validate_sql_identifier("_internal", "table").unwrap(),
+            "_internal"
+        );
+    }
+
+    #[test]
+    fn validate_sql_identifier_allows_mixed_case() {
+        assert_eq!(
+            validate_sql_identifier("MyTable123", "table").unwrap(),
+            "MyTable123"
+        );
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_empty() {
+        let err = validate_sql_identifier("", "table").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_whitespace_only() {
+        let err = validate_sql_identifier("   ", "table").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_starting_digit() {
+        let err = validate_sql_identifier("1bad", "table").unwrap_err();
+        assert!(err.to_string().contains("must start with"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_semicolon() {
+        let err = validate_sql_identifier("users; DROP TABLE x", "table").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_single_quote() {
+        let err = validate_sql_identifier("users' OR '1'='1", "table").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_dash() {
+        let err = validate_sql_identifier("my-table", "table").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_space() {
+        let err = validate_sql_identifier("my table", "table").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_trailing_dot() {
+        let err = validate_sql_identifier("users.", "table").unwrap_err();
+        assert!(err.to_string().contains("invalid dot placement"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_consecutive_dots() {
+        let err = validate_sql_identifier("mydb..users", "table").unwrap_err();
+        assert!(err.to_string().contains("invalid dot placement"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_leading_dot() {
+        let err = validate_sql_identifier(".users", "table").unwrap_err();
+        assert!(err.to_string().contains("must start with"));
+    }
+
+    #[test]
+    fn validate_invalid_input_not_retryable() {
+        let err = MysqlError::InvalidInput("test".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn validate_invalid_input_to_fcp_error() {
+        let err = MysqlError::InvalidInput("bad table".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::InvalidRequest { .. }));
     }
 }

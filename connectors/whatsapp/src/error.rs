@@ -54,6 +54,10 @@ pub enum WhatsAppError {
     /// Webhook signature verification failed.
     #[error("Webhook error: {0}")]
     Webhook(String),
+
+    /// Invalid input (path traversal, bad identifier, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl WhatsAppError {
@@ -77,7 +81,8 @@ impl WhatsAppError {
             | Self::InvalidPhoneNumber(_)
             | Self::TemplateRejected(_)
             | Self::Config(_)
-            | Self::Webhook(_) => false,
+            | Self::Webhook(_)
+            | Self::InvalidInput(_) => false,
         }
     }
 
@@ -137,6 +142,10 @@ impl WhatsAppError {
             Self::Webhook(msg) => FcpError::InvalidRequest {
                 code: 1007,
                 message: format!("Webhook error: {msg}"),
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1008,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

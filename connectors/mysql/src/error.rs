@@ -60,6 +60,10 @@ pub enum MysqlError {
     /// API error with status code
     #[error("MySQL API error ({status_code}): {message}")]
     Api { status_code: u16, message: String },
+
+    /// Invalid input (SQL identifier injection, empty field, etc.)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl MysqlError {
@@ -70,7 +74,14 @@ impl MysqlError {
                 true
             }
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
-            _ => false,
+            Self::Json(_)
+            | Self::Auth(_)
+            | Self::Query(_)
+            | Self::Transaction(_)
+            | Self::Schema(_)
+            | Self::ConstraintViolation(_)
+            | Self::PermissionDenied(_)
+            | Self::InvalidInput(_) => false,
         }
     }
 
@@ -140,6 +151,10 @@ impl MysqlError {
                 status_code: Some(*status_code),
                 retryable: self.is_retryable(),
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1008,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }
@@ -333,6 +348,7 @@ mod tests {
                 status_code: 500,
                 message: "test".into(),
             },
+            MysqlError::InvalidInput("test".into()),
         ];
         for variant in &variants {
             assert!(!variant.to_string().is_empty());
@@ -350,6 +366,7 @@ mod tests {
             MysqlError::ConstraintViolation("test".into()),
             MysqlError::Timeout("test".into()),
             MysqlError::PermissionDenied("test".into()),
+            MysqlError::InvalidInput("test".into()),
             MysqlError::RateLimited {
                 retry_after_ms: 100,
             },

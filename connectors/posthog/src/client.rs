@@ -188,13 +188,14 @@ impl PostHogClient {
 
     /// Query events using HogQL.
     pub async fn query_events(&self, hogql_query: &str) -> PostHogResult<serde_json::Value> {
+        let safe_pid = sanitize_path_segment(&self.project_id, "project_id")?;
         let body = serde_json::json!({
             "query": {
                 "kind": "HogQLQuery",
                 "query": hogql_query
             }
         });
-        self.post(&format!("/projects/{}/query", self.project_id), &body)
+        self.post(&format!("/projects/{safe_pid}/query"), &body)
             .await
     }
 
@@ -202,7 +203,8 @@ impl PostHogClient {
 
     /// List saved insights.
     pub async fn list_insights(&self) -> PostHogResult<serde_json::Value> {
-        self.get(&format!("/projects/{}/insights", self.project_id))
+        let safe_pid = sanitize_path_segment(&self.project_id, "project_id")?;
+        self.get(&format!("/projects/{safe_pid}/insights"))
             .await
     }
 
@@ -210,9 +212,35 @@ impl PostHogClient {
 
     /// List feature flags.
     pub async fn list_feature_flags(&self) -> PostHogResult<serde_json::Value> {
-        self.get(&format!("/projects/{}/feature_flags", self.project_id))
+        let safe_pid = sanitize_path_segment(&self.project_id, "project_id")?;
+        self.get(&format!("/projects/{safe_pid}/feature_flags"))
             .await
     }
+}
+
+/// Validate a value intended for use as a URL path segment.
+///
+/// Rejects empty strings, path traversal sequences, slashes,
+/// and percent-encoded equivalents.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PostHogResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PostHogError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(PostHogError::InvalidInput(format!(
+            "{field} contains invalid characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 #[cfg(test)]
@@ -399,5 +427,50 @@ mod tests {
         assert!(!key1.is_secretless());
         let key2 = PostHogAuth::ApiKey("any_key".into());
         assert!(!key2.is_secretless());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(sanitize_path_segment("12345", "project_id").unwrap(), "12345");
+    }
+
+    #[test]
+    fn sanitize_path_segment_trims_whitespace() {
+        assert_eq!(sanitize_path_segment("  abc  ", "f").unwrap(), "abc");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("   ", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("../etc/passwd", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("foo\\bar", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("foo..bar", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("foo%2fbar", "project_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        assert!(sanitize_path_segment("foo%5Cbar", "project_id").is_err());
     }
 }

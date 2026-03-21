@@ -15,9 +15,15 @@ manifest_status="pending"
 manifest_note=""
 cargo_check_status="pending"
 format_check_status="pending"
+health_guidance_status="pending"
+doctor_guidance_status="pending"
 doctor_self_check_status="pending"
 retryable_self_check_status="pending"
+sts_identity_status="pending"
+lambda_list_status="pending"
+ec2_terminate_status="pending"
 risky_mutation_status="pending"
+compliance_status="pending"
 integration_suite_status="pending"
 clippy_status="pending"
 
@@ -115,11 +121,31 @@ fi
 
 if run_logged \
   format_check \
-  cargo fmt -p fcp-aws --check
+  rch exec -- cargo fmt -p fcp-aws -- --check
 then
   format_check_status="passed"
 else
   format_check_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  health_guidance_evidence \
+  rch exec -- cargo test -p fcp-aws --test integration lifecycle_health_unconfigured_includes_guidance -- --nocapture
+then
+  health_guidance_status="passed"
+else
+  health_guidance_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  doctor_guidance_evidence \
+  rch exec -- cargo test -p fcp-aws --test integration doctor_unconfigured_reports_remediation -- --nocapture
+then
+  doctor_guidance_status="passed"
+else
+  doctor_guidance_status="failed"
   promote_overall_status failed
 fi
 
@@ -144,12 +170,52 @@ else
 fi
 
 if run_logged \
+  sts_identity_evidence \
+  rch exec -- cargo test -p fcp-aws --test integration invoke_sts_identity_preserves_artifact_evidence -- --nocapture
+then
+  sts_identity_status="passed"
+else
+  sts_identity_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  lambda_list_evidence \
+  rch exec -- cargo test -p fcp-aws --test integration invoke_lambda_list_functions_preserves_artifact_evidence -- --nocapture
+then
+  lambda_list_status="passed"
+else
+  lambda_list_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  ec2_terminate_evidence \
+  rch exec -- cargo test -p fcp-aws --test integration invoke_ec2_terminate_preserves_state_transition_evidence -- --nocapture
+then
+  ec2_terminate_status="passed"
+else
+  ec2_terminate_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
   risky_mutation_evidence \
   rch exec -- cargo test -p fcp-aws --test integration invoke_dangerous_s3_delete_preserves_artifact_evidence -- --nocapture
 then
   risky_mutation_status="passed"
 else
   risky_mutation_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  compliance_evidence \
+  rch exec -- cargo test -p fcp-aws --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+then
+  compliance_status="passed"
+else
+  compliance_status="failed"
   promote_overall_status failed
 fi
 
@@ -173,6 +239,37 @@ else
   promote_overall_status failed
 fi
 
+cat > "${OUT_ROOT}/environment.json" <<EOF
+{
+  "run_id": "${RUN_ID}",
+  "connector": "fcp-aws",
+  "repo_root": "${REPO_ROOT}",
+  "verification_script": "scripts/e2e/aws_connector_verification.sh",
+  "artifact_root": "${OUT_ROOT}"
+}
+EOF
+
+cat > "${OUT_ROOT}/replay.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+rch exec -- cargo run -q -p fwc -- manifest fix connectors/aws/manifest.toml --check --json
+rch exec -- cargo check -p fcp-aws --all-targets
+rch exec -- cargo fmt -p fcp-aws -- --check
+rch exec -- cargo test -p fcp-aws --test integration lifecycle_health_unconfigured_includes_guidance -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration doctor_unconfigured_reports_remediation -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration self_check_ready_with_custom_sts_override_and_evidence -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration self_check_retryable_sts_failure_reports_degraded -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration invoke_sts_identity_preserves_artifact_evidence -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration invoke_lambda_list_functions_preserves_artifact_evidence -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration invoke_ec2_terminate_preserves_state_transition_evidence -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration invoke_dangerous_s3_delete_preserves_artifact_evidence -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration -- --nocapture
+rch exec -- cargo clippy -p fcp-aws --all-targets -- -D warnings
+EOF
+chmod +x "${OUT_ROOT}/replay.sh"
+
 cat > "${OUT_ROOT}/summary.json" <<EOF
 {
   "run_id": "${RUN_ID}",
@@ -186,9 +283,15 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     },
     "cargo_check": "${cargo_check_status}",
     "format_check": "${format_check_status}",
+    "health_guidance_evidence": "${health_guidance_status}",
+    "doctor_guidance_evidence": "${doctor_guidance_status}",
     "doctor_self_check_evidence": "${doctor_self_check_status}",
     "retryable_self_check_evidence": "${retryable_self_check_status}",
+    "sts_identity_evidence": "${sts_identity_status}",
+    "lambda_list_evidence": "${lambda_list_status}",
+    "ec2_terminate_evidence": "${ec2_terminate_status}",
     "risky_mutation_evidence": "${risky_mutation_status}",
+    "compliance_evidence": "${compliance_status}",
     "integration_suite": "${integration_suite_status}",
     "clippy": "${clippy_status}"
   },
@@ -196,11 +299,19 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     "manifest_check": "${OUT_ROOT}/evidence/manifest_check.json",
     "cargo_check_log": "${OUT_ROOT}/logs/cargo_check.log",
     "format_check_log": "${OUT_ROOT}/logs/format_check.log",
+    "health_guidance_evidence_log": "${OUT_ROOT}/logs/health_guidance_evidence.log",
+    "doctor_guidance_evidence_log": "${OUT_ROOT}/logs/doctor_guidance_evidence.log",
     "doctor_self_check_evidence_log": "${OUT_ROOT}/logs/doctor_self_check_evidence.log",
     "retryable_self_check_evidence_log": "${OUT_ROOT}/logs/retryable_self_check_evidence.log",
+    "sts_identity_evidence_log": "${OUT_ROOT}/logs/sts_identity_evidence.log",
+    "lambda_list_evidence_log": "${OUT_ROOT}/logs/lambda_list_evidence.log",
+    "ec2_terminate_evidence_log": "${OUT_ROOT}/logs/ec2_terminate_evidence.log",
     "risky_mutation_evidence_log": "${OUT_ROOT}/logs/risky_mutation_evidence.log",
+    "compliance_evidence_log": "${OUT_ROOT}/logs/compliance_evidence.log",
     "integration_suite_log": "${OUT_ROOT}/logs/integration_suite.log",
-    "clippy_log": "${OUT_ROOT}/logs/clippy.log"
+    "clippy_log": "${OUT_ROOT}/logs/clippy.log",
+    "environment": "${OUT_ROOT}/environment.json",
+    "replay": "${OUT_ROOT}/replay.sh"
   }
 }
 EOF

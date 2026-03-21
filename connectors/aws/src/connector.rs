@@ -47,9 +47,12 @@ const CAP_LAMBDA_WRITE: &str = "aws.lambda.write";
 const CAP_IAM_READ: &str = "aws.iam.read";
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/aws_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/aws_connector/<timestamp>";
-const VERIFY_COMMANDS: [&str; 3] = [
+const VERIFY_COMMANDS: [&str; 6] = [
+    "scripts/e2e/aws_connector_verification.sh",
+    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/aws/manifest.toml --check --json",
     "rch exec -- cargo check -p fcp-aws --all-targets",
-    "rch exec -- cargo test -p fcp-aws",
+    "rch exec -- cargo fmt -p fcp-aws -- --check",
+    "rch exec -- cargo test -p fcp-aws --test integration -- --nocapture",
     "rch exec -- cargo clippy -p fcp-aws --all-targets -- -D warnings",
 ];
 
@@ -260,6 +263,8 @@ struct ProvisioningReadiness {
 #[derive(Debug, Clone, serde::Serialize)]
 struct OperatorGuidance {
     prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
     limitations: Vec<&'static str>,
     common_remediation: Vec<RemediationHint>,
     rerun_commands: Vec<&'static str>,
@@ -276,9 +281,15 @@ struct RemediationHint {
 fn operator_guidance() -> OperatorGuidance {
     OperatorGuidance {
         prerequisites: vec![
-            "Use non-production verification endpoints for S3, EC2, Lambda, and STS until SigV4 signing exists in this connector.",
-            "Configure all four *_base_url overrides if you need the full operation surface to be live-ready.",
-            "Keep access_key_id, secret_access_key, and optional session_token out of logs and shared transcripts.",
+            "Create a disposable AWS verification environment, LocalStack stack, or signing proxy that can safely emulate S3, EC2, Lambda, and STS.",
+            "Provision credentials scoped only to the services and mutations you intend to exercise during verification.",
+            "Configure all four *_base_url overrides if you need the full operation surface to be live-ready before SigV4 signing exists in this connector.",
+        ],
+        dedicated_environment: "Use staging-only buckets, instances, Lambda functions, and STS verification endpoints. S3 delete and EC2 terminate operations are destructive and should never target production resources during verification.",
+        redaction_rules: vec![
+            "Never log access_key_id, secret_access_key, or session_token values.",
+            "Redact X-Aws-Access-Key-Id, X-Aws-Secret-Access-Key, and X-Aws-Security-Token headers from captured request/response artifacts.",
+            "Treat private account IDs, ARNs, bucket names, instance IDs, function names, and non-public endpoint override URLs as sensitive unless they are already public test fixtures.",
         ],
         limitations: vec![
             "This connector currently sends placeholder X-Aws-* headers rather than SigV4-signed AWS requests.",
@@ -325,6 +336,7 @@ pub struct DoctorResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     provisioning: Option<ProvisioningReadiness>,
     operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
@@ -342,6 +354,7 @@ impl DoctorResult {
             checks,
             provisioning,
             operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
         }
     }
 }

@@ -13,8 +13,8 @@
 use chrono::{Duration, Utc};
 use fcp_aws::connector::AwsConnector;
 use fcp_core::{
-    CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HandshakeRequest, InvokeRequest,
-    OperationId, RequestId, ZoneId,
+    ApprovalMode, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HandshakeRequest,
+    IdempotencyClass, InvokeRequest, OperationId, RequestId, SafetyTier, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_testkit::readiness_helpers::{
@@ -25,6 +25,8 @@ use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OP_S3_DELETE_OBJECT: &str = "aws.s3.delete_object";
+const OP_EC2_TERMINATE: &str = "aws.ec2.terminate_instance";
+const OP_LAMBDA_LIST: &str = "aws.lambda.list_functions";
 const OP_STS_IDENTITY: &str = "aws.sts.get_caller_identity";
 
 fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
@@ -36,6 +38,8 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         nonce: [5u8; 32],
         capabilities_requested: vec![
             CapabilityId::from_static("aws.s3.write"),
+            CapabilityId::from_static("aws.ec2.write"),
+            CapabilityId::from_static("aws.lambda.read"),
             CapabilityId::from_static("aws.iam.read"),
         ],
         host: None,
@@ -47,6 +51,8 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
     let capability = match op {
         OP_S3_DELETE_OBJECT => "aws.s3.write",
+        OP_EC2_TERMINATE => "aws.ec2.write",
+        OP_LAMBDA_LIST => "aws.lambda.read",
         OP_STS_IDENTITY => "aws.iam.read",
         _ => panic!("unsupported test operation: {op}"),
     };
@@ -115,8 +121,10 @@ async fn lifecycle_health_unconfigured_includes_guidance() {
     let connector = AwsConnector::new();
     let health = connector.health().await;
     assert!(!health.is_ready());
-    let details = health.details.expect("health details");
+    let details = health.details.as_ref().expect("health details");
+    assert!(details["operator_guidance"]["dedicated_environment"].is_string());
     assert!(details["operator_guidance"]["prerequisites"].is_array());
+    assert!(details["operator_guidance"]["redaction_rules"].is_array());
     assert_eq!(
         details["verification_script"],
         "scripts/e2e/aws_connector_verification.sh"
@@ -124,6 +132,10 @@ async fn lifecycle_health_unconfigured_includes_guidance() {
     assert_eq!(
         details["artifact_root_hint"],
         "artifacts/e2e/aws_connector/<timestamp>"
+    );
+    println!(
+        "aws_health_evidence={}",
+        serde_json::to_string_pretty(&health).unwrap()
     );
 }
 
@@ -134,8 +146,17 @@ async fn doctor_unconfigured_reports_remediation() {
     assert_doctor_response_valid(&doctor);
     assert_eq!(doctor["ready"], false);
     assert_eq!(
+        doctor["verification_script"],
+        "scripts/e2e/aws_connector_verification.sh"
+    );
+    assert!(doctor["operator_guidance"]["redaction_rules"].is_array());
+    assert_eq!(
         doctor["operator_guidance"]["artifact_root_hint"],
         "artifacts/e2e/aws_connector/<timestamp>"
+    );
+    println!(
+        "aws_doctor_guidance_evidence={}",
+        serde_json::to_string_pretty(&doctor).unwrap()
     );
 }
 
@@ -231,5 +252,166 @@ async fn invoke_dangerous_s3_delete_preserves_artifact_evidence() {
     println!(
         "aws_risky_mutation_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_ec2_terminate_preserves_state_transition_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(query_param("Action", "TerminateInstances"))
+        .and(query_param("InstanceId.1", "i-0123456789abcdef0"))
+        .and(query_param("Version", "2016-11-15"))
+        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "instance_id": "i-0123456789abcdef0",
+            "previous_state": "running",
+            "current_state": "shutting-down"
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_EC2_TERMINATE,
+            json!({
+                "instance_id": "i-0123456789abcdef0"
+            }),
+            generate_valid_token(&signing_key, OP_EC2_TERMINATE),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("ec2 terminate result");
+    assert_eq!(result["previous_state"], "running");
+    assert_eq!(result["current_state"], "shutting-down");
+    println!(
+        "aws_ec2_terminate_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_lambda_list_functions_preserves_artifact_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/2015-03-31/functions"))
+        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "function_name": "sync-orders",
+                "function_arn": "arn:aws:lambda:us-east-1:123456789012:function:sync-orders",
+                "runtime": "provided.al2023",
+                "handler": "bootstrap",
+                "memory_size": 256,
+                "timeout": 30,
+                "state": "Active"
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_LAMBDA_LIST,
+            json!({}),
+            generate_valid_token(&signing_key, OP_LAMBDA_LIST),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("lambda list result");
+    assert_eq!(result.as_array().unwrap().len(), 1);
+    assert_eq!(result[0]["function_name"], "sync-orders");
+    println!(
+        "aws_lambda_list_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_sts_identity_preserves_artifact_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(query_param("Action", "GetCallerIdentity"))
+        .and(query_param("Version", "2011-06-15"))
+        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account": "123456789012",
+            "arn": "arn:aws:sts::123456789012:assumed-role/test/AwsConnector",
+            "user_id": "AIDATESTUSER"
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_STS_IDENTITY,
+            json!({}),
+            generate_valid_token(&signing_key, OP_STS_IDENTITY),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("sts identity result");
+    assert_eq!(result["account"], "123456789012");
+    println!(
+        "aws_sts_identity_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspection_emits_v3_compliance_evidence() {
+    let connector = AwsConnector::new();
+    let operations = connector.introspect().operations;
+    assert_eq!(operations.len(), 13);
+
+    let s3_delete = operations
+        .iter()
+        .find(|operation| operation.id.as_str() == OP_S3_DELETE_OBJECT)
+        .expect("s3 delete operation");
+    assert_eq!(s3_delete.safety_tier, SafetyTier::Dangerous);
+    assert_eq!(s3_delete.idempotency, IdempotencyClass::Strict);
+    assert_eq!(s3_delete.requires_approval, Some(ApprovalMode::Interactive));
+
+    let ec2_terminate = operations
+        .iter()
+        .find(|operation| operation.id.as_str() == OP_EC2_TERMINATE)
+        .expect("ec2 terminate operation");
+    assert_eq!(ec2_terminate.safety_tier, SafetyTier::Dangerous);
+    assert_eq!(ec2_terminate.idempotency, IdempotencyClass::Strict);
+    assert_eq!(
+        ec2_terminate.requires_approval,
+        Some(ApprovalMode::Interactive)
+    );
+
+    let evidence = json!({
+        "operation_ids": operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>(),
+        "dangerous_operations": operations
+            .iter()
+            .filter(|operation| operation.safety_tier == SafetyTier::Dangerous)
+            .map(|operation| {
+                json!({
+                    "id": operation.id.as_str(),
+                    "capability": operation.capability.as_str(),
+                    "idempotency": format!("{:?}", operation.idempotency),
+                    "requires_approval": serde_json::to_value(operation.requires_approval)
+                        .unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+    println!(
+        "aws_v3_conformance_evidence={}",
+        serde_json::to_string_pretty(&evidence).unwrap()
     );
 }

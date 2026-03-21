@@ -68,10 +68,11 @@ impl PayPalClient {
         base_url: &str,
         client_id: String,
         client_secret: String,
+        request_timeout_ms: u64,
         retry_config: HttpRetryConfig,
     ) -> PayPalResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_millis(request_timeout_ms))
             .build()
             .map_err(PayPalError::Http)?;
 
@@ -482,6 +483,7 @@ mod tests {
                 "https://api-m.sandbox.paypal.com",
                 "client_id_123".into(),
                 "secret_456".into(),
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -501,6 +503,7 @@ mod tests {
                 "https://api-m.sandbox.paypal.com",
                 String::new(),
                 "secret".into(),
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -514,6 +517,7 @@ mod tests {
                 "https://api-m.sandbox.paypal.com",
                 "id".into(),
                 "secret".into(),
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -530,6 +534,7 @@ mod tests {
                 "https://api-m.sandbox.paypal.com/",
                 "id".into(),
                 "secret".into(),
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await
@@ -580,6 +585,7 @@ mod tests {
                 "https://api-m.sandbox.paypal.com",
                 "id".into(),
                 "secret".into(),
+                30_000,
                 HttpRetryConfig::default(),
             )
             .await

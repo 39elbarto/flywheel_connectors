@@ -1,125 +1,370 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:2080b28004713881e4734dc4202a5b7e748c2ce62bcadc343c61cb33bfb2cad8"
 
 [connector]
 id = "fcp.paypal"
-name = "PayPal"
+name = "PayPal Connector"
 version = "0.1.0"
-description = "PayPal connector for Orders, Payments, and Invoices"
+description = "Single-merchant PayPal REST connector for orders, captures, refunds, invoices, and credential health verification"
 archetypes = ["operational"]
-homepage = "https://developer.paypal.com/docs/api/overview/"
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; one PayPal client-credential pair and one environment are injected at runtime."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work", "z:private"]
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = [
+    "z:public",
+    "z:community",
+]
 
 [capabilities]
-required = ["network.outbound"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "system.privileged",
+]
 
-[provides.operations.orders_create]
-summary = "Create a PayPal order"
-capability = "paypal.orders.write"
-risk = "high"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.orders_create.ai_hints]
-when_to_use = "When you need to create a new PayPal checkout order"
-
-[provides.operations.orders_get]
-summary = "Get order details"
+[provides.operations."paypal.health"]
+description = "Verify that the configured PayPal client credentials can reach the configured environment."
 capability = "paypal.orders.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.orders_get.ai_hints]
-when_to_use = "When you need to check the status of a PayPal order"
-
-[provides.operations.orders_capture]
-summary = "Capture payment for an order"
-capability = "paypal.orders.write"
-risk = "critical"
-safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.orders_capture.ai_hints]
-when_to_use = "When you need to capture funds for an approved order"
+[provides.operations."paypal.health".input_schema]
+type = "object"
 
-[provides.operations.payments_list]
-summary = "List payments"
-capability = "paypal.payments.read"
-risk = "low"
+[provides.operations."paypal.health".output_schema]
+type = "object"
+
+[provides.operations."paypal.health".output_schema.properties.healthy]
+type = "boolean"
+
+[provides.operations."paypal.health".output_schema.properties.sandbox]
+type = "boolean"
+
+[provides.operations."paypal.health".ai_hints]
+when_to_use = "Use when you need to confirm the configured PayPal credentials and environment are reachable."
+common_mistakes = [
+    "Assuming this proves payouts, subscriptions, or webhook permissions; it only verifies the first-slice REST surface.",
+]
+examples = []
+related = []
+
+[provides.operations."paypal.orders.create"]
+description = "Create a PayPal checkout order for a single merchant account in the configured environment."
+capability = "paypal.orders.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."paypal.orders.create".input_schema]
+required = ["intent", "currency_code", "value"]
+type = "object"
+
+[provides.operations."paypal.orders.create".input_schema.properties.intent]
+type = "string"
+
+[provides.operations."paypal.orders.create".input_schema.properties.currency_code]
+type = "string"
+
+[provides.operations."paypal.orders.create".input_schema.properties.value]
+type = "string"
+
+[provides.operations."paypal.orders.create".output_schema]
+type = "object"
+
+[provides.operations."paypal.orders.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."paypal.orders.create".output_schema.properties.status]
+type = "string"
+
+[provides.operations."paypal.orders.create".ai_hints]
+when_to_use = "Use when you need to create a new PayPal checkout order."
+common_mistakes = [
+    "Passing an intent other than CAPTURE or AUTHORIZE.",
+    "Expecting this call to capture funds immediately; capture is a separate operation.",
+]
+examples = []
+related = ["paypal.orders.read"]
+
+[provides.operations."paypal.orders.get"]
+description = "Fetch one PayPal order by order id from the configured merchant context."
+capability = "paypal.orders.read"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.payments_list.ai_hints]
-when_to_use = "When you need to list recent payment captures"
+[provides.operations."paypal.orders.get".input_schema]
+required = ["order_id"]
+type = "object"
 
-[provides.operations.payments_get]
-summary = "Get payment details"
+[provides.operations."paypal.orders.get".input_schema.properties.order_id]
+type = "string"
+
+[provides.operations."paypal.orders.get".output_schema]
+type = "object"
+
+[provides.operations."paypal.orders.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."paypal.orders.get".output_schema.properties.status]
+type = "string"
+
+[provides.operations."paypal.orders.get".ai_hints]
+when_to_use = "Use when you need the status or details of a specific PayPal order."
+common_mistakes = ["Passing a capture id instead of an order id."]
+examples = []
+related = ["paypal.orders.write"]
+
+[provides.operations."paypal.orders.capture"]
+description = "Capture an approved PayPal order and create a real financial side effect."
+capability = "paypal.orders.write"
+risk_level = "critical"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."paypal.orders.capture".input_schema]
+required = ["order_id"]
+type = "object"
+
+[provides.operations."paypal.orders.capture".input_schema.properties.order_id]
+type = "string"
+
+[provides.operations."paypal.orders.capture".output_schema]
+type = "object"
+
+[provides.operations."paypal.orders.capture".output_schema.properties.id]
+type = "string"
+
+[provides.operations."paypal.orders.capture".output_schema.properties.status]
+type = "string"
+
+[provides.operations."paypal.orders.capture".ai_hints]
+when_to_use = "Use when you need to capture funds for an already approved PayPal order."
+common_mistakes = [
+    "Trying to capture an order that is not in APPROVED status.",
+    "Treating capture as a dry run; this operation causes a real financial side effect.",
+]
+examples = []
+related = ["paypal.orders.read", "paypal.payments.read"]
+
+[provides.operations."paypal.payments.list"]
+description = "List PayPal transactions within a bounded reporting date range."
 capability = "paypal.payments.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.payments_get.ai_hints]
-when_to_use = "When you need details of a specific payment capture"
+[provides.operations."paypal.payments.list".input_schema]
+required = ["start_date", "end_date"]
+type = "object"
 
-[provides.operations.payments_refund]
-summary = "Refund a payment"
+[provides.operations."paypal.payments.list".input_schema.properties.start_date]
+type = "string"
+
+[provides.operations."paypal.payments.list".input_schema.properties.end_date]
+type = "string"
+
+[provides.operations."paypal.payments.list".output_schema]
+type = "array"
+
+[provides.operations."paypal.payments.list".output_schema.items]
+type = "object"
+
+[provides.operations."paypal.payments.list".ai_hints]
+when_to_use = "Use when you need transaction history from the PayPal reporting API."
+common_mistakes = [
+    "Passing non-ISO-8601 date strings.",
+    "Expecting payouts or subscription billing history; those are out of scope for this first slice.",
+]
+examples = []
+related = ["paypal.payments.read"]
+
+[provides.operations."paypal.payments.get"]
+description = "Fetch one captured payment by capture id from the configured merchant context."
+capability = "paypal.payments.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."paypal.payments.get".input_schema]
+required = ["capture_id"]
+type = "object"
+
+[provides.operations."paypal.payments.get".input_schema.properties.capture_id]
+type = "string"
+
+[provides.operations."paypal.payments.get".output_schema]
+type = "object"
+
+[provides.operations."paypal.payments.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."paypal.payments.get".output_schema.properties.status]
+type = "string"
+
+[provides.operations."paypal.payments.get".ai_hints]
+when_to_use = "Use when you need details for a specific captured payment."
+common_mistakes = ["Passing an order id instead of a capture id."]
+examples = []
+related = ["paypal.payments.write"]
+
+[provides.operations."paypal.payments.refund"]
+description = "Refund a captured PayPal payment, optionally with a partial amount."
 capability = "paypal.payments.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "risky"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.payments_refund.ai_hints]
-when_to_use = "When you need to refund a captured payment"
+[provides.operations."paypal.payments.refund".input_schema]
+required = ["capture_id"]
+type = "object"
 
-[provides.operations.invoices_create]
-summary = "Create an invoice"
+[provides.operations."paypal.payments.refund".input_schema.properties.capture_id]
+type = "string"
+
+[provides.operations."paypal.payments.refund".input_schema.properties.amount]
+type = "object"
+
+[provides.operations."paypal.payments.refund".output_schema]
+type = "object"
+
+[provides.operations."paypal.payments.refund".output_schema.properties.id]
+type = "string"
+
+[provides.operations."paypal.payments.refund".output_schema.properties.status]
+type = "string"
+
+[provides.operations."paypal.payments.refund".ai_hints]
+when_to_use = "Use when you need to refund a completed PayPal capture."
+common_mistakes = [
+    "Passing an order id instead of a capture id.",
+    "Assuming refund is harmless; this operation causes a real financial side effect.",
+]
+examples = []
+related = ["paypal.payments.read"]
+
+[provides.operations."paypal.invoices.create"]
+description = "Create a draft PayPal invoice for the configured merchant account."
 capability = "paypal.invoices.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.invoices_create.ai_hints]
-when_to_use = "When you need to create a draft PayPal invoice"
+[provides.operations."paypal.invoices.create".input_schema]
+required = ["currency_code", "items"]
+type = "object"
 
-[provides.operations.invoices_list]
-summary = "List invoices"
+[provides.operations."paypal.invoices.create".input_schema.properties.currency_code]
+type = "string"
+
+[provides.operations."paypal.invoices.create".input_schema.properties.items]
+type = "array"
+
+[provides.operations."paypal.invoices.create".output_schema]
+type = "object"
+
+[provides.operations."paypal.invoices.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."paypal.invoices.create".output_schema.properties.status]
+type = "string"
+
+[provides.operations."paypal.invoices.create".ai_hints]
+when_to_use = "Use when you need to create a draft invoice before it is sent."
+common_mistakes = [
+    "Omitting invoice items.",
+    "Assuming invoice creation sends email automatically; sending is a separate operation.",
+]
+examples = []
+related = ["paypal.invoices.read", "paypal.invoices.write"]
+
+[provides.operations."paypal.invoices.list"]
+description = "List draft and sent invoices for the configured merchant account."
 capability = "paypal.invoices.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.invoices_list.ai_hints]
-when_to_use = "When you need to list PayPal invoices"
+[provides.operations."paypal.invoices.list".input_schema]
+type = "object"
 
-[provides.operations.invoices_send]
-summary = "Send an invoice"
+[provides.operations."paypal.invoices.list".output_schema]
+type = "array"
+
+[provides.operations."paypal.invoices.list".output_schema.items]
+type = "object"
+
+[provides.operations."paypal.invoices.list".ai_hints]
+when_to_use = "Use when you need invoice inventory from the configured merchant account."
+common_mistakes = [
+    "Expecting subscription billing agreements or recurring plan invoices; those are out of scope.",
+]
+examples = []
+related = ["paypal.invoices.write"]
+
+[provides.operations."paypal.invoices.send"]
+description = "Send a draft PayPal invoice to its recipient."
 capability = "paypal.invoices.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "risky"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.invoices_send.ai_hints]
-when_to_use = "When you need to send a draft invoice to the recipient"
+[provides.operations."paypal.invoices.send".input_schema]
+required = ["invoice_id"]
+type = "object"
 
-[provides.operations.health]
-summary = "Check PayPal API health"
-capability = "paypal.orders.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
+[provides.operations."paypal.invoices.send".input_schema.properties.invoice_id]
+type = "string"
 
-[provides.operations.health.ai_hints]
-when_to_use = "When you need to verify PayPal API credentials"
+[provides.operations."paypal.invoices.send".output_schema]
+type = "object"
+
+[provides.operations."paypal.invoices.send".output_schema.properties.sent]
+type = "boolean"
+
+[provides.operations."paypal.invoices.send".ai_hints]
+when_to_use = "Use when you need to deliver a previously created draft invoice."
+common_mistakes = [
+    "Trying to send a non-draft invoice.",
+    "Treating this as a read-only operation; it contacts an external recipient.",
+]
+examples = []
+related = ["paypal.invoices.read", "paypal.invoices.write"]
 
 [sandbox]
 profile = "strict"

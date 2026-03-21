@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
-    ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
+    ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
@@ -25,6 +25,18 @@ use crate::types::{
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const PAYPAL_SANDBOX_BASE_URL: &str = "https://api-m.sandbox.paypal.com";
+const PAYPAL_PRODUCTION_BASE_URL: &str = "https://api-m.paypal.com";
+const PAYPAL_IMPLEMENTATION_API: &str = "paypal_rest_v2";
+const PAYPAL_IMPLEMENTATION_STATUS: &str = "first_slice";
+const PAYPAL_AUTH_MODEL: &str = "oauth2_client_credentials";
+const PAYPAL_BINDING_MODEL: &str = "single_merchant_environment";
+const PAYPAL_FIRST_SLICE_NON_GOALS: &[&str] = &[
+    "Payouts, subscriptions, disputes, and partner onboarding",
+    "Webhook ingestion or streaming event delivery",
+    "Multi-merchant routing from a single connector instance",
+    "Vault and saved-payment-method flows",
+];
 
 const OP_ORDERS_CREATE: &str = "paypal.orders.create";
 const OP_ORDERS_GET: &str = "paypal.orders.get";
@@ -59,7 +71,7 @@ pub struct PayPalConfig {
 }
 
 fn default_base_url() -> String {
-    "https://api-m.sandbox.paypal.com".into()
+    PAYPAL_SANDBOX_BASE_URL.into()
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -85,6 +97,28 @@ impl PayPalConfig {
         if self.client_secret.is_empty() {
             return Err("client_secret is required".into());
         }
+        let parsed = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| format!("base_url must be a valid absolute URL: {err}"))?;
+        if parsed.scheme() != "https" {
+            return Err("base_url must use https".into());
+        }
+        if parsed.path() != "/" && !parsed.path().is_empty() {
+            return Err("base_url must not include an API path".into());
+        }
+        let Some(host) = parsed.host_str() else {
+            return Err("base_url must include a hostname".into());
+        };
+        match (self.sandbox, host) {
+            (true, "api-m.sandbox.paypal.com") | (false, "api-m.paypal.com") => {}
+            (true, _) => {
+                return Err(
+                    "sandbox=true requires base_url https://api-m.sandbox.paypal.com".into(),
+                );
+            }
+            (false, _) => {
+                return Err("sandbox=false requires base_url https://api-m.paypal.com".into());
+            }
+        }
         Ok(())
     }
 
@@ -94,11 +128,15 @@ impl PayPalConfig {
                 code: 1001,
                 message: format!("Invalid configuration: {e}"),
             })?;
-        // Auto-set base_url based on sandbox flag if default
-        if config.sandbox && config.base_url == default_base_url() {
-            config.base_url = "https://api-m.sandbox.paypal.com".into();
-        } else if !config.sandbox && config.base_url == default_base_url() {
-            config.base_url = "https://api-m.paypal.com".into();
+        config.client_id = config.client_id.trim().to_owned();
+        config.client_secret = config.client_secret.trim().to_owned();
+        config.base_url = config.base_url.trim().trim_end_matches('/').to_owned();
+        if config.base_url.is_empty() || config.base_url == default_base_url() {
+            config.base_url = if config.sandbox {
+                PAYPAL_SANDBOX_BASE_URL.into()
+            } else {
+                PAYPAL_PRODUCTION_BASE_URL.into()
+            };
         }
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
@@ -147,6 +185,81 @@ impl DoctorResult {
             checks,
         }
     }
+}
+
+fn contract_details(config: Option<&PayPalConfig>) -> serde_json::Value {
+    json!({
+        "implementation": {
+            "api": PAYPAL_IMPLEMENTATION_API,
+            "status": PAYPAL_IMPLEMENTATION_STATUS,
+            "notes": [
+                "The connector targets PayPal REST endpoints for checkout orders, reporting transactions, captures, refunds, and invoicing.",
+                "The first slice is deliberately request-response only; there is no webhook or subscription event ingestion yet."
+            ],
+        },
+        "auth_boundary": {
+            "binding": PAYPAL_BINDING_MODEL,
+            "token_type": PAYPAL_AUTH_MODEL,
+            "environment": config.map(|cfg| if cfg.sandbox { "sandbox" } else { "production" }),
+            "base_url": config.map(|cfg| cfg.base_url.clone()),
+            "multi_merchant_supported": false,
+            "delegated_user_auth_supported": false,
+        },
+        "service_inventory": {
+            "orders": {
+                "supported_operations": [OP_ORDERS_CREATE, OP_ORDERS_GET, OP_ORDERS_CAPTURE],
+                "notes": [
+                    "The connector supports order creation, lookup, and capture only.",
+                    "Authorize-only, void, and order-update workflows are not exposed in the first slice."
+                ],
+            },
+            "payments": {
+                "supported_operations": [OP_PAYMENTS_LIST, OP_PAYMENTS_GET, OP_PAYMENTS_REFUND],
+                "notes": [
+                    "Payment reads are centered on reporting transactions and capture lookup.",
+                    "Refunds operate on captures only."
+                ],
+            },
+            "invoices": {
+                "supported_operations": [OP_INVOICES_CREATE, OP_INVOICES_LIST, OP_INVOICES_SEND],
+                "notes": [
+                    "Invoice creation produces a draft invoice; sending is a separate operation.",
+                    "The connector does not manage recurring subscriptions or automatic billing plans."
+                ],
+            },
+            "payouts": {
+                "supported": false,
+                "notes": [
+                    "Payout APIs are intentionally out of scope for this first slice."
+                ],
+            },
+            "subscriptions": {
+                "supported": false,
+                "notes": [
+                    "Subscription plans, billing agreements, and vault flows are deferred."
+                ],
+            },
+            "webhooks": {
+                "supported": false,
+                "notes": [
+                    "There is no inbound webhook verification or event delivery path yet."
+                ],
+            },
+        },
+        "non_goals": PAYPAL_FIRST_SLICE_NON_GOALS,
+    })
+}
+
+fn with_self_check_details(
+    mut report: SelfCheckReport,
+    config: Option<&PayPalConfig>,
+    probe: serde_json::Value,
+) -> SelfCheckReport {
+    report.details = Some(json!({
+        "contract": contract_details(config),
+        "probe": probe,
+    }));
+    report
 }
 
 #[derive(Debug)]
@@ -222,6 +335,24 @@ impl PayPalConnector {
                 critical: false,
             });
         }
+        checks.push(DoctorCheck {
+            name: "auth_boundary".into(),
+            passed: true,
+            message: Some(
+                "Uses OAuth2 client_credentials for one merchant context in one environment; delegated user auth and multi-merchant routing are out of scope."
+                    .into(),
+            ),
+            critical: false,
+        });
+        checks.push(DoctorCheck {
+            name: "first_slice_inventory".into(),
+            passed: true,
+            message: Some(
+                "Supported today: checkout orders, capture lookups/refunds, and invoicing. Payouts, subscriptions, disputes, and webhooks are intentionally deferred."
+                    .into(),
+            ),
+            critical: false,
+        });
         DoctorResult::from_checks(checks)
     }
 
@@ -277,7 +408,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 vec![CAP_ORDERS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ORDERS_GET),
@@ -288,14 +419,14 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_ORDERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Check status of a PayPal order",
                 vec!["Use the PayPal order ID".into()],
                 vec![CAP_ORDERS_WRITE],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ORDERS_CAPTURE),
@@ -313,7 +444,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 vec![CAP_ORDERS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PAYMENTS_LIST),
@@ -324,14 +455,14 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAYMENTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Search transaction history",
                 vec!["Dates in ISO 8601 format".into()],
                 vec![],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PAYMENTS_GET),
@@ -342,14 +473,14 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAYMENTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
                 "Get details of a specific payment capture",
                 vec!["Use the capture ID, not order ID".into()],
                 vec![CAP_PAYMENTS_WRITE],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PAYMENTS_REFUND),
@@ -367,7 +498,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 vec![CAP_PAYMENTS_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_INVOICES_CREATE),
@@ -385,7 +516,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 vec![CAP_INVOICES_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_INVOICES_LIST),
@@ -396,10 +527,10 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_INVOICES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: hint("List PayPal invoices", vec![], vec![CAP_INVOICES_WRITE]),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_INVOICES_SEND),
@@ -417,7 +548,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 vec![CAP_INVOICES_READ],
             ),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
@@ -431,7 +562,7 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: hint("Verify PayPal credentials", vec![], vec![]),
             rate_limit: None,
-            requires_approval: None,
+            requires_approval: Some(ApprovalMode::None),
         },
     ]
 }
@@ -452,6 +583,7 @@ impl FcpConnector for PayPalConnector {
             &cfg.base_url,
             cfg.client_id.clone(),
             cfg.client_secret.clone(),
+            cfg.request_timeout_ms,
             cfg.retry.clone(),
         )
         .await
@@ -510,48 +642,93 @@ impl FcpConnector for PayPalConnector {
             "configured": self.config.is_some(),
             "handshaken": self.base.handshaken.load(Ordering::Acquire),
             "sandbox": self.config.as_ref().map(|c| c.sandbox).unwrap_or(false),
+            "base_url": self.config.as_ref().map(|c| c.base_url.clone()),
             "manifest_hash": Self::manifest_hash(),
+            "contract": contract_details(self.config.as_ref()),
         }));
         snap
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(_config) = &self.config else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+        let Some(config) = &self.config else {
+            return Ok(with_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+                json!({
+                    "ready": false,
+                    "reason": "configure one PayPal client_id/client_secret pair and environment before running self_check",
+                }),
             ));
         };
 
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::failed(
-                "client_missing",
-                "PayPal HTTP client not initialized; re-run configure",
+            return Ok(with_self_check_details(
+                SelfCheckReport::failed(
+                    "client_missing",
+                    "PayPal HTTP client not initialized; re-run configure",
+                ),
+                Some(config),
+                json!({
+                    "ready": false,
+                    "reason": "client_missing",
+                }),
             ));
         };
         let Some(runtime) = &self.runtime else {
-            return Ok(SelfCheckReport::failed(
-                "runtime_missing",
-                "ConnectorRuntime not initialized; re-run configure",
+            return Ok(with_self_check_details(
+                SelfCheckReport::failed(
+                    "runtime_missing",
+                    "ConnectorRuntime not initialized; re-run configure",
+                ),
+                Some(config),
+                json!({
+                    "ready": false,
+                    "reason": "runtime_missing",
+                }),
             ));
         };
 
         match client.health_check(runtime).await {
             Ok(true) => {
                 info!(event = "paypal.self_check", "PayPal self_check passed");
-                Ok(SelfCheckReport::ok())
+                Ok(with_self_check_details(
+                    SelfCheckReport::ok(),
+                    Some(config),
+                    json!({
+                        "healthy": true,
+                        "base_url": client.base_url(),
+                        "environment": if config.sandbox { "sandbox" } else { "production" },
+                    }),
+                ))
             }
-            Ok(false) => Ok(SelfCheckReport::degraded(
-                "api_degraded",
-                "PayPal API returned server error",
+            Ok(false) => Ok(with_self_check_details(
+                SelfCheckReport::degraded("api_degraded", "PayPal API returned server error"),
+                Some(config),
+                json!({
+                    "healthy": false,
+                    "base_url": client.base_url(),
+                    "environment": if config.sandbox { "sandbox" } else { "production" },
+                }),
             )),
-            Err(error) if error.is_retryable() => Ok(SelfCheckReport::degraded(
-                "self_check_retryable",
-                error.to_string(),
+            Err(error) if error.is_retryable() => Ok(with_self_check_details(
+                SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                Some(config),
+                json!({
+                    "healthy": false,
+                    "base_url": client.base_url(),
+                    "environment": if config.sandbox { "sandbox" } else { "production" },
+                    "retryable": true,
+                }),
             )),
-            Err(error) => Ok(SelfCheckReport::failed(
-                "self_check_failed",
-                error.to_string(),
+            Err(error) => Ok(with_self_check_details(
+                SelfCheckReport::failed("self_check_failed", error.to_string()),
+                Some(config),
+                json!({
+                    "healthy": false,
+                    "base_url": client.base_url(),
+                    "environment": if config.sandbox { "sandbox" } else { "production" },
+                    "retryable": false,
+                }),
             )),
         }
     }
@@ -988,7 +1165,43 @@ mod tests {
         .unwrap();
         assert_eq!(
             c.config.as_ref().unwrap().base_url,
-            "https://api-m.paypal.com"
+            PAYPAL_PRODUCTION_BASE_URL
+        );
+    }
+
+    #[test]
+    fn configure_rejects_non_paypal_host() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = PayPalConnector::new();
+                c.configure(json!({
+                    "client_id": "id",
+                    "client_secret": "secret",
+                    "sandbox": false,
+                    "base_url": "https://example.com"
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn configure_rejects_base_url_with_path() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = PayPalConnector::new();
+                c.configure(json!({
+                    "client_id": "id",
+                    "client_secret": "secret",
+                    "sandbox": true,
+                    "base_url": "https://api-m.sandbox.paypal.com/v2"
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
         );
     }
 
@@ -1022,8 +1235,42 @@ mod tests {
     }
 
     #[test]
+    fn doctor_exposes_contract_checks() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = PayPalConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.doctor()
+        })
+        .unwrap();
+        assert!(result.checks.iter().any(|c| c.name == "auth_boundary"));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "first_slice_inventory")
+        );
+    }
+
+    #[test]
     fn introspect_ops() {
         assert_eq!(PayPalConnector::new().introspect().operations.len(), 10);
+    }
+
+    #[test]
+    fn read_operations_are_strictly_idempotent() {
+        for operation in operations_info() {
+            if matches!(
+                operation.id.as_str(),
+                OP_ORDERS_GET | OP_PAYMENTS_LIST | OP_PAYMENTS_GET | OP_INVOICES_LIST | OP_HEALTH
+            ) {
+                assert_eq!(
+                    operation.idempotency,
+                    IdempotencyClass::Strict,
+                    "{}",
+                    operation.id
+                );
+            }
+        }
     }
 
     #[test]
@@ -1286,6 +1533,27 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(h.status, fcp_core::HealthState::Ready));
+        assert!(
+            h.details
+                .as_ref()
+                .and_then(|details| details.get("contract"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn self_check_unconfigured_includes_contract_details() {
+        let report = fcp_async_core::runtime::block_on_sync(async {
+            PayPalConnector::new().self_check().await.unwrap()
+        })
+        .unwrap();
+        assert!(
+            report
+                .details
+                .as_ref()
+                .and_then(|details| details.get("contract"))
+                .is_some()
+        );
     }
 
     #[test]

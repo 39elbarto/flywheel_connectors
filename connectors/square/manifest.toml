@@ -1,0 +1,66 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.square"
+name = "Square"
+version = "0.1.0"
+description = "Square API connector for payments, orders, catalog, customers, and locations"
+archetype = "operational"
+homepage = "https://developer.squareup.com/docs"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.payments_list]
+summary = "List payments"
+capability = "square.payments.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.payments_list.network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations.payments_list.ai_hints]
+when_to_use = "When listing payments"
+
+[provides.operations.payments_create]
+summary = "Create a payment"
+capability = "square.payments.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.payments_create.network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations.payments_create.ai_hints]
+when_to_use = "When creating a new payment"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

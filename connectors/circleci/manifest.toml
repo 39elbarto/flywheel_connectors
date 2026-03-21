@@ -1,0 +1,135 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.circleci"
+name = "CircleCI"
+version = "0.1.0"
+description = "CircleCI CI/CD platform connector for managing pipelines, workflows, and jobs"
+archetype = "operational"
+homepage = "https://circleci.com/docs/api/v2/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.pipelines_list]
+summary = "List pipelines for a project"
+capability = "circleci.pipelines.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.pipelines_list.network_constraints]
+host_allow = ["circleci.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.pipelines_list.ai_hints]
+when_to_use = "When you need to list recent pipelines for a project"
+
+[provides.operations.pipelines_get]
+summary = "Get a pipeline by ID"
+capability = "circleci.pipelines.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.pipelines_get.network_constraints]
+host_allow = ["circleci.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.pipelines_get.ai_hints]
+when_to_use = "When you need details about a specific pipeline"
+
+[provides.operations.pipelines_trigger]
+summary = "Trigger a new pipeline"
+capability = "circleci.pipelines.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.pipelines_trigger.network_constraints]
+host_allow = ["circleci.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.pipelines_trigger.ai_hints]
+when_to_use = "When you need to trigger a new CI/CD pipeline run"
+
+[provides.operations.workflows_list]
+summary = "List workflows for a pipeline"
+capability = "circleci.workflows.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.workflows_list.network_constraints]
+host_allow = ["circleci.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.workflows_list.ai_hints]
+when_to_use = "When you need to see workflows triggered by a pipeline"
+
+[provides.operations.workflows_cancel]
+summary = "Cancel a running workflow"
+capability = "circleci.workflows.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.workflows_cancel.network_constraints]
+host_allow = ["circleci.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.workflows_cancel.ai_hints]
+when_to_use = "When you need to cancel a running workflow"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

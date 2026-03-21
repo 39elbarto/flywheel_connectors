@@ -1,0 +1,120 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.zoom"
+name = "Zoom"
+version = "0.1.0"
+description = "Zoom API connector for meetings, users, recordings, and webinars"
+archetype = "operational"
+homepage = "https://developers.zoom.us/docs/api/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.meetings_list]
+summary = "List meetings for a user"
+capability = "zoom.meetings.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.meetings_list.network_constraints]
+host_allow = ["api.zoom.us"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations.meetings_list.ai_hints]
+when_to_use = "When listing meetings for a Zoom user"
+
+[provides.operations.meetings_get]
+summary = "Get a meeting by ID"
+capability = "zoom.meetings.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.meetings_get.network_constraints]
+host_allow = ["api.zoom.us"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations.meetings_get.ai_hints]
+when_to_use = "When retrieving details of a specific meeting"
+
+[provides.operations.meetings_create]
+summary = "Create a new meeting"
+capability = "zoom.meetings.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.meetings_create.network_constraints]
+host_allow = ["api.zoom.us"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations.meetings_create.ai_hints]
+when_to_use = "When creating a new Zoom meeting"
+
+[provides.operations.meetings_update]
+summary = "Update an existing meeting"
+capability = "zoom.meetings.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.meetings_update.network_constraints]
+host_allow = ["api.zoom.us"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations.meetings_update.ai_hints]
+when_to_use = "When updating an existing Zoom meeting"
+
+[provides.operations.meetings_delete]
+summary = "Delete a meeting"
+capability = "zoom.meetings.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.meetings_delete.network_constraints]
+host_allow = ["api.zoom.us"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations.meetings_delete.ai_hints]
+when_to_use = "When permanently deleting a Zoom meeting"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

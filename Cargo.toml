@@ -140,6 +140,10 @@ members = [
     "connectors/imessage",
     "connectors/vercel",
     "connectors/azure",
+    "connectors/circleci",
+    "connectors/confluence",
+    "connectors/zoom",
+    "connectors/square",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

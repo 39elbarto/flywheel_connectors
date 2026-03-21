@@ -1,25 +1,43 @@
+use fcp_core::CredentialId;
 use serde::{Deserialize, Serialize};
 
 // ── Auth ──
 
-/// Shopify authentication via Admin API access token.
+/// Shopify authentication for the Admin API.
 #[derive(Clone, Deserialize)]
-pub struct ShopifyAuth {
-    pub access_token: String,
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ShopifyAuth {
+    AccessToken { access_token: String },
+    CredentialId { credential_id: CredentialId },
 }
 
 impl ShopifyAuth {
     #[must_use]
-    pub fn is_secretless(&self) -> bool {
-        self.access_token.trim().is_empty()
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::AccessToken { .. } => "access_token",
+            Self::CredentialId { .. } => "credential_id",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
     }
 }
 
 impl std::fmt::Debug for ShopifyAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShopifyAuth")
-            .field("access_token", &"[REDACTED]")
-            .finish()
+        match self {
+            Self::AccessToken { .. } => f
+                .debug_struct("AccessToken")
+                .field("access_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId { credential_id } => f
+                .debug_struct("CredentialId")
+                .field("credential_id", credential_id)
+                .finish(),
+        }
     }
 }
 
@@ -258,7 +276,7 @@ mod tests {
 
     #[test]
     fn auth_debug_redacts_token() {
-        let auth = ShopifyAuth {
+        let auth = ShopifyAuth::AccessToken {
             access_token: "shpat_secret123".into(),
         };
         let debug = format!("{auth:?}");
@@ -267,16 +285,26 @@ mod tests {
     }
 
     #[test]
-    fn auth_secretless_empty() {
-        let auth = ShopifyAuth {
-            access_token: "  ".into(),
+    fn auth_debug_shows_credential_id() {
+        let auth = ShopifyAuth::CredentialId {
+            credential_id: CredentialId::parse("12345678-1234-5678-1234-567812345678").unwrap(),
+        };
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("CredentialId"));
+        assert!(debug.contains("12345678-1234-5678-1234-567812345678"));
+    }
+
+    #[test]
+    fn auth_secretless_credential_id() {
+        let auth = ShopifyAuth::CredentialId {
+            credential_id: CredentialId::parse("12345678-1234-5678-1234-567812345678").unwrap(),
         };
         assert!(auth.is_secretless());
     }
 
     #[test]
-    fn auth_secretless_non_empty() {
-        let auth = ShopifyAuth {
+    fn auth_secretless_access_token_disabled() {
+        let auth = ShopifyAuth::AccessToken {
             access_token: "shpat_token".into(),
         };
         assert!(!auth.is_secretless());

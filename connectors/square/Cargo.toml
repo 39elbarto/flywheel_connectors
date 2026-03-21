@@ -32,5 +32,6 @@ chrono = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 fcp-crypto.workspace = true
+fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit.workspace = true
 wiremock.workspace = true

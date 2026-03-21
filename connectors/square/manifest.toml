@@ -1,61 +1,603 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:112a4998b16f9fa9de056dc80d9f4a141fd8ceba58104c025042c7b7a11ae0b5"
 
 [connector]
 id = "fcp.square"
-name = "Square"
+name = "Square Connector"
 version = "0.1.0"
-description = "Square API connector for payments, orders, catalog, customers, and locations"
-archetype = "operational"
-homepage = "https://developer.squareup.com/docs"
+description = "Merchant-scoped Square connector for first-slice payments, refunds, orders, catalog, customers, locations, and connectivity verification"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "One injected bearer access token per connector instance. The first slice does not manage OAuth install, token refresh, multi-merchant brokering, or durable connector state."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work"]
+allowed_sources = ["z:owner", "z:private", "z:work"]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = ["z:public", "z:community"]
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "network.listen", "system.privileged"]
 
-[provides.operations.payments_list]
-summary = "List payments"
-capability = "square.payments.read"
-risk = "low"
+# Auth and scope model:
+# - Each connector instance is bound to one injected Square bearer token.
+# - The token can be a PAT or an OAuth seller token provisioned out-of-band.
+# - The token is merchant-scoped; location-sensitive operations still require explicit
+#   `location_id` or `location_ids` input.
+# - OAuth installation, token refresh, merchant discovery, and cross-merchant fan-out
+#   are out of scope for this first slice.
+#
+# First-slice non-goals:
+# - Invoices, inventory adjustments, gift cards, payouts, disputes, terminal flows,
+#   webhook ingestion, and any workflow that captures browser or mobile checkout state.
+
+[provides.operations."square.health"]
+description = "Probe the configured Square seller token by calling the Locations API and verifying API reachability."
+capability = "square.locations.read"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.payments_list.network_constraints]
-host_allow = ["connect.squareup.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-
-[provides.operations.payments_list.ai_hints]
-when_to_use = "When listing payments"
-
-[provides.operations.payments_create]
-summary = "Create a payment"
-capability = "square.payments.write"
-risk = "high"
-safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.payments_create.network_constraints]
+[provides.operations."square.health".input_schema]
+type = "object"
+
+[provides.operations."square.health".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."square.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."square.health".network_constraints]
 host_allow = ["connect.squareup.com"]
 port_allow = [443]
-require_tls = true
-require_sni = true
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.payments_create.ai_hints]
-when_to_use = "When creating a new payment"
+[provides.operations."square.health".ai_hints]
+when_to_use = "Use when you need to confirm that the configured seller token can reach the Square API before invoking other operations."
+common_mistakes = ["Assuming health proves every optional seller permission is granted. It only proves that the configured token can reach the Locations API."]
+examples = []
+related = ["square.locations.list"]
+
+[provides.operations."square.locations.list"]
+description = "List locations visible to the configured Square seller token."
+capability = "square.locations.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.locations.list".input_schema]
+type = "object"
+
+[provides.operations."square.locations.list".output_schema]
+required = ["locations"]
+type = "object"
+
+[provides.operations."square.locations.list".output_schema.properties.locations]
+type = "array"
+
+[provides.operations."square.locations.list".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."square.locations.list".ai_hints]
+when_to_use = "Use when you need valid Square location IDs for downstream payments or order workflows."
+common_mistakes = ["Treating merchant scope and location scope as the same thing. The token identifies the seller, but many workflows still require an explicit location ID."]
+examples = []
+related = ["square.health", "square.orders.list", "square.orders.create", "square.payments.list", "square.payments.create"]
+
+[provides.operations."square.payments.list"]
+description = "List payments for the configured seller, optionally filtered by one Square location and paginated with Square cursors."
+capability = "square.payments.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.payments.list".input_schema]
+type = "object"
+
+[provides.operations."square.payments.list".input_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.payments.list".input_schema.properties.location_id]
+type = "string"
+
+[provides.operations."square.payments.list".output_schema]
+required = ["payments"]
+type = "object"
+
+[provides.operations."square.payments.list".output_schema.properties.payments]
+type = "array"
+
+[provides.operations."square.payments.list".output_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.payments.list".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."square.payments.list".ai_hints]
+when_to_use = "Use when you need recent payment records for the configured seller or one specific location."
+common_mistakes = ["Passing page numbers instead of Square cursors.", "Assuming this operation can fan out across multiple merchants. Each connector instance is bound to one seller token."]
+examples = []
+related = ["square.payments.get", "square.locations.list"]
+
+[provides.operations."square.payments.get"]
+description = "Retrieve one Square payment by payment ID."
+capability = "square.payments.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.payments.get".input_schema]
+required = ["payment_id"]
+type = "object"
+
+[provides.operations."square.payments.get".input_schema.properties.payment_id]
+type = "string"
+
+[provides.operations."square.payments.get".output_schema]
+required = ["payment"]
+type = "object"
+
+[provides.operations."square.payments.get".output_schema.properties.payment]
+type = "object"
+
+[provides.operations."square.payments.get".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."square.payments.get".ai_hints]
+when_to_use = "Use when you need the canonical state of one known payment."
+common_mistakes = ["Passing a display label instead of the Square payment ID."]
+examples = []
+related = ["square.payments.list", "square.payments.refund"]
+
+[provides.operations."square.payments.create"]
+description = "Create a real Square payment against the configured seller token."
+capability = "square.payments.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."square.payments.create".input_schema]
+required = ["source_id", "idempotency_key", "amount_money"]
+type = "object"
+
+[provides.operations."square.payments.create".input_schema.properties.source_id]
+type = "string"
+
+[provides.operations."square.payments.create".input_schema.properties.idempotency_key]
+type = "string"
+
+[provides.operations."square.payments.create".input_schema.properties.amount_money]
+type = "object"
+
+[provides.operations."square.payments.create".input_schema.properties.location_id]
+type = "string"
+
+[provides.operations."square.payments.create".input_schema.properties.customer_id]
+type = "string"
+
+[provides.operations."square.payments.create".input_schema.properties.note]
+type = "string"
+
+[provides.operations."square.payments.create".output_schema]
+required = ["payment"]
+type = "object"
+
+[provides.operations."square.payments.create".output_schema.properties.payment]
+type = "object"
+
+[provides.operations."square.payments.create".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."square.payments.create".ai_hints]
+when_to_use = "Use when you need to create a real payment for the configured seller."
+common_mistakes = ["Reusing an idempotency key across logically different charges.", "Forgetting that `amount_money.amount` is in the smallest currency unit.", "Treating this as a sandbox-only bookkeeping call. It has real financial side effects."]
+examples = []
+related = ["square.payments.get", "square.payments.refund", "square.locations.list"]
+
+[provides.operations."square.payments.refund"]
+description = "Refund a previously created Square payment."
+capability = "square.payments.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."square.payments.refund".input_schema]
+required = ["idempotency_key", "payment_id", "amount_money"]
+type = "object"
+
+[provides.operations."square.payments.refund".input_schema.properties.idempotency_key]
+type = "string"
+
+[provides.operations."square.payments.refund".input_schema.properties.payment_id]
+type = "string"
+
+[provides.operations."square.payments.refund".input_schema.properties.amount_money]
+type = "object"
+
+[provides.operations."square.payments.refund".input_schema.properties.reason]
+type = "string"
+
+[provides.operations."square.payments.refund".output_schema]
+required = ["refund"]
+type = "object"
+
+[provides.operations."square.payments.refund".output_schema.properties.refund]
+type = "object"
+
+[provides.operations."square.payments.refund".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."square.payments.refund".ai_hints]
+when_to_use = "Use when you need to refund a completed payment."
+common_mistakes = ["Requesting a refund larger than the captured payment.", "Retrying without a new or intentionally reused idempotency key.", "Treating refunds as low-risk bookkeeping operations."]
+examples = []
+related = ["square.payments.get", "square.payments.create"]
+
+[provides.operations."square.orders.list"]
+description = "Search orders for one or more Square locations using the seller token bound to this connector instance."
+capability = "square.orders.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.orders.list".input_schema]
+required = ["location_ids"]
+type = "object"
+
+[provides.operations."square.orders.list".input_schema.properties.location_ids]
+type = "array"
+
+[provides.operations."square.orders.list".input_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.orders.list".output_schema]
+required = ["orders"]
+type = "object"
+
+[provides.operations."square.orders.list".output_schema.properties.orders]
+type = "array"
+
+[provides.operations."square.orders.list".output_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.orders.list".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."square.orders.list".ai_hints]
+when_to_use = "Use when you need orders scoped to one or more known Square locations."
+common_mistakes = ["Omitting `location_ids`.", "Assuming order search is global without passing locations.", "Passing page numbers instead of Square cursors."]
+examples = []
+related = ["square.orders.get", "square.orders.create", "square.locations.list"]
+
+[provides.operations."square.orders.get"]
+description = "Retrieve one Square order by order ID."
+capability = "square.orders.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.orders.get".input_schema]
+required = ["order_id"]
+type = "object"
+
+[provides.operations."square.orders.get".input_schema.properties.order_id]
+type = "string"
+
+[provides.operations."square.orders.get".output_schema]
+required = ["order"]
+type = "object"
+
+[provides.operations."square.orders.get".output_schema.properties.order]
+type = "object"
+
+[provides.operations."square.orders.get".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."square.orders.get".ai_hints]
+when_to_use = "Use when you need the canonical details for one known Square order."
+common_mistakes = ["Passing an external display label instead of the Square order ID."]
+examples = []
+related = ["square.orders.list"]
+
+[provides.operations."square.orders.create"]
+description = "Create a real Square order for one location without checkout orchestration, payment capture, fulfillment, or invoice workflows."
+capability = "square.orders.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."square.orders.create".input_schema]
+required = ["location_id", "line_items"]
+type = "object"
+
+[provides.operations."square.orders.create".input_schema.properties.location_id]
+type = "string"
+
+[provides.operations."square.orders.create".input_schema.properties.line_items]
+type = "array"
+
+[provides.operations."square.orders.create".input_schema.properties.idempotency_key]
+type = "string"
+
+[provides.operations."square.orders.create".output_schema]
+required = ["order"]
+type = "object"
+
+[provides.operations."square.orders.create".output_schema.properties.order]
+type = "object"
+
+[provides.operations."square.orders.create".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."square.orders.create".ai_hints]
+when_to_use = "Use when you need to create an order record for a known Square location."
+common_mistakes = ["Omitting `location_id`.", "Retrying order creation without supplying an idempotency key.", "Expecting this first slice to handle invoice generation, fulfillment, or payment capture."]
+examples = []
+related = ["square.orders.list", "square.locations.list", "square.payments.create"]
+
+[provides.operations."square.catalog.list"]
+description = "List Square catalog objects visible to the configured seller token."
+capability = "square.catalog.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.catalog.list".input_schema]
+type = "object"
+
+[provides.operations."square.catalog.list".input_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.catalog.list".input_schema.properties.types]
+type = "string"
+
+[provides.operations."square.catalog.list".output_schema]
+required = ["objects"]
+type = "object"
+
+[provides.operations."square.catalog.list".output_schema.properties.objects]
+type = "array"
+
+[provides.operations."square.catalog.list".output_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.catalog.list".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."square.catalog.list".ai_hints]
+when_to_use = "Use when you need catalog objects such as items or variations from the configured seller."
+common_mistakes = ["Passing comma-free values to `types` that do not match Square catalog object type names.", "Expecting catalog mutation, inventory adjustment, or image management from this first slice."]
+examples = []
+related = ["square.locations.list"]
+
+[provides.operations."square.customers.list"]
+description = "List customers visible to the configured Square seller token."
+capability = "square.customers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.customers.list".input_schema]
+type = "object"
+
+[provides.operations."square.customers.list".input_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.customers.list".output_schema]
+required = ["customers"]
+type = "object"
+
+[provides.operations."square.customers.list".output_schema.properties.customers]
+type = "array"
+
+[provides.operations."square.customers.list".output_schema.properties.cursor]
+type = "string"
+
+[provides.operations."square.customers.list".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."square.customers.list".ai_hints]
+when_to_use = "Use when you need customer records for the configured seller."
+common_mistakes = ["Treating customer output as safe to echo into broad logs or shared transcripts.", "Passing page numbers instead of cursors."]
+examples = []
+related = ["square.customers.get"]
+
+[provides.operations."square.customers.get"]
+description = "Retrieve one Square customer by customer ID."
+capability = "square.customers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."square.customers.get".input_schema]
+required = ["customer_id"]
+type = "object"
+
+[provides.operations."square.customers.get".input_schema.properties.customer_id]
+type = "string"
+
+[provides.operations."square.customers.get".output_schema]
+required = ["customer"]
+type = "object"
+
+[provides.operations."square.customers.get".output_schema.properties.customer]
+type = "object"
+
+[provides.operations."square.customers.get".network_constraints]
+host_allow = ["connect.squareup.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."square.customers.get".ai_hints]
+when_to_use = "Use when you need one known customer from the configured seller account."
+common_mistakes = ["Passing an email address or display name instead of a Square customer ID.", "Echoing unnecessary customer PII into shared transcripts."]
+examples = []
+related = ["square.customers.list"]
 
 [sandbox]
 profile = "strict"

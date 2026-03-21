@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    ConnectorId, ConnectorMetrics, CredentialId, EventCaps, FcpConnector, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde::Serialize;
@@ -19,14 +19,17 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::ShopifyClient;
-use crate::types::{CreateLineItem, CreateOrder, CreateProduct, CreateVariant, UpdateProduct};
+use crate::types::{
+    CreateLineItem, CreateOrder, CreateProduct, CreateVariant, ShopifyAuth, UpdateProduct,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const DEFAULT_LIST_LIMIT: u64 = 50;
 const SHOPIFY_IMPLEMENTATION_API: &str = "shopify_admin_rest";
 const SHOPIFY_IMPLEMENTATION_STATUS: &str = "legacy";
-const SHOPIFY_AUTH_MODEL: &str = "admin_api_access_token";
 const SHOPIFY_BINDING_MODEL: &str = "single_shop_single_app_install";
+const SHOPIFY_AUTH_MODE_ACCESS_TOKEN: &str = "admin_api_access_token";
+const SHOPIFY_AUTH_MODE_CREDENTIAL_ID: &str = "credential_id_proxy";
 const SHOPIFY_ORDER_HISTORY_SCOPE: &str = "read_all_orders";
 const SHOPIFY_FIRST_SLICE_NON_GOALS: &[&str] = &[
     "OAuth installation and token exchange",
@@ -57,16 +60,28 @@ const CAP_ORDERS_WRITE: &str = "shopify.orders.write";
 const CAP_CUSTOMERS_READ: &str = "shopify.customers.read";
 const CAP_INVENTORY_READ: &str = "shopify.inventory.read";
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone)]
 pub struct ShopifyConfig {
     pub shop_domain: String,
-    pub access_token: String,
-    #[serde(default = "default_api_version")]
+    pub auth: ShopifyAuth,
     pub api_version: String,
-    #[serde(default)]
     pub retry: HttpRetryConfig,
-    #[serde(default = "default_timeout_ms")]
     pub request_timeout_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct ShopifyConfigInput {
+    shop_domain: String,
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    credential_id: Option<String>,
+    #[serde(default = "default_api_version")]
+    api_version: String,
+    #[serde(default)]
+    retry: HttpRetryConfig,
+    #[serde(default = "default_timeout_ms")]
+    request_timeout_ms: u64,
 }
 
 fn default_api_version() -> String {
@@ -81,7 +96,7 @@ impl std::fmt::Debug for ShopifyConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShopifyConfig")
             .field("shop_domain", &self.shop_domain)
-            .field("access_token", &"[REDACTED]")
+            .field("auth", &self.auth)
             .field("api_version", &self.api_version)
             .finish()
     }
@@ -109,8 +124,11 @@ impl ShopifyConfig {
         {
             return Err("shop_domain must end with .myshopify.com".into());
         }
-        if self.access_token.is_empty() {
-            return Err("access_token is required".into());
+        match &self.auth {
+            ShopifyAuth::AccessToken { access_token } if access_token.is_empty() => {
+                return Err("access_token must not be empty".into());
+            }
+            ShopifyAuth::AccessToken { .. } | ShopifyAuth::CredentialId { .. } => {}
         }
         if self.api_version.len() != 7
             || !self.api_version.chars().enumerate().all(|(idx, ch)| {
@@ -127,18 +145,55 @@ impl ShopifyConfig {
     }
 
     fn from_value(val: serde_json::Value) -> FcpResult<Self> {
-        let mut config: Self =
+        let config: ShopifyConfigInput =
             serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid configuration: {e}"),
             })?;
-        config.shop_domain = config
+        let shop_domain = config
             .shop_domain
             .trim()
             .trim_end_matches('/')
             .to_ascii_lowercase();
-        config.access_token = config.access_token.trim().to_owned();
-        config.api_version = config.api_version.trim().to_owned();
+        let access_token = config
+            .access_token
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let credential_id = config
+            .credential_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let auth = match (access_token, credential_id) {
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1001,
+                    message: "Provide either access_token or credential_id, not both".into(),
+                });
+            }
+            (Some(access_token), None) => ShopifyAuth::AccessToken { access_token },
+            (None, Some(raw)) => {
+                let credential_id =
+                    CredentialId::parse(raw).map_err(|error| FcpError::InvalidRequest {
+                        code: 1001,
+                        message: format!("Invalid credential_id: {error}"),
+                    })?;
+                ShopifyAuth::CredentialId { credential_id }
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1001,
+                    message: "Missing access_token or credential_id".into(),
+                });
+            }
+        };
+        let config = Self {
+            shop_domain,
+            auth,
+            api_version: config.api_version.trim().to_owned(),
+            retry: config.retry,
+            request_timeout_ms: config.request_timeout_ms,
+        };
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
             message: e,
@@ -200,11 +255,20 @@ fn contract_details(config: Option<&ShopifyConfig>) -> serde_json::Value {
         },
         "auth_boundary": {
             "binding": SHOPIFY_BINDING_MODEL,
-            "token_type": SHOPIFY_AUTH_MODEL,
+            "supported_modes": [
+                SHOPIFY_AUTH_MODE_ACCESS_TOKEN,
+                SHOPIFY_AUTH_MODE_CREDENTIAL_ID,
+            ],
+            "configured_mode": config.map(|cfg| match cfg.auth {
+                ShopifyAuth::AccessToken { .. } => SHOPIFY_AUTH_MODE_ACCESS_TOKEN,
+                ShopifyAuth::CredentialId { .. } => SHOPIFY_AUTH_MODE_CREDENTIAL_ID,
+            }),
+            "secretless_mode": config.map(|cfg| cfg.auth.is_secretless()),
             "configured_shop_domain": config.map(|cfg| cfg.shop_domain.clone()),
             "api_version": config.map(|cfg| cfg.api_version.clone()),
             "oauth_installation_supported": false,
             "multi_shop_supported": false,
+            "credential_injection_supported": true,
         },
         "service_inventory": {
             "products": {
@@ -309,13 +373,15 @@ impl ShopifyConnector {
             message: if self.config.is_some() {
                 self.config.as_ref().map(|cfg| {
                     format!(
-                        "Bound to {} with Admin API version {}.",
-                        cfg.shop_domain, cfg.api_version
+                        "Bound to {} with Admin API version {} using {} auth.",
+                        cfg.shop_domain,
+                        cfg.api_version,
+                        cfg.auth.redacted_label()
                     )
                 })
             } else {
                 Some(
-                    "Not configured; provide one Admin API token and one *.myshopify.com shop domain before handshake or invoke."
+                    "Not configured; provide one *.myshopify.com shop domain and exactly one auth mode: access_token or credential_id."
                         .into(),
                 )
             },
@@ -345,9 +411,20 @@ impl ShopifyConnector {
             name: "auth_boundary".into(),
             passed: self.config.is_some(),
             message: Some(
-                "This connector is scoped to one shop/app install only; OAuth install, multi-shop fan-out, and delegated user auth are out of scope for the first slice."
+                "This connector is scoped to one shop/app install only; OAuth install, multi-shop fan-out, and delegated user auth are out of scope for the first slice. Secretless credential_id injection is supported through the egress proxy."
                     .into(),
             ),
+            critical: false,
+        });
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: self.config.is_some(),
+            message: self.config.as_ref().map(|cfg| {
+                format!(
+                    "Manifest egress should be pinned to {}:443 for every operation.",
+                    cfg.shop_domain
+                )
+            }),
             critical: false,
         });
         checks.push(DoctorCheck {
@@ -663,7 +740,7 @@ fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "List recent orders available to the configured shop token.",
+                "List recent orders available to the configured shop auth context.",
                 vec![
                     format!(
                         "This first slice returns only the first {} visible orders and does not expose cursor pagination or filters.",
@@ -757,7 +834,8 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_CUSTOMERS_LIST),
             summary: "List customers".into(),
             description: Some(
-                "List the first page of customers visible to the configured shop token.".into(),
+                "List the first page of customers visible to the configured shop auth context."
+                    .into(),
             ),
             input_schema: json!({"type":"object"}),
             output_schema: json!({"type":"array","items": customer_schema()}),
@@ -843,7 +921,7 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check API credentials".into(),
             description: Some(
-                "Probe /shop.json to verify that the configured Admin API token can reach the configured Shopify shop."
+                "Probe /shop.json to verify that the configured Shopify auth mode can reach the configured shop."
                     .into(),
             ),
             input_schema: json!({"type":"object"}),
@@ -863,9 +941,9 @@ fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: hint(
-                "Verify that the configured shop token can reach /shop.json.",
+                "Verify that the configured shop credentials can reach /shop.json.",
                 vec![
-                    "This validates the shop binding and token reachability, not every optional scope used by every operation.".into(),
+                    "This validates the shop binding and credential reachability, not every optional scope used by every operation.".into(),
                 ],
                 vec![],
             ),
@@ -889,7 +967,7 @@ impl FcpConnector for ShopifyConnector {
         ));
         let client = ShopifyClient::new(
             &cfg.shop_domain,
-            cfg.access_token.clone(),
+            cfg.auth.clone(),
             &cfg.api_version,
             cfg.request_timeout_ms,
             cfg.retry.clone(),
@@ -900,6 +978,7 @@ impl FcpConnector for ShopifyConnector {
         })?;
         let shop_domain = cfg.shop_domain.clone();
         let api_version = cfg.api_version.clone();
+        let auth_mode = cfg.auth.redacted_label();
         self.client = Some(client);
         self.config = Some(cfg);
         self.verifier = None;
@@ -909,6 +988,7 @@ impl FcpConnector for ShopifyConnector {
             event = "shopify.configure",
             shop_domain = %shop_domain,
             api_version = %api_version,
+            auth_mode = %auth_mode,
             "Configured Shopify connector"
         );
         Ok(())
@@ -951,9 +1031,6 @@ impl FcpConnector for ShopifyConnector {
             (None, _, _) => HealthSnapshot::degraded("not configured"),
             (Some(_), None, _) => HealthSnapshot::error("client not initialized"),
             (Some(_), _, None) => HealthSnapshot::error("runtime not initialized"),
-            (Some(_), Some(client), Some(_)) if client.is_secretless() => {
-                HealthSnapshot::degraded("admin api access token required")
-            }
             (Some(_), Some(_), Some(_)) => HealthSnapshot::ready(),
         };
         snap.uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -973,7 +1050,7 @@ impl FcpConnector for ShopifyConnector {
                 None,
                 json!({
                     "reachable": false,
-                    "reason": "configure one Admin API token and one *.myshopify.com shop domain before running self_check"
+                    "reason": "configure one *.myshopify.com shop domain plus exactly one auth mode (access_token or credential_id) before running self_check"
                 }),
             ));
         };
@@ -1382,12 +1459,22 @@ impl ShopifyConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_manifest::ConnectorManifest;
 
     fn tc() -> serde_json::Value {
         json!({
             "shop_domain": "test.myshopify.com",
             "access_token": "shpat_test123"
+        })
+    }
+
+    fn tc_credential_id() -> serde_json::Value {
+        json!({
+            "shop_domain": "test.myshopify.com",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
         })
     }
 
@@ -1485,11 +1572,40 @@ mod tests {
     }
 
     #[test]
-    fn configure_missing_token() {
+    fn configure_accepts_credential_id() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
                 let mut c = ShopifyConnector::new();
-                c.configure(json!({"shop_domain":"test.myshopify.com","access_token":""}))
+                c.configure(tc_credential_id()).await
+            })
+            .unwrap()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn configure_missing_auth() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = ShopifyConnector::new();
+                c.configure(json!({"shop_domain":"test.myshopify.com"}))
+                    .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn configure_rejects_both_auth_modes() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = ShopifyConnector::new();
+                c.configure(json!({
+                    "shop_domain":"test.myshopify.com",
+                    "access_token":"shpat_test123",
+                    "credential_id":"550e8400-e29b-41d4-a716-446655440000"
+                }))
                     .await
             })
             .unwrap()
@@ -1779,7 +1895,9 @@ mod tests {
     fn config_debug_redacts_token() {
         let cfg = ShopifyConfig {
             shop_domain: "test.myshopify.com".into(),
-            access_token: "shpat_secret".into(),
+            auth: ShopifyAuth::AccessToken {
+                access_token: "shpat_secret".into(),
+            },
             api_version: "2024-01".into(),
             retry: HttpRetryConfig::default(),
             request_timeout_ms: 30_000,
@@ -1943,5 +2061,38 @@ mod tests {
                     .as_deref()
                     .is_some_and(|message| message.contains("Fulfillment"))
         }),);
+    }
+
+    #[test]
+    fn health_secretless_configured_is_ready() {
+        let h = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = ShopifyConnector::new();
+            c.configure(tc_credential_id()).await.unwrap();
+            c.health().await
+        })
+        .unwrap();
+        assert!(matches!(h.status, fcp_core::HealthState::Ready));
+    }
+
+    #[test]
+    fn manifest_interface_hash_is_deterministic() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        if !manifest_path.exists() {
+            eprintln!("manifest.toml missing; skipping interface_hash check");
+            return;
+        }
+
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(manifest.manifest.interface_hash, computed);
+
+        let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(computed, computed2);
     }
 }

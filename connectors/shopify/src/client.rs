@@ -13,7 +13,7 @@ use crate::types::*;
 pub struct ShopifyClient {
     client: Client,
     base_url: String,
-    access_token: String,
+    auth: ShopifyAuth,
     retry_config: HttpRetryConfig,
 }
 
@@ -21,7 +21,7 @@ impl std::fmt::Debug for ShopifyClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShopifyClient")
             .field("base_url", &self.base_url)
-            .field("access_token", &"[REDACTED]")
+            .field("auth", &self.auth)
             .finish()
     }
 }
@@ -29,7 +29,7 @@ impl std::fmt::Debug for ShopifyClient {
 impl ShopifyClient {
     pub async fn new(
         shop_domain: &str,
-        access_token: String,
+        auth: ShopifyAuth,
         api_version: &str,
         request_timeout_ms: u64,
         retry_config: HttpRetryConfig,
@@ -47,7 +47,7 @@ impl ShopifyClient {
         Ok(Self {
             client,
             base_url,
-            access_token,
+            auth,
             retry_config,
         })
     }
@@ -57,7 +57,7 @@ impl ShopifyClient {
     }
 
     pub fn is_secretless(&self) -> bool {
-        self.access_token.trim().is_empty()
+        self.auth.is_secretless()
     }
 
     // ── Health check (shop info) ──
@@ -70,10 +70,10 @@ impl ShopifyClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.access_token.clone();
+            let auth = self.auth.clone();
             async move {
                 debug!(attempt, "Checking Shopify health");
-                let req = authenticate(client.get(&url), &token);
+                let req = authenticate(client.get(&url), &auth);
                 let resp = match req.send().await {
                     Ok(r) => r,
                     Err(e) => {
@@ -232,10 +232,10 @@ impl ShopifyClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.access_token.clone();
+            let auth = self.auth.clone();
             async move {
                 debug!(attempt, url = %url, "GET");
-                let req = authenticate(client.get(&url), &token);
+                let req = authenticate(client.get(&url), &auth);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -256,11 +256,11 @@ impl ShopifyClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.access_token.clone();
+            let auth = self.auth.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, url = %url, "POST");
-                let req = authenticate(client.post(&url), &token).json(&body);
+                let req = authenticate(client.post(&url), &auth).json(&body);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -281,11 +281,11 @@ impl ShopifyClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.access_token.clone();
+            let auth = self.auth.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, url = %url, "PUT");
-                let req = authenticate(client.put(&url), &token).json(&body);
+                let req = authenticate(client.put(&url), &auth).json(&body);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -304,10 +304,10 @@ impl ShopifyClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.access_token.clone();
+            let auth = self.auth.clone();
             async move {
                 debug!(attempt, url = %url, "DELETE");
-                let req = authenticate(client.delete(&url), &token);
+                let req = authenticate(client.delete(&url), &auth);
                 let resp = match req.send().await {
                     Ok(r) => r,
                     Err(e) => {
@@ -338,11 +338,15 @@ impl ShopifyClient {
 
 // ── Free functions ──
 
-fn authenticate(req: RequestBuilder, token: &str) -> RequestBuilder {
-    if token.is_empty() {
-        req
-    } else {
-        req.header("X-Shopify-Access-Token", token)
+fn authenticate(req: RequestBuilder, auth: &ShopifyAuth) -> RequestBuilder {
+    match auth {
+        ShopifyAuth::AccessToken { access_token } if access_token.trim().is_empty() => req,
+        ShopifyAuth::AccessToken { access_token } => {
+            req.header("X-Shopify-Access-Token", access_token)
+        }
+        ShopifyAuth::CredentialId { credential_id } => {
+            req.header("X-FCP-Credential-ID", credential_id.to_string())
+        }
     }
 }
 
@@ -441,7 +445,9 @@ mod tests {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             ShopifyClient::new(
                 "test-store.myshopify.com",
-                "shpat_secret".into(),
+                ShopifyAuth::AccessToken {
+                    access_token: "shpat_secret".into(),
+                },
                 "2024-01",
                 30_000,
                 HttpRetryConfig::default(),
@@ -460,7 +466,12 @@ mod tests {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             ShopifyClient::new(
                 "test.myshopify.com",
-                String::new(),
+                ShopifyAuth::CredentialId {
+                    credential_id: fcp_core::CredentialId::parse(
+                        "550e8400-e29b-41d4-a716-446655440000",
+                    )
+                    .unwrap(),
+                },
                 "2024-01",
                 30_000,
                 HttpRetryConfig::default(),
@@ -474,7 +485,9 @@ mod tests {
         let rt2 = fcp_async_core::runtime::block_on_sync(async {
             ShopifyClient::new(
                 "test.myshopify.com",
-                "token".into(),
+                ShopifyAuth::AccessToken {
+                    access_token: "token".into(),
+                },
                 "2024-01",
                 30_000,
                 HttpRetryConfig::default(),
@@ -491,7 +504,9 @@ mod tests {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             ShopifyClient::new(
                 "my-store.myshopify.com",
-                "t".into(),
+                ShopifyAuth::AccessToken {
+                    access_token: "t".into(),
+                },
                 "2024-01",
                 30_000,
                 HttpRetryConfig::default(),
@@ -511,7 +526,9 @@ mod tests {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             ShopifyClient::new(
                 "store.myshopify.com/",
-                "t".into(),
+                ShopifyAuth::AccessToken {
+                    access_token: "t".into(),
+                },
                 "2024-01",
                 30_000,
                 HttpRetryConfig::default(),
@@ -521,5 +538,46 @@ mod tests {
         })
         .unwrap();
         assert!(!rt.base_url().contains("//admin"));
+    }
+
+    #[test]
+    fn authenticate_uses_access_token_header() {
+        let client = Client::new();
+        let auth = ShopifyAuth::AccessToken {
+            access_token: "shpat_secret".into(),
+        };
+        let request = authenticate(client.get("https://example.com"), &auth)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Shopify-Access-Token")
+                .and_then(|value| value.to_str().ok()),
+            Some("shpat_secret")
+        );
+        assert!(request.headers().get("X-FCP-Credential-ID").is_none());
+    }
+
+    #[test]
+    fn authenticate_uses_credential_id_header() {
+        let client = Client::new();
+        let auth = ShopifyAuth::CredentialId {
+            credential_id: fcp_core::CredentialId::parse(
+                "550e8400-e29b-41d4-a716-446655440000",
+            )
+            .unwrap(),
+        };
+        let request = authenticate(client.get("https://example.com"), &auth)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get("X-FCP-Credential-ID")
+                .and_then(|value| value.to_str().ok()),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert!(request.headers().get("X-Shopify-Access-Token").is_none());
     }
 }

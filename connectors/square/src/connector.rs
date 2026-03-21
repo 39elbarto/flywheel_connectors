@@ -256,7 +256,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAYMENTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When listing payments processed by Square".into(),
                 common_mistakes: vec![
@@ -288,7 +288,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAYMENTS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When retrieving details of a specific payment".into(),
                 common_mistakes: Vec::new(),
@@ -340,7 +340,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 related: Vec::new(),
             },
             rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PAYMENTS_REFUND),
@@ -382,7 +382,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static(OP_PAYMENTS_GET)],
             },
             rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ORDERS_LIST),
@@ -406,7 +406,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_ORDERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When searching or listing orders".into(),
                 common_mistakes: vec![
@@ -438,7 +438,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_ORDERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When retrieving details of a specific order".into(),
                 common_mistakes: Vec::new(),
@@ -478,20 +478,21 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 }
             }),
             capability: CapabilityId::from_static(CAP_ORDERS_WRITE),
-            risk_level: RiskLevel::High,
+            risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "When creating a new order".into(),
                 common_mistakes: vec![
                     "Quantity must be a string, not a number".into(),
                     "Amount is in smallest denomination (cents for USD)".into(),
+                    "Provide idempotency_key when retrying order creation to reduce duplicate side effects".into(),
                 ],
                 examples: Vec::new(),
                 related: Vec::new(),
             },
             rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_CATALOG_LIST),
@@ -514,7 +515,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_CATALOG_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When listing catalog items, categories, or variations".into(),
                 common_mistakes: Vec::new(),
@@ -544,7 +545,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_CUSTOMERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When listing customers".into(),
                 common_mistakes: Vec::new(),
@@ -574,7 +575,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_CUSTOMERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When retrieving details of a specific customer".into(),
                 common_mistakes: Vec::new(),
@@ -598,7 +599,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_LOCATIONS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When listing business locations".into(),
                 common_mistakes: Vec::new(),
@@ -1122,6 +1123,9 @@ impl SquareConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    use fcp_manifest::ConnectorManifest;
 
     fn all_caps() -> Vec<CapabilityId> {
         vec![
@@ -1387,7 +1391,8 @@ mod tests {
         let op = ops.iter().find(|op| op.id.as_str() == OP_PAYMENTS_LIST).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
-        assert_eq!(op.idempotency, IdempotencyClass::None);
+        assert_eq!(op.idempotency, IdempotencyClass::Strict);
+        assert_eq!(op.requires_approval, Some(ApprovalMode::None));
     }
 
     #[test]
@@ -1397,6 +1402,7 @@ mod tests {
         assert_eq!(op.safety_tier, SafetyTier::Risky);
         assert_eq!(op.risk_level, RiskLevel::High);
         assert_eq!(op.idempotency, IdempotencyClass::Strict);
+        assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
     }
 
     #[test]
@@ -1405,6 +1411,17 @@ mod tests {
         let op = ops.iter().find(|op| op.id.as_str() == OP_PAYMENTS_REFUND).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
         assert_eq!(op.risk_level, RiskLevel::High);
+        assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
+    }
+
+    #[test]
+    fn test_orders_create_contract_semantics() {
+        let ops = operations_info();
+        let op = ops.iter().find(|op| op.id.as_str() == OP_ORDERS_CREATE).unwrap();
+        assert_eq!(op.safety_tier, SafetyTier::Risky);
+        assert_eq!(op.risk_level, RiskLevel::Medium);
+        assert_eq!(op.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
     }
 
     #[test]
@@ -1413,6 +1430,31 @@ mod tests {
         let hash2 = SquareConnector::manifest_hash();
         assert_eq!(hash1, hash2);
         assert!(hash1.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn manifest_interface_hash_is_deterministic() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        if !manifest_path.exists() {
+            eprintln!("manifest.toml missing; skipping interface_hash check");
+            return;
+        }
+
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(
+            manifest.manifest.interface_hash, computed,
+            "update connectors/square/manifest.toml interface_hash to {computed}"
+        );
+
+        let manifest2 = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(computed, computed2);
     }
 
     #[test]
@@ -1479,7 +1521,8 @@ mod tests {
         let ops = operations_info();
         let op = ops.iter().find(|op| op.id.as_str() == OP_ORDERS_CREATE).unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
-        assert_eq!(op.risk_level, RiskLevel::High);
-        assert_eq!(op.idempotency, IdempotencyClass::Strict);
+        assert_eq!(op.risk_level, RiskLevel::Medium);
+        assert_eq!(op.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
     }
 }

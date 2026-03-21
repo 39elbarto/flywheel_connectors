@@ -198,7 +198,7 @@ async fn mail_list_messages_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/messages"))
+        .and(path("/me/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": [
                 { "id": "msg-1", "subject": "Hello", "isRead": false },
@@ -233,7 +233,7 @@ async fn mail_get_message_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/messages/msg-123"))
+        .and(path("/me/messages/msg-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "msg-123",
             "subject": "Important Update",
@@ -267,7 +267,7 @@ async fn mail_send_message_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/users/me/sendMail"))
+        .and(path("/me/sendMail"))
         .respond_with(ResponseTemplate::new(202))
         .mount(&mock_server)
         .await;
@@ -306,7 +306,7 @@ async fn files_list_items_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path_regex("/users/me/drive/root/children.*"))
+        .and(path_regex("/me/drive/root/children.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": [
                 { "id": "item-1", "name": "Document.docx", "file": { "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" } },
@@ -340,7 +340,7 @@ async fn files_upload_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("PUT"))
-        .and(path("/users/me/drive/root:/Documents/hello.txt:/content"))
+        .and(path("/me/drive/root:/Documents/hello.txt:/content"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "new-item-1",
             "name": "hello.txt",
@@ -378,7 +378,7 @@ async fn files_get_item_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/item-42"))
+        .and(path("/me/drive/items/item-42"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "item-42",
             "name": "report.pdf",
@@ -414,7 +414,7 @@ async fn files_download_file_happy_path() {
 
     // Metadata request
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-1"))
+        .and(path("/me/drive/items/doc-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "doc-1",
             "name": "notes.txt",
@@ -425,7 +425,7 @@ async fn files_download_file_happy_path() {
 
     // Content download
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-1/content"))
+        .and(path("/me/drive/items/doc-1/content"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello world".to_vec()))
         .mount(&mock_server)
         .await;
@@ -460,7 +460,7 @@ async fn files_delete_item_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("DELETE"))
-        .and(path("/users/me/drive/items/item-99"))
+        .and(path("/me/drive/items/item-99"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&mock_server)
         .await;
@@ -488,7 +488,7 @@ async fn files_search_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path_regex("/users/me/drive/root/search.*"))
+        .and(path_regex("/me/drive/root/search.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": [
                 { "id": "item-10", "name": "Q4 Report.xlsx", "size": 51_200 },
@@ -522,7 +522,7 @@ async fn files_create_share_link_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/users/me/drive/items/item-42/createLink"))
+        .and(path("/me/drive/items/item-42/createLink"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "link-abc",
             "link": {
@@ -654,7 +654,7 @@ async fn word_list_documents_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/root/children"))
+        .and(path("/me/drive/root/children"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": [
                 {
@@ -703,7 +703,7 @@ async fn word_extract_text_happy_path() {
     let docx = sample_docx_bytes("Quarterly Review");
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-1"))
+        .and(path("/me/drive/items/doc-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "doc-1",
             "name": "Quarterly Review.docx",
@@ -716,7 +716,7 @@ async fn word_extract_text_happy_path() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-1/content"))
+        .and(path("/me/drive/items/doc-1/content"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(docx))
         .mount(&mock_server)
         .await;
@@ -746,7 +746,7 @@ async fn word_create_document_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("PUT"))
-        .and(path("/users/me/drive/root:/Documents/Meeting%20Notes.docx:/content"))
+        .and(path("/me/drive/root:/Documents/Meeting%20Notes.docx:/content"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "doc-2",
             "name": "Meeting Notes.docx",
@@ -786,7 +786,7 @@ async fn word_update_document_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-3"))
+        .and(path("/me/drive/items/doc-3"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "doc-3",
             "name": "Draft.docx",
@@ -799,7 +799,7 @@ async fn word_update_document_happy_path() {
         .await;
 
     Mock::given(method("PUT"))
-        .and(path("/users/me/drive/items/doc-3/content"))
+        .and(path("/me/drive/items/doc-3/content"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "doc-3",
             "name": "Draft.docx",
@@ -839,7 +839,7 @@ async fn word_export_document_pdf_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-4"))
+        .and(path("/me/drive/items/doc-4"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "doc-4",
             "name": "Quarterly Review.docx",
@@ -852,7 +852,7 @@ async fn word_export_document_pdf_happy_path() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-4/content"))
+        .and(path("/me/drive/items/doc-4/content"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-1.7".to_vec()))
         .mount(&mock_server)
         .await;
@@ -891,7 +891,7 @@ async fn word_extract_text_rejects_oversized_metadata() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/drive/items/doc-oversized"))
+        .and(path("/me/drive/items/doc-oversized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "doc-oversized",
             "name": "Huge.docx",
@@ -968,7 +968,7 @@ async fn calendar_list_events_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path_regex("/users/me/events.*"))
+        .and(path_regex("/me/events.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": [{
                 "id": "evt-1",
@@ -1005,7 +1005,7 @@ async fn calendar_create_event_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/users/me/events"))
+        .and(path("/me/events"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "evt-new-1",
             "subject": "Sprint Planning",
@@ -1044,7 +1044,7 @@ async fn calendar_get_event_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/events/evt-123"))
+        .and(path("/me/events/evt-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "evt-123",
             "subject": "1:1 with Manager",
@@ -1107,7 +1107,7 @@ async fn calendar_update_event_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("PATCH"))
-        .and(path("/users/me/events/evt-456"))
+        .and(path("/me/events/evt-456"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "evt-456",
             "subject": "Updated Standup",
@@ -1176,7 +1176,7 @@ async fn calendar_delete_event_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("DELETE"))
-        .and(path("/users/me/events/evt-789"))
+        .and(path("/me/events/evt-789"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&mock_server)
         .await;
@@ -1380,7 +1380,7 @@ async fn tasks_list_task_lists_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/todo/lists"))
+        .and(path("/me/todo/lists"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": [
                 { "id": "list-1", "displayName": "Tasks", "isOwner": true },
@@ -1414,7 +1414,7 @@ async fn tasks_create_task_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/users/me/todo/lists/list-1/tasks"))
+        .and(path("/me/todo/lists/list-1/tasks"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "task-new-1",
             "title": "Review PR #42",
@@ -1536,7 +1536,7 @@ async fn unauthorized_maps_to_fcp_error() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/messages/msg-123"))
+        .and(path("/me/messages/msg-123"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({
             "error": {
                 "code": "InvalidAuthenticationToken",
@@ -1568,7 +1568,7 @@ async fn not_found_maps_to_fcp_error() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/messages/msg-nonexistent"))
+        .and(path("/me/messages/msg-nonexistent"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
             "error": {
                 "code": "ErrorItemNotFound",
@@ -1600,7 +1600,7 @@ async fn rate_limited_maps_to_fcp_error() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/users/me/messages"))
+        .and(path("/me/messages"))
         .respond_with(ResponseTemplate::new(429).set_body_json(json!({
             "error": {
                 "code": "TooManyRequests",
@@ -1632,7 +1632,7 @@ async fn forbidden_maps_to_fcp_error() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path_regex("/users/me/events.*"))
+        .and(path_regex("/me/events.*"))
         .respond_with(ResponseTemplate::new(403).set_body_json(json!({
             "error": {
                 "code": "Authorization_RequestDenied",
@@ -1743,7 +1743,8 @@ async fn configure_credential_id_mode() {
         .handle_health()
         .await
         .expect("health should succeed");
-    assert_eq!(health["status"], "healthy");
+    assert_eq!(health["status"], "degraded");
+    assert_eq!(health["reason_code"], "credential_injection_required");
     assert_eq!(health["auth_mode"], "credential_id");
 }
 

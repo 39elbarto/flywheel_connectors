@@ -552,6 +552,86 @@ impl WordAuditEvent {
     }
 }
 
+fn readiness_profile(
+    auth_mode: &M365AuthMode,
+) -> (&'static str, Option<&'static str>, &'static str) {
+    match auth_mode {
+        M365AuthMode::CredentialId(_) => (
+            "degraded",
+            Some("credential_injection_required"),
+            "Configured for secretless credential injection; readiness depends on host-provided Graph credentials at runtime.",
+        ),
+        M365AuthMode::AccessToken => (
+            "healthy",
+            None,
+            "Delegated access token configured for direct Graph requests.",
+        ),
+        M365AuthMode::ClientCredentials { .. } => (
+            "healthy",
+            None,
+            "Client-credentials mode configured for app-only Graph requests.",
+        ),
+    }
+}
+
+fn operator_action_for_auth_mode(auth_mode: &M365AuthMode) -> &'static str {
+    match auth_mode {
+        M365AuthMode::CredentialId(_) => {
+            "Inject the referenced credential through the host egress proxy before relying on readiness."
+        }
+        M365AuthMode::AccessToken => {
+            "Re-run doctor or self_check after refreshing the delegated token and confirming the required mailbox permissions."
+        }
+        M365AuthMode::ClientCredentials { .. } => {
+            "Verify the app registration has the intended Microsoft Graph application permissions for the target mailbox and calendar surfaces."
+        }
+    }
+}
+
+fn classify_self_check_error(err: &M365Error) -> (&'static str, bool) {
+    match err {
+        M365Error::RateLimit { .. } => ("graph_rate_limited", true),
+        M365Error::Api {
+            status_code: Some(401),
+            ..
+        } => ("token_invalid_or_expired", false),
+        M365Error::Api {
+            status_code: Some(403),
+            ..
+        } => ("permissions_or_consent_missing", false),
+        M365Error::Api {
+            status_code: Some(404),
+            ..
+        } => ("graph_resource_not_found", false),
+        _ if err.is_retryable() => ("self_check_retryable", true),
+        _ => ("self_check_failed", false),
+    }
+}
+
+fn health_probe_summary(payload: &serde_json::Value) -> serde_json::Value {
+    if let Some(upn) = payload
+        .get("userPrincipalName")
+        .and_then(|value| value.as_str())
+    {
+        json!({
+            "target": "/me",
+            "mode": "delegated",
+            "user_principal_name": upn,
+        })
+    } else if let Some(name) = payload.get("displayName").and_then(|value| value.as_str()) {
+        json!({
+            "target": "/organization",
+            "mode": "application",
+            "display_name": name,
+        })
+    } else {
+        json!({
+            "target": "unknown",
+            "mode": "unknown",
+        })
+    }
+}
+
 /// FCP Microsoft 365 Connector.
 pub struct M365Connector {
     base: Arc<BaseConnector>,
@@ -806,22 +886,43 @@ impl M365Connector {
 
     /// Handle health check.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let configured = self.client.is_some();
         let metrics = self.base.metrics();
-        let auth_mode = self
-            .config
+        let Some(config) = &self.config else {
+            return Ok(json!({
+                "status": "not_configured",
+                "reason_code": "not_configured",
+                "auth_mode": "unconfigured",
+                "api_url": serde_json::Value::Null,
+                "required_permissions": [],
+                "permissions": [],
+                "readiness": {
+                    "message": "Connector is not configured yet.",
+                    "operator_action": "Call configure with access_token, credential_id, or app_credentials before invoking Outlook/Exchange operations.",
+                },
+                "metrics": {
+                    "requests_total": metrics.requests_total,
+                    "requests_error": metrics.requests_error,
+                }
+            }));
+        };
+
+        let permissions = config
+            .token_permissions
             .as_ref()
-            .map_or("unconfigured", |c| c.auth_mode.label());
-        let permissions = self
-            .config
-            .as_ref()
-            .and_then(|c| c.token_permissions.as_ref().map(TokenPermissions::all))
+            .map(TokenPermissions::all)
             .unwrap_or_default();
+        let (status, reason_code, readiness_message) = readiness_profile(&config.auth_mode);
         Ok(json!({
-            "status": if configured { "healthy" } else { "not_configured" },
-            "auth_mode": auth_mode,
-            "api_url": self.config.as_ref().map(|c| c.api_url.clone()),
+            "status": status,
+            "reason_code": reason_code,
+            "auth_mode": config.auth_mode.label(),
+            "api_url": config.api_url,
+            "required_permissions": config.required_permissions,
             "permissions": permissions,
+            "readiness": {
+                "message": readiness_message,
+                "operator_action": operator_action_for_auth_mode(&config.auth_mode),
+            },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
@@ -931,7 +1032,61 @@ impl M365Connector {
             });
         }
 
-        // 5. Network constraints
+        // 5. Required permissions
+        if let Some(ref config) = self.config {
+            let (status, message) = match config.token_permissions.as_ref() {
+                Some(permissions) => {
+                    let missing = permissions.missing_required(&config.required_permissions);
+                    if missing.is_empty() {
+                        (
+                            "pass",
+                            format!(
+                                "Token covers required permissions: {}",
+                                if config.required_permissions.is_empty() {
+                                    "<implicit>".to_string()
+                                } else {
+                                    config.required_permissions.join(", ")
+                                }
+                            ),
+                        )
+                    } else {
+                        (
+                            "fail",
+                            format!(
+                                "Token is missing required permissions: {}",
+                                missing.join(", ")
+                            ),
+                        )
+                    }
+                }
+                None if config.required_permissions.is_empty() => (
+                    "warn",
+                    "No explicit required_permissions configured; permission surface is implicit."
+                        .to_string(),
+                ),
+                None => (
+                    "warn",
+                    format!(
+                        "Required permissions cannot be verified locally in {} mode: {}",
+                        config.auth_mode.label(),
+                        config.required_permissions.join(", ")
+                    ),
+                ),
+            };
+            checks.push(DoctorCheck {
+                name: "required_permissions",
+                status,
+                message,
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "required_permissions",
+                status: "fail",
+                message: "No auth configured".into(),
+            });
+        }
+
+        // 6. Network constraints
         checks.push(DoctorCheck {
             name: "network_constraints",
             status: "pass",
@@ -939,21 +1094,19 @@ impl M365Connector {
                 .into(),
         });
 
-        // 6. Credential injection
+        // 7. Credential injection / readiness model
         if let Some(ref config) = self.config {
-            if matches!(config.auth_mode, M365AuthMode::CredentialId(_)) {
-                checks.push(DoctorCheck {
-                    name: "credential_injection",
-                    status: "pass",
-                    message: "Secretless egress proxy mode — no secrets on disk".into(),
-                });
-            } else {
-                checks.push(DoctorCheck {
-                    name: "credential_injection",
-                    status: "warn",
-                    message: "Direct token mode — consider credential_id for production".into(),
-                });
-            }
+            let (status, _reason_code, readiness_message) = readiness_profile(&config.auth_mode);
+            checks.push(DoctorCheck {
+                name: "credential_injection",
+                status: if status == "healthy" { "pass" } else { "warn" },
+                message: readiness_message.into(),
+            });
+            checks.push(DoctorCheck {
+                name: "operator_guidance",
+                status: "warn",
+                message: operator_action_for_auth_mode(&config.auth_mode).into(),
+            });
         } else {
             checks.push(DoctorCheck {
                 name: "credential_injection",
@@ -1006,27 +1159,41 @@ impl M365Connector {
             report.details = Some(json!({
                 "auth_mode": config.auth_mode.summary(),
                 "required_permissions": config.required_permissions,
+                "operator_action": operator_action_for_auth_mode(&config.auth_mode),
             }));
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
                 message: format!("Failed to serialize self-check report: {e}"),
             });
         }
 
-        let mut report = match client.health_check().await {
-            Ok(_) => SelfCheckReport::ok(),
+        let report = match client.health_check().await {
+            Ok(payload) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({
+                    "auth_mode": config.auth_mode.summary(),
+                    "required_permissions": config.required_permissions,
+                    "permissions": config.token_permissions.as_ref().map(TokenPermissions::all).unwrap_or_default(),
+                    "health_probe": health_probe_summary(&payload),
+                    "operator_action": operator_action_for_auth_mode(&config.auth_mode),
+                }));
+                report
+            }
             Err(err) => {
-                if err.is_retryable() {
-                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                let (reason_code, degraded) = classify_self_check_error(&err);
+                let mut report = if degraded {
+                    SelfCheckReport::degraded(reason_code, err.to_string())
                 } else {
-                    SelfCheckReport::failed("self_check_failed", err.to_string())
-                }
+                    SelfCheckReport::failed(reason_code, err.to_string())
+                };
+                report.details = Some(json!({
+                    "auth_mode": config.auth_mode.summary(),
+                    "required_permissions": config.required_permissions,
+                    "permissions": config.token_permissions.as_ref().map(TokenPermissions::all).unwrap_or_default(),
+                    "operator_action": operator_action_for_auth_mode(&config.auth_mode),
+                }));
+                report
             }
         };
-        report.details = Some(json!({
-            "auth_mode": config.auth_mode.summary(),
-            "required_permissions": config.required_permissions,
-            "permissions": config.token_permissions.as_ref().map(TokenPermissions::all).unwrap_or_default(),
-        }));
 
         serde_json::to_value(report).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize self-check report: {e}"),
@@ -4444,6 +4611,7 @@ mod tests {
         let connector = M365Connector::new();
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["status"], "not_configured");
+        assert_eq!(result["reason_code"], "not_configured");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4516,6 +4684,7 @@ mod tests {
 
         let health = connector.handle_health().await.unwrap();
         assert_eq!(health["auth_mode"], "client_credentials");
+        assert_eq!(health["status"], "healthy");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4533,11 +4702,50 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_self_check_classifies_invalid_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = M365Connector::new();
+        connector
+            .handle_configure(json!({
+                "allow_test_api_url": true,
+                "api_url": mock_server.uri(),
+                "access_token": make_access_token(&["Mail.Read"], &[])
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["reason_code"], "token_invalid_or_expired");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_degraded_for_credential_id_mode() {
+        let mut connector = M365Connector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_list_threads_groups_conversations() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages"))
+            .and(path("/me/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
                     {
@@ -4594,7 +4802,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/onenote/pages/page-123/content"))
+            .and(path("/me/onenote/pages/page-123/content"))
             .and(query_param("includeIDs", "true"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -4816,7 +5024,7 @@ mod tests {
             .iter()
             .find(|c| c["name"] == "credential_injection")
             .unwrap();
-        assert_eq!(cred_check["status"], "warn");
+        assert_eq!(cred_check["status"], "pass");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4831,7 +5039,13 @@ mod tests {
             .unwrap();
 
         let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "pass");
+        assert_eq!(result["status"], "warn");
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(cred_check["status"], "warn");
     }
 
     // ── Schema completeness tests ─────────────────────────────────

@@ -1,0 +1,250 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0ef3641bf49d5cffa94dd3501590469e13dfae5e443e6ffefa54a3f7c9c9da5e"
+
+[connector]
+id = "fcp.mysql"
+name = "MySQL Connector"
+version = "0.1.0"
+description = "Self-hosted MySQL/MariaDB REST-proxy connector for query, mutation, schema, and health operations"
+archetypes = ["storage", "operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; auth and proxy endpoint are injected at runtime."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "system.privileged"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
+
+# The concrete MySQL proxy host is operator-configured at runtime, so host-level
+# network constraints are intentionally not hardcoded in this manifest.
+
+[provides.operations."mysql.query"]
+description = "Execute a read-only parameterized SQL query"
+capability = "mysql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mysql.query".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."mysql.query".input_schema.properties.sql]
+type = "string"
+description = "SQL query using ? placeholders"
+
+[provides.operations."mysql.query".input_schema.properties.params]
+type = "array"
+description = "Positional query parameters"
+
+[provides.operations."mysql.query".input_schema.properties.timeout_ms]
+type = "integer"
+description = "Optional query timeout in milliseconds"
+
+[provides.operations."mysql.query".output_schema]
+type = "object"
+
+[provides.operations."mysql.query".output_schema.properties.rows]
+type = "array"
+
+[provides.operations."mysql.query".output_schema.properties.columns]
+type = "array"
+
+[provides.operations."mysql.query".output_schema.properties.row_count]
+type = "integer"
+
+[provides.operations."mysql.query".ai_hints]
+when_to_use = "Use for SELECT queries and other read-only data access."
+common_mistakes = [
+  "Using string interpolation instead of positional parameters.",
+  "Treating this as proof that write permissions also exist.",
+]
+examples = []
+related = ["mysql.execute", "mysql.schema.tables"]
+
+[provides.operations."mysql.execute"]
+description = "Execute a parameterized INSERT, UPDATE, or DELETE statement"
+capability = "mysql.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."mysql.execute".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."mysql.execute".input_schema.properties.sql]
+type = "string"
+description = "Mutating SQL statement using ? placeholders"
+
+[provides.operations."mysql.execute".input_schema.properties.params]
+type = "array"
+description = "Positional statement parameters"
+
+[provides.operations."mysql.execute".output_schema]
+type = "object"
+
+[provides.operations."mysql.execute".output_schema.properties.affected_rows]
+type = "integer"
+
+[provides.operations."mysql.execute".ai_hints]
+when_to_use = "Use for row mutations in a disposable staging database."
+common_mistakes = [
+  "Pointing mutation traffic at a non-disposable database.",
+  "Using execute as a catch-all DDL channel without explicit operator review.",
+]
+examples = []
+related = ["mysql.query", "mysql.health"]
+
+[provides.operations."mysql.explain"]
+description = "Explain a query execution plan without running the query"
+capability = "mysql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mysql.explain".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."mysql.explain".input_schema.properties.sql]
+type = "string"
+description = "SQL query to explain"
+
+[provides.operations."mysql.explain".output_schema]
+type = "object"
+
+[provides.operations."mysql.explain".output_schema.properties.plan]
+type = "object"
+
+[provides.operations."mysql.explain".ai_hints]
+when_to_use = "Use before expensive queries when you need plan visibility."
+common_mistakes = ["Confusing EXPLAIN output with actual query execution."]
+examples = []
+related = ["mysql.query"]
+
+[provides.operations."mysql.schema.tables"]
+description = "List visible tables in the configured database"
+capability = "mysql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mysql.schema.tables".input_schema]
+type = "object"
+
+[provides.operations."mysql.schema.tables".output_schema]
+type = "array"
+
+[provides.operations."mysql.schema.tables".ai_hints]
+when_to_use = "Use before querying when you need table discovery."
+common_mistakes = ["Assuming every schema or catalog is exposed through the proxy."]
+examples = []
+related = ["mysql.schema.columns", "mysql.schema.indexes"]
+
+[provides.operations."mysql.schema.columns"]
+description = "Describe columns for a single table"
+capability = "mysql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mysql.schema.columns".input_schema]
+type = "object"
+required = ["table"]
+
+[provides.operations."mysql.schema.columns".input_schema.properties.table]
+type = "string"
+description = "Table name"
+
+[provides.operations."mysql.schema.columns".output_schema]
+type = "array"
+
+[provides.operations."mysql.schema.columns".ai_hints]
+when_to_use = "Use to inspect table shape before writing queries."
+common_mistakes = ["Using a display label instead of the real table identifier."]
+examples = []
+related = ["mysql.schema.tables", "mysql.schema.indexes"]
+
+[provides.operations."mysql.schema.indexes"]
+description = "Describe indexes for a single table"
+capability = "mysql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mysql.schema.indexes".input_schema]
+type = "object"
+required = ["table"]
+
+[provides.operations."mysql.schema.indexes".input_schema.properties.table]
+type = "string"
+description = "Table name"
+
+[provides.operations."mysql.schema.indexes".output_schema]
+type = "array"
+
+[provides.operations."mysql.schema.indexes".ai_hints]
+when_to_use = "Use when debugging query plans or uniqueness constraints."
+common_mistakes = ["Assuming index metadata proves the query planner will choose that index."]
+examples = []
+related = ["mysql.explain", "mysql.schema.columns"]
+
+[provides.operations."mysql.health"]
+description = "Probe the configured MySQL proxy health endpoint"
+capability = "mysql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mysql.health".input_schema]
+type = "object"
+
+[provides.operations."mysql.health".output_schema]
+type = "object"
+
+[provides.operations."mysql.health".output_schema.properties.healthy]
+type = "boolean"
+
+[provides.operations."mysql.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."mysql.health".output_schema.properties.probe]
+type = "object"
+
+[provides.operations."mysql.health".ai_hints]
+when_to_use = "Use before reads or writes when you need a live connectivity signal."
+common_mistakes = ["Assuming a healthy proxy proves every table or mutation permission is present."]
+examples = []
+related = ["mysql.query", "mysql.execute"]

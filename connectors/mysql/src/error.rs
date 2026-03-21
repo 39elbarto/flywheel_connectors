@@ -1,4 +1,4 @@
-//! MySQL-specific error types.
+//! `MySQL`-specific error types.
 
 use std::time::Duration;
 
@@ -7,10 +7,10 @@ use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
-/// Result alias for MySQL operations.
+/// Result alias for `MySQL` operations.
 pub type MysqlResult<T> = Result<T, MysqlError>;
 
-/// MySQL-specific errors.
+/// `MySQL`-specific errors.
 #[derive(Error, Debug)]
 pub enum MysqlError {
     /// HTTP request failed
@@ -21,35 +21,35 @@ pub enum MysqlError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// MySQL connection error
+    /// `MySQL` connection error
     #[error("MySQL connection error: {0}")]
     Connection(String),
 
-    /// MySQL authentication error
+    /// `MySQL` authentication error
     #[error("MySQL authentication error: {0}")]
     Auth(String),
 
-    /// MySQL query error
+    /// `MySQL` query error
     #[error("MySQL query error: {0}")]
     Query(String),
 
-    /// MySQL transaction error
+    /// `MySQL` transaction error
     #[error("MySQL transaction error: {0}")]
     Transaction(String),
 
-    /// MySQL schema error
+    /// `MySQL` schema error
     #[error("MySQL schema error: {0}")]
     Schema(String),
 
-    /// MySQL constraint violation (duplicate key, foreign key, etc.)
+    /// `MySQL` constraint violation (duplicate key, foreign key, etc.)
     #[error("MySQL constraint violation: {0}")]
     ConstraintViolation(String),
 
-    /// MySQL timeout
+    /// `MySQL` timeout
     #[error("MySQL timeout: {0}")]
     Timeout(String),
 
-    /// MySQL permission denied
+    /// `MySQL` permission denied
     #[error("MySQL permission denied: {0}")]
     PermissionDenied(String),
 
@@ -95,7 +95,7 @@ impl MysqlError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::Connection(msg) => FcpError::External {
+            Self::Connection(msg) | Self::Timeout(msg) => FcpError::External {
                 service: "mysql".into(),
                 message: msg.clone(),
                 status_code: None,
@@ -106,21 +106,7 @@ impl MysqlError {
                 code: 2001,
                 message: msg.clone(),
             },
-            Self::Query(msg) => FcpError::External {
-                service: "mysql".into(),
-                message: msg.clone(),
-                status_code: None,
-                retryable: false,
-                retry_after: None,
-            },
-            Self::Transaction(msg) => FcpError::External {
-                service: "mysql".into(),
-                message: msg.clone(),
-                status_code: None,
-                retryable: false,
-                retry_after: None,
-            },
-            Self::Schema(msg) => FcpError::External {
+            Self::Query(msg) | Self::Transaction(msg) | Self::Schema(msg) => FcpError::External {
                 service: "mysql".into(),
                 message: msg.clone(),
                 status_code: None,
@@ -132,13 +118,6 @@ impl MysqlError {
                 message: msg.clone(),
                 status_code: Some(409),
                 retryable: false,
-                retry_after: None,
-            },
-            Self::Timeout(msg) => FcpError::External {
-                service: "mysql".into(),
-                message: msg.clone(),
-                status_code: None,
-                retryable: true,
                 retry_after: None,
             },
             Self::PermissionDenied(msg) => FcpError::External {
@@ -184,15 +163,15 @@ impl ConnectorErrorMapping for MysqlError {
     }
 
     fn to_fcp_error(&self) -> FcpError {
-        MysqlError::to_fcp_error(self)
+        Self::to_fcp_error(self)
     }
 
     fn is_retryable(&self) -> bool {
-        MysqlError::is_retryable(self)
+        Self::is_retryable(self)
     }
 
     fn retry_after(&self) -> Option<Duration> {
-        MysqlError::retry_after(self)
+        Self::retry_after(self)
     }
 }
 
@@ -224,7 +203,7 @@ mod tests {
             retry_after_ms: 5000,
         };
         assert!(err.is_retryable());
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(5000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
     }
 
     #[test]
@@ -255,12 +234,11 @@ mod tests {
     fn constraint_violation_maps_to_409() {
         let err = MysqlError::ConstraintViolation("duplicate key".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::External { status_code, .. } => {
-                assert_eq!(status_code, Some(409));
-            }
-            _ => panic!("expected External error"),
-        }
+        let status_code = match fcp {
+            FcpError::External { status_code, .. } => status_code,
+            _ => None,
+        };
+        assert_eq!(status_code, Some(409));
     }
 
     #[test]
@@ -274,12 +252,11 @@ mod tests {
     fn permission_denied_maps_to_403() {
         let err = MysqlError::PermissionDenied("SELECT command denied".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::External { status_code, .. } => {
-                assert_eq!(status_code, Some(403));
-            }
-            _ => panic!("expected External error"),
-        }
+        let status_code = match fcp {
+            FcpError::External { status_code, .. } => status_code,
+            _ => None,
+        };
+        assert_eq!(status_code, Some(403));
     }
 
     #[test]
@@ -288,12 +265,11 @@ mod tests {
             retry_after_ms: 2000,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::RateLimited { retry_after_ms, .. } => {
-                assert_eq!(retry_after_ms, 2000);
-            }
-            _ => panic!("expected RateLimited error, got {fcp:?}"),
-        }
+        let retry_after_ms = match fcp {
+            FcpError::RateLimited { retry_after_ms, .. } => Some(retry_after_ms),
+            _ => None,
+        };
+        assert_eq!(retry_after_ms, Some(2000));
     }
 
     #[test]

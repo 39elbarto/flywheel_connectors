@@ -1,4 +1,4 @@
-//! MySQL connector types.
+//! `MySQL` connector types.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ pub struct QueryResult {
 pub struct ColumnInfo {
     /// Column name.
     pub name: String,
-    /// MySQL data type.
+    /// `MySQL` data type.
     pub data_type: String,
     /// Whether the column is nullable.
     pub nullable: bool,
@@ -51,7 +51,7 @@ pub struct TableInfo {
     pub name: String,
     /// Database/schema name.
     pub database: String,
-    /// Storage engine (InnoDB, MyISAM, etc.).
+    /// Storage engine (`InnoDB`, `MyISAM`, etc.).
     pub engine: String,
     /// Estimated row count.
     pub row_count_estimate: u64,
@@ -62,7 +62,7 @@ pub struct TableInfo {
 pub struct ColumnDetail {
     /// Column name.
     pub name: String,
-    /// MySQL data type.
+    /// `MySQL` data type.
     pub data_type: String,
     /// Whether the column is nullable.
     pub nullable: bool,
@@ -110,23 +110,23 @@ pub struct BatchRequest {
     pub params: Vec<Vec<serde_json::Value>>,
 }
 
-/// MySQL REST API response.
+/// `MySQL` REST API response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MysqlApiResponse {
     /// The result data on success.
     pub result: Option<serde_json::Value>,
     /// Error message on failure.
     pub error: Option<String>,
-    /// Optional MySQL error code.
+    /// Optional `MySQL` error code.
     pub code: Option<String>,
 }
 
-/// MySQL REST API error response body.
+/// `MySQL` REST API error response body.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiErrorResponse {
     /// Human-readable error message.
     pub message: Option<String>,
-    /// MySQL error code (e.g. "1062" for duplicate key).
+    /// `MySQL` error code (e.g. `"1062"` for duplicate key).
     pub code: Option<String>,
     /// Additional details.
     pub details: Option<String>,

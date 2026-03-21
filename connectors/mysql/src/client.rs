@@ -1,4 +1,4 @@
-//! MySQL REST API client.
+//! `MySQL` REST API client.
 
 use std::fmt;
 use std::time::Duration;
@@ -14,12 +14,12 @@ use crate::{
     types::ApiErrorResponse,
 };
 
-/// Default MySQL REST API base URL.
+/// Default `MySQL` REST API base URL.
 ///
-/// Users must configure this to their actual MySQL proxy endpoint.
+/// Users must configure this to their actual `MySQL` proxy endpoint.
 pub const DEFAULT_BASE_URL: &str = "https://db.example.com";
 
-/// Authentication mode for the MySQL REST API.
+/// Authentication mode for the `MySQL` REST API.
 #[derive(Clone)]
 pub enum MysqlAuth {
     /// API key (passed as Bearer token).
@@ -38,8 +38,28 @@ impl MysqlAuth {
     }
 
     #[must_use]
+    pub const fn mode_label(&self) -> &'static str {
+        match self {
+            Self::ApiKey(_) => "api_key",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    #[must_use]
     pub const fn is_secretless(&self) -> bool {
         matches!(self, Self::CredentialId(_))
+    }
+
+    #[must_use]
+    pub const fn permissions_guidance(&self) -> &'static str {
+        match self {
+            Self::ApiKey(_) => {
+                "API-key mode still depends on the upstream REST proxy mapping that token to read, write, schema, and health endpoints for a dedicated staging database."
+            }
+            Self::CredentialId(_) => {
+                "credential_id mode requires the host or egress proxy to inject a concrete upstream credential before live health checks can prove connectivity or permissions."
+            }
+        }
     }
 }
 
@@ -52,9 +72,9 @@ impl fmt::Debug for MysqlAuth {
     }
 }
 
-/// MySQL REST API client.
+/// `MySQL` REST API client.
 ///
-/// Sends SQL queries and schema requests via HTTP to a MySQL REST proxy endpoint.
+/// Sends SQL queries and schema requests via HTTP to a `MySQL` REST proxy endpoint.
 pub struct MysqlClient {
     client: Client,
     auth: MysqlAuth,
@@ -68,12 +88,13 @@ impl fmt::Debug for MysqlClient {
         f.debug_struct("MysqlClient")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
+#[allow(clippy::missing_errors_doc)]
 impl MysqlClient {
-    /// Create a new MySQL REST API client.
+    /// Create a new `MySQL` REST API client.
     pub fn new(auth: MysqlAuth, base_url: Option<&str>) -> MysqlResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -112,6 +133,12 @@ impl MysqlClient {
     #[must_use]
     pub const fn retry_config(&self) -> &HttpRetryConfig {
         &self.retry_config
+    }
+
+    /// Base URL configured for the proxy.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -215,17 +242,21 @@ impl MysqlClient {
         self.handle_response(resp).await
     }
 
-    /// Health check: simple probe to the MySQL proxy.
+    /// Health check: simple probe to the `MySQL` proxy.
     #[instrument(skip(self), fields(base_url = %self.base_url))]
     pub async fn health_check(&self) -> MysqlResult<bool> {
-        debug!("running health check");
+        self.probe_health().await.map(|_| true)
+    }
+
+    /// Retrieve the health payload from the configured proxy.
+    #[instrument(skip(self), fields(base_url = %self.base_url))]
+    pub async fn probe_health(&self) -> MysqlResult<serde_json::Value> {
+        debug!("running health probe");
 
         let url = format!("{}/health", self.base_url);
         let req = self.add_auth(self.client.get(&url));
-        match req.send().await {
-            Ok(resp) => Ok(resp.status().is_success()),
-            Err(_) => Ok(false),
-        }
+        let resp = req.send().await?;
+        self.handle_response(resp).await
     }
 
     /// Handle the HTTP response, extracting errors from the body.
@@ -243,8 +274,7 @@ impl MysqlClient {
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok())
-            .map(|secs| secs * 1000)
-            .unwrap_or(1000);
+            .map_or(1000, |secs| secs * 1000);
 
         // Try to parse error body
         let body_text = resp.text().await.unwrap_or_default();
@@ -304,9 +334,9 @@ mod tests {
 
     #[test]
     fn auth_redacted_label() {
-        let api_key = MysqlAuth::ApiKey("secret".into());
-        assert_eq!(api_key.redacted_label(), "api_key:redacted");
-        assert!(!api_key.is_secretless());
+        let token_auth = MysqlAuth::ApiKey("test-token".into());
+        assert_eq!(token_auth.redacted_label(), "api_key:redacted");
+        assert!(!token_auth.is_secretless());
 
         let cred = MysqlAuth::CredentialId(
             CredentialId::parse("550e8400-e29b-41d4-a716-446655440002").unwrap(),

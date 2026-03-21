@@ -1,6 +1,6 @@
-//! FCP MySQL Connector - Main entrypoint
+//! FCP `MySQL` connector main entrypoint.
 //!
-//! A MySQL/MariaDB REST API connector implementing the
+//! A `MySQL`/`MariaDB` REST API connector implementing the
 //! Flywheel Connector Protocol. Provides access to SQL queries, schema introspection,
 //! transactions, and batch operations via HTTP.
 
@@ -90,15 +90,15 @@ async fn handle_message(connector: &mut MysqlConnector, message: &str) -> serde_
         .unwrap_or_else(|| serde_json::json!({}));
 
     let result = match method {
-        "configure" => connector.handle_configure(params).await,
-        "handshake" => connector.handle_handshake(params).await,
+        "configure" => connector.handle_configure(&params),
+        "handshake" => connector.handle_handshake(&params),
         "health" => connector.handle_health().await,
-        "doctor" => connector.handle_doctor().await,
+        "doctor" => connector.handle_doctor(),
         "self_check" => connector.handle_self_check().await,
-        "introspect" => connector.handle_introspect().await,
+        "introspect" => connector.handle_introspect(),
         "invoke" => connector.handle_invoke(params).await,
-        "simulate" => connector.handle_simulate(params).await,
-        "shutdown" => connector.handle_shutdown(params).await,
+        "simulate" => connector.handle_simulate(&params),
+        "shutdown" => connector.handle_shutdown(&params),
         _ => Err(fcp_core::FcpError::InvalidRequest {
             code: 1002,
             message: format!("Unknown method: {method}"),

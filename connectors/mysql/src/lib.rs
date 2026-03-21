@@ -1,7 +1,7 @@
-//! FCP MySQL/MariaDB Connector
+//! FCP `MySQL`/`MariaDB` connector.
 //!
 //! Provides SQL query execution, schema introspection, transaction management,
-//! and batch operations via a MySQL REST API proxy.
+//! and batch operations via a `MySQL` REST API proxy.
 
 #![forbid(unsafe_code)]
 #![allow(dead_code)]

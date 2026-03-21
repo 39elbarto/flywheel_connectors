@@ -167,6 +167,7 @@ impl GmailClient {
     /// Get a single message by ID.
     #[instrument(skip(self))]
     pub async fn get_message(&self, message_id: &str) -> GmailResult<GmailMessage> {
+        let message_id = sanitize_path_segment(message_id, "message_id")?;
         let url = format!("{}/users/me/messages/{message_id}", self.base_url);
         self.get(&url).await
     }
@@ -237,6 +238,7 @@ impl GmailClient {
         add_labels: &[String],
         remove_labels: &[String],
     ) -> GmailResult<GmailMessage> {
+        let message_id = sanitize_path_segment(message_id, "message_id")?;
         let url = format!("{}/users/me/messages/{message_id}/modify", self.base_url);
         let body = serde_json::json!({
             "addLabelIds": add_labels,
@@ -248,6 +250,7 @@ impl GmailClient {
     /// Trash a message.
     #[instrument(skip(self))]
     pub async fn trash_message(&self, message_id: &str) -> GmailResult<GmailMessage> {
+        let message_id = sanitize_path_segment(message_id, "message_id")?;
         let url = format!("{}/users/me/messages/{message_id}/trash", self.base_url);
         self.post_json(&url, &serde_json::json!({})).await
     }
@@ -257,6 +260,7 @@ impl GmailClient {
     /// Get a thread by ID.
     #[instrument(skip(self))]
     pub async fn get_thread(&self, thread_id: &str) -> GmailResult<GmailThread> {
+        let thread_id = sanitize_path_segment(thread_id, "thread_id")?;
         let url = format!("{}/users/me/threads/{thread_id}", self.base_url);
         self.get(&url).await
     }
@@ -276,6 +280,7 @@ impl GmailClient {
     /// Get a draft by ID.
     #[instrument(skip(self))]
     pub async fn get_draft(&self, draft_id: &str) -> GmailResult<GmailDraft> {
+        let draft_id = sanitize_path_segment(draft_id, "draft_id")?;
         let url = format!("{}/users/me/drafts/{draft_id}", self.base_url);
         self.get(&url).await
     }
@@ -476,6 +481,32 @@ fn map_google_api_error(error: GoogleApiError) -> GmailError {
     }
 }
 
+/// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
+///
+/// Rejects empty strings, path separators (`/`, `\`), traversal sequences (`..`),
+/// and percent-encoded variants (`%2f`, `%5c`).
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> GmailResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(GmailError::Api {
+            code: 400,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(GmailError::Api {
+            code: 400,
+            message: format!("{field} contains path traversal characters"),
+        });
+    }
+    Ok(value)
+}
+
 fn redact_url(url: &str) -> String {
     let Ok(mut parsed) = Url::parse(url) else {
         return url.to_string();
@@ -493,4 +524,54 @@ fn redact_url(url: &str) -> String {
         .collect::<Vec<_>>();
     parsed.query_pairs_mut().clear().extend_pairs(pairs);
     parsed.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "message_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "message_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "message_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "message_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "message_id").is_err());
+        assert!(sanitize_path_segment("", "message_id").is_err());
+        assert!(sanitize_path_segment("  ", "message_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            sanitize_path_segment("18d04b7e3c5a8f2d", "message_id").unwrap(),
+            "18d04b7e3c5a8f2d"
+        );
+        assert_eq!(
+            sanitize_path_segment("msg-abc-123", "message_id").unwrap(),
+            "msg-abc-123"
+        );
+    }
+
+    #[test]
+    fn redact_url_redacts_key_param() {
+        let url = "https://gmail.googleapis.com/v1/users/me/messages?key=SECRET123";
+        let redacted = redact_url(url);
+        assert!(!redacted.contains("SECRET123"));
+        assert!(redacted.contains("redacted"));
+    }
+
+    #[test]
+    fn redact_url_preserves_non_key_params() {
+        let url = "https://gmail.googleapis.com/v1/users/me/messages?q=test&maxResults=10";
+        let redacted = redact_url(url);
+        assert!(redacted.contains("test"));
+        assert!(redacted.contains("maxResults"));
+    }
+
+    #[test]
+    fn redact_url_handles_invalid() {
+        let url = "not-a-url";
+        assert_eq!(redact_url(url), url);
+    }
 }

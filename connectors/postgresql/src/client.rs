@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::json;
 use tracing::{debug, instrument};
@@ -246,7 +247,8 @@ impl PostgresClient {
     pub async fn schema_tables(&self, schema: Option<&str>) -> PostgresResult<serde_json::Value> {
         let mut url = format!("{}/rest/v1/schema/tables", self.base_url);
         if let Some(s) = schema {
-            url = format!("{url}?schema={s}");
+            let encoded = utf8_percent_encode(s, NON_ALPHANUMERIC);
+            url = format!("{url}?schema={encoded}");
         }
         debug!(url = %url, "GET pg.schema.tables");
         let req = self
@@ -259,7 +261,8 @@ impl PostgresClient {
     /// Get columns for a table.
     #[instrument(skip(self))]
     pub async fn schema_columns(&self, table: &str) -> PostgresResult<serde_json::Value> {
-        let url = format!("{}/rest/v1/schema/columns?table={table}", self.base_url);
+        let encoded_table = utf8_percent_encode(table, NON_ALPHANUMERIC);
+        let url = format!("{}/rest/v1/schema/columns?table={encoded_table}", self.base_url);
         debug!(url = %url, "GET pg.schema.columns");
         let req = self
             .add_auth(self.client.get(&url))
@@ -271,7 +274,8 @@ impl PostgresClient {
     /// List indexes for a table.
     #[instrument(skip(self))]
     pub async fn schema_indexes(&self, table: &str) -> PostgresResult<serde_json::Value> {
-        let url = format!("{}/rest/v1/schema/indexes?table={table}", self.base_url);
+        let encoded_table = utf8_percent_encode(table, NON_ALPHANUMERIC);
+        let url = format!("{}/rest/v1/schema/indexes?table={encoded_table}", self.base_url);
         debug!(url = %url, "GET pg.schema.indexes");
         let req = self
             .add_auth(self.client.get(&url))
@@ -397,5 +401,109 @@ impl PostgresClient {
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_client() -> PostgresClient {
+        PostgresClient::new(
+            PostgresAuth::ApiKey("test-key".into()),
+            Some("https://test.example.com"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn schema_param_is_percent_encoded() {
+        // Verify that special characters in schema names are encoded
+        let encoded = utf8_percent_encode("public&drop=true", NON_ALPHANUMERIC).to_string();
+        assert!(!encoded.contains('&'));
+        assert!(encoded.contains("%26"));
+    }
+
+    #[test]
+    fn table_param_is_percent_encoded() {
+        let encoded = utf8_percent_encode("users;DROP TABLE", NON_ALPHANUMERIC).to_string();
+        assert!(!encoded.contains(';'));
+        assert!(!encoded.contains(' '));
+    }
+
+    #[test]
+    fn safe_schema_name_encodes_cleanly() {
+        let encoded = utf8_percent_encode("public", NON_ALPHANUMERIC).to_string();
+        assert_eq!(encoded, "public");
+    }
+
+    #[test]
+    fn schema_with_slash_is_encoded() {
+        let encoded = utf8_percent_encode("../admin", NON_ALPHANUMERIC).to_string();
+        assert!(!encoded.contains('/'));
+        assert!(!encoded.contains(".."));
+    }
+
+    #[test]
+    fn table_with_equals_is_encoded() {
+        let encoded = utf8_percent_encode("t=1&schema=admin", NON_ALPHANUMERIC).to_string();
+        assert!(!encoded.contains('='));
+        assert!(!encoded.contains('&'));
+    }
+
+    #[test]
+    fn auth_debug_redacts_api_key() {
+        let auth = PostgresAuth::ApiKey("super-secret-key".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("super-secret-key"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_redacted_label() {
+        let auth = PostgresAuth::ApiKey("key".into());
+        assert_eq!(auth.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let auth = PostgresAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_api_key_is_not_secretless() {
+        let auth = PostgresAuth::ApiKey("key".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn client_default_url() {
+        let client = PostgresClient::new(PostgresAuth::ApiKey("k".into()), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_custom_url() {
+        let client = make_client();
+        assert_eq!(client.base_url, "https://test.example.com");
+    }
+
+    #[test]
+    fn client_strips_trailing_slash() {
+        let client = PostgresClient::new(
+            PostgresAuth::ApiKey("k".into()),
+            Some("https://example.com/"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_redacts_key() {
+        let client = make_client();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("test-key"));
+        assert!(dbg.contains("redacted"));
     }
 }

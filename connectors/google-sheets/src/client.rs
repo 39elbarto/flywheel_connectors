@@ -74,6 +74,7 @@ impl SheetsClient {
     /// Get a spreadsheet by ID.
     #[instrument(skip(self), fields(spreadsheet_id))]
     pub async fn get_spreadsheet(&self, spreadsheet_id: &str) -> SheetsResult<Spreadsheet> {
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
         let url = format!("{}/spreadsheets/{spreadsheet_id}", self.base_url);
         self.get_json(&url).await
     }
@@ -81,7 +82,8 @@ impl SheetsClient {
     /// Read values from a range.
     #[instrument(skip(self), fields(spreadsheet_id, range))]
     pub async fn get_values(&self, spreadsheet_id: &str, range: &str) -> SheetsResult<ValueRange> {
-        let encoded_range = urlencoded(range);
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let encoded_range = encode_range(range);
         let url = format!(
             "{}/spreadsheets/{spreadsheet_id}/values/{encoded_range}",
             self.base_url
@@ -97,7 +99,8 @@ impl SheetsClient {
         range: &str,
         values: Vec<Vec<serde_json::Value>>,
     ) -> SheetsResult<UpdateValuesResponse> {
-        let encoded_range = urlencoded(range);
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let encoded_range = encode_range(range);
         let url = format!(
             "{}/spreadsheets/{spreadsheet_id}/values/{encoded_range}?valueInputOption=USER_ENTERED",
             self.base_url
@@ -118,7 +121,8 @@ impl SheetsClient {
         range: &str,
         values: Vec<Vec<serde_json::Value>>,
     ) -> SheetsResult<AppendValuesResponse> {
-        let encoded_range = urlencoded(range);
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let encoded_range = encode_range(range);
         let url = format!(
             "{}/spreadsheets/{spreadsheet_id}/values/{encoded_range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS",
             self.base_url
@@ -138,7 +142,8 @@ impl SheetsClient {
         spreadsheet_id: &str,
         range: &str,
     ) -> SheetsResult<serde_json::Value> {
-        let encoded_range = urlencoded(range);
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let encoded_range = encode_range(range);
         let url = format!(
             "{}/spreadsheets/{spreadsheet_id}/values/{encoded_range}:clear",
             self.base_url
@@ -256,10 +261,39 @@ fn map_api_error(error: ApiErrorDetail) -> SheetsError {
     }
 }
 
-fn urlencoded(s: &str) -> String {
-    s.replace(' ', "%20")
-        .replace('!', "%21")
-        .replace(':', "%3A")
+/// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
+///
+/// Rejects empty strings, path separators (`/`, `\`), traversal sequences (`..`),
+/// and percent-encoded variants (`%2f`, `%5c`).
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SheetsResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(SheetsError::Api {
+            status_code: 400,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(SheetsError::Api {
+            status_code: 400,
+            message: format!("{field} contains path traversal characters"),
+        });
+    }
+    Ok(value)
+}
+
+/// Percent-encode a Sheets range expression for use in a URL path segment.
+///
+/// Uses `percent_encoding::NON_ALPHANUMERIC` which encodes all non-alphanumeric
+/// characters. This is a proper superset of the 3 characters the old custom
+/// `urlencoded()` handled and covers all edge cases.
+fn encode_range(range: &str) -> String {
+    percent_encoding::utf8_percent_encode(range, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
 
 #[cfg(test)]
@@ -267,13 +301,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn urlencoded_basic() {
-        assert_eq!(urlencoded("Sheet1!A1:B2"), "Sheet1%21A1%3AB2");
+    fn encode_range_basic() {
+        let encoded = encode_range("Sheet1!A1:B2");
+        assert!(encoded.contains("%21")); // '!' encoded
+        assert!(encoded.contains("%3A")); // ':' encoded
+        assert!(encoded.contains("Sheet1"));
+        assert!(encoded.contains("A1"));
+        assert!(encoded.contains("B2"));
     }
 
     #[test]
-    fn urlencoded_spaces() {
-        assert_eq!(urlencoded("My Sheet!A1"), "My%20Sheet%21A1");
+    fn encode_range_spaces() {
+        let encoded = encode_range("My Sheet!A1");
+        assert!(encoded.contains("%20")); // space encoded
+        assert!(encoded.contains("%21")); // '!' encoded
+    }
+
+    #[test]
+    fn encode_range_handles_slash() {
+        let encoded = encode_range("Sheet/1!A1");
+        assert!(encoded.contains("%2F")); // '/' encoded, not left bare
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("  ", "spreadsheet_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            sanitize_path_segment("abc123", "spreadsheet_id").unwrap(),
+            "abc123"
+        );
+        assert_eq!(
+            sanitize_path_segment("1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms", "spreadsheet_id").unwrap(),
+            "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+        );
     }
 
     #[test]

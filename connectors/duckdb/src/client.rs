@@ -67,6 +67,28 @@ impl fmt::Debug for DuckDbClient {
     }
 }
 
+/// Validate that a user-supplied string is safe for use as a URL path segment.
+///
+/// Rejects strings containing `/`, `\`, `..`, or percent-encoded equivalents (`%2f`, `%5c`)
+/// which could allow path traversal attacks.
+fn sanitize_path_segment(value: &str, param_name: &str) -> DuckDbResult<()> {
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(DuckDbError::Api {
+            status_code: 400,
+            message: format!(
+                "invalid {param_name}: must not contain '/', '\\', '..', or encoded traversal sequences"
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl DuckDbClient {
     /// Create a new `MotherDuck` client.
     pub fn new(auth: DuckDbAuth, base_url: Option<&str>) -> DuckDbResult<Self> {
@@ -197,6 +219,7 @@ impl DuckDbClient {
 
     /// Get details of a specific database.
     pub async fn get_database(&self, db_name: &str) -> DuckDbResult<serde_json::Value> {
+        sanitize_path_segment(db_name, "db_name")?;
         self.get(&format!("/databases/{db_name}")).await
     }
 
@@ -204,6 +227,7 @@ impl DuckDbClient {
 
     /// List tables in a `MotherDuck` database.
     pub async fn list_tables(&self, db_name: &str) -> DuckDbResult<serde_json::Value> {
+        sanitize_path_segment(db_name, "db_name")?;
         self.get(&format!("/databases/{db_name}/tables")).await
     }
 
@@ -213,6 +237,8 @@ impl DuckDbClient {
         db_name: &str,
         table_name: &str,
     ) -> DuckDbResult<serde_json::Value> {
+        sanitize_path_segment(db_name, "db_name")?;
+        sanitize_path_segment(table_name, "table_name")?;
         self.get(&format!("/databases/{db_name}/tables/{table_name}"))
             .await
     }
@@ -221,6 +247,7 @@ impl DuckDbClient {
 
     /// List schemas in a `MotherDuck` database.
     pub async fn list_schemas(&self, db_name: &str) -> DuckDbResult<serde_json::Value> {
+        sanitize_path_segment(db_name, "db_name")?;
         self.get(&format!("/databases/{db_name}/schemas")).await
     }
 
@@ -228,6 +255,7 @@ impl DuckDbClient {
 
     /// Get the status of a previously submitted query.
     pub async fn get_query_status(&self, query_id: &str) -> DuckDbResult<serde_json::Value> {
+        sanitize_path_segment(query_id, "query_id")?;
         self.get(&format!("/queries/{query_id}")).await
     }
 
@@ -399,5 +427,81 @@ mod tests {
     #[test]
     fn default_base_url_has_v0() {
         assert!(DEFAULT_BASE_URL.contains("/v0"));
+    }
+
+    #[test]
+    fn sanitize_rejects_forward_slash() {
+        let result = sanitize_path_segment("my/db", "db_name");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DuckDbError::Api { status_code: 400, .. }));
+    }
+
+    #[test]
+    fn sanitize_rejects_backslash() {
+        let result = sanitize_path_segment("my\\db", "db_name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_dot_dot() {
+        let result = sanitize_path_segment("..admin", "db_name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_slash() {
+        let result = sanitize_path_segment("my%2fdb", "db_name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_backslash() {
+        let result = sanitize_path_segment("my%5cdb", "db_name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_slash_uppercase() {
+        let result = sanitize_path_segment("my%2Fdb", "db_name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_backslash_uppercase() {
+        let result = sanitize_path_segment("my%5Cdb", "db_name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_clean_db_name() {
+        assert!(sanitize_path_segment("my-database-123", "db_name").is_ok());
+    }
+
+    #[test]
+    fn sanitize_accepts_underscored_name() {
+        assert!(sanitize_path_segment("my_table_v2", "table_name").is_ok());
+    }
+
+    #[test]
+    fn sanitize_accepts_dots_without_traversal() {
+        assert!(sanitize_path_segment("my.database", "db_name").is_ok());
+    }
+
+    #[test]
+    fn sanitize_error_message_contains_param_name() {
+        let result = sanitize_path_segment("a/b", "table_name");
+        match result.unwrap_err() {
+            DuckDbError::Api { message, .. } => {
+                assert!(message.contains("table_name"));
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_path_traversal_sequence() {
+        let result = sanitize_path_segment("../../../etc/passwd", "query_id");
+        assert!(result.is_err());
     }
 }

@@ -24,6 +24,7 @@ fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 
+percent-encoding.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true

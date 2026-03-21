@@ -69,6 +69,7 @@ impl DocsClient {
     /// Get a document by ID.
     #[instrument(skip(self), fields(document_id))]
     pub async fn get_document(&self, document_id: &str) -> DocsResult<Document> {
+        let document_id = sanitize_path_segment(document_id, "document_id")?;
         let url = format!("{}/documents/{document_id}", self.base_url);
         self.get_json(&url).await
     }
@@ -88,6 +89,7 @@ impl DocsClient {
         document_id: &str,
         requests: Vec<serde_json::Value>,
     ) -> DocsResult<BatchUpdateResponse> {
+        let document_id = sanitize_path_segment(document_id, "document_id")?;
         let url = format!("{}/documents/{document_id}:batchUpdate", self.base_url);
         let body = serde_json::json!({ "requests": requests });
         self.post_json(&url, &body).await
@@ -160,6 +162,32 @@ impl DocsClient {
             })
         }
     }
+}
+
+/// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
+///
+/// Rejects empty strings, path separators (`/`, `\`), traversal sequences (`..`),
+/// and percent-encoded variants (`%2f`, `%5c`).
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocsResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(DocsError::Api {
+            status_code: 400,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(DocsError::Api {
+            status_code: 400,
+            message: format!("{field} contains path traversal characters"),
+        });
+    }
+    Ok(value)
 }
 
 fn map_api_error(error: ApiErrorDetail) -> DocsError {
@@ -246,5 +274,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(client.auth_redacted_label(), label);
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "document_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "document_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "document_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "document_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "document_id").is_err());
+        assert!(sanitize_path_segment("", "document_id").is_err());
+        assert!(sanitize_path_segment("  ", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            sanitize_path_segment("1abc-xyz_123", "document_id").unwrap(),
+            "1abc-xyz_123"
+        );
     }
 }

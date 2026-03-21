@@ -56,6 +56,28 @@ impl fmt::Debug for BigQueryClient {
     }
 }
 
+/// Validate that a user-supplied string is safe for use as a URL path segment.
+///
+/// Rejects strings containing `/`, `\`, `..`, or percent-encoded equivalents (`%2f`, `%5c`)
+/// which could allow path traversal attacks.
+fn sanitize_path_segment(value: &str, param_name: &str) -> BigQueryResult<()> {
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(BigQueryError::Api {
+            status_code: 400,
+            message: format!(
+                "invalid {param_name}: must not contain '/', '\\', '..', or encoded traversal sequences"
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl BigQueryClient {
     /// Create a new `BigQuery` client.
     pub fn new(
@@ -179,6 +201,7 @@ impl BigQueryClient {
 
     /// List datasets in a project.
     pub async fn list_datasets(&self, project_id: &str) -> BigQueryResult<serde_json::Value> {
+        sanitize_path_segment(project_id, "project_id")?;
         self.get(&format!("/projects/{project_id}/datasets")).await
     }
 
@@ -190,6 +213,8 @@ impl BigQueryClient {
         project_id: &str,
         dataset_id: &str,
     ) -> BigQueryResult<serde_json::Value> {
+        sanitize_path_segment(project_id, "project_id")?;
+        sanitize_path_segment(dataset_id, "dataset_id")?;
         self.get(&format!(
             "/projects/{project_id}/datasets/{dataset_id}/tables"
         ))
@@ -200,6 +225,7 @@ impl BigQueryClient {
 
     /// List recent jobs in a project.
     pub async fn list_jobs(&self, project_id: &str) -> BigQueryResult<serde_json::Value> {
+        sanitize_path_segment(project_id, "project_id")?;
         self.get(&format!("/projects/{project_id}/jobs")).await
     }
 
@@ -210,6 +236,7 @@ impl BigQueryClient {
         query_str: &str,
         use_legacy_sql: bool,
     ) -> BigQueryResult<serde_json::Value> {
+        sanitize_path_segment(project_id, "project_id")?;
         let body = serde_json::json!({
             "query": query_str,
             "useLegacySql": use_legacy_sql,
@@ -407,5 +434,81 @@ mod tests {
         };
         let client = BigQueryClient::new(auth, None, Some("https://example.com")).unwrap();
         assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn sanitize_rejects_forward_slash() {
+        let result = sanitize_path_segment("my/project", "project_id");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, BigQueryError::Api { status_code: 400, .. }));
+    }
+
+    #[test]
+    fn sanitize_rejects_backslash() {
+        let result = sanitize_path_segment("my\\project", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_dot_dot() {
+        let result = sanitize_path_segment("..admin", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_slash() {
+        let result = sanitize_path_segment("my%2fproject", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_backslash() {
+        let result = sanitize_path_segment("my%5cproject", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_slash_uppercase() {
+        let result = sanitize_path_segment("my%2Fproject", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_encoded_backslash_uppercase() {
+        let result = sanitize_path_segment("my%5Cproject", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_clean_project_id() {
+        assert!(sanitize_path_segment("my-project-123", "project_id").is_ok());
+    }
+
+    #[test]
+    fn sanitize_accepts_underscored_name() {
+        assert!(sanitize_path_segment("my_dataset_v2", "dataset_id").is_ok());
+    }
+
+    #[test]
+    fn sanitize_accepts_dots_without_traversal() {
+        assert!(sanitize_path_segment("my.project", "project_id").is_ok());
+    }
+
+    #[test]
+    fn sanitize_error_message_contains_param_name() {
+        let result = sanitize_path_segment("a/b", "dataset_id");
+        match result.unwrap_err() {
+            BigQueryError::Api { message, .. } => {
+                assert!(message.contains("dataset_id"));
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_path_traversal_sequence() {
+        let result = sanitize_path_segment("../../../etc/passwd", "project_id");
+        assert!(result.is_err());
     }
 }

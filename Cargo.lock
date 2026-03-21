@@ -2272,6 +2272,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-circleci"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-clickup"
 version = "0.1.0"
 dependencies = [
@@ -2303,6 +2325,29 @@ dependencies = [
  "fcp-testkit",
  "hex",
  "percent-encoding",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-confluence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3033,6 +3078,7 @@ dependencies = [
  "fcp-manifest",
  "fcp-sdk",
  "fcp-testkit",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3896,6 +3942,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-sdk",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -4449,6 +4496,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-square"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-store"
 version = "0.1.0"
 dependencies = [
@@ -4600,6 +4670,7 @@ dependencies = [
  "fcp-sdk",
  "fcp-testkit",
  "futures-util",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -4978,6 +5049,29 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-zoom"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

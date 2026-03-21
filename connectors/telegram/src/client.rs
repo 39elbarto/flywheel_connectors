@@ -16,13 +16,22 @@ use tracing::instrument;
 use crate::types::*;
 
 /// Telegram Bot API client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelegramClient {
     credential: String,
     client: Client,
     base_url: String,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
+}
+
+impl std::fmt::Debug for TelegramClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramClient")
+            .field("credential", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TelegramClient {
@@ -249,10 +258,30 @@ impl TelegramClient {
     }
 
     /// Download a file by its path.
+    ///
+    /// The `file_path` is percent-encoded to prevent path injection from
+    /// potentially user-controlled values returned in Telegram API responses.
     pub fn file_download_url(&self, file_path: &str) -> String {
+        use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+
+        // Encode everything except unreserved chars and forward slash (path separator).
+        const PATH_SEGMENT: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'#')
+            .add(b'<')
+            .add(b'>')
+            .add(b'?')
+            .add(b'`')
+            .add(b'{')
+            .add(b'}')
+            .add(b'%')
+            .add(b'\\');
+
+        let encoded_path = utf8_percent_encode(file_path, PATH_SEGMENT).to_string();
         format!(
             "{}/file/bot{}/{}",
-            self.base_url, self.credential, file_path
+            self.base_url, self.credential, encoded_path
         )
     }
 
@@ -1429,8 +1458,9 @@ mod tests {
         let client = TelegramClient::new("123456:SECRET").unwrap();
         let debug = format!("{client:?}");
         assert!(debug.contains("TelegramClient"));
-        // Debug includes the credential (it's not redacted at the client level)
-        assert!(debug.contains("123456:SECRET"));
+        // Credential must be redacted to prevent log exposure
+        assert!(!debug.contains("123456:SECRET"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]
@@ -1485,6 +1515,25 @@ mod tests {
             .with_base_url("http://localhost:9999");
         let url = client.file_download_url("pics/photo.jpg");
         assert_eq!(url, "http://localhost:9999/file/bottok/pics/photo.jpg");
+    }
+
+    #[test]
+    fn test_file_download_url_encodes_special_chars() {
+        let client = TelegramClient::new("tok").unwrap();
+        // A malicious file_path with path traversal and query injection
+        let url = client.file_download_url("../../../etc/passwd?foo=bar");
+        // Path traversal dots and slashes are preserved (slashes are valid path separators),
+        // but ? is encoded to prevent query injection
+        assert!(url.contains("%3F"), "query ? should be encoded: {url}");
+        assert!(!url.contains('?'), "raw ? should not appear: {url}");
+    }
+
+    #[test]
+    fn test_file_download_url_encodes_spaces_and_hashes() {
+        let client = TelegramClient::new("tok").unwrap();
+        let url = client.file_download_url("photos/my file#2.jpg");
+        assert!(url.contains("%20"), "space should be encoded: {url}");
+        assert!(url.contains("%23"), "hash should be encoded: {url}");
     }
 
     // ─── SendMessageOptions tests ───────────────────────────────────

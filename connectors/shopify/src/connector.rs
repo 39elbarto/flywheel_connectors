@@ -259,7 +259,7 @@ fn contract_details(config: Option<&ShopifyConfig>) -> serde_json::Value {
                 SHOPIFY_AUTH_MODE_ACCESS_TOKEN,
                 SHOPIFY_AUTH_MODE_CREDENTIAL_ID,
             ],
-            "configured_mode": config.map(|cfg| match cfg.auth {
+            "configured_mode": config.map(|cfg| match &cfg.auth {
                 ShopifyAuth::AccessToken { .. } => SHOPIFY_AUTH_MODE_ACCESS_TOKEN,
                 ShopifyAuth::CredentialId { .. } => SHOPIFY_AUTH_MODE_CREDENTIAL_ID,
             }),
@@ -1606,7 +1606,7 @@ mod tests {
                     "access_token":"shpat_test123",
                     "credential_id":"550e8400-e29b-41d4-a716-446655440000"
                 }))
-                    .await
+                .await
             })
             .unwrap()
             .is_err()

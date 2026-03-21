@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.confluence"
 name = "Confluence"
 version = "0.1.0"
-description = "Atlassian Confluence wiki connector for managing spaces, pages, and search"
+description = "Tenant-scoped Atlassian Confluence Cloud connector for spaces, pages, CQL search, and health operations"
 archetype = "operational"
 homepage = "https://developer.atlassian.com/cloud/confluence/rest/v2/"
 
@@ -42,12 +42,75 @@ max_redirects = 0
 [provides.operations.spaces_list.ai_hints]
 when_to_use = "When you need to list available Confluence spaces"
 
+[provides.operations.spaces_get]
+summary = "Get a Confluence space"
+capability = "confluence.spaces.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.spaces_get.network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.spaces_get.ai_hints]
+when_to_use = "When you need details about a specific Confluence space"
+
+[provides.operations.pages_list]
+summary = "List pages in a Confluence space"
+capability = "confluence.pages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.pages_list.network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.pages_list.ai_hints]
+when_to_use = "When you need to list pages in a Confluence space"
+
+[provides.operations.pages_get]
+summary = "Get a Confluence page by ID"
+capability = "confluence.pages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.pages_get.network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.pages_get.ai_hints]
+when_to_use = "When you need the full content of a specific Confluence page"
+
 [provides.operations.pages_create]
 summary = "Create a Confluence page"
 capability = "confluence.pages.write"
 risk = "medium"
 safety_tier = "risky"
-idempotency = "strict"
+idempotency = "best_effort"
 
 [provides.operations.pages_create.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -61,14 +124,35 @@ deny_ip_literals = true
 max_redirects = 0
 
 [provides.operations.pages_create.ai_hints]
-when_to_use = "When you need to create a new wiki page"
+when_to_use = "When you need to create a new Confluence page"
+
+[provides.operations.pages_update]
+summary = "Update a Confluence page"
+capability = "confluence.pages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.pages_update.network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.pages_update.ai_hints]
+when_to_use = "When you need to update an existing Confluence page"
 
 [provides.operations.pages_delete]
 summary = "Delete a Confluence page"
 capability = "confluence.pages.write"
 risk = "high"
 safety_tier = "dangerous"
-idempotency = "strict"
+idempotency = "best_effort"
 
 [provides.operations.pages_delete.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -82,7 +166,49 @@ deny_ip_literals = true
 max_redirects = 0
 
 [provides.operations.pages_delete.ai_hints]
-when_to_use = "When you need to permanently delete a wiki page"
+when_to_use = "When you need to delete a Confluence page"
+
+[provides.operations.search]
+summary = "Search Confluence content with CQL"
+capability = "confluence.pages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.search.network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.search.ai_hints]
+when_to_use = "When you need to search Confluence content across the tenant"
+
+[provides.operations.health]
+summary = "Check Confluence API health"
+capability = "confluence.spaces.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to validate Confluence connectivity and auth"
 
 [sandbox]
 profile = "strict"

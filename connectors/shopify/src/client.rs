@@ -563,10 +563,8 @@ mod tests {
     fn authenticate_uses_credential_id_header() {
         let client = Client::new();
         let auth = ShopifyAuth::CredentialId {
-            credential_id: fcp_core::CredentialId::parse(
-                "550e8400-e29b-41d4-a716-446655440000",
-            )
-            .unwrap(),
+            credential_id: fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap(),
         };
         let request = authenticate(client.get("https://example.com"), &auth)
             .build()

@@ -362,12 +362,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAGES_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "When you need to create a new wiki page".into(),
                 common_mistakes: vec![
                     "Body must be in Confluence storage format (XHTML), not Markdown".into(),
-                    "Page title must be unique within a space".into(),
+                    "Duplicate retries can still create ambiguous results; page title is not a safe deduplication key".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_PAGES_UPDATE)],
@@ -386,7 +386,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "page_id": { "type": "string", "description": "Page ID to update" },
                     "title": { "type": "string", "description": "New page title" },
                     "body": { "type": "string", "description": "New page body in storage format" },
-                    "version_number": { "type": "integer", "description": "Current version number (will be incremented)" },
+                    "version_number": { "type": "integer", "description": "Current page version number; the connector increments it by 1 for the provider request" },
                     "version_message": { "type": "string", "description": "Optional version comment" }
                 }
             }),
@@ -401,11 +401,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAGES_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "When you need to update the content of an existing page".into(),
                 common_mistakes: vec![
-                    "version_number must be the current version + 1".into(),
+                    "Pass the current page version number; the connector increments it by 1".into(),
                     "Fetch the page first to get the current version number".into(),
                 ],
                 examples: Vec::new(),
@@ -417,7 +417,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_PAGES_DELETE),
             summary: "Delete a page".into(),
-            description: Some("Permanently deletes a Confluence page".into()),
+            description: Some("Deletes a Confluence page; provider behavior may move content to trash unless purge semantics are implemented explicitly".into()),
             input_schema: json!({
                 "type": "object",
                 "required": ["page_id"],
@@ -434,12 +434,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAGES_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "When you need to permanently delete a wiki page".into(),
+                when_to_use: "When you need to delete a wiki page".into(),
                 common_mistakes: vec![
-                    "Deletion is permanent and cannot be undone".into(),
-                    "Deleting a parent page also deletes child pages".into(),
+                    "Confluence delete may move content to trash unless purge behavior is implemented explicitly".into(),
+                    "Deleting a parent page can affect descendants and linked content".into(),
                 ],
                 examples: Vec::new(),
                 related: Vec::new(),
@@ -679,9 +679,7 @@ impl ConfluenceConnector {
             OP_SPACES_LIST | OP_SPACES_GET | OP_HEALTH => {
                 CapabilityId::from_static(CAP_SPACES_READ)
             }
-            OP_PAGES_LIST | OP_PAGES_GET | OP_SEARCH => {
-                CapabilityId::from_static(CAP_PAGES_READ)
-            }
+            OP_PAGES_LIST | OP_PAGES_GET | OP_SEARCH => CapabilityId::from_static(CAP_PAGES_READ),
             OP_PAGES_CREATE | OP_PAGES_UPDATE | OP_PAGES_DELETE => {
                 CapabilityId::from_static(CAP_PAGES_WRITE)
             }
@@ -718,14 +716,12 @@ impl ConfluenceConnector {
                 })?
             }
             OP_SPACES_GET => {
-                let space_key = req
-                    .input
-                    .get("space_key")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let space_key = req.input.get("space_key").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'space_key' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_space(runtime, space_key)
                     .await
@@ -735,14 +731,12 @@ impl ConfluenceConnector {
                 })?
             }
             OP_PAGES_LIST => {
-                let space_key = req
-                    .input
-                    .get("space_key")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let space_key = req.input.get("space_key").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'space_key' field".into(),
-                    })?;
+                    },
+                )?;
                 let start = req.input.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
                 let limit = req
                     .input
@@ -758,14 +752,12 @@ impl ConfluenceConnector {
                 })?
             }
             OP_PAGES_GET => {
-                let page_id = req
-                    .input
-                    .get("page_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let page_id = req.input.get("page_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'page_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_page(runtime, page_id)
                     .await
@@ -775,30 +767,24 @@ impl ConfluenceConnector {
                 })?
             }
             OP_PAGES_CREATE => {
-                let space_key = req
-                    .input
-                    .get("space_key")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let space_key = req.input.get("space_key").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'space_key' field".into(),
-                    })?;
-                let title = req
-                    .input
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let title = req.input.get("title").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'title' field".into(),
-                    })?;
-                let body_content = req
-                    .input
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let body_content = req.input.get("body").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'body' field".into(),
-                    })?;
+                    },
+                )?;
 
                 let mut create_body = json!({
                     "type": "page",
@@ -825,30 +811,24 @@ impl ConfluenceConnector {
                 })?
             }
             OP_PAGES_UPDATE => {
-                let page_id = req
-                    .input
-                    .get("page_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let page_id = req.input.get("page_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'page_id' field".into(),
-                    })?;
-                let title = req
-                    .input
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let title = req.input.get("title").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'title' field".into(),
-                    })?;
-                let body_content = req
-                    .input
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let body_content = req.input.get("body").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'body' field".into(),
-                    })?;
+                    },
+                )?;
                 let version_number = req
                     .input
                     .get("version_number")
@@ -888,14 +868,12 @@ impl ConfluenceConnector {
                 })?
             }
             OP_PAGES_DELETE => {
-                let page_id = req
-                    .input
-                    .get("page_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let page_id = req.input.get("page_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'page_id' field".into(),
-                    })?;
+                    },
+                )?;
                 client
                     .delete_page(runtime, page_id)
                     .await
@@ -903,14 +881,12 @@ impl ConfluenceConnector {
                 json!({ "deleted": true })
             }
             OP_SEARCH => {
-                let cql = req
-                    .input
-                    .get("cql")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let cql = req.input.get("cql").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'cql' field".into(),
-                    })?;
+                    },
+                )?;
                 let start = req.input.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
                 let limit = req
                     .input
@@ -1181,7 +1157,19 @@ mod tests {
             .unwrap();
         assert_eq!(create.safety_tier, SafetyTier::Risky);
         assert_eq!(create.risk_level, RiskLevel::Medium);
-        assert_eq!(create.idempotency, IdempotencyClass::Strict);
+        assert_eq!(create.idempotency, IdempotencyClass::BestEffort);
+    }
+
+    #[test]
+    fn test_pages_update_is_best_effort() {
+        let ops = operations_info();
+        let update = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_PAGES_UPDATE)
+            .unwrap();
+        assert_eq!(update.safety_tier, SafetyTier::Risky);
+        assert_eq!(update.risk_level, RiskLevel::Medium);
+        assert_eq!(update.idempotency, IdempotencyClass::BestEffort);
     }
 
     #[test]
@@ -1193,10 +1181,8 @@ mod tests {
             .unwrap();
         assert_eq!(delete.safety_tier, SafetyTier::Dangerous);
         assert_eq!(delete.risk_level, RiskLevel::High);
-        assert_eq!(
-            delete.requires_approval,
-            Some(ApprovalMode::Interactive)
-        );
+        assert_eq!(delete.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(delete.requires_approval, Some(ApprovalMode::Interactive));
     }
 
     #[test]

@@ -10,9 +10,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::error::{Error, Result};
-use crate::types::{
-    ApiErrorResponse, Page, PaginatedResponse, SearchResult, Space,
-};
+use crate::types::{ApiErrorResponse, Page, PaginatedResponse, SearchResult, Space};
 
 /// Confluence API client with retry and runtime integration.
 pub struct ConfluenceClient {
@@ -93,19 +91,12 @@ impl ConfluenceClient {
         limit: u64,
     ) -> Result<PaginatedResponse<Space>> {
         let url = format!("{}/rest/api/space", self.base_url);
-        let query = vec![
-            ("start", start.to_string()),
-            ("limit", limit.to_string()),
-        ];
+        let query = vec![("start", start.to_string()), ("limit", limit.to_string())];
         self.get_with_retry(runtime, &url, &query).await
     }
 
     /// Get a space by key.
-    pub async fn get_space(
-        &self,
-        runtime: &ConnectorRuntime,
-        space_key: &str,
-    ) -> Result<Space> {
+    pub async fn get_space(&self, runtime: &ConnectorRuntime, space_key: &str) -> Result<Space> {
         let key = sanitize_path_segment(space_key)?;
         let url = format!("{}/rest/api/space/{key}", self.base_url);
         self.get_with_retry::<Space>(runtime, &url, &[]).await
@@ -130,11 +121,7 @@ impl ConfluenceClient {
     }
 
     /// Get a page by ID.
-    pub async fn get_page(
-        &self,
-        runtime: &ConnectorRuntime,
-        page_id: &str,
-    ) -> Result<Page> {
+    pub async fn get_page(&self, runtime: &ConnectorRuntime, page_id: &str) -> Result<Page> {
         let id = sanitize_path_segment(page_id)?;
         let url = format!("{}/rest/api/content/{id}", self.base_url);
         let query = vec![("expand", "body.storage,version,space".to_string())];
@@ -164,11 +151,7 @@ impl ConfluenceClient {
     }
 
     /// Delete a page.
-    pub async fn delete_page(
-        &self,
-        runtime: &ConnectorRuntime,
-        page_id: &str,
-    ) -> Result<()> {
+    pub async fn delete_page(&self, runtime: &ConnectorRuntime, page_id: &str) -> Result<()> {
         let id = sanitize_path_segment(page_id)?;
         let url = format!("{}/rest/api/content/{id}", self.base_url);
         self.delete_with_retry(runtime, &url).await
@@ -250,8 +233,10 @@ impl ConfluenceClient {
             let url = url.to_string();
             let client = self.client.clone();
             let auth = auth.clone();
-            let query: Vec<(String, String)> =
-                query.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+            let query: Vec<(String, String)> = query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect();
             async move {
                 debug!(attempt, "GET {}", url);
                 let mut req = client.get(&url).header("Authorization", &auth);
@@ -356,11 +341,7 @@ impl ConfluenceClient {
     }
 
     /// DELETE with retry.
-    async fn delete_with_retry(
-        &self,
-        runtime: &ConnectorRuntime,
-        url: &str,
-    ) -> Result<()> {
+    async fn delete_with_retry(&self, runtime: &ConnectorRuntime, url: &str) -> Result<()> {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let auth = self.auth_header();
@@ -449,9 +430,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: Error::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -487,7 +466,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -592,14 +571,12 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/rest/api/space"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "results": [],
-                    "start": 0,
-                    "limit": 1,
-                    "size": 0
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [],
+                "start": 0,
+                "limit": 1,
+                "size": 0
+            })))
             .mount(&mock_server)
             .await;
 

@@ -655,14 +655,11 @@ impl FcpConnector for SquareConnector {
                 .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
         ));
 
-        let client = SquareClient::new(
-            &config.base_url,
-            &config.access_token,
-            config.retry.clone(),
-        )
-        .map_err(|e| FcpError::Internal {
-            message: format!("Failed to create Square client: {e}"),
-        })?;
+        let client =
+            SquareClient::new(&config.base_url, &config.access_token, config.retry.clone())
+                .map_err(|e| FcpError::Internal {
+                    message: format!("Failed to create Square client: {e}"),
+                })?;
 
         self.client = Some(client);
         self.config = Some(config);
@@ -840,14 +837,12 @@ impl SquareConnector {
                 })?
             }
             OP_PAYMENTS_GET => {
-                let payment_id = req
-                    .input
-                    .get("payment_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let payment_id = req.input.get("payment_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'payment_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_payment(runtime, payment_id)
                     .await
@@ -857,14 +852,12 @@ impl SquareConnector {
                 })?
             }
             OP_PAYMENTS_CREATE => {
-                let source_id = req
-                    .input
-                    .get("source_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let source_id = req.input.get("source_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'source_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let idempotency_key = req
                     .input
                     .get("idempotency_key")
@@ -873,19 +866,17 @@ impl SquareConnector {
                         code: 1005,
                         message: "Missing 'idempotency_key' field".into(),
                     })?;
-                let amount_money_val = req
-                    .input
-                    .get("amount_money")
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'amount_money' field".into(),
-                    })?;
-                let amount_money: Money =
-                    serde_json::from_value(amount_money_val.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                let amount_money_val =
+                    req.input
+                        .get("amount_money")
+                        .ok_or(FcpError::InvalidRequest {
                             code: 1005,
-                            message: format!("Invalid 'amount_money': {e}"),
-                        }
+                            message: "Missing 'amount_money' field".into(),
+                        })?;
+                let amount_money: Money = serde_json::from_value(amount_money_val.clone())
+                    .map_err(|e| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("Invalid 'amount_money': {e}"),
                     })?;
 
                 let create_req = CreatePaymentRequest {
@@ -926,27 +917,23 @@ impl SquareConnector {
                         code: 1005,
                         message: "Missing 'idempotency_key' field".into(),
                     })?;
-                let payment_id = req
-                    .input
-                    .get("payment_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let payment_id = req.input.get("payment_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'payment_id' field".into(),
-                    })?;
-                let amount_money_val = req
-                    .input
-                    .get("amount_money")
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'amount_money' field".into(),
-                    })?;
-                let amount_money: Money =
-                    serde_json::from_value(amount_money_val.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                    },
+                )?;
+                let amount_money_val =
+                    req.input
+                        .get("amount_money")
+                        .ok_or(FcpError::InvalidRequest {
                             code: 1005,
-                            message: format!("Invalid 'amount_money': {e}"),
-                        }
+                            message: "Missing 'amount_money' field".into(),
+                        })?;
+                let amount_money: Money = serde_json::from_value(amount_money_val.clone())
+                    .map_err(|e| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("Invalid 'amount_money': {e}"),
                     })?;
 
                 let refund_req = RefundPaymentRequest {
@@ -969,19 +956,17 @@ impl SquareConnector {
                 })?
             }
             OP_ORDERS_LIST => {
-                let location_ids_val = req
-                    .input
-                    .get("location_ids")
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'location_ids' field".into(),
-                    })?;
-                let location_ids: Vec<String> =
-                    serde_json::from_value(location_ids_val.clone()).map_err(|e| {
-                        FcpError::InvalidRequest {
+                let location_ids_val =
+                    req.input
+                        .get("location_ids")
+                        .ok_or(FcpError::InvalidRequest {
                             code: 1005,
-                            message: format!("Invalid 'location_ids': {e}"),
-                        }
+                            message: "Missing 'location_ids' field".into(),
+                        })?;
+                let location_ids: Vec<String> = serde_json::from_value(location_ids_val.clone())
+                    .map_err(|e| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("Invalid 'location_ids': {e}"),
                     })?;
                 let cursor = req.input.get("cursor").and_then(|v| v.as_str());
 
@@ -994,14 +979,12 @@ impl SquareConnector {
                 })?
             }
             OP_ORDERS_GET => {
-                let order_id = req
-                    .input
-                    .get("order_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let order_id = req.input.get("order_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'order_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_order(runtime, order_id)
                     .await
@@ -1019,13 +1002,13 @@ impl SquareConnector {
                         code: 1005,
                         message: "Missing 'location_id' field".into(),
                     })?;
-                let line_items_val = req
-                    .input
-                    .get("line_items")
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'line_items' field".into(),
-                    })?;
+                let line_items_val =
+                    req.input
+                        .get("line_items")
+                        .ok_or(FcpError::InvalidRequest {
+                            code: 1005,
+                            message: "Missing 'line_items' field".into(),
+                        })?;
                 let line_items: Vec<OrderLineItemInput> =
                     serde_json::from_value(line_items_val.clone()).map_err(|e| {
                         FcpError::InvalidRequest {
@@ -1102,10 +1085,7 @@ impl SquareConnector {
                 })?
             }
             OP_HEALTH => {
-                client
-                    .health_check()
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                client.health_check().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "status": "ok" })
             }
             _ => {
@@ -1261,18 +1241,78 @@ mod tests {
         let connector = SquareConnector::new();
         let intro = connector.introspect();
         assert_eq!(intro.operations.len(), 12);
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_PAYMENTS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_PAYMENTS_GET));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_PAYMENTS_CREATE));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_PAYMENTS_REFUND));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_ORDERS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_ORDERS_GET));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_ORDERS_CREATE));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_CATALOG_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_CUSTOMERS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_CUSTOMERS_GET));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_LOCATIONS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_HEALTH));
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_PAYMENTS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_PAYMENTS_GET)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_PAYMENTS_CREATE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_PAYMENTS_REFUND)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_ORDERS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_ORDERS_GET)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_ORDERS_CREATE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_CATALOG_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_CUSTOMERS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_CUSTOMERS_GET)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_LOCATIONS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_HEALTH)
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1297,7 +1337,9 @@ mod tests {
     async fn test_invoke_before_handshake_returns_not_handshaken() {
         let mut connector = SquareConnector::new();
         connector.configure(test_config()).await.unwrap();
-        let result = connector.invoke(base_invoke(connector.id(), OP_PAYMENTS_LIST)).await;
+        let result = connector
+            .invoke(base_invoke(connector.id(), OP_PAYMENTS_LIST))
+            .await;
         assert!(matches!(result, Err(FcpError::NotHandshaken)));
     }
 
@@ -1388,7 +1430,10 @@ mod tests {
     #[test]
     fn test_payments_list_is_safe() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_PAYMENTS_LIST).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_PAYMENTS_LIST)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
         assert_eq!(op.idempotency, IdempotencyClass::Strict);
@@ -1398,7 +1443,10 @@ mod tests {
     #[test]
     fn test_payments_create_is_risky_high() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_PAYMENTS_CREATE).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_PAYMENTS_CREATE)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
         assert_eq!(op.risk_level, RiskLevel::High);
         assert_eq!(op.idempotency, IdempotencyClass::Strict);
@@ -1408,7 +1456,10 @@ mod tests {
     #[test]
     fn test_payments_refund_is_risky_high() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_PAYMENTS_REFUND).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_PAYMENTS_REFUND)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
         assert_eq!(op.risk_level, RiskLevel::High);
         assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
@@ -1417,7 +1468,10 @@ mod tests {
     #[test]
     fn test_orders_create_contract_semantics() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_ORDERS_CREATE).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_ORDERS_CREATE)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
         assert_eq!(op.risk_level, RiskLevel::Medium);
         assert_eq!(op.idempotency, IdempotencyClass::BestEffort);
@@ -1494,22 +1548,40 @@ mod tests {
     #[test]
     fn test_capability_mapping() {
         let ops = operations_info();
-        let payments_list = ops.iter().find(|op| op.id.as_str() == OP_PAYMENTS_LIST).unwrap();
+        let payments_list = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_PAYMENTS_LIST)
+            .unwrap();
         assert_eq!(payments_list.capability.as_str(), CAP_PAYMENTS_READ);
 
-        let payments_create = ops.iter().find(|op| op.id.as_str() == OP_PAYMENTS_CREATE).unwrap();
+        let payments_create = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_PAYMENTS_CREATE)
+            .unwrap();
         assert_eq!(payments_create.capability.as_str(), CAP_PAYMENTS_WRITE);
 
-        let orders_list = ops.iter().find(|op| op.id.as_str() == OP_ORDERS_LIST).unwrap();
+        let orders_list = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_ORDERS_LIST)
+            .unwrap();
         assert_eq!(orders_list.capability.as_str(), CAP_ORDERS_READ);
 
-        let catalog = ops.iter().find(|op| op.id.as_str() == OP_CATALOG_LIST).unwrap();
+        let catalog = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_CATALOG_LIST)
+            .unwrap();
         assert_eq!(catalog.capability.as_str(), CAP_CATALOG_READ);
 
-        let customers = ops.iter().find(|op| op.id.as_str() == OP_CUSTOMERS_LIST).unwrap();
+        let customers = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_CUSTOMERS_LIST)
+            .unwrap();
         assert_eq!(customers.capability.as_str(), CAP_CUSTOMERS_READ);
 
-        let locations = ops.iter().find(|op| op.id.as_str() == OP_LOCATIONS_LIST).unwrap();
+        let locations = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_LOCATIONS_LIST)
+            .unwrap();
         assert_eq!(locations.capability.as_str(), CAP_LOCATIONS_READ);
 
         let health = ops.iter().find(|op| op.id.as_str() == OP_HEALTH).unwrap();
@@ -1519,7 +1591,10 @@ mod tests {
     #[test]
     fn test_orders_create_is_risky() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_ORDERS_CREATE).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_ORDERS_CREATE)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
         assert_eq!(op.risk_level, RiskLevel::Medium);
         assert_eq!(op.idempotency, IdempotencyClass::BestEffort);

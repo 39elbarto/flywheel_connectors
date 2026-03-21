@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2080b28004713881e4734dc4202a5b7e748c2ce62bcadc343c61cb33bfb2cad8"
+interface_hash = "blake3-256:fcp.interface.v2:6974a5aa69103d4ff974b30eee4d09e20240c601f7d8ad3f7efcd2346ec8c188"
 
 [connector]
 id = "fcp.shopify"
@@ -18,7 +18,7 @@ format = "native"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "No durable connector state; one shop domain and one pre-provisioned Admin API token are injected at runtime."
+migration_hint = "No durable connector state; one shop domain plus either one pre-provisioned Admin API access token or one credential_id are injected at runtime."
 
 [zones]
 home = "z:work"
@@ -70,6 +70,24 @@ type = "string"
 [provides.operations."shopify.customers.get".output_schema.properties.id]
 type = "integer"
 
+[provides.operations."shopify.customers.get".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
 [provides.operations."shopify.customers.get".ai_hints]
 when_to_use = "Use when you need one customer from the configured shop by numeric customer ID."
 common_mistakes = [
@@ -80,7 +98,7 @@ examples = []
 related = []
 
 [provides.operations."shopify.customers.list"]
-description = "List the first page of customers visible to the configured shop token."
+description = "List the first page of customers visible to the configured shop auth context."
 capability = "shopify.customers.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -96,6 +114,24 @@ type = "array"
 [provides.operations."shopify.customers.list".output_schema.items]
 type = "object"
 
+[provides.operations."shopify.customers.list".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
 [provides.operations."shopify.customers.list".ai_hints]
 when_to_use = "Use when you need the first page of customer records from the configured shop."
 common_mistakes = [
@@ -106,7 +142,7 @@ examples = []
 related = []
 
 [provides.operations."shopify.health"]
-description = "Probe /shop.json to verify that the configured Admin API token can reach the configured Shopify shop."
+description = "Probe /shop.json to verify that the configured Shopify auth mode can reach the configured shop."
 capability = "shopify.products.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -128,8 +164,26 @@ type = "integer"
 [provides.operations."shopify.health".output_schema.properties.shop_name]
 type = "string"
 
+[provides.operations."shopify.health".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
 [provides.operations."shopify.health".ai_hints]
-when_to_use = "Use when you need to confirm the configured token can reach the configured shop."
+when_to_use = "Use when you need to confirm the configured Shopify credentials can reach the configured shop."
 common_mistakes = ["Assuming this proves every optional scope is granted; it only verifies the /shop.json probe path."]
 examples = []
 related = []
@@ -154,6 +208,24 @@ type = "array"
 
 [provides.operations."shopify.inventory.list".output_schema.items]
 type = "object"
+
+[provides.operations."shopify.inventory.list".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
 [provides.operations."shopify.inventory.list".ai_hints]
 when_to_use = "Use when you need inventory levels for one known location in the configured shop."
@@ -194,6 +266,24 @@ type = "integer"
 [provides.operations."shopify.orders.create".output_schema.properties.line_items]
 type = "array"
 
+[provides.operations."shopify.orders.create".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
 [provides.operations."shopify.orders.create".ai_hints]
 when_to_use = "Use when you need to create a real order record in the configured shop."
 common_mistakes = [
@@ -230,6 +320,24 @@ type = "integer"
 [provides.operations."shopify.orders.get".output_schema.properties.line_items]
 type = "array"
 
+[provides.operations."shopify.orders.get".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
 [provides.operations."shopify.orders.get".ai_hints]
 when_to_use = "Use when you need one order from the configured shop by numeric order ID."
 common_mistakes = [
@@ -255,6 +363,24 @@ type = "array"
 
 [provides.operations."shopify.orders.list".output_schema.items]
 type = "object"
+
+[provides.operations."shopify.orders.list".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
 [provides.operations."shopify.orders.list".ai_hints]
 when_to_use = "Use when you need the first page of orders visible to the configured Shopify app installation."
@@ -307,6 +433,24 @@ type = "integer"
 [provides.operations."shopify.products.create".output_schema.properties.title]
 type = "string"
 
+[provides.operations."shopify.products.create".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
 [provides.operations."shopify.products.create".ai_hints]
 when_to_use = "Use when you need to create a real product in one configured Shopify shop."
 common_mistakes = [
@@ -336,6 +480,24 @@ type = "object"
 
 [provides.operations."shopify.products.delete".output_schema.properties.deleted]
 type = "boolean"
+
+[provides.operations."shopify.products.delete".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
 [provides.operations."shopify.products.delete".ai_hints]
 when_to_use = "Use only when you need to permanently remove a product from the configured shop."
@@ -374,6 +536,24 @@ type = "string"
 [provides.operations."shopify.products.get".output_schema.properties.variants]
 type = "array"
 
+[provides.operations."shopify.products.get".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
 [provides.operations."shopify.products.get".ai_hints]
 when_to_use = "Use when you need one product from the configured shop by numeric product ID."
 common_mistakes = [
@@ -399,6 +579,24 @@ type = "array"
 
 [provides.operations."shopify.products.list".output_schema.items]
 type = "object"
+
+[provides.operations."shopify.products.list".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
 [provides.operations."shopify.products.list".ai_hints]
 when_to_use = "Use when you need the first page of products from one configured Shopify shop."
@@ -450,6 +648,24 @@ type = "integer"
 
 [provides.operations."shopify.products.update".output_schema.properties.title]
 type = "string"
+
+[provides.operations."shopify.products.update".network_constraints]
+host_allow = ["$shop_domain"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
 [provides.operations."shopify.products.update".ai_hints]
 when_to_use = "Use when you need to patch mutable product fields in the configured shop."

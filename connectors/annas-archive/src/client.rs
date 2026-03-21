@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -18,7 +18,6 @@ pub struct AnnasArchiveClient {
     client: Client,
     base_url: String,
     runtime: ConnectorRuntime,
-    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for AnnasArchiveClient {
@@ -46,10 +45,6 @@ impl AnnasArchiveClient {
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
-            retry_config: HttpRetryConfig {
-                max_retries: 2,
-                ..HttpRetryConfig::default()
-            },
         })
     }
 

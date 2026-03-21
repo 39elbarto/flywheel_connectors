@@ -314,7 +314,7 @@ impl SentryConnector {
 
                         // Validate project slug if configured
                         if let Some(project) = config.project_slug.as_deref() {
-                            let project_found = projects.as_array().map_or(false, |arr| {
+                            let project_found = projects.as_array().is_some_and(|arr| {
                                 arr.iter().any(|p| {
                                     p.get("slug").and_then(|s| s.as_str()) == Some(project)
                                 })
@@ -1125,11 +1125,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 "properties": {
                     "issue_id": { "type": "string", "description": "Sentry issue ID" },
                     "status": { "type": "string", "enum": ["resolved", "unresolved", "ignored"] },
-                    "substatus": { "type": "string", "description": "Issue substatus" },
-                    "assignedTo": { "type": "string", "description": "Assign to user (email or 'team:slug')" },
-                    "hasSeen": { "type": "boolean" },
-                    "isBookmarked": { "type": "boolean" },
-                    "isSubscribed": { "type": "boolean" }
+                    "substatus": { "type": "string", "description": "Issue substatus (e.g., 'ongoing', 'escalating', 'new', 'archived_until_escalating', 'archived_forever', 'archived_until_condition_met')" }
                 }
             }),
             json!({

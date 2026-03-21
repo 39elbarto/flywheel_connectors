@@ -134,15 +134,15 @@ impl ConnectorErrorMapping for GitLabError {
     }
 
     fn to_fcp_error(&self) -> FcpError {
-        GitLabError::to_fcp_error(self)
+        Self::to_fcp_error(self)
     }
 
     fn is_retryable(&self) -> bool {
-        GitLabError::is_retryable(self)
+        Self::is_retryable(self)
     }
 
     fn retry_after(&self) -> Option<Duration> {
-        GitLabError::retry_after(self)
+        Self::retry_after(self)
     }
 }
 

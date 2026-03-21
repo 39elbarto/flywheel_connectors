@@ -133,9 +133,9 @@ pub struct TagImage {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Organization {
-    #[serde(alias = "orgname")]
+    #[serde(default)]
     pub id: String,
-    #[serde(default, alias = "orgname")]
+    #[serde(default)]
     pub orgname: Option<String>,
     #[serde(default)]
     pub full_name: Option<String>,

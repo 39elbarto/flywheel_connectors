@@ -523,9 +523,7 @@ impl FcpConnector for DockerHubConnector {
 
         // If credentials-based auth, attempt login to get JWT
         if matches!(cfg.auth, DockerHubAuth::Credentials { .. }) && !cfg.auth.is_secretless() {
-            if let Some(runtime) = &self.runtime {
-                let _ = client.login(runtime).await; // Best-effort login
-            }
+            let _ = client.login(self.runtime.as_ref().unwrap()).await; // Best-effort login
         }
 
         self.client = Some(client);

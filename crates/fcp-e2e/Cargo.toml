@@ -13,6 +13,7 @@ anthropic = []
 slack = []
 discord = []
 google_ai = []
+gcp = []
 qdrant = []
 telegram = []
 pinecone = []
@@ -110,6 +111,7 @@ fcp-openai = { path = "../../connectors/openai" }
 fcp-slack = { path = "../../connectors/slack" }
 fcp-discord = { path = "../../connectors/discord", features = ["testing"] }
 fcp-google-ai = { path = "../../connectors/google-ai" }
+fcp-gcp = { path = "../../connectors/gcp" }
 fcp-qdrant = { path = "../../connectors/qdrant" }
 fcp-telegram = { path = "../../connectors/telegram" }
 fcp-pinecone = { path = "../../connectors/pinecone" }

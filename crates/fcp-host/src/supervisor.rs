@@ -317,7 +317,7 @@ impl ExponentialBackoff {
         clippy::cast_sign_loss
     )]
     pub fn current_delay(&self) -> Duration {
-        if self.attempt == 0 {
+        if self.attempt == 0 || self.initial.is_zero() {
             return self.initial;
         }
         let factor = self
@@ -326,6 +326,11 @@ impl ExponentialBackoff {
         let initial_ms = self.initial.as_millis() as f64;
         let max_ms = self.max.as_millis() as f64;
         let delay_ms = (initial_ms * factor).min(max_ms).max(0.0);
+        
+        if delay_ms.is_nan() {
+            return self.max;
+        }
+
         let capped = Duration::from_millis(delay_ms as u64);
         capped.min(self.max)
     }
@@ -2615,8 +2620,8 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SupervisorConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.max_restarts, 10);
-        assert_eq!(parsed.backoff_multiplier, 1.5);
+        assert_eq!(parsed.max_restarts, config.max_restarts);
+        assert_eq!(parsed.backoff_multiplier, config.backoff_multiplier);
         assert_eq!(parsed.restart_policy, RestartPolicy::Always);
     }
 

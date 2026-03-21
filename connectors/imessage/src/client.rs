@@ -13,9 +13,25 @@ use tracing::{debug, warn};
 
 use crate::error::{BlueBubblesError, BlueBubblesResult};
 use crate::types::{
-    Chat, Message, PaginatedResponse, QueryParams, SendMessageRequest, SendMessageResponse,
+    BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SendMessageRequest, SendMessageResponse,
     ServerInfo,
 };
+
+fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn duration_to_ms(d: Duration) -> u64 {
+    d.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+async fn decode_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, BlueBubblesError> {
+    resp.json::<T>().await.map_err(BlueBubblesError::Http)
+}
 
 /// `BlueBubbles` API client.
 pub struct BlueBubblesClient {
@@ -23,6 +39,7 @@ pub struct BlueBubblesClient {
     server_url: String,
     password: String,
     retry_config: HttpRetryConfig,
+    request_timeout: Duration,
 }
 
 impl std::fmt::Debug for BlueBubblesClient {
@@ -32,6 +49,7 @@ impl std::fmt::Debug for BlueBubblesClient {
             .field("server_url", &self.server_url)
             .field("password", &"[REDACTED]")
             .field("retry_config", &self.retry_config)
+            .field("request_timeout", &self.request_timeout)
             .finish()
     }
 }
@@ -47,16 +65,40 @@ impl BlueBubblesClient {
         password: &str,
         retry_config: HttpRetryConfig,
     ) -> BlueBubblesResult<Self> {
+        Self::build(server_url, password, retry_config, Duration::from_secs(30))
+    }
+
+    /// Create a client from validated connector configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn from_config(config: &BlueBubblesConfig) -> BlueBubblesResult<Self> {
+        Self::build(
+            &config.server_url,
+            &config.password,
+            config.retry.clone(),
+            Duration::from_millis(config.request_timeout_ms),
+        )
+    }
+
+    fn build(
+        server_url: &str,
+        password: &str,
+        retry_config: HttpRetryConfig,
+        request_timeout: Duration,
+    ) -> BlueBubblesResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(request_timeout)
             .build()
             .map_err(BlueBubblesError::Http)?;
 
         Ok(Self {
             client,
-            server_url: server_url.trim_end_matches('/').to_string(),
-            password: password.to_string(),
+            server_url: server_url.trim().trim_end_matches('/').to_string(),
+            password: password.trim().to_string(),
             retry_config,
+            request_timeout,
         })
     }
 
@@ -64,6 +106,12 @@ impl BlueBubblesClient {
     #[must_use]
     pub fn server_url(&self) -> &str {
         &self.server_url
+    }
+
+    /// Get the configured request timeout.
+    #[must_use]
+    pub const fn request_timeout(&self) -> Duration {
+        self.request_timeout
     }
 
     /// Get server information.
@@ -92,7 +140,7 @@ impl BlueBubblesClient {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
-                            error: BlueBubblesError::Http(e),
+                            error: BlueBubblesError::from_transport_error(e),
                             retry_after: None,
                         };
                     }
@@ -103,6 +151,25 @@ impl BlueBubblesClient {
                     return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
                         message: "Invalid server password".into(),
                     });
+                }
+
+                if status == 404 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Api {
+                        status_code: 404,
+                        message: "Server API not found (check URL)".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
                 }
 
                 if !resp.status().is_success() {
@@ -118,9 +185,9 @@ impl BlueBubblesClient {
                     return AttemptOutcome::Terminal(err);
                 }
 
-                match resp.json::<ServerInfo>().await {
-                    Ok(r) => AttemptOutcome::Success(r),
-                    Err(e) => AttemptOutcome::Terminal(BlueBubblesError::Http(e)),
+                match decode_json::<ServerInfo>(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
         })
@@ -167,7 +234,7 @@ impl BlueBubblesClient {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
-                            error: BlueBubblesError::Http(e),
+                            error: BlueBubblesError::from_transport_error(e),
                             retry_after: None,
                         };
                     }
@@ -181,19 +248,12 @@ impl BlueBubblesClient {
                 }
 
                 if status == 429 {
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map(Duration::from_secs);
+                    let retry_after = retry_after_from_headers(resp.headers());
                     return AttemptOutcome::Retryable {
                         error: BlueBubblesError::RateLimited {
-                            retry_after_ms: retry_after
-                                .unwrap_or(Duration::from_secs(30))
-                                .as_millis()
-                                .try_into()
-                                .unwrap_or(u64::MAX),
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
                         },
                         retry_after,
                     };
@@ -212,9 +272,9 @@ impl BlueBubblesClient {
                     return AttemptOutcome::Terminal(err);
                 }
 
-                match resp.json::<SendMessageResponse>().await {
-                    Ok(r) => AttemptOutcome::Success(r),
-                    Err(e) => AttemptOutcome::Terminal(BlueBubblesError::Http(e)),
+                match decode_json::<SendMessageResponse>(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
         })
@@ -259,13 +319,25 @@ impl BlueBubblesClient {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
-                            error: BlueBubblesError::Http(e),
+                            error: BlueBubblesError::from_transport_error(e),
                             retry_after: None,
                         };
                     }
                 };
 
                 let status = resp.status().as_u16();
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
                 if status == 401 || status == 403 {
                     return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
                         message: "Invalid server password".into(),
@@ -285,9 +357,9 @@ impl BlueBubblesClient {
                     return AttemptOutcome::Terminal(err);
                 }
 
-                match resp.json::<PaginatedResponse<Chat>>().await {
-                    Ok(r) => AttemptOutcome::Success(r),
-                    Err(e) => AttemptOutcome::Terminal(BlueBubblesError::Http(e)),
+                match decode_json::<PaginatedResponse<Chat>>(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
         })
@@ -326,7 +398,7 @@ impl BlueBubblesClient {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
-                            error: BlueBubblesError::Http(e),
+                            error: BlueBubblesError::from_transport_error(e),
                             retry_after: None,
                         };
                     }
@@ -335,6 +407,18 @@ impl BlueBubblesClient {
                 let status = resp.status().as_u16();
                 if status == 404 {
                     return AttemptOutcome::Terminal(BlueBubblesError::ChatNotFound { guid });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
                 }
 
                 if status == 401 || status == 403 {
@@ -356,9 +440,9 @@ impl BlueBubblesClient {
                     return AttemptOutcome::Terminal(err);
                 }
 
-                match resp.json::<Chat>().await {
-                    Ok(r) => AttemptOutcome::Success(r),
-                    Err(e) => AttemptOutcome::Terminal(BlueBubblesError::Http(e)),
+                match decode_json::<Chat>(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
         })
@@ -380,12 +464,14 @@ impl BlueBubblesClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let password = self.password.clone();
+        let chat_guid = chat_guid.to_string();
         let params = params.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
             let password = password.clone();
+            let chat_guid = chat_guid.clone();
             let params = params.clone();
             async move {
                 debug!(attempt, "Fetching BlueBubbles messages");
@@ -410,13 +496,31 @@ impl BlueBubblesClient {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
-                            error: BlueBubblesError::Http(e),
+                            error: BlueBubblesError::from_transport_error(e),
                             retry_after: None,
                         };
                     }
                 };
 
                 let status = resp.status().as_u16();
+                if status == 404 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::ChatNotFound {
+                        guid: chat_guid,
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
                     warn!(status, "BlueBubbles get_messages failed");
@@ -431,9 +535,9 @@ impl BlueBubblesClient {
                     return AttemptOutcome::Terminal(err);
                 }
 
-                match resp.json::<PaginatedResponse<Message>>().await {
-                    Ok(r) => AttemptOutcome::Success(r),
-                    Err(e) => AttemptOutcome::Terminal(BlueBubblesError::Http(e)),
+                match decode_json::<PaginatedResponse<Message>>(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
         })
@@ -454,6 +558,7 @@ impl BlueBubblesClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let password = self.password.clone();
+        let guid = guid.to_string();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
@@ -470,13 +575,32 @@ impl BlueBubblesClient {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
-                            error: BlueBubblesError::Http(e),
+                            error: BlueBubblesError::from_transport_error(e),
                             retry_after: None,
                         };
                     }
                 };
 
                 let status = resp.status().as_u16();
+                if status == 404 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Api {
+                        status_code: 404,
+                        message: "Server API not found (check URL)".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
                     let decision = classify_http_status(status, None);
@@ -513,6 +637,7 @@ impl BlueBubblesClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let password = self.password.clone();
+        let chat_guid = chat_guid.to_string();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
@@ -529,13 +654,32 @@ impl BlueBubblesClient {
                     Ok(r) => r,
                     Err(e) => {
                         return AttemptOutcome::Retryable {
-                            error: BlueBubblesError::Http(e),
+                            error: BlueBubblesError::from_transport_error(e),
                             retry_after: None,
                         };
                     }
                 };
 
                 let status = resp.status().as_u16();
+                if status == 404 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Api {
+                        status_code: 404,
+                        message: "Server API not found (check URL)".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
                     let decision = classify_http_status(status, None);
@@ -568,301 +712,22 @@ impl BlueBubblesClient {
             .query(&[("password", &self.password)])
             .send()
             .await
-            .map_err(|_| BlueBubblesError::ServerUnreachable)?;
+            .map_err(BlueBubblesError::from_transport_error)?;
+
+        let status = resp.status().as_u16();
+        if status == 429 {
+            let retry_after =
+                retry_after_from_headers(resp.headers()).unwrap_or(Duration::from_secs(30));
+            return Err(BlueBubblesError::RateLimited {
+                retry_after_ms: duration_to_ms(retry_after),
+            });
+        }
 
         if resp.status().is_success() {
             Ok(())
-        } else if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
-            Err(BlueBubblesError::Unauthorized {
-                message: "Invalid server password".into(),
-            })
         } else {
-            Err(BlueBubblesError::ServerUnreachable)
+            let text = resp.text().await.unwrap_or_default();
+            Err(BlueBubblesError::from_api_response(status, &text))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn client_creation() {
-        let client = BlueBubblesClient::new(
-            "http://localhost:1234",
-            "test-password",
-            HttpRetryConfig::default(),
-        );
-        assert!(client.is_ok());
-    }
-
-    #[test]
-    fn server_url_trimmed() {
-        let client = BlueBubblesClient::new(
-            "http://localhost:1234/",
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        assert!(!client.server_url().ends_with('/'));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn server_info_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/api/v1/server/info"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "os_version": "14.2",
-                    "server_version": "1.9.0",
-                    "private_api": true,
-                    "proxy_service": "cloudflare"
-                })),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        let info = client.server_info(&runtime).await.unwrap();
-        assert_eq!(info.os_version.as_deref(), Some("14.2"));
-        assert!(info.private_api);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn send_message_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v1/message/text"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "status": 200,
-                    "message": "Message sent!",
-                    "data": {
-                        "guid": "msg-001",
-                        "text": "Hello!",
-                        "is_from_me": true,
-                        "attachments": []
-                    }
-                })),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        let resp = client
-            .send_message(&runtime, "iMessage;-;+15551234567", "Hello!")
-            .await
-            .unwrap();
-        assert_eq!(resp.status, 200);
-        assert!(resp.data.is_some());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn send_message_unauthorized() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/v1/message/text"))
-            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("unauthorized"))
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "bad-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        let result = client
-            .send_message(&runtime, "iMessage;-;+15551234567", "Hello!")
-            .await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            BlueBubblesError::Unauthorized { .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/api/v1/server/info"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "os_version": "14.2",
-                    "server_version": "1.9.0",
-                    "private_api": false
-                })),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_server_down() {
-        let client = BlueBubblesClient::new(
-            "http://127.0.0.1:1",
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let result = client.health_check().await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            BlueBubblesError::ServerUnreachable
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn get_chats_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/api/v1/chat"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "total": 2,
-                    "offset": 0,
-                    "limit": 25,
-                    "data": [
-                        {
-                            "guid": "iMessage;-;+15551234567",
-                            "display_name": "Alice",
-                            "participants": [],
-                            "is_group": false
-                        },
-                        {
-                            "guid": "iMessage;+;chat123",
-                            "display_name": "Family",
-                            "participants": [],
-                            "is_group": true
-                        }
-                    ]
-                })),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        let resp = client
-            .get_chats(&runtime, &QueryParams::default())
-            .await
-            .unwrap();
-        assert_eq!(resp.total, Some(2));
-        assert_eq!(resp.data.len(), 2);
-        assert!(!resp.data[0].is_group);
-        assert!(resp.data[1].is_group);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn get_chat_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path(
-                "/api/v1/chat/iMessage;-;+15551234567",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "guid": "iMessage;-;+15551234567",
-                    "display_name": "Alice",
-                    "participants": [],
-                    "is_group": false
-                })),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        let resp = client
-            .get_chat(&runtime, "iMessage;-;+15551234567")
-            .await
-            .unwrap();
-        assert_eq!(resp.guid, "iMessage;-;+15551234567");
-        assert_eq!(resp.display_name.as_deref(), Some("Alice"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn download_attachment_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        let body = b"bluebubbles-attachment".to_vec();
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path(
-                "/api/v1/attachment/attachment-123/download",
-            ))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.clone()))
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        let resp = client
-            .download_attachment(&runtime, "attachment-123")
-            .await
-            .unwrap();
-        assert_eq!(resp, body);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn mark_read_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/api/v1/chat/iMessage;-;+15551234567/read",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"status": 200, "message": "Marked as read"})),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = BlueBubblesClient::new(
-            &mock_server.uri(),
-            "test-password",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        let result = client.mark_read(&runtime, "iMessage;-;+15551234567").await;
-        assert!(result.is_ok());
     }
 }

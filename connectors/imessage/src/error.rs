@@ -46,6 +46,10 @@ pub enum BlueBubblesError {
     #[error("Chat not found: {guid}")]
     ChatNotFound { guid: String },
 
+    /// Attachment not found by GUID.
+    #[error("Attachment not found: {guid}")]
+    AttachmentNotFound { guid: String },
+
     /// Configuration error.
     #[error("Configuration error: {0}")]
     Config(String),
@@ -65,11 +69,12 @@ impl BlueBubblesError {
             }
             Self::Json(_)
             | Self::Unauthorized { .. }
-            | Self::Api { .. }
+            | Self::AttachmentNotFound { .. }
             | Self::PrivateApiRequired { .. }
             | Self::AttachmentTooLarge { .. }
             | Self::ChatNotFound { .. }
             | Self::Config(_) => false,
+            Self::Api { status_code, .. } => is_retryable_status(*status_code),
         }
     }
 
@@ -114,7 +119,7 @@ impl BlueBubblesError {
                 service: "bluebubbles".into(),
                 message: format!("HTTP {status_code}: {message}"),
                 status_code: Some(*status_code),
-                retryable: false,
+                retryable: is_retryable_status(*status_code),
                 retry_after: None,
             },
             Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
@@ -135,6 +140,10 @@ impl BlueBubblesError {
             Self::ChatNotFound { guid } => FcpError::InvalidRequest {
                 code: 1004,
                 message: format!("Chat not found: {guid}"),
+            },
+            Self::AttachmentNotFound { guid } => FcpError::InvalidRequest {
+                code: 1007,
+                message: format!("Attachment not found: {guid}"),
             },
             Self::Config(msg) => FcpError::InvalidRequest {
                 code: 1001,
@@ -177,6 +186,16 @@ impl BlueBubblesError {
             }
         }
     }
+
+    /// Normalize reqwest transport failures into connector-specific failures.
+    #[must_use]
+    pub fn from_transport_error(error: reqwest::Error) -> Self {
+        if error.is_connect() || error.is_timeout() {
+            Self::ServerUnreachable
+        } else {
+            Self::Http(error)
+        }
+    }
 }
 
 impl ConnectorErrorMapping for BlueBubblesError {
@@ -202,6 +221,10 @@ impl ConnectorErrorMapping for BlueBubblesError {
 }
 
 pub type BlueBubblesResult<T> = Result<T, BlueBubblesError>;
+
+const fn is_retryable_status(status_code: u16) -> bool {
+    matches!(status_code, 408 | 425) || status_code >= 500
+}
 
 #[cfg(test)]
 mod tests {
@@ -242,10 +265,19 @@ mod tests {
     }
 
     #[test]
-    fn api_error_not_retryable() {
+    fn api_error_5xx_is_retryable() {
         let err = BlueBubblesError::Api {
             status_code: 500,
             message: "internal error".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_error_4xx_not_retryable() {
+        let err = BlueBubblesError::Api {
+            status_code: 422,
+            message: "unprocessable".into(),
         };
         assert!(!err.is_retryable());
     }
@@ -285,6 +317,14 @@ mod tests {
     }
 
     #[test]
+    fn attachment_not_found_not_retryable() {
+        let err = BlueBubblesError::AttachmentNotFound {
+            guid: "attachment-123".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
     fn config_not_retryable() {
         let err = BlueBubblesError::Config("missing password".into());
         assert!(!err.is_retryable());
@@ -314,6 +354,15 @@ mod tests {
         };
         let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
         assert!(matches!(fcp_err, FcpError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn attachment_not_found_maps_to_fcp() {
+        let err = BlueBubblesError::AttachmentNotFound {
+            guid: "attachment-123".into(),
+        };
+        let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
+        assert!(matches!(fcp_err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]

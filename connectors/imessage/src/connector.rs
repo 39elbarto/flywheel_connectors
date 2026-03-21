@@ -11,7 +11,7 @@ use fcp_core::{
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -63,12 +63,35 @@ impl DoctorResult {
 
 /// `BlueBubbles` `iMessage` connector state.
 #[derive(Debug)]
+struct BlueBubblesState {
+    config: BlueBubblesConfig,
+    client: BlueBubblesClient,
+    runtime: ConnectorRuntime,
+}
+
+impl BlueBubblesState {
+    fn from_config(config: BlueBubblesConfig) -> FcpResult<Self> {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default()
+                .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
+        );
+        let client =
+            BlueBubblesClient::from_config(&config).map_err(|error| FcpError::Internal {
+                message: format!("Failed to create BlueBubbles client: {error}"),
+            })?;
+
+        Ok(Self {
+            config,
+            client,
+            runtime,
+        })
+    }
+}
+
+#[derive(Debug)]
 pub struct BlueBubblesConnector {
     base: BaseConnector,
-    config: Option<BlueBubblesConfig>,
-    client: Option<BlueBubblesClient>,
-    runtime: Option<ConnectorRuntime>,
-    retry_config: HttpRetryConfig,
+    state: Option<BlueBubblesState>,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
 }
@@ -79,10 +102,7 @@ impl BlueBubblesConnector {
     pub fn new() -> Self {
         Self {
             base: BaseConnector::new(ConnectorId::from_static("fcp.imessage")),
-            config: None,
-            client: None,
-            runtime: None,
-            retry_config: HttpRetryConfig::default(),
+            state: None,
             started_at: Instant::now(),
             verifier: None,
         }
@@ -98,7 +118,7 @@ impl BlueBubblesConnector {
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
 
-        let configured = self.config.is_some();
+        let configured = self.state.is_some();
         checks.push(DoctorCheck {
             name: "configuration".into(),
             passed: configured,
@@ -110,7 +130,7 @@ impl BlueBubblesConnector {
             critical: true,
         });
 
-        let client_ok = self.client.is_some();
+        let client_ok = self.state.is_some();
         checks.push(DoctorCheck {
             name: "client_initialized".into(),
             passed: client_ok,
@@ -122,7 +142,7 @@ impl BlueBubblesConnector {
             critical: true,
         });
 
-        let runtime_ok = self.runtime.is_some();
+        let runtime_ok = self.state.is_some();
         checks.push(DoctorCheck {
             name: "runtime".into(),
             passed: runtime_ok,
@@ -134,7 +154,8 @@ impl BlueBubblesConnector {
             critical: true,
         });
 
-        if let Some(config) = &self.config {
+        if let Some(state) = &self.state {
+            let config = &state.config;
             let scheme = if config.server_url.starts_with("https://") {
                 "https"
             } else {
@@ -147,17 +168,7 @@ impl BlueBubblesConnector {
                 critical: false,
             });
 
-            let host_part = config
-                .server_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
+            let host_part = config.server_host().unwrap_or_default();
             let host_ok = host_part == "localhost" || host_part == "127.0.0.1";
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
@@ -587,26 +598,8 @@ impl FcpConnector for BlueBubblesConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
-        let config: BlueBubblesConfig =
-            serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
-                code: 1001,
-                message: format!("Invalid BlueBubbles config: {e}"),
-            })?;
-
-        self.retry_config = config.retry.clone();
-        self.runtime = Some(ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
-        ));
-
-        let client =
-            BlueBubblesClient::new(&config.server_url, &config.password, config.retry.clone())
-                .map_err(|e| FcpError::Internal {
-                    message: format!("Failed to create BlueBubbles client: {e}"),
-                })?;
-
-        self.client = Some(client);
-        self.config = Some(config);
+        let config = BlueBubblesConfig::from_value(config)?;
+        self.state = Some(BlueBubblesState::from_config(config)?);
         self.base.set_configured(true);
         Ok(())
     }
@@ -646,7 +639,7 @@ impl FcpConnector for BlueBubblesConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
+        let mut snapshot = if self.state.is_some() {
             HealthSnapshot::ready()
         } else {
             HealthSnapshot::degraded("not configured")
@@ -657,14 +650,14 @@ impl FcpConnector for BlueBubblesConnector {
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(client) = &self.client else {
+        let Some(state) = &self.state else {
             return Ok(SelfCheckReport::degraded(
                 "not_configured",
                 "Connector is not configured",
             ));
         };
 
-        match client.health_check().await {
+        match state.client.health_check().await {
             Ok(()) => Ok(SelfCheckReport::ok()),
             Err(err) => {
                 if err.is_retryable() {
@@ -691,8 +684,8 @@ impl FcpConnector for BlueBubblesConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
-        if let Some(runtime) = &self.runtime {
-            runtime.shutdown();
+        if let Some(state) = &self.state {
+            state.runtime.shutdown();
         }
         Ok(())
     }
@@ -753,8 +746,9 @@ impl BlueBubblesConnector {
             return Err(FcpError::NotConfigured);
         }
 
-        let runtime = self.runtime.as_ref().ok_or(FcpError::NotConfigured)?;
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
+        let runtime = &state.runtime;
+        let client = &state.client;
 
         let output = match operation {
             OP_SEND_MESSAGE => {
@@ -1084,9 +1078,7 @@ mod tests {
         let mut connector = BlueBubblesConnector::new();
         let result = connector.configure(test_config()).await;
         assert!(result.is_ok());
-        assert!(connector.config.is_some());
-        assert!(connector.client.is_some());
-        assert!(connector.runtime.is_some());
+        assert!(connector.state.is_some());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1124,6 +1116,34 @@ mod tests {
         connector.configure(test_config()).await.unwrap();
         let report = connector.doctor();
         assert!(report.passed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_zero_request_timeout() {
+        let mut connector = BlueBubblesConnector::new();
+        let result = connector
+            .configure(json!({
+                "password": "test-password-123",
+                "request_timeout_ms": 0
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_reports_remote_server_host() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_url("https://bluebubbles.example.com"))
+            .await
+            .unwrap();
+        let report = connector.doctor();
+        let network_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "network_constraints")
+            .unwrap();
+        assert!(!network_check.passed);
     }
 
     #[fcp_async_core::runtime::test]

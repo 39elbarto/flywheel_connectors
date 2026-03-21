@@ -2,6 +2,8 @@
 //!
 //! Covers the `BlueBubbles` REST API types for `iMessage` bridging.
 
+use fcp_core::FcpError;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -35,6 +37,74 @@ pub struct BlueBubblesConfig {
     pub request_timeout_ms: u64,
 }
 
+impl BlueBubblesConfig {
+    /// Parse and validate connector configuration from FCP configure payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `InvalidRequest` error when required fields are missing or malformed.
+    pub fn from_value(value: serde_json::Value) -> Result<Self, FcpError> {
+        let config: Self =
+            serde_json::from_value(value).map_err(|error| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid BlueBubbles config: {error}"),
+            })?;
+        config.validate()
+    }
+
+    /// Validate and normalize the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `InvalidRequest` error when the config is unusable.
+    pub fn validate(mut self) -> Result<Self, FcpError> {
+        self.server_url = self.server_url.trim().trim_end_matches('/').to_string();
+        self.password = self.password.trim().to_string();
+        self.attachment_dir = self
+            .attachment_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        if self.password.is_empty() {
+            return Err(invalid_config("password must not be empty"));
+        }
+
+        if self.poll_interval_ms == 0 {
+            return Err(invalid_config("poll_interval_ms must be greater than zero"));
+        }
+
+        if self.request_timeout_ms == 0 {
+            return Err(invalid_config(
+                "request_timeout_ms must be greater than zero",
+            ));
+        }
+
+        let parsed_url = Url::parse(&self.server_url).map_err(|error| {
+            invalid_config(format!("server_url must be a valid absolute URL: {error}"))
+        })?;
+
+        if !matches!(parsed_url.scheme(), "http" | "https") {
+            return Err(invalid_config("server_url must use http or https"));
+        }
+
+        if parsed_url.host_str().is_none() {
+            return Err(invalid_config("server_url must include a host"));
+        }
+
+        Ok(self)
+    }
+
+    /// Extract the configured host for diagnostics.
+    #[must_use]
+    pub fn server_host(&self) -> Option<String> {
+        Url::parse(&self.server_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+    }
+}
+
 impl std::fmt::Debug for BlueBubblesConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlueBubblesConfig")
@@ -58,6 +128,13 @@ const fn default_poll_interval_ms() -> u64 {
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+fn invalid_config(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1001,
+        message: format!("Invalid BlueBubbles config: {}", message.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +415,58 @@ mod tests {
         assert_eq!(config.server_url, "http://myhost:5555");
         assert_eq!(config.password, "abc");
         assert_eq!(config.poll_interval_ms, 1000);
+    }
+
+    #[test]
+    fn config_from_value_trims_and_normalizes() {
+        let config = BlueBubblesConfig::from_value(serde_json::json!({
+            "server_url": " https://example.com/bridge/ ",
+            "password": " secret ",
+            "poll_interval_ms": 2500,
+            "request_timeout_ms": 45000,
+            "attachment_dir": "   "
+        }))
+        .unwrap();
+
+        assert_eq!(config.server_url, "https://example.com/bridge");
+        assert_eq!(config.password, "secret");
+        assert_eq!(config.server_host().as_deref(), Some("example.com"));
+        assert!(config.attachment_dir.is_none());
+    }
+
+    #[test]
+    fn config_from_value_rejects_blank_password() {
+        let result = BlueBubblesConfig::from_value(serde_json::json!({
+            "password": "   "
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_from_value_rejects_zero_poll_interval() {
+        let result = BlueBubblesConfig::from_value(serde_json::json!({
+            "password": "secret",
+            "poll_interval_ms": 0
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_from_value_rejects_zero_request_timeout() {
+        let result = BlueBubblesConfig::from_value(serde_json::json!({
+            "password": "secret",
+            "request_timeout_ms": 0
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_from_value_rejects_invalid_server_url() {
+        let result = BlueBubblesConfig::from_value(serde_json::json!({
+            "server_url": "not-a-url",
+            "password": "secret"
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

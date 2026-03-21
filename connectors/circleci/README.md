@@ -31,7 +31,7 @@ The current connector code already exposes these operations:
 - `circleci.jobs.get`
 - `circleci.health`
 
-The current manifest does not fully describe that runtime surface yet. It only declares a subset of the operations, so bead `flywheel_connectors-j05nu.4.2.2` must reconcile manifest and runtime before the connector can claim a truthful V3 implementation.
+The current implementation bead is reconciling manifest and runtime so this operation inventory is now the authoritative first-slice surface.
 
 ## First-Slice Scope
 
@@ -51,8 +51,8 @@ The connector is `operational` and effectively stateless aside from configuratio
 
 - CircleCI API v2 supports personal API tokens, not project tokens.
 - The connector authenticates with the `Circle-Token` header and inherits the full read/write authority of that user token.
-- The public config contract is one `api_token`, plus `base_url`, retry policy, and bounded request timeout.
-- `base_url` defaults to `https://circleci.com/api/v2`. For CircleCI Server, the docs explicitly allow replacing `https://circleci.com` with the server hostname.
+- The public config contract for the first slice is one `api_token`, plus retry policy and bounded request timeout.
+- `base_url` exists as an implementation/test override, but the first-slice manifest and readiness contract only treat hosted `https://circleci.com/api/v2` as live-ready. CircleCI Server host overrides remain a follow-on extension.
 - The connector instance is user-scoped, not project-scoped. It can operate on any project the token can access unless a future allowlist is added.
 - Project-targeted operations require an explicit `project_slug`.
 - CircleCI documents `project_slug` as `vcs-slug/org-name/repo-name`; for GitLab and GitHub App projects the `vcs-slug` becomes `circleci`, with org and project IDs instead of human-readable names.
@@ -60,7 +60,8 @@ The connector is `operational` and effectively stateless aside from configuratio
 
 ## Network And Runtime Invariants
 
-- Base API host: `circleci.com` by default, or a configured CircleCI Server host.
+- Base API host for the first production slice: `circleci.com`
+- The current manifest formalizes hosted `circleci.com` only; localhost overrides are test-only and CircleCI Server hosts are not yet encoded as a first-class V3 network contract.
 - Base path: `/api/v2`
 - Port: `443`
 - TLS + SNI required

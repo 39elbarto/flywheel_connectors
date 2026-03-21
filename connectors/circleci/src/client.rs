@@ -194,7 +194,10 @@ impl CircleCiClient {
         for part in project_slug.split('/') {
             sanitize_path_segment(part)?;
         }
-        let url = format!("{}/project/{}/job/{}", self.base_url, project_slug, job_number);
+        let url = format!(
+            "{}/project/{}/job/{}",
+            self.base_url, project_slug, job_number
+        );
         self.get_with_retry::<Job>(runtime, &url, &[]).await
     }
 
@@ -220,9 +223,7 @@ impl CircleCiClient {
             let query = query.clone();
             async move {
                 debug!(attempt, "GET {}", url);
-                let mut req = client
-                    .get(&url)
-                    .header("Circle-Token", &token);
+                let mut req = client.get(&url).header("Circle-Token", &token);
                 for (k, v) in &query {
                     req = req.query(&[(k, v)]);
                 }
@@ -298,12 +299,13 @@ impl CircleCiClient {
             let url = url.to_string();
             let client = self.client.clone();
             let token = self.api_token.clone();
-            let query: Vec<(String, String)> = query.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+            let query: Vec<(String, String)> = query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect();
             async move {
                 debug!(attempt, "GET {}", url);
-                let mut req = client
-                    .get(&url)
-                    .header("Circle-Token", &token);
+                let mut req = client.get(&url).header("Circle-Token", &token);
                 for (k, v) in &query {
                     req = req.query(&[(k.as_str(), v.as_str())]);
                 }
@@ -377,9 +379,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: Error::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -427,9 +427,7 @@ async fn handle_response_as_list<T: serde::de::DeserializeOwned>(
             .map(Duration::from_secs);
         return AttemptOutcome::Retryable {
             error: Error::RateLimited {
-                retry_after_ms: retry_after
-                    .unwrap_or(Duration::from_secs(30))
-                    .as_millis() as u64,
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
             },
             retry_after,
         };
@@ -506,14 +504,13 @@ mod tests {
 
     #[test]
     fn secretless_detection() {
-        let client =
-            CircleCiClient::new(
-                "https://circleci.com/api/v2",
-                "",
-                HttpRetryConfig::default(),
-                30_000,
-            )
-            .unwrap();
+        let client = CircleCiClient::new(
+            "https://circleci.com/api/v2",
+            "",
+            HttpRetryConfig::default(),
+            30_000,
+        )
+        .unwrap();
         assert!(client.is_secretless());
     }
 
@@ -616,7 +613,12 @@ mod tests {
         )
         .unwrap();
         let err = client.health_check().await.unwrap_err();
-        assert!(matches!(err, Error::RateLimited { retry_after_ms: 60000 }));
+        assert!(matches!(
+            err,
+            Error::RateLimited {
+                retry_after_ms: 60000
+            }
+        ));
     }
 
     #[fcp_async_core::runtime::test]

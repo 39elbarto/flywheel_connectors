@@ -242,29 +242,20 @@ impl CircleCiConnector {
         });
 
         if let Some(config) = &self.config {
-            let allowed_hosts = ["circleci.com"];
-            let host_part = config
-                .base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
+            let (host_ok, host_message) = base_url_manifest_alignment(&config.base_url);
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
                 passed: host_ok,
-                message: Some(if host_ok {
-                    "Base URL matches allowed host (circleci.com)".into()
-                } else {
-                    format!("Base URL {} does not match allowed hosts", config.base_url)
-                }),
+                message: Some(host_message),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "request_timeout_ms".into(),
+                passed: config.request_timeout_ms > 0,
+                message: Some(format!(
+                    "HTTP client timeout is configured to {} ms",
+                    config.request_timeout_ms
+                )),
                 critical: true,
             });
 
@@ -273,7 +264,7 @@ impl CircleCiConnector {
                 name: "credential_mode".into(),
                 passed: !secretless,
                 message: Some(if secretless {
-                    "Credential injection required via egress proxy".into()
+                    "Credential injection required via egress proxy before live health verification can pass".into()
                 } else {
                     "API token configured".into()
                 }),
@@ -657,10 +648,12 @@ impl FcpConnector for CircleCiConnector {
                 code: 1001,
                 message: format!("Invalid CircleCI config: {e}"),
             })?;
-        let config = config.validate().map_err(|message| FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("Invalid CircleCI config: {message}"),
-        })?;
+        let config = config
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid CircleCI config: {message}"),
+            })?;
 
         self.runtime = Some(ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
@@ -719,8 +712,10 @@ impl FcpConnector for CircleCiConnector {
 
     async fn health(&self) -> HealthSnapshot {
         let mut snapshot = if let Some(config) = self.config.as_ref() {
-            let credential_injection_required =
-                self.client.as_ref().is_some_and(|client| client.is_secretless());
+            let credential_injection_required = self
+                .client
+                .as_ref()
+                .is_some_and(|client| client.is_secretless());
             let (manifest_network_policy_aligned, manifest_network_policy_message) =
                 base_url_manifest_alignment(&config.base_url);
 
@@ -734,7 +729,7 @@ impl FcpConnector for CircleCiConnector {
             snapshot.details = Some(json!({
                 "configured": true,
                 "client_initialized": self.client.is_some(),
-                "base_url": config.base_url,
+                "base_url": config.base_url.as_str(),
                 "request_timeout_ms": config.request_timeout_ms,
                 "auth_mode": if credential_injection_required { "credential_injection" } else { "api_token" },
                 "credential_injection_required": credential_injection_required,
@@ -1060,14 +1055,12 @@ impl CircleCiConnector {
                         code: 1005,
                         message: "Missing 'project_slug' field".into(),
                     })?;
-                let job_number = req
-                    .input
-                    .get("job_number")
-                    .and_then(|v| v.as_u64())
-                    .ok_or(FcpError::InvalidRequest {
+                let job_number = req.input.get("job_number").and_then(|v| v.as_u64()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing or invalid 'job_number' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_job(runtime, project_slug, job_number)
                     .await
@@ -1105,6 +1098,8 @@ impl CircleCiConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn all_caps() -> Vec<CapabilityId> {
         vec![
@@ -1196,6 +1191,28 @@ mod tests {
         assert!(matches!(health.status, HealthState::Ready));
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_health_secretless_mode_is_degraded() {
+        let mut connector = CircleCiConnector::new();
+        connector
+            .configure(json!({ "api_token": "" }))
+            .await
+            .unwrap();
+        let health = connector.health().await;
+        assert!(matches!(
+            health.status,
+            HealthState::Degraded { ref reason } if reason == "credential injection required"
+        ));
+        assert_eq!(
+            health
+                .details
+                .as_ref()
+                .and_then(|details| details.get("credential_injection_required"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
     #[test]
     fn test_doctor_before_configure() {
         let connector = CircleCiConnector::new();
@@ -1215,10 +1232,87 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_doctor_custom_host_reports_manifest_policy_failure() {
+        let mut connector = CircleCiConnector::new();
+        connector
+            .configure(json!({
+                "api_token": "tok",
+                "base_url": "https://custom.circleci.example/api/v2"
+            }))
+            .await
+            .unwrap();
+        let report = connector.doctor();
+        let network_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "network_constraints")
+            .unwrap();
+        assert!(!network_check.passed);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_self_check_before_configure() {
         let connector = CircleCiConnector::new();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_secretless_reason_code() {
+        let mut connector = CircleCiConnector::new();
+        connector
+            .configure(json!({ "api_token": "" }))
+            .await
+            .unwrap();
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("credential_injection_required")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_invalid_token_reason_code() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = CircleCiConnector::new();
+        connector
+            .configure(json!({
+                "api_token": "bad",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("invalid_api_token"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_rate_limited_reason_code() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "2"))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = CircleCiConnector::new();
+        connector
+            .configure(json!({
+                "api_token": "tok",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(report.reason_code.as_deref(), Some("circleci_rate_limited"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1331,7 +1425,8 @@ mod tests {
             .unwrap();
         assert_eq!(trigger.safety_tier, SafetyTier::Risky);
         assert_eq!(trigger.risk_level, RiskLevel::High);
-        assert_eq!(trigger.idempotency, IdempotencyClass::Strict);
+        assert_eq!(trigger.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(trigger.requires_approval, Some(ApprovalMode::Policy));
     }
 
     #[test]
@@ -1355,6 +1450,17 @@ mod tests {
             .unwrap();
         assert_eq!(cancel.safety_tier, SafetyTier::Risky);
         assert_eq!(cancel.risk_level, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_workflows_rerun_requires_policy_approval() {
+        let ops = operations_info();
+        let rerun = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_WORKFLOWS_RERUN)
+            .unwrap();
+        assert_eq!(rerun.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(rerun.requires_approval, Some(ApprovalMode::Policy));
     }
 
     #[test]
@@ -1393,6 +1499,18 @@ mod tests {
         });
         let result = connector.configure(config).await;
         assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_zero_timeout() {
+        let mut connector = CircleCiConnector::new();
+        let result = connector
+            .configure(json!({
+                "api_token": "tok",
+                "request_timeout_ms": 0
+            }))
+            .await;
+        assert!(result.is_err());
     }
 
     #[fcp_async_core::runtime::test]

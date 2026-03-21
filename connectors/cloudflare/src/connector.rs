@@ -90,14 +90,30 @@ impl CloudflareConfig {
         if self.base_url.is_empty() {
             return Err("base_url cannot be empty".into());
         }
+        match &self.auth {
+            CloudflareAuth::ApiKey { api_key, email }
+                if !api_key.trim().is_empty() && email.trim().is_empty() =>
+            {
+                return Err(
+                    "email is required when using api_key mode with configured key material".into(),
+                );
+            }
+            _ => {}
+        }
         Ok(())
     }
 
     fn from_value(val: serde_json::Value) -> FcpResult<Self> {
-        let config: Self = serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("Invalid configuration: {e}"),
-        })?;
+        let mut config: Self =
+            serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+        config.base_url = config.base_url.trim().to_string();
+        config.account_id = config.account_id.trim().to_string();
+        if let CloudflareAuth::ApiKey { email, .. } = &mut config.auth {
+            *email = email.trim().to_string();
+        }
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
             message: e,
@@ -467,6 +483,133 @@ impl Default for CloudflareConnector {
     }
 }
 
+fn zone_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id", "name", "status"],
+        "properties": {
+            "id": { "type": "string", "description": "Cloudflare zone identifier." },
+            "name": { "type": "string", "description": "DNS zone name, such as example.com." },
+            "status": { "type": "string" },
+            "type": { "type": ["string", "null"] },
+            "paused": { "type": ["boolean", "null"] },
+            "development_mode": { "type": ["integer", "null"] },
+            "plan": {
+                "type": ["object", "null"],
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }
+        }
+    })
+}
+
+fn dns_record_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id", "type", "name", "content"],
+        "properties": {
+            "id": { "type": "string" },
+            "type": { "type": "string" },
+            "name": { "type": "string" },
+            "content": { "type": "string" },
+            "proxied": { "type": ["boolean", "null"] },
+            "ttl": { "type": ["integer", "null"] },
+            "priority": { "type": ["integer", "null"] },
+            "comment": { "type": ["string", "null"] },
+            "created_on": { "type": ["string", "null"] },
+            "modified_on": { "type": ["string", "null"] }
+        }
+    })
+}
+
+fn worker_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string" },
+            "default_environment": {
+                "type": ["object", "null"],
+                "properties": {
+                    "environment": { "type": ["string", "null"] },
+                    "created_on": { "type": ["string", "null"] },
+                    "modified_on": { "type": ["string", "null"] }
+                }
+            },
+            "created_on": { "type": ["string", "null"] },
+            "modified_on": { "type": ["string", "null"] },
+            "etag": { "type": ["string", "null"] }
+        }
+    })
+}
+
+fn worker_script_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string" },
+            "etag": { "type": ["string", "null"] },
+            "size": { "type": ["integer", "null"] },
+            "modified_on": { "type": ["string", "null"] }
+        }
+    })
+}
+
+fn pages_deployment_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string" },
+            "url": { "type": ["string", "null"] },
+            "environment": { "type": ["string", "null"] },
+            "created_on": { "type": ["string", "null"] },
+            "project_name": { "type": ["string", "null"] }
+        }
+    })
+}
+
+fn pages_project_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "subdomain": { "type": ["string", "null"] },
+            "created_on": { "type": ["string", "null"] },
+            "production_branch": { "type": ["string", "null"] },
+            "latest_deployment": {
+                "type": ["object", "null"],
+                "properties": pages_deployment_schema()["properties"].clone()
+            }
+        }
+    })
+}
+
+fn generic_delete_result_schema(resource: &str) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": format!(
+            "Cloudflare delete response for {resource}. The API commonly returns an id/deleted pair but may include extra fields."
+        ),
+        "properties": {
+            "id": { "type": ["string", "null"] },
+            "deleted": { "type": ["boolean", "null"] }
+        }
+    })
+}
+
+fn generic_mutation_result_schema(summary: &str) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": summary
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn operations_info() -> Vec<OperationInfo> {
     let hint = |when: &str,
@@ -485,9 +628,12 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_ZONES_LIST),
             summary: "List all zones".into(),
-            description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            description: Some(
+                "Enumerate Cloudflare zones visible to the configured identity so later DNS operations can use stable zone IDs."
+                    .into(),
+            ),
+            input_schema: json!({"type":"object","properties":{}}),
+            output_schema: json!({"type":"array","items": zone_schema()}),
             capability: CapabilityId::from_static(CAP_ZONES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -499,9 +645,20 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Verify API token".into(),
-            description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Verify that the configured Cloudflare credentials are active and return a compact readiness payload."
+                    .into(),
+            ),
+            input_schema: json!({"type":"object","properties":{}}),
+            output_schema: json!({
+                "type":"object",
+                "required":["status","token_id","healthy"],
+                "properties":{
+                    "status":{"type":"string"},
+                    "token_id":{"type":"string"},
+                    "healthy":{"type":"boolean"}
+                }
+            }),
             capability: CapabilityId::from_static(CAP_ZONES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -513,9 +670,18 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_DNS_LIST),
             summary: "List DNS records for a zone".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["zone_id"]}),
-            output_schema: json!({"type":"array"}),
+            description: Some(
+                "List DNS records in a specific zone. Use this before mutation operations to confirm record IDs and the current record shape."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["zone_id"],
+                "properties":{
+                    "zone_id":{"type":"string","description":"Cloudflare zone identifier returned by cloudflare.zones.list."}
+                }
+            }),
+            output_schema: json!({"type":"array","items": dns_record_schema()}),
             capability: CapabilityId::from_static(CAP_DNS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -532,9 +698,25 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_DNS_CREATE),
             summary: "Create DNS record".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["zone_id","type","name","content"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Create a DNS record inside a zone and return the created Cloudflare DNS record."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["zone_id","type","name","content"],
+                "properties":{
+                    "zone_id":{"type":"string"},
+                    "type":{"type":"string"},
+                    "name":{"type":"string"},
+                    "content":{"type":"string"},
+                    "proxied":{"type":"boolean"},
+                    "ttl":{"type":"integer"},
+                    "priority":{"type":"integer"},
+                    "comment":{"type":"string"}
+                }
+            }),
+            output_schema: dns_record_schema(),
             capability: CapabilityId::from_static(CAP_DNS_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -551,9 +733,25 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_DNS_UPDATE),
             summary: "Update DNS record".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["zone_id","record_id","type","name","content"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Replace a DNS record definition in Cloudflare and return the updated record payload."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["zone_id","record_id","type","name","content"],
+                "properties":{
+                    "zone_id":{"type":"string"},
+                    "record_id":{"type":"string"},
+                    "type":{"type":"string"},
+                    "name":{"type":"string"},
+                    "content":{"type":"string"},
+                    "proxied":{"type":"boolean"},
+                    "ttl":{"type":"integer"},
+                    "comment":{"type":"string"}
+                }
+            }),
+            output_schema: dns_record_schema(),
             capability: CapabilityId::from_static(CAP_DNS_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -570,9 +768,19 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_DNS_DELETE),
             summary: "Delete DNS record".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["zone_id","record_id"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Delete a DNS record from a zone. This is destructive and should only be used after confirming the exact record ID."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["zone_id","record_id"],
+                "properties":{
+                    "zone_id":{"type":"string"},
+                    "record_id":{"type":"string"}
+                }
+            }),
+            output_schema: generic_delete_result_schema("DNS record"),
             capability: CapabilityId::from_static(CAP_DNS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
@@ -589,9 +797,12 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_WORKERS_LIST),
             summary: "List Workers scripts".into(),
-            description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            description: Some(
+                "List Workers scripts in the configured Cloudflare account."
+                    .into(),
+            ),
+            input_schema: json!({"type":"object","properties":{}}),
+            output_schema: json!({"type":"array","items": worker_schema()}),
             capability: CapabilityId::from_static(CAP_WORKERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -603,9 +814,18 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_WORKERS_GET),
             summary: "Get Worker details".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["script_name"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Fetch metadata for a specific Workers script by script name."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["script_name"],
+                "properties":{
+                    "script_name":{"type":"string"}
+                }
+            }),
+            output_schema: worker_script_schema(),
             capability: CapabilityId::from_static(CAP_WORKERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -622,9 +842,19 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_WORKERS_DEPLOY),
             summary: "Deploy Workers script".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["script_name","script_content"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Create or update a Workers script from JavaScript source and return the deployed script metadata."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["script_name","script_content"],
+                "properties":{
+                    "script_name":{"type":"string"},
+                    "script_content":{"type":"string"}
+                }
+            }),
+            output_schema: worker_script_schema(),
             capability: CapabilityId::from_static(CAP_WORKERS_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -641,9 +871,18 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_WORKERS_DELETE),
             summary: "Delete Workers script".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["script_name"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Delete a Workers script from the configured account. This is destructive and may affect live traffic."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["script_name"],
+                "properties":{
+                    "script_name":{"type":"string"}
+                }
+            }),
+            output_schema: generic_delete_result_schema("Workers script"),
             capability: CapabilityId::from_static(CAP_WORKERS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
@@ -660,9 +899,12 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_PAGES_LIST),
             summary: "List Pages projects".into(),
-            description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            description: Some(
+                "Enumerate Cloudflare Pages projects owned by the configured account."
+                    .into(),
+            ),
+            input_schema: json!({"type":"object","properties":{}}),
+            output_schema: json!({"type":"array","items": pages_project_schema()}),
             capability: CapabilityId::from_static(CAP_PAGES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -674,9 +916,19 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_PAGES_DEPLOY),
             summary: "Trigger Pages deployment".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["project_name","branch"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Trigger a Pages deployment from a specific branch and return the created deployment metadata."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["project_name","branch"],
+                "properties":{
+                    "project_name":{"type":"string"},
+                    "branch":{"type":"string"}
+                }
+            }),
+            output_schema: pages_deployment_schema(),
             capability: CapabilityId::from_static(CAP_PAGES_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -693,9 +945,25 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_KV_GET),
             summary: "Read KV value".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["namespace_id","key"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Read a single Workers KV value from the configured account and namespace."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["namespace_id","key"],
+                "properties":{
+                    "namespace_id":{"type":"string"},
+                    "key":{"type":"string"}
+                }
+            }),
+            output_schema: json!({
+                "type":"object",
+                "required":["value"],
+                "properties":{
+                    "value":{"type":"string"}
+                }
+            }),
             capability: CapabilityId::from_static(CAP_KV_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -712,9 +980,22 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_KV_PUT),
             summary: "Write KV value".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["namespace_id","key","value"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Write a Workers KV value. Cloudflare may return a minimal success object rather than a full typed resource."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["namespace_id","key","value"],
+                "properties":{
+                    "namespace_id":{"type":"string"},
+                    "key":{"type":"string"},
+                    "value":{"type":"string"}
+                }
+            }),
+            output_schema: generic_mutation_result_schema(
+                "Cloudflare KV write response. The service may return a minimal object or an envelope-derived object depending on the endpoint behavior.",
+            ),
             capability: CapabilityId::from_static(CAP_KV_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -731,9 +1012,21 @@ fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_KV_DELETE),
             summary: "Delete KV key".into(),
-            description: None,
-            input_schema: json!({"type":"object","required":["namespace_id","key"]}),
-            output_schema: json!({"type":"object"}),
+            description: Some(
+                "Delete a Workers KV entry. This is destructive and should be used only after confirming the namespace and key."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type":"object",
+                "required":["namespace_id","key"],
+                "properties":{
+                    "namespace_id":{"type":"string"},
+                    "key":{"type":"string"}
+                }
+            }),
+            output_schema: generic_mutation_result_schema(
+                "Cloudflare KV delete response. The service may return a minimal object or an envelope-derived object depending on the endpoint behavior.",
+            ),
             capability: CapabilityId::from_static(CAP_KV_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
@@ -1290,6 +1583,59 @@ mod tests {
         );
     }
     #[test]
+    fn configure_whitespace_account_rejected() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = CloudflareConnector::new();
+                c.configure(json!({"mode":"api_token","api_token":"t","account_id":"   "}))
+                    .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+    #[test]
+    fn configure_trims_account_id_base_url_and_email() {
+        let configured = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = CloudflareConnector::new();
+            c.configure(json!({
+                "mode":"api_key",
+                "api_key":"",
+                "email":" ops@example.com ",
+                "account_id":" account-123 ",
+                "base_url":" https://api.cloudflare.com/client/v4 "
+            }))
+            .await
+            .map(|_| c)
+        })
+        .unwrap()
+        .unwrap();
+        let config = configured.config.as_ref().unwrap();
+        assert_eq!(config.account_id, "account-123");
+        assert_eq!(config.base_url, "https://api.cloudflare.com/client/v4");
+        match &config.auth {
+            CloudflareAuth::ApiKey { email, .. } => assert_eq!(email, "ops@example.com"),
+            CloudflareAuth::ApiToken { .. } => panic!("expected api_key auth"),
+        }
+    }
+    #[test]
+    fn configure_api_key_requires_email_when_key_present() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = CloudflareConnector::new();
+                c.configure(json!({
+                    "mode":"api_key",
+                    "api_key":"k",
+                    "email":"   ",
+                    "account_id":"a"
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+    #[test]
     fn configure_bad() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
@@ -1319,6 +1665,41 @@ mod tests {
     #[test]
     fn introspect_ops() {
         assert_eq!(CloudflareConnector::new().introspect().operations.len(), 15);
+    }
+    #[test]
+    fn introspect_exposes_typed_schemas_for_key_operations() {
+        let introspection = CloudflareConnector::new().introspect();
+        let zones = introspection
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_ZONES_LIST)
+            .unwrap();
+        assert_eq!(
+            zones.output_schema["items"]["required"],
+            json!(["id", "name", "status"])
+        );
+
+        let health = introspection
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_HEALTH)
+            .unwrap();
+        assert_eq!(
+            health.output_schema["properties"]["healthy"]["type"],
+            "boolean"
+        );
+        assert!(health.description.is_some());
+
+        let kv_get = introspection
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_KV_GET)
+            .unwrap();
+        assert_eq!(kv_get.output_schema["required"], json!(["value"]));
+        assert_eq!(
+            kv_get.output_schema["properties"]["value"]["type"],
+            "string"
+        );
     }
     #[test]
     fn ops_all_have_hints() {

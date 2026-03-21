@@ -1,300 +1,1140 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:9c27229d93e604f61542819d0a7e5ddac9609d79f2347184f08b3292e80dd3e5"
 
 [connector]
 id = "fcp.cloudflare"
-name = "Cloudflare"
+name = "Cloudflare Connector"
 version = "0.1.0"
-description = "Cloudflare connector for Workers, Pages, DNS, KV, and Zones management"
-archetypes = ["operational"]
-homepage = "https://developers.cloudflare.com/api"
+description = "FCP connector for Cloudflare Zones, DNS, Workers, Pages, and Workers KV operations"
+archetypes = [
+    "operational",
+    "storage",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; configuration and HTTP runtime live only inside the current connector instance."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work", "z:private"]
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = [
+    "z:public",
+    "z:community",
+]
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "system.privileged",
+]
 
-[provides.operations.zones_list]
-summary = "List Cloudflare zones"
-capability = "cloudflare.zones.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
+[provides.operations."cloudflare.dns.create_record"]
+description = "Create a DNS record inside a Cloudflare zone and return the created record payload."
+capability = "cloudflare.dns.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
 
-[provides.operations.zones_list.network_constraints]
+[provides.operations."cloudflare.dns.create_record".input_schema]
+required = [
+    "zone_id",
+    "type",
+    "name",
+    "content",
+]
+type = "object"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.comment]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.content]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.name]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.priority]
+type = "integer"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.proxied]
+type = "boolean"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.ttl]
+type = "integer"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.type]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".input_schema.properties.zone_id]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".output_schema]
+required = [
+    "id",
+    "type",
+    "name",
+    "content",
+]
+type = "object"
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.comment]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.content]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.name]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.priority]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.proxied]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.ttl]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.create_record".output_schema.properties.type]
+type = "string"
+
+[provides.operations."cloudflare.dns.create_record".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
-[provides.operations.zones_list.ai_hints]
-when_to_use = "When you need to list all domains managed by Cloudflare"
+[provides.operations."cloudflare.dns.create_record".ai_hints]
+when_to_use = "Create a new DNS record in a Cloudflare zone."
+common_mistakes = [
+    "Creating a duplicate record without listing the current records first.",
+    "Forgetting MX priority when creating MX records.",
+]
+examples = []
+related = ["cloudflare.dns.list_records"]
 
-[provides.operations.health]
-summary = "Check API token health"
-capability = "cloudflare.zones.read"
-risk = "low"
-safety_tier = "safe"
+[provides.operations."cloudflare.dns.delete_record"]
+description = "Delete a DNS record from a zone. This is destructive and should only be used after confirming the exact record_id."
+capability = "cloudflare.dns.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.health.network_constraints]
+[provides.operations."cloudflare.dns.delete_record".input_schema]
+required = [
+    "zone_id",
+    "record_id",
+]
+type = "object"
+
+[provides.operations."cloudflare.dns.delete_record".input_schema.properties.record_id]
+type = "string"
+
+[provides.operations."cloudflare.dns.delete_record".input_schema.properties.zone_id]
+type = "string"
+
+[provides.operations."cloudflare.dns.delete_record".output_schema]
+type = "object"
+
+[provides.operations."cloudflare.dns.delete_record".output_schema.properties.deleted]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.delete_record".output_schema.properties.id]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.delete_record".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
 
-[provides.operations.health.ai_hints]
-when_to_use = "When you need to verify Cloudflare API credentials"
+[provides.operations."cloudflare.dns.delete_record".ai_hints]
+when_to_use = "Delete an exact DNS record after separately verifying the zone and record identifiers."
+common_mistakes = [
+    "Deleting by hostname without first resolving the Cloudflare record_id.",
+    "Using this against a production zone without operator approval.",
+]
+examples = []
+related = ["cloudflare.dns.list_records"]
 
-[provides.operations.dns_list_records]
-summary = "List DNS records for a zone"
+[provides.operations."cloudflare.dns.list_records"]
+description = "List DNS records in a specific zone so agents can inspect current records and capture stable record IDs before mutations."
 capability = "cloudflare.dns.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.dns_list_records.network_constraints]
+[provides.operations."cloudflare.dns.list_records".input_schema]
+required = ["zone_id"]
+type = "object"
+
+[provides.operations."cloudflare.dns.list_records".input_schema.properties.zone_id]
+description = "Cloudflare zone identifier returned by cloudflare.zones.list."
+type = "string"
+
+[provides.operations."cloudflare.dns.list_records".output_schema]
+type = "array"
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items]
+required = [
+    "id",
+    "type",
+    "name",
+    "content",
+]
+type = "object"
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.comment]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.content]
+type = "string"
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.created_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.modified_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.name]
+type = "string"
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.priority]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.proxied]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.ttl]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.list_records".output_schema.items.properties.type]
+type = "string"
+
+[provides.operations."cloudflare.dns.list_records".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 16777216
 
-[provides.operations.dns_list_records.ai_hints]
-when_to_use = "When you need to see DNS records for a domain"
+[provides.operations."cloudflare.dns.list_records".ai_hints]
+when_to_use = "Inspect DNS records in a zone before creating, updating, or deleting a record."
+common_mistakes = [
+    "Using a domain name instead of the Cloudflare zone_id.",
+    "Skipping this read before a destructive DNS delete.",
+]
+examples = []
+related = [
+    "cloudflare.zones.list",
+    "cloudflare.dns.create_record",
+    "cloudflare.dns.update_record",
+    "cloudflare.dns.delete_record",
+]
 
-[provides.operations.dns_create_record]
-summary = "Create a DNS record"
+[provides.operations."cloudflare.dns.update_record"]
+description = "Replace a DNS record definition in Cloudflare and return the updated record payload."
 capability = "cloudflare.dns.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
-idempotency = "none"
-
-[provides.operations.dns_create_record.network_constraints]
-host_allow = ["api.cloudflare.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.dns_create_record.ai_hints]
-when_to_use = "When you need to add a DNS record to a domain"
-
-[provides.operations.dns_update_record]
-summary = "Update a DNS record"
-capability = "cloudflare.dns.write"
-risk = "medium"
-safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.dns_update_record.network_constraints]
+[provides.operations."cloudflare.dns.update_record".input_schema]
+required = [
+    "zone_id",
+    "record_id",
+    "type",
+    "name",
+    "content",
+]
+type = "object"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.comment]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.content]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.name]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.proxied]
+type = "boolean"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.record_id]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.ttl]
+type = "integer"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.type]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".input_schema.properties.zone_id]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".output_schema]
+required = [
+    "id",
+    "type",
+    "name",
+    "content",
+]
+type = "object"
+
+[provides.operations."cloudflare.dns.update_record".output_schema.properties.comment]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.update_record".output_schema.properties.content]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".output_schema.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".output_schema.properties.name]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".output_schema.properties.proxied]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.update_record".output_schema.properties.ttl]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.dns.update_record".output_schema.properties.type]
+type = "string"
+
+[provides.operations."cloudflare.dns.update_record".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
-[provides.operations.dns_update_record.ai_hints]
-when_to_use = "When you need to modify an existing DNS record"
+[provides.operations."cloudflare.dns.update_record".ai_hints]
+when_to_use = "Update an existing Cloudflare DNS record by record_id."
+common_mistakes = [
+    "Using a stale record_id from an earlier snapshot.",
+    "Treating record updates as safe without checking the current content first.",
+]
+examples = []
+related = ["cloudflare.dns.list_records"]
 
-[provides.operations.dns_delete_record]
-summary = "Delete a DNS record"
-capability = "cloudflare.dns.write"
-risk = "high"
+[provides.operations."cloudflare.health"]
+description = "Verify that the configured Cloudflare credentials are active and return a compact readiness payload."
+capability = "cloudflare.zones.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cloudflare.health".input_schema]
+type = "object"
+
+[provides.operations."cloudflare.health".output_schema]
+required = [
+    "status",
+    "token_id",
+    "healthy",
+]
+type = "object"
+
+[provides.operations."cloudflare.health".output_schema.properties.healthy]
+type = "boolean"
+
+[provides.operations."cloudflare.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."cloudflare.health".output_schema.properties.token_id]
+type = "string"
+
+[provides.operations."cloudflare.health".network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."cloudflare.health".ai_hints]
+when_to_use = "Verify that the current credentials are active before attempting Cloudflare API calls."
+common_mistakes = ["Treating connector configure success as proof that the Cloudflare token is valid."]
+examples = []
+related = ["cloudflare.zones.list"]
+
+[provides.operations."cloudflare.kv.delete"]
+description = "Delete a Workers KV entry. This is destructive and should only be used after confirming the namespace and key."
+capability = "cloudflare.kv.write"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.dns_delete_record.network_constraints]
+[provides.operations."cloudflare.kv.delete".input_schema]
+required = [
+    "namespace_id",
+    "key",
+]
+type = "object"
+
+[provides.operations."cloudflare.kv.delete".input_schema.properties.key]
+type = "string"
+
+[provides.operations."cloudflare.kv.delete".input_schema.properties.namespace_id]
+type = "string"
+
+[provides.operations."cloudflare.kv.delete".output_schema]
+type = "object"
+
+[provides.operations."cloudflare.kv.delete".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
 
-[provides.operations.dns_delete_record.ai_hints]
-when_to_use = "When you need to remove a DNS record — affects live traffic"
+[provides.operations."cloudflare.kv.delete".ai_hints]
+when_to_use = "Delete a Workers KV value after verifying the namespace and key."
+common_mistakes = ["Deleting a shared key without checking which workers depend on it."]
+examples = []
+related = ["cloudflare.kv.get"]
 
-[provides.operations.workers_list]
-summary = "List Workers scripts"
-capability = "cloudflare.workers.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.workers_list.network_constraints]
-host_allow = ["api.cloudflare.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.workers_list.ai_hints]
-when_to_use = "When you need to see deployed Workers scripts"
-
-[provides.operations.workers_get]
-summary = "Get a Workers script"
-capability = "cloudflare.workers.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.workers_get.network_constraints]
-host_allow = ["api.cloudflare.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.workers_get.ai_hints]
-when_to_use = "When you need metadata for a specific Workers script"
-
-[provides.operations.workers_deploy]
-summary = "Deploy a Workers script"
-capability = "cloudflare.workers.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.workers_deploy.network_constraints]
-host_allow = ["api.cloudflare.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.workers_deploy.ai_hints]
-when_to_use = "When you need to deploy code to Cloudflare Workers"
-
-[provides.operations.workers_delete]
-summary = "Delete a Workers script"
-capability = "cloudflare.workers.write"
-risk = "high"
-safety_tier = "dangerous"
-idempotency = "strict"
-
-[provides.operations.workers_delete.network_constraints]
-host_allow = ["api.cloudflare.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.workers_delete.ai_hints]
-when_to_use = "When you need to permanently remove a Workers script"
-
-[provides.operations.pages_list_projects]
-summary = "List Pages projects"
-capability = "cloudflare.pages.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.pages_list_projects.network_constraints]
-host_allow = ["api.cloudflare.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.pages_list_projects.ai_hints]
-when_to_use = "When you need to enumerate Cloudflare Pages projects"
-
-[provides.operations.pages_create_deployment]
-summary = "Create a Pages deployment"
-capability = "cloudflare.pages.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "none"
-
-[provides.operations.pages_create_deployment.network_constraints]
-host_allow = ["api.cloudflare.com"]
-port_allow = [443]
-require_tls = true
-deny_localhost = true
-deny_private_ranges = true
-max_redirects = 0
-
-[provides.operations.pages_create_deployment.ai_hints]
-when_to_use = "When you need to trigger a Cloudflare Pages deployment"
-
-[provides.operations.kv_get]
-summary = "Get a KV value"
+[provides.operations."cloudflare.kv.get"]
+description = "Read a single Workers KV value from the configured account and namespace."
 capability = "cloudflare.kv.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.kv_get.network_constraints]
+[provides.operations."cloudflare.kv.get".input_schema]
+required = [
+    "namespace_id",
+    "key",
+]
+type = "object"
+
+[provides.operations."cloudflare.kv.get".input_schema.properties.key]
+type = "string"
+
+[provides.operations."cloudflare.kv.get".input_schema.properties.namespace_id]
+type = "string"
+
+[provides.operations."cloudflare.kv.get".output_schema]
+required = ["value"]
+type = "object"
+
+[provides.operations."cloudflare.kv.get".output_schema.properties.value]
+type = "string"
+
+[provides.operations."cloudflare.kv.get".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
 
-[provides.operations.kv_get.ai_hints]
-when_to_use = "When you need to read a value from Workers KV"
+[provides.operations."cloudflare.kv.get".ai_hints]
+when_to_use = "Read a specific Workers KV value by namespace and key."
+common_mistakes = ["Treating namespace titles as namespace_id values."]
+examples = []
+related = [
+    "cloudflare.kv.put",
+    "cloudflare.kv.delete",
+]
 
-[provides.operations.kv_put]
-summary = "Write a KV value"
+[provides.operations."cloudflare.kv.put"]
+description = "Write a Workers KV value. Cloudflare may return a minimal success object rather than a strongly typed resource."
 capability = "cloudflare.kv.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.kv_put.network_constraints]
+[provides.operations."cloudflare.kv.put".input_schema]
+required = [
+    "namespace_id",
+    "key",
+    "value",
+]
+type = "object"
+
+[provides.operations."cloudflare.kv.put".input_schema.properties.key]
+type = "string"
+
+[provides.operations."cloudflare.kv.put".input_schema.properties.namespace_id]
+type = "string"
+
+[provides.operations."cloudflare.kv.put".input_schema.properties.value]
+type = "string"
+
+[provides.operations."cloudflare.kv.put".output_schema]
+type = "object"
+
+[provides.operations."cloudflare.kv.put".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
 
-[provides.operations.kv_put.ai_hints]
-when_to_use = "When you need to store a value in Workers KV"
+[provides.operations."cloudflare.kv.put".ai_hints]
+when_to_use = "Write or replace a Workers KV value."
+common_mistakes = [
+    "Assuming Workers KV writes are immediately visible everywhere.",
+    "Using a path-like key that contains traversal sequences blocked by the connector.",
+]
+examples = []
+related = ["cloudflare.kv.get"]
 
-[provides.operations.kv_delete]
-summary = "Delete a KV key"
-capability = "cloudflare.kv.write"
-risk = "high"
+[provides.operations."cloudflare.pages.create_deployment"]
+description = "Trigger a Pages deployment from a specific branch and return the created deployment metadata."
+capability = "cloudflare.pages.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."cloudflare.pages.create_deployment".input_schema]
+required = [
+    "project_name",
+    "branch",
+]
+type = "object"
+
+[provides.operations."cloudflare.pages.create_deployment".input_schema.properties.branch]
+type = "string"
+
+[provides.operations."cloudflare.pages.create_deployment".input_schema.properties.project_name]
+type = "string"
+
+[provides.operations."cloudflare.pages.create_deployment".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."cloudflare.pages.create_deployment".output_schema.properties.created_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.pages.create_deployment".output_schema.properties.environment]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.pages.create_deployment".output_schema.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.pages.create_deployment".output_schema.properties.project_name]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.pages.create_deployment".output_schema.properties.url]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.pages.create_deployment".network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."cloudflare.pages.create_deployment".ai_hints]
+when_to_use = "Trigger a new Cloudflare Pages deployment from a known branch."
+common_mistakes = [
+    "Expecting this call to be idempotent across repeated deploy requests.",
+    "Using a branch name that does not exist in the linked repository.",
+]
+examples = []
+related = ["cloudflare.pages.list_projects"]
+
+[provides.operations."cloudflare.pages.list_projects"]
+description = "Enumerate Cloudflare Pages projects owned by the configured account."
+capability = "cloudflare.pages.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cloudflare.pages.list_projects".input_schema]
+type = "object"
+
+[provides.operations."cloudflare.pages.list_projects".output_schema]
+type = "array"
+
+[provides.operations."cloudflare.pages.list_projects".output_schema.items]
+required = [
+    "id",
+    "name",
+]
+type = "object"
+
+[provides.operations."cloudflare.pages.list_projects".output_schema.items.properties.created_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.pages.list_projects".output_schema.items.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.pages.list_projects".output_schema.items.properties.name]
+type = "string"
+
+[provides.operations."cloudflare.pages.list_projects".output_schema.items.properties.production_branch]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.pages.list_projects".output_schema.items.properties.subdomain]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.pages.list_projects".network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."cloudflare.pages.list_projects".ai_hints]
+when_to_use = "Inspect Cloudflare Pages projects before triggering a deployment."
+common_mistakes = ["Using a Pages subdomain where the API requires a project_name."]
+examples = []
+related = ["cloudflare.pages.create_deployment"]
+
+[provides.operations."cloudflare.workers.delete"]
+description = "Delete a Workers script from the configured account. This is destructive and may affect live traffic."
+capability = "cloudflare.workers.write"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.kv_delete.network_constraints]
+[provides.operations."cloudflare.workers.delete".input_schema]
+required = ["script_name"]
+type = "object"
+
+[provides.operations."cloudflare.workers.delete".input_schema.properties.script_name]
+type = "string"
+
+[provides.operations."cloudflare.workers.delete".output_schema]
+type = "object"
+
+[provides.operations."cloudflare.workers.delete".output_schema.properties.deleted]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.delete".output_schema.properties.id]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.delete".network_constraints]
 host_allow = ["api.cloudflare.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
 
-[provides.operations.kv_delete.ai_hints]
-when_to_use = "When you need to remove a key from Workers KV"
+[provides.operations."cloudflare.workers.delete".ai_hints]
+when_to_use = "Delete an existing Workers script after confirming its script_name and blast radius."
+common_mistakes = ["Deleting a worker that is still receiving production traffic."]
+examples = []
+related = ["cloudflare.workers.list"]
+
+[provides.operations."cloudflare.workers.deploy"]
+description = "Create or update a Workers script from JavaScript source and return the deployed script metadata."
+capability = "cloudflare.workers.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cloudflare.workers.deploy".input_schema]
+required = [
+    "script_name",
+    "script_content",
+]
+type = "object"
+
+[provides.operations."cloudflare.workers.deploy".input_schema.properties.script_content]
+type = "string"
+
+[provides.operations."cloudflare.workers.deploy".input_schema.properties.script_name]
+type = "string"
+
+[provides.operations."cloudflare.workers.deploy".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."cloudflare.workers.deploy".output_schema.properties.etag]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.deploy".output_schema.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.workers.deploy".output_schema.properties.modified_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.deploy".output_schema.properties.size]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.deploy".network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 16777216
+
+[provides.operations."cloudflare.workers.deploy".ai_hints]
+when_to_use = "Create or update a Cloudflare Workers script."
+common_mistakes = [
+    "Deploying unreviewed source directly to a live worker.",
+    "Assuming this is read-only because the endpoint is idempotent.",
+]
+examples = []
+related = [
+    "cloudflare.workers.list",
+    "cloudflare.workers.get",
+]
+
+[provides.operations."cloudflare.workers.get"]
+description = "Fetch metadata for a specific Workers script by script_name."
+capability = "cloudflare.workers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cloudflare.workers.get".input_schema]
+required = ["script_name"]
+type = "object"
+
+[provides.operations."cloudflare.workers.get".input_schema.properties.script_name]
+type = "string"
+
+[provides.operations."cloudflare.workers.get".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."cloudflare.workers.get".output_schema.properties.etag]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.workers.get".output_schema.properties.modified_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.get".output_schema.properties.size]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.get".network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."cloudflare.workers.get".ai_hints]
+when_to_use = "Fetch metadata for one known Workers script."
+common_mistakes = ["Passing a route or URL instead of the Workers script_name."]
+examples = []
+related = ["cloudflare.workers.list"]
+
+[provides.operations."cloudflare.workers.list"]
+description = "List Workers scripts in the configured Cloudflare account."
+capability = "cloudflare.workers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cloudflare.workers.list".input_schema]
+type = "object"
+
+[provides.operations."cloudflare.workers.list".output_schema]
+type = "array"
+
+[provides.operations."cloudflare.workers.list".output_schema.items]
+required = ["id"]
+type = "object"
+
+[provides.operations."cloudflare.workers.list".output_schema.items.properties.created_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.list".output_schema.items.properties.etag]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.list".output_schema.items.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.workers.list".output_schema.items.properties.modified_on]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.workers.list".network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."cloudflare.workers.list".ai_hints]
+when_to_use = "Inspect Workers scripts already deployed in the configured Cloudflare account."
+common_mistakes = ["Assuming a script name exists without listing the account first."]
+examples = []
+related = ["cloudflare.workers.get"]
+
+[provides.operations."cloudflare.zones.list"]
+description = "Enumerate Cloudflare zones visible to the configured identity so follow-on DNS operations can use stable zone IDs."
+capability = "cloudflare.zones.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cloudflare.zones.list".input_schema]
+type = "object"
+
+[provides.operations."cloudflare.zones.list".output_schema]
+type = "array"
+
+[provides.operations."cloudflare.zones.list".output_schema.items]
+required = [
+    "id",
+    "name",
+    "status",
+]
+type = "object"
+
+[provides.operations."cloudflare.zones.list".output_schema.items.properties.development_mode]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."cloudflare.zones.list".output_schema.items.properties.id]
+type = "string"
+
+[provides.operations."cloudflare.zones.list".output_schema.items.properties.name]
+type = "string"
+
+[provides.operations."cloudflare.zones.list".output_schema.items.properties.paused]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."cloudflare.zones.list".output_schema.items.properties.status]
+type = "string"
+
+[provides.operations."cloudflare.zones.list".output_schema.items.properties.type]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."cloudflare.zones.list".network_constraints]
+host_allow = ["api.cloudflare.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 8388608
+
+[provides.operations."cloudflare.zones.list".ai_hints]
+when_to_use = "List the zones accessible to the configured Cloudflare identity before DNS reads or mutations."
+common_mistakes = ["Passing a domain name where a later operation needs a Cloudflare zone_id."]
+examples = []
+related = ["cloudflare.dns.list_records"]
 
 [sandbox]
 profile = "strict"
 memory_mb = 128
 cpu_percent = 25
 wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
 deny_exec = true
 deny_ptrace = true

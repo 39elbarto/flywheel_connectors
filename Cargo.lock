@@ -2258,6 +2258,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-calendly"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-cbor"
 version = "0.1.0"
 dependencies = [
@@ -2325,6 +2347,28 @@ dependencies = [
  "fcp-testkit",
  "hex",
  "percent-encoding",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-coda"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3160,6 +3204,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-hackernews"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-homeassistant"
 version = "0.1.0"
 dependencies = [
@@ -3460,6 +3526,28 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 1.0.6+spec-1.1.0",
  "uuid",
+]
+
+[[package]]
+name = "fcp-mastodon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -4377,6 +4465,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-manifest",
  "fcp-sdk",
  "fcp-testkit",
  "hex",
@@ -4509,6 +4598,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-manifest",
  "fcp-sdk",
  "fcp-testkit",
  "hex",

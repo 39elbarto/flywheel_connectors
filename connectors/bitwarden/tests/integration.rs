@@ -62,6 +62,15 @@ async fn lifecycle_shutdown() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/collections"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": []
+        })))
+        .mount(&server)
+        .await;
+
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "ok");
@@ -70,6 +79,15 @@ async fn lifecycle_self_check() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/collections"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": []
+        })))
+        .mount(&server)
+        .await;
+
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }

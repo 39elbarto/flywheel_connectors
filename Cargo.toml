@@ -148,6 +148,10 @@ members = [
     "connectors/coda",
     "connectors/mastodon",
     "connectors/hackernews",
+    "connectors/obsidian",
+    "connectors/twitch",
+    "connectors/line",
+    "connectors/feishu",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

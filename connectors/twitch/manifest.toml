@@ -1,0 +1,186 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.twitch"
+name = "Twitch"
+version = "0.1.0"
+description = "Twitch Helix API connector for streams, channels, clips, and chat"
+archetype = "operational"
+homepage = "https://dev.twitch.tv/docs/api"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:private"]
+allowed_targets = ["z:private"]
+tailscale_tag = "tag:fcp-private"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.streams_list]
+summary = "List live streams"
+capability = "twitch.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.streams_list.network_constraints]
+host_allow = ["api.twitch.tv", "id.twitch.tv"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.streams_list.ai_hints]
+when_to_use = "When you need to browse currently live streams"
+
+[provides.operations.streams_get]
+summary = "Get a specific stream"
+capability = "twitch.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.streams_get.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.streams_get.ai_hints]
+when_to_use = "When you need to check if a specific user is live"
+
+[provides.operations.users_get]
+summary = "Get user information"
+capability = "twitch.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.users_get.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.users_get.ai_hints]
+when_to_use = "When you need to look up a user profile"
+
+[provides.operations.channels_get]
+summary = "Get channel information"
+capability = "twitch.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.channels_get.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.channels_get.ai_hints]
+when_to_use = "When you need to look up channel details"
+
+[provides.operations.channels_modify]
+summary = "Modify channel information"
+capability = "twitch.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.channels_modify.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.channels_modify.ai_hints]
+when_to_use = "When you need to update a channel's title, game, or language"
+
+[provides.operations.clips_list]
+summary = "List clips"
+capability = "twitch.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.clips_list.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.clips_list.ai_hints]
+when_to_use = "When you need to list clips for a channel"
+
+[provides.operations.clips_create]
+summary = "Create a clip"
+capability = "twitch.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.clips_create.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.clips_create.ai_hints]
+when_to_use = "When you need to create a clip of a live stream"
+
+[provides.operations.chat_send]
+summary = "Send a chat message"
+capability = "twitch.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.chat_send.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.chat_send.ai_hints]
+when_to_use = "When you need to send a message in Twitch chat"
+
+[provides.operations.games_list]
+summary = "List games/categories"
+capability = "twitch.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.games_list.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.games_list.ai_hints]
+when_to_use = "When you need to look up game/category information"
+
+[provides.operations.health]
+summary = "Check Twitch API health"
+capability = "twitch.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["api.twitch.tv"]
+port_allow = [443]
+require_tls = true
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to check if the Twitch API is reachable"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

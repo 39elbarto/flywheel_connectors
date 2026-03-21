@@ -1,0 +1,103 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.line"
+name = "LINE Messaging"
+version = "0.1.0"
+description = "LINE Messaging API connector for push/reply messages, profiles, groups, and rich menus"
+archetype = "operational"
+homepage = "https://developers.line.biz/en/reference/messaging-api/"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:private"]
+allowed_targets = ["z:private"]
+tailscale_tag = "tag:fcp-private"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.push]
+summary = "Push a message to a user"
+capability = "line.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.push.network_constraints]
+host_allow = ["api.line.me"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.reply]
+summary = "Reply to a message"
+capability = "line.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.multicast]
+summary = "Send message to multiple users"
+capability = "line.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.profile_get]
+summary = "Get user profile"
+capability = "line.profile.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.group_profile]
+summary = "Get group chat profile"
+capability = "line.profile.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.group_members]
+summary = "List group members"
+capability = "line.profile.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.rich_menu_list]
+summary = "List rich menus"
+capability = "line.menu.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.rich_menu_create]
+summary = "Create a rich menu"
+capability = "line.menu.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.rich_menu_delete]
+summary = "Delete a rich menu"
+capability = "line.menu.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.health]
+summary = "Health check"
+capability = "line.profile.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"

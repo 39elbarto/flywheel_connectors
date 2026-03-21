@@ -1,0 +1,103 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.feishu"
+name = "Feishu/Lark"
+version = "0.1.0"
+description = "Feishu/Lark API connector for messaging, chats, users, docs, sheets, and calendar"
+archetype = "operational"
+homepage = "https://open.feishu.cn/document/"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:private"]
+allowed_targets = ["z:private"]
+tailscale_tag = "tag:fcp-private"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.messages_send]
+summary = "Send a message"
+capability = "feishu.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_send.network_constraints]
+host_allow = ["open.feishu.cn"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
+[provides.operations.messages_reply]
+summary = "Reply to a message"
+capability = "feishu.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_get]
+summary = "Get a message"
+capability = "feishu.messages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.chats_list]
+summary = "List chats"
+capability = "feishu.chats.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.chats_get]
+summary = "Get chat details"
+capability = "feishu.chats.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.users_get]
+summary = "Get user info"
+capability = "feishu.users.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.docs_get]
+summary = "Get document content"
+capability = "feishu.docs.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.sheets_get]
+summary = "Get spreadsheet data"
+capability = "feishu.docs.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.calendar_events]
+summary = "List calendar events"
+capability = "feishu.calendar.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.health]
+summary = "Health check"
+capability = "feishu.users.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"

@@ -1,0 +1,33 @@
+[package]
+name = "fcp-line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "FCP LINE Messaging API connector"
+
+[[bin]]
+name = "fcp-line"
+path = "src/main.rs"
+
+[lib]
+name = "fcp_line"
+path = "src/lib.rs"
+
+[dependencies]
+fcp-core.workspace = true
+fcp-sdk.workspace = true
+fcp-async-core.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+async-trait.workspace = true
+sha2.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+wiremock = "0.6"

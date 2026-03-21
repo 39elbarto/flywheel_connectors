@@ -1,0 +1,35 @@
+[package]
+name = "fcp-obsidian"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "FCP Obsidian vault connector (local filesystem)"
+
+[[bin]]
+name = "fcp-obsidian"
+path = "src/main.rs"
+
+[lib]
+name = "fcp_obsidian"
+path = "src/lib.rs"
+
+[dependencies]
+fcp-core.workspace = true
+fcp-sdk.workspace = true
+fcp-async-core.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+async-trait.workspace = true
+sha2.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+fcp-crypto.workspace = true
+fcp-testkit.workspace = true
+tempfile = "3.15"

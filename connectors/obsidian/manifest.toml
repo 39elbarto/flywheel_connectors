@@ -1,0 +1,120 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.obsidian"
+name = "Obsidian Vault"
+version = "0.1.0"
+description = "Local filesystem connector for Obsidian markdown vaults"
+archetype = "operational"
+homepage = "https://obsidian.md"
+
+[zones]
+home = "z:local"
+allowed_sources = ["z:local"]
+allowed_targets = ["z:local"]
+tailscale_tag = "tag:fcp-local"
+
+[capabilities]
+required = ["filesystem.read"]
+optional = ["filesystem.write"]
+forbidden = ["network.outbound", "system.exec", "system.privileged"]
+
+[provides.operations.notes_list]
+summary = "List notes in the vault"
+capability = "obsidian.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.notes_list.ai_hints]
+when_to_use = "When you need to browse or list notes in the vault"
+
+[provides.operations.notes_get]
+summary = "Get a note by path"
+capability = "obsidian.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.notes_get.ai_hints]
+when_to_use = "When you need to read a specific note's content"
+
+[provides.operations.notes_create]
+summary = "Create a new note"
+capability = "obsidian.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.notes_create.ai_hints]
+when_to_use = "When you need to create a new note in the vault"
+
+[provides.operations.notes_update]
+summary = "Update an existing note"
+capability = "obsidian.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "strict"
+
+[provides.operations.notes_update.ai_hints]
+when_to_use = "When you need to modify an existing note"
+
+[provides.operations.notes_delete]
+summary = "Delete a note"
+capability = "obsidian.write"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "strict"
+
+[provides.operations.notes_delete.ai_hints]
+when_to_use = "When you need to permanently delete a note"
+
+[provides.operations.search]
+summary = "Search notes by text"
+capability = "obsidian.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.search.ai_hints]
+when_to_use = "When you need to find notes containing specific text"
+
+[provides.operations.tags_list]
+summary = "List all tags in the vault"
+capability = "obsidian.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.tags_list.ai_hints]
+when_to_use = "When you need to see what tags are used in the vault"
+
+[provides.operations.backlinks_get]
+summary = "Get backlinks for a note"
+capability = "obsidian.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "none"
+
+[provides.operations.backlinks_get.ai_hints]
+when_to_use = "When you need to find which notes reference a given note"
+
+[provides.operations.health]
+summary = "Get vault health status"
+capability = "obsidian.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to check if the vault is accessible and healthy"
+
+[sandbox]
+profile = "strict"
+memory_mb = 32
+cpu_percent = 10
+wall_clock_timeout_ms = 10000
+deny_exec = true
+deny_ptrace = true

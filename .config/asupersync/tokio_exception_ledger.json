@@ -14,7 +14,7 @@
       "dependency": "tokio-tungstenite",
       "kind": "dev",
       "owner_bead": "flywheel_connectors-1ud0u.9.1",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "WebSocket transport migration not complete"
     },
     {
@@ -22,7 +22,7 @@
       "dependency": "tokio-tungstenite",
       "kind": "dev",
       "owner_bead": "flywheel_connectors-1ud0u.6.2",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "GraphQL subscription transport migration not complete"
     },
     {
@@ -30,7 +30,7 @@
       "dependency": "tokio",
       "kind": "normal",
       "owner_bead": "flywheel_connectors-1ud0u.4",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "CLI stdio/runtime seam still depends on Tokio pending main.rs and transport cutover"
     },
     {
@@ -38,7 +38,7 @@
       "dependency": "tokio",
       "kind": "normal",
       "owner_bead": "flywheel_connectors-1ud0u.2",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "Substrate facade — last crate to eliminate Tokio"
     },
     {
@@ -46,7 +46,7 @@
       "dependency": "tokio-tungstenite",
       "kind": "dev",
       "owner_bead": "flywheel_connectors-1ud0u.9.2",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "WebSocket transport migration not complete"
     }
   ],
@@ -57,7 +57,7 @@
       "scope": ["crates", "connectors", "tests", "fuzz"],
       "max_count": 95,
       "owner_bead": "flywheel_connectors-1ud0u.4",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "50 in fcp-async-core + 44 in differential_regression.rs parity tests + 1 UnixListener use in fcp-host"
     },
     {
@@ -66,7 +66,7 @@
       "scope": ["crates", "connectors", "tests", "fuzz"],
       "max_count": 0,
       "owner_bead": "flywheel_connectors-1ud0u.7",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "Block new Tokio async tests until shared ASUPERSYNC test harness lands"
     },
     {
@@ -75,7 +75,7 @@
       "scope": ["crates", "connectors", "tests", "fuzz"],
       "max_count": 3,
       "owner_bead": "flywheel_connectors-1ud0u.2",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "Prevent growth of local runtime bootstrap points"
     },
     {
@@ -84,7 +84,7 @@
       "scope": ["crates", "connectors", "tests", "fuzz"],
       "max_count": 6,
       "owner_bead": "flywheel_connectors-1ud0u.2",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "2 in fcp-async-core + 4 in differential_regression.rs (tokio::task::spawn parity tests)"
     },
     {
@@ -93,7 +93,7 @@
       "scope": ["crates", "connectors", "tests", "fuzz"],
       "max_count": 6,
       "owner_bead": "flywheel_connectors-1ud0u.3",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "1 in fcp-async-core + 5 in differential_regression.rs (tokio::select! parity tests)"
     },
     {
@@ -102,7 +102,7 @@
       "scope": ["crates", "connectors", "tests", "fuzz"],
       "max_count": 35,
       "owner_bead": "flywheel_connectors-1ud0u.2",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "25 in fcp-async-core + 10 in differential_regression.rs (tokio::sync channel parity tests)"
     },
     {
@@ -111,7 +111,7 @@
       "scope": ["crates", "connectors", "tests", "fuzz"],
       "max_count": 21,
       "owner_bead": "flywheel_connectors-1ud0u.3",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "21 in differential_regression.rs (intentional raw tokio time parity tests)"
     },
     {
@@ -120,7 +120,7 @@
       "scope": ["Cargo.toml"],
       "max_count": 1,
       "owner_bead": "flywheel_connectors-1ud0u.10.1",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "Hold a single workspace Tokio entry until dependency replacement plan completes"
     },
     {
@@ -129,7 +129,7 @@
       "scope": ["Cargo.toml"],
       "max_count": 1,
       "owner_bead": "flywheel_connectors-1ud0u.10.1",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "Hold a single workspace tokio-stream entry until dependency replacement plan completes"
     },
     {
@@ -138,7 +138,7 @@
       "scope": ["Cargo.toml"],
       "max_count": 1,
       "owner_bead": "flywheel_connectors-1ud0u.10.1",
-      "expires_on": "2026-03-21T00:00:00Z",
+      "expires_on": "2026-04-21T00:00:00Z",
       "reason": "Hold a single workspace tokio-tungstenite entry until dependency replacement plan completes"
     }
   ],
@@ -195,7 +195,7 @@
       {
         "wave": "Phase 10 — Final Cutover",
         "owner_bead": "flywheel_connectors-1ud0u.10",
-        "checkpoint": "2026-03-21T00:00:00Z",
+        "checkpoint": "2026-04-21T00:00:00Z",
         "targets": {
           "workspace_tokio_dependency_entry": {"from": 1, "to": 0, "delta": -1},
           "workspace_tokio_stream_entry": {"from": 1, "to": 0, "delta": -1},

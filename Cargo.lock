@@ -2369,6 +2369,7 @@ dependencies = [
  "fcp-sdk",
  "fcp-testkit",
  "hex",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -2782,6 +2783,26 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-feishu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
@@ -3389,6 +3410,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-line"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-linear"
 version = "0.1.0"
 dependencies = [
@@ -3885,6 +3926,28 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-obsidian"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4911,6 +4974,29 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-twitch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

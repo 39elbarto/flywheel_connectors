@@ -271,6 +271,7 @@ fn validate_connector_state_subpath(suffix: &str) -> Result<(), &'static str> {
 
 fn is_manifest_absolute_path(path: &str) -> bool {
     Path::new(path).is_absolute()
+        || path.starts_with('/')
         || path.starts_with(r"\\")
         || path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
             && matches!(path.as_bytes().get(1), Some(b':'))
@@ -459,7 +460,8 @@ mod tests {
         assert!(
             policy
                 .writable_paths
-                .contains(&PathBuf::from("/var/lib/fcp/connectors/test"))
+                .iter()
+                .any(|p| p.as_path() == Path::new("/var/lib/fcp/connectors/test"))
         );
         assert!(policy.deny_exec);
         assert!(policy.deny_ptrace);
@@ -627,7 +629,8 @@ mod tests {
         assert!(
             policy
                 .writable_paths
-                .contains(&PathBuf::from("/data/state"))
+                .iter()
+                .any(|p| p.as_path() == Path::new("/data/state"))
         );
     }
 
@@ -642,7 +645,7 @@ mod tests {
         let count = policy
             .writable_paths
             .iter()
-            .filter(|p| *p == &PathBuf::from("/data/state"))
+            .filter(|p| p.as_path() == Path::new("/data/state"))
             .count();
         assert_eq!(count, 1);
     }
@@ -941,8 +944,8 @@ mod tests {
     #[test]
     fn test_sandbox_error_io_from() {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no access");
-        let sandbox_err = SandboxError::from(io_err);
-        assert!(sandbox_err.to_string().contains("no access"));
+        let e: SandboxError = io_err.into();
+        assert!(e.to_string().contains("no access"));
     }
 
     #[test]

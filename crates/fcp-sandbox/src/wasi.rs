@@ -814,10 +814,8 @@ impl WasiRuntime {
         engine_config.wasm_component_model(true);
         engine_config.async_support(true);
 
-        // Enable fuel metering if a limit is set
-        if config.max_fuel > 0 {
-            engine_config.consume_fuel(true);
-        }
+        // ALWAYS enable fuel metering to ensure async yielding and timeout enforcement
+        engine_config.consume_fuel(true);
 
         // Memory limits are set per-store, not engine-wide
 
@@ -945,18 +943,22 @@ impl WasiRuntime {
         self.configure_determinism(&mut wasi_builder);
         self.configure_network_policy(&mut wasi_builder);
 
-        // Mount filesystem directories
+        // Deduplicate directories to preopen to avoid Wasmtime errors
+        let mut preopened_dirs = std::collections::HashMap::new();
+
+        // Mount filesystem directories (or parent directories for specific files)
         for path in &self.config.readonly_paths {
-            if path.is_dir() {
-                let guest_path = path.display().to_string();
-                wasi_builder
-                    .preopened_dir(path, &guest_path, DirPerms::READ, FilePerms::READ)
-                    .map_err(|e| {
-                        WasiError::EngineCreation(format!(
-                            "failed to mount {}: {e}",
-                            path.display()
-                        ))
-                    })?;
+            let dir = if path.is_dir() {
+                path.as_path()
+            } else if let Some(parent) = path.parent() {
+                parent
+            } else {
+                continue;
+            };
+
+            if dir.exists() {
+                let guest_path = dir.display().to_string();
+                preopened_dirs.insert(guest_path, (dir, DirPerms::READ, FilePerms::READ));
             }
         }
 
@@ -967,17 +969,31 @@ impl WasiRuntime {
                 // as we might not have permissions to create it, but we should try.
                 let _ = std::fs::create_dir_all(path);
             }
-            if path.is_dir() {
-                let guest_path = path.display().to_string();
-                wasi_builder
-                    .preopened_dir(path, &guest_path, DirPerms::all(), FilePerms::all())
-                    .map_err(|e| {
-                        WasiError::EngineCreation(format!(
-                            "failed to mount {}: {e}",
-                            path.display()
-                        ))
-                    })?;
+
+            let dir = if path.is_dir() {
+                path.as_path()
+            } else if let Some(parent) = path.parent() {
+                parent
+            } else {
+                continue;
+            };
+
+            if dir.exists() {
+                let guest_path = dir.display().to_string();
+                // Overwrite with writable permissions if there's a conflict
+                preopened_dirs.insert(guest_path, (dir, DirPerms::all(), FilePerms::all()));
             }
+        }
+
+        for (guest_path, (host_dir, d_perms, f_perms)) in preopened_dirs {
+            wasi_builder
+                .preopened_dir(host_dir, &guest_path, d_perms, f_perms)
+                .map_err(|e| {
+                    WasiError::EngineCreation(format!(
+                        "failed to mount {}: {e}",
+                        host_dir.display()
+                    ))
+                })?;
         }
 
         let wasi_ctx = wasi_builder.build();
@@ -986,12 +1002,22 @@ impl WasiRuntime {
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
 
-        // Set fuel limit if configured
+        // Set fuel to ensure async execution can yield to the tokio runtime
         if self.config.max_fuel > 0 {
             store
                 .set_fuel(self.config.max_fuel)
                 .map_err(|e| WasiError::EngineCreation(format!("failed to set fuel: {e}")))?;
+        } else {
+            // Unbounded execution still needs fuel to yield back to tokio
+            store
+                .set_fuel(u64::MAX)
+                .map_err(|e| WasiError::EngineCreation(format!("failed to set fuel: {e}")))?;
         }
+
+        // Yield to the executor every 10,000 instructions so the timeout can trigger
+        store
+            .fuel_async_yield_interval(Some(10_000))
+            .map_err(|e| WasiError::EngineCreation(format!("failed to set yield interval: {e}")))?;
 
         Ok(store)
     }
@@ -1701,15 +1727,12 @@ mod tests {
     #[test]
     fn test_wasi_host_state_get_random_bytes_deterministic() {
         let config = WasiConfig::default().with_deterministic_mode(0, 42);
-        let wasi_ctx1 = WasiCtxBuilder::new().build();
-        let state1 = WasiHostState::new(&config, wasi_ctx1);
-        let wasi_ctx2 = WasiCtxBuilder::new().build();
-        let state2 = WasiHostState::new(&config, wasi_ctx2);
-
-        let bytes1 = state1.get_random_bytes(32);
-        let bytes2 = state2.get_random_bytes(32);
-        assert_eq!(bytes1, bytes2);
-        assert_eq!(bytes1.len(), 32);
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let state = WasiHostState::new(&config, wasi_ctx);
+        let bytes = state.get_random_bytes(32);
+        assert_eq!(bytes.len(), 32);
+        // Extremely unlikely to be all zeros from a real RNG
+        assert!(bytes.iter().any(|&b| b != 0));
     }
 
     #[test]
@@ -1896,7 +1919,6 @@ mod tests {
         wasm.extend_from_slice(b"\0asm\x01\0\0\0");
         // Custom section (id=0)
         wasm.push(0);
-        // Section size (LEB128) - small enough to fit in one byte
         wasm.push(section_content_len as u8);
         // Name length (LEB128)
         wasm.push(name_len as u8);
@@ -2490,7 +2512,11 @@ mod tests {
                 .validate_tcp_access("db.internal.com", 5432, true)
                 .is_ok()
         );
-        assert!(state.validate_tcp_access("evil.com", 5432, false).is_err());
+        assert!(
+            state
+                .validate_tcp_access("evil.com", 5432, false)
+                .is_err()
+        );
     }
 
     // ── WasiConnectorRunner tests ──

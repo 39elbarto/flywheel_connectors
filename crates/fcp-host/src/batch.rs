@@ -308,7 +308,6 @@ fn zone_accessible(agent_zone: &ZoneId, connector_zone: &ZoneId) -> bool {
                 agent == "z:owner"
                     || agent == "z:private"
                     || agent == "z:work"
-                    || agent.starts_with("z:project:")
             } else if agent.starts_with("z:project:") {
                 connector == "z:community" || connector == "z:public"
             } else {
@@ -2057,13 +2056,12 @@ mod tests {
     }
 
     #[test]
-    fn zone_project_isolation_different_projects_accessible() {
+    fn zone_project_isolation_different_projects_inaccessible() {
         // Two different project zones: z:project:foo and z:project:bar
-        // Project zone agents can access other project zones per the code
+        // Project zone agents CANNOT access other project zones
         let proj_foo = "z:project:foo".parse::<ZoneId>().unwrap();
         let proj_bar = "z:project:bar".parse::<ZoneId>().unwrap();
-        // The code allows any z:project:* agent to access z:project:* connectors
-        assert!(zone_accessible(&proj_foo, &proj_bar));
+        assert!(!zone_accessible(&proj_foo, &proj_bar));
     }
 
     #[test]
@@ -3172,7 +3170,7 @@ mod tests {
     #[test]
     fn executed_result_success_captures_output() {
         let started = Instant::now();
-        let result = executed_result("op1", Ok(serde_json::json!({"v": 1})), started);
+        let result = executed_result("op1", Ok(serde_json::json!({"ok": true})), started);
         assert_eq!(result.id, "op1");
         assert_eq!(result.status, OperationResultStatus::Success);
         assert!(result.output.is_some());

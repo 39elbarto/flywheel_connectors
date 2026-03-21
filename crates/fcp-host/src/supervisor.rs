@@ -430,7 +430,7 @@ impl RestartTracker {
 
     /// Total number of restarts ever recorded, including events pruned from history.
     #[must_use]
-    pub fn total_restarts(&self) -> usize {
+    pub const fn total_restarts(&self) -> usize {
         self.total_restarts
     }
 
@@ -2573,7 +2573,7 @@ mod tests {
     #[test]
     fn backoff_multiplier_below_one_clamps_to_two() {
         let mut backoff =
-            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 0.5);
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(2), 0.5);
         // multiplier < 1 → reset to 2.0
         assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
         assert_eq!(backoff.next_backoff(), Duration::from_millis(200));

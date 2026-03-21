@@ -1,16 +1,16 @@
 //! Coda API client.
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder};
+use std::fmt::Write as _;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::error::{CodaError, CodaResult};
 use crate::types::{
-    ApiErrorResponse, DeleteRowsResponse, Doc, Formula, Page, PaginatedResponse, Row, Table,
-    UpsertRowsResponse,
+    ApiErrorResponse, Column, Control, DeleteRowsResponse, Doc, Formula, MutationStatus, Page,
+    PaginatedResponse, Row, Table, UpsertRowsResponse, UserInfo,
 };
 
 /// Coda API client with retry and runtime integration.
@@ -31,19 +31,49 @@ impl std::fmt::Debug for CodaClient {
     }
 }
 
+const CODA_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'?')
+    .add(b'\\');
+
 /// Sanitize a path segment to prevent path traversal.
 fn sanitize_path_segment(segment: &str) -> CodaResult<&str> {
+    let lower = segment.to_ascii_lowercase();
     if segment.is_empty()
         || segment.contains('/')
         || segment.contains('\\')
         || segment.contains("..")
         || segment.contains('\0')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
     {
         return Err(CodaError::InvalidInput(
             "Invalid path segment: contains illegal characters".into(),
         ));
     }
     Ok(segment)
+}
+
+fn encode_path_segment(segment: &str) -> CodaResult<String> {
+    Ok(utf8_percent_encode(
+        sanitize_path_segment(segment)?,
+        CODA_PATH_SEGMENT_ENCODE_SET,
+    )
+    .to_string())
+}
+
+fn push_query_param(url: &mut String, key: &str, value: &str, first: &mut bool) {
+    let separator = if *first { '?' } else { '&' };
+    *first = false;
+    let _ = write!(
+        url,
+        "{separator}{key}={}",
+        utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+    );
 }
 
 impl CodaClient {
@@ -55,10 +85,11 @@ impl CodaClient {
     pub fn new(
         base_url: &str,
         api_token: &str,
+        request_timeout_ms: u64,
         retry_config: HttpRetryConfig,
     ) -> CodaResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_millis(request_timeout_ms))
             .build()
             .map_err(CodaError::Http)?;
 
@@ -70,66 +101,43 @@ impl CodaClient {
         })
     }
 
-    fn authenticate(&self, request: RequestBuilder) -> RequestBuilder {
-        if self.api_token.is_empty() {
-            request
-        } else {
-            request.bearer_auth(&self.api_token)
-        }
+    /// Get authenticated user info and workspace binding.
+    pub async fn whoami(&self, runtime: &ConnectorRuntime) -> CodaResult<UserInfo> {
+        let url = format!("{}/whoami", self.base_url);
+        self.get_json(runtime, &url).await
     }
 
     /// List documents.
     pub async fn list_docs(
         &self,
         runtime: &ConnectorRuntime,
+        workspace_id: Option<&str>,
         limit: Option<u32>,
         page_token: Option<&str>,
         query: Option<&str>,
     ) -> CodaResult<PaginatedResponse<Doc>> {
         let mut url = format!("{}/docs", self.base_url);
-        let mut sep = '?';
+        let mut first = true;
+        if let Some(workspace_id) = workspace_id {
+            push_query_param(&mut url, "workspaceId", workspace_id, &mut first);
+        }
         if let Some(l) = limit {
-            url.push_str(&format!("{sep}limit={l}"));
-            sep = '&';
+            push_query_param(&mut url, "limit", &l.to_string(), &mut first);
         }
         if let Some(pt) = page_token {
-            url.push_str(&format!("{sep}pageToken={pt}"));
-            sep = '&';
+            push_query_param(&mut url, "pageToken", pt, &mut first);
         }
         if let Some(q) = query {
-            url.push_str(&format!("{sep}query={q}"));
+            push_query_param(&mut url, "query", q, &mut first);
         }
         self.get_json(runtime, &url).await
     }
 
     /// Get a single document.
-    pub async fn get_doc(
-        &self,
-        runtime: &ConnectorRuntime,
-        doc_id: &str,
-    ) -> CodaResult<Doc> {
-        let id = sanitize_path_segment(doc_id)?;
+    pub async fn get_doc(&self, runtime: &ConnectorRuntime, doc_id: &str) -> CodaResult<Doc> {
+        let id = encode_path_segment(doc_id)?;
         let url = format!("{}/docs/{}", self.base_url, id);
         self.get_json(runtime, &url).await
-    }
-
-    /// Create a new document.
-    pub async fn create_doc(
-        &self,
-        runtime: &ConnectorRuntime,
-        title: &str,
-        source_doc: Option<&str>,
-        folder_id: Option<&str>,
-    ) -> CodaResult<Doc> {
-        let url = format!("{}/docs", self.base_url);
-        let mut body = serde_json::json!({ "title": title });
-        if let Some(src) = source_doc {
-            body["sourceDoc"] = serde_json::json!(src);
-        }
-        if let Some(fid) = folder_id {
-            body["folderId"] = serde_json::json!(fid);
-        }
-        self.post_json(runtime, &url, &body).await
     }
 
     /// List pages in a document.
@@ -140,16 +148,28 @@ impl CodaClient {
         limit: Option<u32>,
         page_token: Option<&str>,
     ) -> CodaResult<PaginatedResponse<Page>> {
-        let id = sanitize_path_segment(doc_id)?;
+        let id = encode_path_segment(doc_id)?;
         let mut url = format!("{}/docs/{}/pages", self.base_url, id);
-        let mut sep = '?';
+        let mut first = true;
         if let Some(l) = limit {
-            url.push_str(&format!("{sep}limit={l}"));
-            sep = '&';
+            push_query_param(&mut url, "limit", &l.to_string(), &mut first);
         }
         if let Some(pt) = page_token {
-            url.push_str(&format!("{sep}pageToken={pt}"));
+            push_query_param(&mut url, "pageToken", pt, &mut first);
         }
+        self.get_json(runtime, &url).await
+    }
+
+    /// Get a single page.
+    pub async fn get_page(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        page_id_or_name: &str,
+    ) -> CodaResult<Page> {
+        let doc_id = encode_path_segment(doc_id)?;
+        let page_id_or_name = encode_path_segment(page_id_or_name)?;
+        let url = format!("{}/docs/{doc_id}/pages/{page_id_or_name}", self.base_url);
         self.get_json(runtime, &url).await
     }
 
@@ -161,15 +181,52 @@ impl CodaClient {
         limit: Option<u32>,
         page_token: Option<&str>,
     ) -> CodaResult<PaginatedResponse<Table>> {
-        let id = sanitize_path_segment(doc_id)?;
+        let id = encode_path_segment(doc_id)?;
         let mut url = format!("{}/docs/{}/tables", self.base_url, id);
-        let mut sep = '?';
+        let mut first = true;
         if let Some(l) = limit {
-            url.push_str(&format!("{sep}limit={l}"));
-            sep = '&';
+            push_query_param(&mut url, "limit", &l.to_string(), &mut first);
         }
         if let Some(pt) = page_token {
-            url.push_str(&format!("{sep}pageToken={pt}"));
+            push_query_param(&mut url, "pageToken", pt, &mut first);
+        }
+        self.get_json(runtime, &url).await
+    }
+
+    /// Get a single table or view.
+    pub async fn get_table(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        table_id_or_name: &str,
+    ) -> CodaResult<Table> {
+        let doc_id = encode_path_segment(doc_id)?;
+        let table_id_or_name = encode_path_segment(table_id_or_name)?;
+        let url = format!("{}/docs/{doc_id}/tables/{table_id_or_name}", self.base_url);
+        self.get_json(runtime, &url).await
+    }
+
+    /// List columns in a table.
+    pub async fn list_columns(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        table_id_or_name: &str,
+        limit: Option<u32>,
+        page_token: Option<&str>,
+    ) -> CodaResult<PaginatedResponse<Column>> {
+        let doc_id = encode_path_segment(doc_id)?;
+        let table_id_or_name = encode_path_segment(table_id_or_name)?;
+        let mut url = format!(
+            "{}/docs/{doc_id}/tables/{table_id_or_name}/columns",
+            self.base_url
+        );
+        let mut first = true;
+        if let Some(l) = limit {
+            push_query_param(&mut url, "limit", &l.to_string(), &mut first);
+        }
+        if let Some(pt) = page_token {
+            push_query_param(&mut url, "pageToken", pt, &mut first);
         }
         self.get_json(runtime, &url).await
     }
@@ -184,21 +241,37 @@ impl CodaClient {
         page_token: Option<&str>,
         query: Option<&str>,
     ) -> CodaResult<PaginatedResponse<Row>> {
-        let did = sanitize_path_segment(doc_id)?;
-        let tid = sanitize_path_segment(table_id)?;
+        let did = encode_path_segment(doc_id)?;
+        let tid = encode_path_segment(table_id)?;
         let mut url = format!("{}/docs/{}/tables/{}/rows", self.base_url, did, tid);
-        let mut sep = '?';
+        let mut first = true;
         if let Some(l) = limit {
-            url.push_str(&format!("{sep}limit={l}"));
-            sep = '&';
+            push_query_param(&mut url, "limit", &l.to_string(), &mut first);
         }
         if let Some(pt) = page_token {
-            url.push_str(&format!("{sep}pageToken={pt}"));
-            sep = '&';
+            push_query_param(&mut url, "pageToken", pt, &mut first);
         }
         if let Some(q) = query {
-            url.push_str(&format!("{sep}query={q}"));
+            push_query_param(&mut url, "query", q, &mut first);
         }
+        self.get_json(runtime, &url).await
+    }
+
+    /// Get a single row.
+    pub async fn get_row(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        table_id_or_name: &str,
+        row_id_or_name: &str,
+    ) -> CodaResult<Row> {
+        let doc_id = encode_path_segment(doc_id)?;
+        let table_id_or_name = encode_path_segment(table_id_or_name)?;
+        let row_id_or_name = encode_path_segment(row_id_or_name)?;
+        let url = format!(
+            "{}/docs/{doc_id}/tables/{table_id_or_name}/rows/{row_id_or_name}",
+            self.base_url
+        );
         self.get_json(runtime, &url).await
     }
 
@@ -210,8 +283,8 @@ impl CodaClient {
         table_id: &str,
         body: &serde_json::Value,
     ) -> CodaResult<UpsertRowsResponse> {
-        let did = sanitize_path_segment(doc_id)?;
-        let tid = sanitize_path_segment(table_id)?;
+        let did = encode_path_segment(doc_id)?;
+        let tid = encode_path_segment(table_id)?;
         let url = format!("{}/docs/{}/tables/{}/rows", self.base_url, did, tid);
         self.post_json(runtime, &url, body).await
     }
@@ -224,11 +297,11 @@ impl CodaClient {
         table_id: &str,
         row_ids: &[String],
     ) -> CodaResult<DeleteRowsResponse> {
-        let did = sanitize_path_segment(doc_id)?;
-        let tid = sanitize_path_segment(table_id)?;
-        let url = format!("{}/docs/{}/tables/{}/rows/delete", self.base_url, did, tid);
+        let did = encode_path_segment(doc_id)?;
+        let tid = encode_path_segment(table_id)?;
+        let url = format!("{}/docs/{}/tables/{}/rows", self.base_url, did, tid);
         let body = serde_json::json!({ "rowIds": row_ids });
-        self.post_json(runtime, &url, &body).await
+        self.delete_json(runtime, &url, &body).await
     }
 
     /// List formulas in a document.
@@ -239,48 +312,84 @@ impl CodaClient {
         limit: Option<u32>,
         page_token: Option<&str>,
     ) -> CodaResult<PaginatedResponse<Formula>> {
-        let id = sanitize_path_segment(doc_id)?;
+        let id = encode_path_segment(doc_id)?;
         let mut url = format!("{}/docs/{}/formulas", self.base_url, id);
-        let mut sep = '?';
+        let mut first = true;
         if let Some(l) = limit {
-            url.push_str(&format!("{sep}limit={l}"));
-            sep = '&';
+            push_query_param(&mut url, "limit", &l.to_string(), &mut first);
         }
         if let Some(pt) = page_token {
-            url.push_str(&format!("{sep}pageToken={pt}"));
+            push_query_param(&mut url, "pageToken", pt, &mut first);
         }
         self.get_json(runtime, &url).await
     }
 
-    /// Health check: validate API reachability with GET /whoami.
-    pub async fn health_check(&self) -> CodaResult<()> {
-        let url = format!("{}/whoami", self.base_url);
-        let resp = self
-            .authenticate(self.client.get(&url))
-            .send()
-            .await
-            .map_err(CodaError::Http)?;
-        let status = resp.status().as_u16();
+    /// Get a single formula.
+    pub async fn get_formula(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        formula_id_or_name: &str,
+    ) -> CodaResult<Formula> {
+        let doc_id = encode_path_segment(doc_id)?;
+        let formula_id_or_name = encode_path_segment(formula_id_or_name)?;
+        let url = format!(
+            "{}/docs/{doc_id}/formulas/{formula_id_or_name}",
+            self.base_url
+        );
+        self.get_json(runtime, &url).await
+    }
 
-        if resp.status().is_success() {
-            Ok(())
-        } else if status == 429 {
-            let retry_after_ms = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(30)
-                * 1000;
-            Err(CodaError::RateLimited { retry_after_ms })
-        } else if status == 401 {
-            Err(CodaError::Unauthorized("Invalid API token".into()))
-        } else {
-            Err(CodaError::Api {
-                status,
-                message: format!("Health check failed with HTTP {status}"),
-            })
+    /// List controls in a document.
+    pub async fn list_controls(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        limit: Option<u32>,
+        page_token: Option<&str>,
+    ) -> CodaResult<PaginatedResponse<Control>> {
+        let doc_id = encode_path_segment(doc_id)?;
+        let mut url = format!("{}/docs/{doc_id}/controls", self.base_url);
+        let mut first = true;
+        if let Some(l) = limit {
+            push_query_param(&mut url, "limit", &l.to_string(), &mut first);
         }
+        if let Some(pt) = page_token {
+            push_query_param(&mut url, "pageToken", pt, &mut first);
+        }
+        self.get_json(runtime, &url).await
+    }
+
+    /// Get a single control.
+    pub async fn get_control(
+        &self,
+        runtime: &ConnectorRuntime,
+        doc_id: &str,
+        control_id_or_name: &str,
+    ) -> CodaResult<Control> {
+        let doc_id = encode_path_segment(doc_id)?;
+        let control_id_or_name = encode_path_segment(control_id_or_name)?;
+        let url = format!(
+            "{}/docs/{doc_id}/controls/{control_id_or_name}",
+            self.base_url
+        );
+        self.get_json(runtime, &url).await
+    }
+
+    /// Get mutation status for an asynchronous write.
+    pub async fn get_mutation_status(
+        &self,
+        runtime: &ConnectorRuntime,
+        request_id: &str,
+    ) -> CodaResult<MutationStatus> {
+        let request_id = encode_path_segment(request_id)?;
+        let url = format!("{}/mutationStatus/{request_id}", self.base_url);
+        self.get_json(runtime, &url).await
+    }
+
+    /// Health check: validate API reachability with GET /whoami.
+    pub async fn health_check(&self, runtime: &ConnectorRuntime) -> CodaResult<UserInfo> {
+        self.whoami(runtime).await
     }
 
     /// Get the base URL (for diagnostics).
@@ -372,13 +481,52 @@ impl CodaClient {
         })
         .await
     }
+
+    /// Generic DELETE with JSON body + retry + JSON deserialization.
+    async fn delete_json<T: serde::de::DeserializeOwned>(
+        &self,
+        runtime: &ConnectorRuntime,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> CodaResult<T> {
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let url = url.to_string();
+        let body = body.clone();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let token = self.api_token.clone();
+            let body = body.clone();
+            async move {
+                debug!(attempt, url = %url, "Coda DELETE");
+                let request = if token.is_empty() {
+                    client.delete(&url)
+                } else {
+                    client.delete(&url).bearer_auth(&token)
+                }
+                .json(&body);
+
+                match send_request(request, "DELETE").await {
+                    Ok(text) => match serde_json::from_str::<T>(&text) {
+                        Ok(v) => AttemptOutcome::Success(v),
+                        Err(e) => AttemptOutcome::Terminal(CodaError::Json(e)),
+                    },
+                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: e.retry_after(),
+                        error: e,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(e),
+                }
+            }
+        })
+        .await
+    }
 }
 
 /// Send a request and handle common error statuses.
-async fn send_request(
-    request: RequestBuilder,
-    label: &str,
-) -> CodaResult<String> {
+async fn send_request(request: RequestBuilder, label: &str) -> CodaResult<String> {
     let resp = request.send().await.map_err(CodaError::Http)?;
     let status = resp.status().as_u16();
 
@@ -420,6 +568,7 @@ async fn send_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_sdk::migration::ConnectorRuntimeConfig;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -428,6 +577,7 @@ mod tests {
         let client = CodaClient::new(
             "https://coda.io/apis/v1",
             "test_token",
+            30_000,
             HttpRetryConfig::default(),
         );
         assert!(client.is_ok());
@@ -438,6 +588,7 @@ mod tests {
         let client = CodaClient::new(
             "https://coda.io/apis/v1/",
             "test_token",
+            30_000,
             HttpRetryConfig::default(),
         )
         .unwrap();
@@ -446,8 +597,13 @@ mod tests {
 
     #[test]
     fn secretless_detection() {
-        let client =
-            CodaClient::new("https://coda.io/apis/v1", "", HttpRetryConfig::default()).unwrap();
+        let client = CodaClient::new(
+            "https://coda.io/apis/v1",
+            "",
+            30_000,
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
         assert!(client.is_secretless());
     }
 
@@ -456,6 +612,7 @@ mod tests {
         let client = CodaClient::new(
             "https://coda.io/apis/v1",
             "super_secret_token_value",
+            30_000,
             HttpRetryConfig::default(),
         )
         .unwrap();
@@ -475,6 +632,7 @@ mod tests {
         let client = CodaClient::new(
             "https://coda.io/apis/v1",
             "real_token",
+            30_000,
             HttpRetryConfig::default(),
         )
         .unwrap();
@@ -504,14 +662,27 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "name": "Test User",
                 "loginId": "test@example.com",
-                "type": "user"
+                "type": "user",
+                "scoped": true,
+                "tokenName": "test token",
+                "href": "https://coda.io/apis/v1/whoami",
+                "workspace": {
+                    "id": "ws-123",
+                    "type": "workspace"
+                }
             })))
             .mount(&mock_server)
             .await;
 
-        let client =
-            CodaClient::new(&mock_server.uri(), "test_tok", HttpRetryConfig::default()).unwrap();
-        assert!(client.health_check().await.is_ok());
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let client = CodaClient::new(
+            &mock_server.uri(),
+            "test_tok",
+            30_000,
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        assert!(client.health_check(&runtime).await.is_ok());
     }
 
     #[fcp_async_core::runtime::test]
@@ -523,9 +694,15 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client =
-            CodaClient::new(&mock_server.uri(), "bad_tok", HttpRetryConfig::default()).unwrap();
-        let result = client.health_check().await;
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let client = CodaClient::new(
+            &mock_server.uri(),
+            "bad_tok",
+            30_000,
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        let result = client.health_check(&runtime).await;
         assert!(matches!(result, Err(CodaError::Unauthorized(_))));
     }
 
@@ -538,9 +715,15 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client =
-            CodaClient::new(&mock_server.uri(), "tok", HttpRetryConfig::default()).unwrap();
-        let result = client.health_check().await;
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let client = CodaClient::new(
+            &mock_server.uri(),
+            "tok",
+            30_000,
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        let result = client.health_check(&runtime).await;
         assert!(matches!(result, Err(CodaError::RateLimited { .. })));
     }
 }

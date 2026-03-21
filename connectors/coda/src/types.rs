@@ -20,6 +20,40 @@ pub struct PaginatedResponse<T> {
     pub next_page_link: Option<String>,
 }
 
+/// Reference to a Coda workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRef {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub workspace_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "organizationId")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "browserLink")]
+    pub browser_link: Option<String>,
+}
+
+/// Authenticated Coda user and token metadata from `GET /whoami`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInfo {
+    pub name: String,
+    #[serde(rename = "loginId")]
+    pub login_id: String,
+    #[serde(rename = "type")]
+    pub user_type: String,
+    pub scoped: bool,
+    #[serde(rename = "tokenName")]
+    pub token_name: String,
+    pub href: String,
+    pub workspace: WorkspaceRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "pictureLink")]
+    pub picture_link: Option<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Document types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,6 +81,11 @@ pub struct Doc {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "folderId")]
     pub folder_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<DocIcon>,
 }
@@ -136,6 +175,25 @@ pub struct Table {
     pub row_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<PageRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "displayColumn")]
+    pub display_column: Option<String>,
+}
+
+/// A Coda column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Column {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub column_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "display")]
+    pub is_display: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -211,6 +269,7 @@ pub struct DeleteRowsResponse {
     #[serde(rename = "requestId")]
     pub request_id: String,
     #[serde(default)]
+    #[serde(rename = "rowIds")]
     pub row_ids: Vec<String>,
 }
 
@@ -231,6 +290,48 @@ pub struct Formula {
     pub value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<PageRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "browserLink")]
+    pub browser_link: Option<String>,
+}
+
+/// A Coda control.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Control {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub control_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "browserLink")]
+    pub browser_link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<PageRef>,
+}
+
+/// Status for an asynchronous Coda mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MutationStatus {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    pub completed: bool,
+    #[serde(default)]
+    pub warnings: Vec<serde_json::Value>,
+    #[serde(default)]
+    #[serde(rename = "resourceId")]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "resultingRowIds")]
+    pub resulting_row_ids: Vec<String>,
+    #[serde(default)]
+    #[serde(rename = "addedRowIds")]
+    pub added_row_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -462,7 +563,7 @@ mod tests {
     fn delete_response_deserialization() {
         let json = serde_json::json!({
             "requestId": "req-del",
-            "row_ids": ["r1", "r2"]
+            "rowIds": ["r1", "r2"]
         });
         let resp: DeleteRowsResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.request_id, "req-del");

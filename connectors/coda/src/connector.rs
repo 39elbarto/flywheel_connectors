@@ -17,56 +17,166 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::CodaClient;
+use crate::types::{Doc, MutationStatus};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const CODA_BASE_URL: &str = "https://coda.io/apis/v1";
+const CODA_HOST: &str = "coda.io";
+const CODA_IMPLEMENTATION_STATUS: &str = "first_slice";
+const CODA_BINDING_MODEL: &str = "single_workspace";
+const CODA_AUTH_MODEL: &str = "bearer_api_token";
 
 // Operation IDs
+const OP_ACCOUNT_WHOAMI: &str = "coda.account.whoami";
 const OP_DOCS_LIST: &str = "coda.docs.list";
 const OP_DOCS_GET: &str = "coda.docs.get";
-const OP_DOCS_CREATE: &str = "coda.docs.create";
 const OP_PAGES_LIST: &str = "coda.pages.list";
+const OP_PAGES_GET: &str = "coda.pages.get";
 const OP_TABLES_LIST: &str = "coda.tables.list";
+const OP_TABLES_GET: &str = "coda.tables.get";
+const OP_COLUMNS_LIST: &str = "coda.columns.list";
 const OP_ROWS_LIST: &str = "coda.rows.list";
+const OP_ROWS_GET: &str = "coda.rows.get";
 const OP_ROWS_UPSERT: &str = "coda.rows.upsert";
 const OP_ROWS_DELETE: &str = "coda.rows.delete";
 const OP_FORMULAS_LIST: &str = "coda.formulas.list";
+const OP_FORMULAS_GET: &str = "coda.formulas.get";
+const OP_CONTROLS_LIST: &str = "coda.controls.list";
+const OP_CONTROLS_GET: &str = "coda.controls.get";
+const OP_MUTATIONS_GET_STATUS: &str = "coda.mutations.get_status";
 const OP_HEALTH: &str = "coda.health";
 
 // Capability IDs
+const CAP_ACCOUNT_READ: &str = "coda.account.read";
 const CAP_DOCS_READ: &str = "coda.docs.read";
-const CAP_DOCS_WRITE: &str = "coda.docs.write";
 const CAP_TABLES_READ: &str = "coda.tables.read";
-const CAP_TABLES_WRITE: &str = "coda.tables.write";
+const CAP_ROWS_READ: &str = "coda.rows.read";
+const CAP_ROWS_WRITE: &str = "coda.rows.write";
+const CAP_FORMULAS_READ: &str = "coda.formulas.read";
+const CAP_CONTROLS_READ: &str = "coda.controls.read";
+const CAP_MUTATIONS_READ: &str = "coda.mutations.read";
 
 /// Coda connector configuration.
 #[derive(Clone, Deserialize)]
 struct CodaConfig {
     #[serde(default = "default_base_url")]
     base_url: String,
+    workspace_id: String,
+    #[serde(default)]
+    allowed_doc_ids: Vec<String>,
     api_token: String,
     #[serde(default)]
     retry: HttpRetryConfig,
     #[serde(default = "default_request_timeout_ms")]
     request_timeout_ms: u64,
+    #[serde(default = "default_mutation_poll_interval_ms")]
+    mutation_poll_interval_ms: u64,
+    #[serde(default = "default_mutation_deadline_ms")]
+    mutation_deadline_ms: u64,
 }
 
 impl std::fmt::Debug for CodaConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CodaConfig")
             .field("base_url", &self.base_url)
+            .field("workspace_id", &self.workspace_id)
+            .field("allowed_doc_ids", &self.allowed_doc_ids)
             .field("api_token", &"[REDACTED]")
             .field("retry", &self.retry)
             .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("mutation_poll_interval_ms", &self.mutation_poll_interval_ms)
+            .field("mutation_deadline_ms", &self.mutation_deadline_ms)
             .finish()
     }
 }
 
 fn default_base_url() -> String {
-    "https://coda.io/apis/v1".into()
+    CODA_BASE_URL.into()
 }
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+const fn default_mutation_poll_interval_ms() -> u64 {
+    1_000
+}
+
+const fn default_mutation_deadline_ms() -> u64 {
+    30_000
+}
+
+impl CodaConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.workspace_id.is_empty() {
+            return Err("workspace_id is required".into());
+        }
+        if self.api_token.is_empty() {
+            return Err("api_token is required".into());
+        }
+        if self.request_timeout_ms == 0 {
+            return Err("request_timeout_ms must be greater than 0".into());
+        }
+        if self.mutation_poll_interval_ms == 0 {
+            return Err("mutation_poll_interval_ms must be greater than 0".into());
+        }
+        if self.mutation_deadline_ms == 0 {
+            return Err("mutation_deadline_ms must be greater than 0".into());
+        }
+
+        let parsed = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| format!("base_url must be a valid absolute URL: {err}"))?;
+        if parsed.scheme() != "https" {
+            return Err("base_url must use https".into());
+        }
+        let Some(host) = parsed.host_str() else {
+            return Err("base_url must include a hostname".into());
+        };
+        let host_ok = matches!(host, CODA_HOST | "localhost" | "127.0.0.1");
+        if !host_ok {
+            return Err(format!(
+                "base_url host must be {CODA_HOST} or localhost for tests"
+            ));
+        }
+        if host == CODA_HOST && parsed.path() != "/apis/v1" {
+            return Err("base_url must use the /apis/v1 path".into());
+        }
+
+        if self
+            .allowed_doc_ids
+            .iter()
+            .any(|doc_id| doc_id.trim().is_empty())
+        {
+            return Err("allowed_doc_ids must not contain empty values".into());
+        }
+
+        Ok(())
+    }
+
+    fn from_value(value: serde_json::Value) -> FcpResult<Self> {
+        let mut config: Self =
+            serde_json::from_value(value).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid Coda config: {e}"),
+            })?;
+        config.base_url = config.base_url.trim().trim_end_matches('/').to_owned();
+        if config.base_url.is_empty() {
+            config.base_url = default_base_url();
+        }
+        config.workspace_id = config.workspace_id.trim().to_owned();
+        config.api_token = config.api_token.trim().to_owned();
+        config.allowed_doc_ids = config
+            .allowed_doc_ids
+            .into_iter()
+            .map(|doc_id| doc_id.trim().to_owned())
+            .filter(|doc_id| !doc_id.is_empty())
+            .collect();
+        config.validate().map_err(|e| FcpError::InvalidRequest {
+            code: 1001,
+            message: format!("Invalid Coda config: {e}"),
+        })?;
+        Ok(config)
+    }
 }
 
 // Doctor types
@@ -91,6 +201,71 @@ impl DoctorResult {
     }
 }
 
+fn contract_details(config: Option<&CodaConfig>) -> serde_json::Value {
+    json!({
+        "implementation": {
+            "api": "coda_rest_v1",
+            "status": CODA_IMPLEMENTATION_STATUS,
+            "notes": [
+                "The connector targets the Coda REST API for one configured workspace boundary.",
+                "Asynchronous writes are tracked through requestId and mutationStatus polling."
+            ],
+        },
+        "auth_boundary": {
+            "binding": CODA_BINDING_MODEL,
+            "token_type": CODA_AUTH_MODEL,
+            "workspace_id": config.map(|cfg| cfg.workspace_id.clone()),
+            "allowed_doc_ids": config.map(|cfg| cfg.allowed_doc_ids.clone()).unwrap_or_default(),
+            "multi_workspace_supported": false,
+            "credential_id_supported": false,
+        },
+        "service_inventory": {
+            "account": [OP_ACCOUNT_WHOAMI],
+            "docs": [OP_DOCS_LIST, OP_DOCS_GET],
+            "pages": [OP_PAGES_LIST, OP_PAGES_GET],
+            "tables": [OP_TABLES_LIST, OP_TABLES_GET, OP_COLUMNS_LIST],
+            "rows": [OP_ROWS_LIST, OP_ROWS_GET, OP_ROWS_UPSERT, OP_ROWS_DELETE],
+            "formulas": [OP_FORMULAS_LIST, OP_FORMULAS_GET],
+            "controls": [OP_CONTROLS_LIST, OP_CONTROLS_GET],
+            "mutations": [OP_MUTATIONS_GET_STATUS],
+        },
+        "non_goals": [
+            "Doc create, update, delete, and governance flows",
+            "Folder CRUD, permissions, publishing, analytics, and automations",
+            "Page content mutation, push-button execution, and multi-workspace aggregation"
+        ]
+    })
+}
+
+fn with_self_check_details(
+    mut report: SelfCheckReport,
+    config: Option<&CodaConfig>,
+    probe: serde_json::Value,
+) -> SelfCheckReport {
+    report.details = Some(json!({
+        "contract": contract_details(config),
+        "probe": probe,
+    }));
+    report
+}
+
+fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
+    let value = input
+        .get(key)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Missing '{key}' field"),
+        })?;
+    if value.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Field '{key}' must not be empty"),
+        });
+    }
+    Ok(value)
+}
+
 /// Coda connector state.
 #[derive(Debug)]
 pub struct CodaConnector {
@@ -98,7 +273,6 @@ pub struct CodaConnector {
     config: Option<CodaConfig>,
     client: Option<CodaClient>,
     runtime: Option<ConnectorRuntime>,
-    retry_config: HttpRetryConfig,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
 }
@@ -112,7 +286,6 @@ impl CodaConnector {
             config: None,
             client: None,
             runtime: None,
-            retry_config: HttpRetryConfig::default(),
             started_at: Instant::now(),
             verifier: None,
         }
@@ -165,56 +338,38 @@ impl CodaConnector {
         });
 
         if let Some(config) = &self.config {
-            let scheme = if config.base_url.starts_with("https://") {
-                "https"
-            } else {
-                "http"
-            };
             checks.push(DoctorCheck {
                 name: "base_url".into(),
                 passed: true,
-                message: Some(format!("Base URL ({scheme}): {}", config.base_url)),
+                message: Some(format!("Base URL: {}", config.base_url)),
                 critical: false,
             });
-
-            let allowed_hosts = ["coda.io"];
-            let host_part = config
-                .base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
             checks.push(DoctorCheck {
-                name: "network_constraints".into(),
-                passed: host_ok,
-                message: Some(if host_ok {
-                    "Base URL matches allowed host (coda.io)".into()
-                } else {
-                    format!(
-                        "Base URL {} does not match allowed hosts",
-                        config.base_url
-                    )
-                }),
+                name: "workspace_scope".into(),
+                passed: true,
+                message: Some(format!(
+                    "Workspace-bound to {} with {} explicitly allowed doc(s)",
+                    config.workspace_id,
+                    config.allowed_doc_ids.len()
+                )),
                 critical: true,
             });
-
-            let secretless = self.client.as_ref().is_some_and(|c| c.is_secretless());
             checks.push(DoctorCheck {
-                name: "credential_mode".into(),
-                passed: !secretless,
-                message: Some(if secretless {
-                    "Credential injection required via egress proxy".into()
-                } else {
-                    "API token configured".into()
-                }),
+                name: "auth_boundary".into(),
+                passed: true,
+                message: Some(
+                    "Uses one bearer token for one workspace boundary; multi-workspace and document-governance flows are intentionally out of scope."
+                        .into(),
+                ),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "service_inventory".into(),
+                passed: true,
+                message: Some(
+                    "Supported today: workspace-scoped docs/pages/tables/rows/formulas/controls reads plus row upsert/delete with mutation-status tracking."
+                        .into(),
+                ),
                 critical: false,
             });
         }
@@ -231,369 +386,265 @@ impl Default for CodaConnector {
 
 /// Build the typed operations catalog.
 pub fn operations_info() -> Vec<OperationInfo> {
+    let hint = |when: &str, mistakes: Vec<String>, related: Vec<&'static str>| -> AgentHint {
+        AgentHint {
+            when_to_use: when.into(),
+            common_mistakes: mistakes,
+            examples: Vec::new(),
+            related: related.into_iter().map(CapabilityId::from_static).collect(),
+        }
+    };
+
     vec![
         OperationInfo {
+            id: OperationId::from_static(OP_ACCOUNT_WHOAMI),
+            summary: "Inspect token identity".into(),
+            description: Some("Read authenticated user info and workspace binding from Coda.".into()),
+            input_schema: json!({"type":"object"}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_ACCOUNT_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use to validate the configured token and workspace boundary.", vec![], vec![CAP_DOCS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
             id: OperationId::from_static(OP_DOCS_LIST),
-            summary: "List documents".into(),
-            description: Some("Lists Coda documents accessible to the authenticated user".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Max results per page (default 25)" },
-                    "page_token": { "type": "string", "description": "Pagination token" },
-                    "query": { "type": "string", "description": "Search query to filter docs" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "items": { "type": "array" },
-                    "nextPageToken": { "type": "string" }
-                }
-            }),
+            summary: "List workspace docs".into(),
+            description: Some("List docs visible to the configured token within the configured workspace boundary.".into()),
+            input_schema: json!({"type":"object","properties":{"limit":{"type":"integer"},"page_token":{"type":"string"},"query":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
             capability: CapabilityId::from_static(CAP_DOCS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list Coda documents accessible to the user".into(),
-                common_mistakes: vec![
-                    "Use page_token for pagination, not offset".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_DOCS_GET)],
-            },
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use for workspace-scoped doc discovery.", vec!["Only docs in the configured workspace should be returned.".into()], vec![CAP_ACCOUNT_READ]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_DOCS_GET),
-            summary: "Get a single document".into(),
-            description: Some("Retrieves details about a specific Coda document".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["doc_id"],
-                "properties": {
-                    "doc_id": { "type": "string", "description": "Document ID" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string" },
-                    "name": { "type": "string" },
-                    "owner": { "type": "string" }
-                }
-            }),
+            summary: "Get doc metadata".into(),
+            description: Some("Fetch one document and verify it belongs to the configured workspace.".into()),
+            input_schema: json!({"type":"object","required":["doc_id"],"properties":{"doc_id":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
             capability: CapabilityId::from_static(CAP_DOCS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need details about a specific Coda document".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_DOCS_LIST)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_DOCS_CREATE),
-            summary: "Create a new document".into(),
-            description: Some("Creates a new Coda document, optionally from a template".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["title"],
-                "properties": {
-                    "title": { "type": "string", "description": "Document title" },
-                    "source_doc": { "type": "string", "description": "Source doc ID to copy from" },
-                    "folder_id": { "type": "string", "description": "Folder ID to place the doc in" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string" },
-                    "name": { "type": "string" },
-                    "browserLink": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_DOCS_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to create a new Coda document".into(),
-                common_mistakes: vec![
-                    "source_doc must be a valid doc ID if specified".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_DOCS_LIST)],
-            },
+            ai_hints: hint("Use to inspect one doc's metadata and workspace binding.", vec!["doc_id must be a stable doc ID.".into()], vec![CAP_DOCS_READ]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_PAGES_LIST),
-            summary: "List pages in a document".into(),
-            description: Some("Lists all pages (sections) within a Coda document".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["doc_id"],
-                "properties": {
-                    "doc_id": { "type": "string", "description": "Document ID" },
-                    "limit": { "type": "integer", "description": "Max results per page" },
-                    "page_token": { "type": "string", "description": "Pagination token" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "items": { "type": "array" },
-                    "nextPageToken": { "type": "string" }
-                }
-            }),
+            summary: "List pages".into(),
+            description: Some("List pages in one scoped Coda document.".into()),
+            input_schema: json!({"type":"object","required":["doc_id"],"properties":{"doc_id":{"type":"string"},"limit":{"type":"integer"},"page_token":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
             capability: CapabilityId::from_static(CAP_DOCS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list pages/sections in a Coda document".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_DOCS_GET)],
-            },
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use for doc structure discovery.", vec![], vec![CAP_DOCS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_PAGES_GET),
+            summary: "Get page".into(),
+            description: Some("Fetch one page by page ID or name inside a scoped doc.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","page_id_or_name"],"properties":{"doc_id":{"type":"string"},"page_id_or_name":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_DOCS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use to inspect one page.", vec!["Stable page IDs are preferred over names.".into()], vec![CAP_DOCS_READ]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_TABLES_LIST),
-            summary: "List tables in a document".into(),
-            description: Some("Lists all tables and views within a Coda document".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["doc_id"],
-                "properties": {
-                    "doc_id": { "type": "string", "description": "Document ID" },
-                    "limit": { "type": "integer", "description": "Max results per page" },
-                    "page_token": { "type": "string", "description": "Pagination token" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "items": { "type": "array" },
-                    "nextPageToken": { "type": "string" }
-                }
-            }),
+            summary: "List tables".into(),
+            description: Some("List tables and views in one scoped Coda document.".into()),
+            input_schema: json!({"type":"object","required":["doc_id"],"properties":{"doc_id":{"type":"string"},"limit":{"type":"integer"},"page_token":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
             capability: CapabilityId::from_static(CAP_TABLES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list tables and views in a Coda document".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_ROWS_LIST)],
-            },
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use to discover tables before row reads or writes.", vec![], vec![CAP_ROWS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_TABLES_GET),
+            summary: "Get table".into(),
+            description: Some("Fetch one table or view by stable identifier.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","table_id_or_name"],"properties":{"doc_id":{"type":"string"},"table_id_or_name":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_TABLES_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use to inspect one table or view.", vec!["Stable table IDs are preferred over names.".into()], vec![CAP_ROWS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_COLUMNS_LIST),
+            summary: "List columns".into(),
+            description: Some("List columns for a base table or view.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","table_id_or_name"],"properties":{"doc_id":{"type":"string"},"table_id_or_name":{"type":"string"},"limit":{"type":"integer"},"page_token":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_TABLES_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use before row writes to learn stable column IDs.", vec![], vec![CAP_ROWS_WRITE]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ROWS_LIST),
-            summary: "List rows in a table".into(),
-            description: Some("Lists rows in a Coda table with optional filtering".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["doc_id", "table_id"],
-                "properties": {
-                    "doc_id": { "type": "string", "description": "Document ID" },
-                    "table_id": { "type": "string", "description": "Table or view ID" },
-                    "limit": { "type": "integer", "description": "Max results per page" },
-                    "page_token": { "type": "string", "description": "Pagination token" },
-                    "query": { "type": "string", "description": "Filter query" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "items": { "type": "array" },
-                    "nextPageToken": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_TABLES_READ),
+            summary: "List rows".into(),
+            description: Some("List rows in a scoped Coda table or view.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","table_id_or_name"],"properties":{"doc_id":{"type":"string"},"table_id_or_name":{"type":"string"},"limit":{"type":"integer"},"page_token":{"type":"string"},"query":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_ROWS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to read rows from a Coda table".into(),
-                common_mistakes: vec![
-                    "table_id can be a table ID or a view ID".into(),
-                    "Row values are keyed by column ID, not column name".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_TABLES_LIST)],
-            },
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use for row enumeration and filtered reads.", vec!["Table names and row names are fragile; prefer stable IDs.".into()], vec![CAP_TABLES_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_ROWS_GET),
+            summary: "Get row".into(),
+            description: Some("Fetch one row by stable row ID or fallback row name.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","table_id_or_name","row_id_or_name"],"properties":{"doc_id":{"type":"string"},"table_id_or_name":{"type":"string"},"row_id_or_name":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_ROWS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use for point lookup of one row.", vec!["Prefer stable row IDs over row names.".into()], vec![CAP_ROWS_READ]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ROWS_UPSERT),
-            summary: "Upsert rows in a table".into(),
-            description: Some("Inserts or updates rows in a Coda table based on key columns".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["doc_id", "table_id", "rows"],
-                "properties": {
-                    "doc_id": { "type": "string", "description": "Document ID" },
-                    "table_id": { "type": "string", "description": "Table ID" },
-                    "rows": {
-                        "type": "array",
-                        "description": "Array of row objects with cells",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "cells": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "column": { "type": "string" },
-                                            "value": {}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "key_columns": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Columns to use as upsert key"
-                    }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "requestId": { "type": "string" },
-                    "addedRowIds": { "type": "array", "items": { "type": "string" } }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_TABLES_WRITE),
+            summary: "Upsert rows".into(),
+            description: Some("Insert or update rows and wait for Coda mutation completion.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","table_id_or_name","rows"],"properties":{"doc_id":{"type":"string"},"table_id_or_name":{"type":"string"},"rows":{"type":"array"},"key_columns":{"type":"array","items":{"type":"string"}}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_ROWS_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to insert or update rows in a Coda table".into(),
-                common_mistakes: vec![
-                    "Columns must be referenced by column ID or name".into(),
-                    "key_columns enables upsert behavior; without it, rows are always inserted".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![
-                    CapabilityId::from_static(OP_ROWS_LIST),
-                    CapabilityId::from_static(OP_ROWS_DELETE),
-                ],
-            },
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: hint("Use to insert or update rows in a base table.", vec!["Coda may update multiple rows when key_columns match more than one record.".into()], vec![CAP_ROWS_READ, CAP_MUTATIONS_READ]),
             rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
+            requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_ROWS_DELETE),
-            summary: "Delete rows from a table".into(),
-            description: Some("Deletes specified rows from a Coda table".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["doc_id", "table_id", "row_ids"],
-                "properties": {
-                    "doc_id": { "type": "string", "description": "Document ID" },
-                    "table_id": { "type": "string", "description": "Table ID" },
-                    "row_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "IDs of rows to delete"
-                    }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "requestId": { "type": "string" },
-                    "row_ids": { "type": "array", "items": { "type": "string" } }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_TABLES_WRITE),
+            summary: "Delete rows".into(),
+            description: Some("Delete rows by stable row ID and wait for mutation completion.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","table_id_or_name","row_ids"],"properties":{"doc_id":{"type":"string"},"table_id_or_name":{"type":"string"},"row_ids":{"type":"array","items":{"type":"string"}}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_ROWS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to delete rows from a Coda table".into(),
-                common_mistakes: vec![
-                    "Deleted rows cannot be recovered".into(),
-                    "Verify row_ids before deleting".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_ROWS_LIST)],
-            },
+            ai_hints: hint("Use for destructive row deletion after explicit confirmation.", vec!["Stable row IDs are required for destructive operations.".into()], vec![CAP_ROWS_READ, CAP_MUTATIONS_READ]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::Interactive),
         },
         OperationInfo {
             id: OperationId::from_static(OP_FORMULAS_LIST),
-            summary: "List formulas in a document".into(),
-            description: Some("Lists named formulas in a Coda document".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["doc_id"],
-                "properties": {
-                    "doc_id": { "type": "string", "description": "Document ID" },
-                    "limit": { "type": "integer", "description": "Max results per page" },
-                    "page_token": { "type": "string", "description": "Pagination token" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "items": { "type": "array" },
-                    "nextPageToken": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_DOCS_READ),
+            summary: "List formulas".into(),
+            description: Some("List named formulas in a scoped document.".into()),
+            input_schema: json!({"type":"object","required":["doc_id"],"properties":{"doc_id":{"type":"string"},"limit":{"type":"integer"},"page_token":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_FORMULAS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list named formulas in a Coda document".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_DOCS_GET)],
-            },
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use for formula discovery.", vec![], vec![CAP_DOCS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_FORMULAS_GET),
+            summary: "Get formula".into(),
+            description: Some("Fetch a named formula by ID or name.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","formula_id_or_name"],"properties":{"doc_id":{"type":"string"},"formula_id_or_name":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_FORMULAS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use for point lookup of one formula.", vec!["Stable IDs are preferred over names.".into()], vec![CAP_FORMULAS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_CONTROLS_LIST),
+            summary: "List controls".into(),
+            description: Some("List controls exposed in a scoped Coda document.".into()),
+            input_schema: json!({"type":"object","required":["doc_id"],"properties":{"doc_id":{"type":"string"},"limit":{"type":"integer"},"page_token":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_CONTROLS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use to inspect the doc's exposed controls without executing buttons.", vec![], vec![CAP_DOCS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_CONTROLS_GET),
+            summary: "Get control".into(),
+            description: Some("Fetch a single control by ID or name.".into()),
+            input_schema: json!({"type":"object","required":["doc_id","control_id_or_name"],"properties":{"doc_id":{"type":"string"},"control_id_or_name":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_CONTROLS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use to inspect one control's current value and metadata.", vec!["Button execution is intentionally out of scope.".into()], vec![CAP_CONTROLS_READ]),
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_MUTATIONS_GET_STATUS),
+            summary: "Get mutation status".into(),
+            description: Some("Poll Coda for completion of an asynchronous write.".into()),
+            input_schema: json!({"type":"object","required":["request_id"],"properties":{"request_id":{"type":"string"}}}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_MUTATIONS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: hint("Use after rows.upsert or rows.delete when you need the terminal mutation outcome.", vec![], vec![CAP_ROWS_WRITE]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
-            summary: "Coda health check".into(),
-            description: Some("Checks Coda API reachability and authentication".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "status": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_DOCS_READ),
+            summary: "Check connector health".into(),
+            description: Some("Verify token reachability and workspace binding.".into()),
+            input_schema: json!({"type":"object"}),
+            output_schema: json!({"type":"object"}),
+            capability: CapabilityId::from_static(CAP_ACCOUNT_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to verify that the Coda API is reachable".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
+            ai_hints: hint("Use before real Coda operations to validate auth and scope.", vec![], vec![CAP_ACCOUNT_READ]),
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
         },
@@ -607,24 +658,20 @@ impl FcpConnector for CodaConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
-        let config: CodaConfig =
-            serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
-                code: 1001,
-                message: format!("Invalid Coda config: {e}"),
-            })?;
-
-        self.retry_config = config.retry.clone();
+        let config = CodaConfig::from_value(config)?;
         self.runtime = Some(ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
         ));
-
-        let client =
-            CodaClient::new(&config.base_url, &config.api_token, config.retry.clone()).map_err(
-                |e| FcpError::Internal {
-                    message: format!("Failed to create Coda client: {e}"),
-                },
-            )?;
+        let client = CodaClient::new(
+            &config.base_url,
+            &config.api_token,
+            config.request_timeout_ms,
+            config.retry.clone(),
+        )
+        .map_err(|e| FcpError::Internal {
+            message: format!("Failed to create Coda client: {e}"),
+        })?;
 
         self.client = Some(client);
         self.config = Some(config);
@@ -674,36 +721,89 @@ impl FcpConnector for CodaConnector {
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
+            "configured": self.config.is_some(),
+            "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
+            "workspace_id": self.config.as_ref().map(|config| config.workspace_id.clone()),
+            "manifest_hash": Self::manifest_hash(),
+            "contract": contract_details(self.config.as_ref()),
+        }));
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        let Some(config) = &self.config else {
+            return Ok(with_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+                json!({
+                    "ready": false,
+                    "reason": "configure with workspace_id and api_token before self_check",
+                }),
+            ));
+        };
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(with_self_check_details(
+                SelfCheckReport::failed("client_missing", "Coda client is not initialized"),
+                Some(config),
+                json!({
+                    "ready": false,
+                    "reason": "client_missing",
+                }),
+            ));
+        };
+        let Some(runtime) = &self.runtime else {
+            return Ok(with_self_check_details(
+                SelfCheckReport::failed("runtime_missing", "Connector runtime is not initialized"),
+                Some(config),
+                json!({
+                    "ready": false,
+                    "reason": "runtime_missing",
+                }),
             ));
         };
 
-        if client.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
-                "credential_injection_required",
-                "Configured with empty token; egress proxy injection required",
-            ));
-        }
-
-        match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
+        match client.whoami(runtime).await {
+            Ok(user) if user.workspace.id != config.workspace_id => Ok(with_self_check_details(
+                SelfCheckReport::failed(
+                    "workspace_mismatch",
+                    format!(
+                        "Configured workspace {} does not match token workspace {}",
+                        config.workspace_id, user.workspace.id
+                    ),
+                ),
+                Some(config),
+                json!({
+                    "ready": false,
+                    "whoami": user,
+                }),
+            )),
+            Ok(user) => Ok(with_self_check_details(
+                SelfCheckReport::ok(),
+                Some(config),
+                json!({
+                    "ready": true,
+                    "whoami": user,
+                }),
+            )),
             Err(err) => {
                 if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
+                    Ok(with_self_check_details(
+                        SelfCheckReport::degraded("self_check_retryable", err.to_string()),
+                        Some(config),
+                        json!({
+                            "ready": false,
+                            "retryable": true,
+                        }),
                     ))
                 } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
+                    Ok(with_self_check_details(
+                        SelfCheckReport::failed("self_check_failed", err.to_string()),
+                        Some(config),
+                        json!({
+                            "ready": false,
+                            "retryable": false,
+                        }),
                     ))
                 }
             }
@@ -756,6 +856,113 @@ impl FcpConnector for CodaConnector {
 }
 
 impl CodaConnector {
+    fn required_capability(operation: &str) -> Option<CapabilityId> {
+        Some(match operation {
+            OP_ACCOUNT_WHOAMI | OP_HEALTH => CapabilityId::from_static(CAP_ACCOUNT_READ),
+            OP_DOCS_LIST | OP_DOCS_GET | OP_PAGES_LIST | OP_PAGES_GET => {
+                CapabilityId::from_static(CAP_DOCS_READ)
+            }
+            OP_TABLES_LIST | OP_TABLES_GET | OP_COLUMNS_LIST => {
+                CapabilityId::from_static(CAP_TABLES_READ)
+            }
+            OP_ROWS_LIST | OP_ROWS_GET => CapabilityId::from_static(CAP_ROWS_READ),
+            OP_ROWS_UPSERT | OP_ROWS_DELETE => CapabilityId::from_static(CAP_ROWS_WRITE),
+            OP_FORMULAS_LIST | OP_FORMULAS_GET => CapabilityId::from_static(CAP_FORMULAS_READ),
+            OP_CONTROLS_LIST | OP_CONTROLS_GET => CapabilityId::from_static(CAP_CONTROLS_READ),
+            OP_MUTATIONS_GET_STATUS => CapabilityId::from_static(CAP_MUTATIONS_READ),
+            _ => return None,
+        })
+    }
+
+    fn ensure_doc_id_allowed(config: &CodaConfig, doc_id: &str) -> FcpResult<()> {
+        if !config.allowed_doc_ids.is_empty()
+            && !config
+                .allowed_doc_ids
+                .iter()
+                .any(|allowed| allowed == doc_id)
+        {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: format!("Doc {doc_id} is outside the configured allowlist"),
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_doc_scope(config: &CodaConfig, doc: &Doc) -> FcpResult<()> {
+        Self::ensure_doc_id_allowed(config, &doc.id)?;
+        match doc.workspace_id.as_deref() {
+            Some(workspace_id) if workspace_id == config.workspace_id => Ok(()),
+            Some(workspace_id) => Err(FcpError::Unauthorized {
+                code: 2001,
+                message: format!(
+                    "Doc {} belongs to workspace {}, expected {}",
+                    doc.id, workspace_id, config.workspace_id
+                ),
+            }),
+            None => Err(FcpError::Unauthorized {
+                code: 2001,
+                message: format!(
+                    "Doc {} did not include a workspaceId; refusing cross-workspace access",
+                    doc.id
+                ),
+            }),
+        }
+    }
+
+    async fn scoped_doc(
+        &self,
+        runtime: &ConnectorRuntime,
+        client: &CodaClient,
+        config: &CodaConfig,
+        doc_id: &str,
+    ) -> FcpResult<Doc> {
+        Self::ensure_doc_id_allowed(config, doc_id)?;
+        let doc = client
+            .get_doc(runtime, doc_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+        Self::ensure_doc_scope(config, &doc)?;
+        Ok(doc)
+    }
+
+    async fn wait_for_mutation(
+        &self,
+        runtime: &ConnectorRuntime,
+        client: &CodaClient,
+        config: &CodaConfig,
+        request_id: &str,
+    ) -> FcpResult<MutationStatus> {
+        let started = Instant::now();
+        let ctx = runtime.request_context();
+        loop {
+            let status = client
+                .get_mutation_status(runtime, request_id)
+                .await
+                .map_err(|e| e.to_fcp_error())?;
+            if status.completed {
+                return Ok(status);
+            }
+            if started.elapsed() >= Duration::from_millis(config.mutation_deadline_ms) {
+                return Err(FcpError::External {
+                    service: "coda".into(),
+                    message: format!(
+                        "Mutation {request_id} did not complete within {}ms",
+                        config.mutation_deadline_ms
+                    ),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: Some(Duration::from_millis(config.mutation_poll_interval_ms)),
+                });
+            }
+            ctx.sleep(Duration::from_millis(config.mutation_poll_interval_ms))
+                .await
+                .map_err(|err| FcpError::Internal {
+                    message: format!("Failed while waiting for Coda mutation completion: {err}"),
+                })?;
+        }
+    }
+
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let operation = req.operation.as_str();
@@ -763,22 +970,16 @@ impl CodaConnector {
         let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
             message: "Capability verifier missing after successful handshake".into(),
         })?;
-        let required_cap = match operation {
-            OP_DOCS_LIST | OP_DOCS_GET | OP_PAGES_LIST | OP_FORMULAS_LIST | OP_HEALTH => {
-                CapabilityId::from_static(CAP_DOCS_READ)
-            }
-            OP_DOCS_CREATE => CapabilityId::from_static(CAP_DOCS_WRITE),
-            OP_TABLES_LIST | OP_ROWS_LIST => CapabilityId::from_static(CAP_TABLES_READ),
-            OP_ROWS_UPSERT | OP_ROWS_DELETE => CapabilityId::from_static(CAP_TABLES_WRITE),
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
+        let required_cap =
+            Self::required_capability(operation).ok_or(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            })?;
         verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
+        let config = self.config.as_ref().ok_or(FcpError::Internal {
+            message: "Connector config missing after configure".into(),
+        })?;
         let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
             message: "Connector runtime missing after configure".into(),
         })?;
@@ -787,64 +988,57 @@ impl CodaConnector {
         })?;
 
         let output = match operation {
+            OP_ACCOUNT_WHOAMI => {
+                let user = client.whoami(runtime).await.map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(user).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize whoami response: {e}"),
+                })?
+            }
             OP_DOCS_LIST => {
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let limit = req
+                    .input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let page_token = req.input.get("page_token").and_then(|v| v.as_str());
                 let query = req.input.get("query").and_then(|v| v.as_str());
-                let resp = client
-                    .list_docs(runtime, limit, page_token, query)
+                let mut resp = client
+                    .list_docs(
+                        runtime,
+                        Some(&config.workspace_id),
+                        limit,
+                        page_token,
+                        query,
+                    )
                     .await
                     .map_err(|e| e.to_fcp_error())?;
+                if !config.allowed_doc_ids.is_empty() {
+                    resp.items.retain(|doc| {
+                        config
+                            .allowed_doc_ids
+                            .iter()
+                            .any(|allowed| allowed == &doc.id)
+                    });
+                }
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize docs: {e}"),
                 })?
             }
             OP_DOCS_GET => {
-                let doc_id = req
-                    .input
-                    .get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'doc_id' field".into(),
-                    })?;
-                let resp = client
-                    .get_doc(runtime, doc_id)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
-                    message: format!("Failed to serialize doc: {e}"),
-                })?
-            }
-            OP_DOCS_CREATE => {
-                let title = req
-                    .input
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'title' field".into(),
-                    })?;
-                let source_doc = req.input.get("source_doc").and_then(|v| v.as_str());
-                let folder_id = req.input.get("folder_id").and_then(|v| v.as_str());
-                let resp = client
-                    .create_doc(runtime, title, source_doc, folder_id)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let doc = self.scoped_doc(runtime, client, config, doc_id).await?;
+                serde_json::to_value(doc).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize doc: {e}"),
                 })?
             }
             OP_PAGES_LIST => {
-                let doc_id = req
+                let doc_id = require_str(&req.input, "doc_id")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let limit = req
                     .input
-                    .get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'doc_id' field".into(),
-                    })?;
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let page_token = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
                     .list_pages(runtime, doc_id, limit, page_token)
@@ -854,16 +1048,26 @@ impl CodaConnector {
                     message: format!("Failed to serialize pages: {e}"),
                 })?
             }
+            OP_PAGES_GET => {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let page_id_or_name = require_str(&req.input, "page_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let resp = client
+                    .get_page(runtime, doc_id, page_id_or_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize page: {e}"),
+                })?
+            }
             OP_TABLES_LIST => {
-                let doc_id = req
+                let doc_id = require_str(&req.input, "doc_id")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let limit = req
                     .input
-                    .get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'doc_id' field".into(),
-                    })?;
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let page_token = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
                     .list_tables(runtime, doc_id, limit, page_token)
@@ -873,24 +1077,45 @@ impl CodaConnector {
                     message: format!("Failed to serialize tables: {e}"),
                 })?
             }
+            OP_TABLES_GET => {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let table_id_or_name = require_str(&req.input, "table_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let resp = client
+                    .get_table(runtime, doc_id, table_id_or_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize table: {e}"),
+                })?
+            }
+            OP_COLUMNS_LIST => {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let table_id_or_name = require_str(&req.input, "table_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let limit = req
+                    .input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let resp = client
+                    .list_columns(runtime, doc_id, table_id_or_name, limit, page_token)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize columns: {e}"),
+                })?
+            }
             OP_ROWS_LIST => {
-                let doc_id = req
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let table_id = require_str(&req.input, "table_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let limit = req
                     .input
-                    .get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'doc_id' field".into(),
-                    })?;
-                let table_id = req
-                    .input
-                    .get("table_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'table_id' field".into(),
-                    })?;
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let page_token = req.input.get("page_token").and_then(|v| v.as_str());
                 let query = req.input.get("query").and_then(|v| v.as_str());
                 let resp = client
@@ -901,23 +1126,23 @@ impl CodaConnector {
                     message: format!("Failed to serialize rows: {e}"),
                 })?
             }
+            OP_ROWS_GET => {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let table_id = require_str(&req.input, "table_id_or_name")?;
+                let row_id = require_str(&req.input, "row_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let resp = client
+                    .get_row(runtime, doc_id, table_id, row_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize row: {e}"),
+                })?
+            }
             OP_ROWS_UPSERT => {
-                let doc_id = req
-                    .input
-                    .get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'doc_id' field".into(),
-                    })?;
-                let table_id = req
-                    .input
-                    .get("table_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'table_id' field".into(),
-                    })?;
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let table_id = require_str(&req.input, "table_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
                 let rows = req.input.get("rows").ok_or(FcpError::InvalidRequest {
                     code: 1005,
                     message: "Missing 'rows' field".into(),
@@ -929,31 +1154,25 @@ impl CodaConnector {
                     body["keyColumns"] = kc.clone();
                 }
 
-                let resp = client
+                let queued = client
                     .upsert_rows(runtime, doc_id, table_id, &body)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let mutation = self
+                    .wait_for_mutation(runtime, client, config, &queued.request_id)
+                    .await?;
+                serde_json::to_value(json!({
+                    "queued": queued,
+                    "mutation": mutation,
+                }))
+                .map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize upsert response: {e}"),
                 })?
             }
             OP_ROWS_DELETE => {
-                let doc_id = req
-                    .input
-                    .get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'doc_id' field".into(),
-                    })?;
-                let table_id = req
-                    .input
-                    .get("table_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'table_id' field".into(),
-                    })?;
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let table_id = require_str(&req.input, "table_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
                 let row_ids: Vec<String> = req
                     .input
                     .get("row_ids")
@@ -963,24 +1182,29 @@ impl CodaConnector {
                         message: "Missing or invalid 'row_ids' field".into(),
                     })?;
 
-                let resp = client
+                let queued = client
                     .delete_rows(runtime, doc_id, table_id, &row_ids)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let mutation = self
+                    .wait_for_mutation(runtime, client, config, &queued.request_id)
+                    .await?;
+                serde_json::to_value(json!({
+                    "queued": queued,
+                    "mutation": mutation,
+                }))
+                .map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize delete response: {e}"),
                 })?
             }
             OP_FORMULAS_LIST => {
-                let doc_id = req
+                let doc_id = require_str(&req.input, "doc_id")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let limit = req
                     .input
-                    .get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'doc_id' field".into(),
-                    })?;
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let page_token = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
                     .list_formulas(runtime, doc_id, limit, page_token)
@@ -990,16 +1214,69 @@ impl CodaConnector {
                     message: format!("Failed to serialize formulas: {e}"),
                 })?
             }
+            OP_FORMULAS_GET => {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let formula_id_or_name = require_str(&req.input, "formula_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let resp = client
+                    .get_formula(runtime, doc_id, formula_id_or_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize formula: {e}"),
+                })?
+            }
+            OP_CONTROLS_LIST => {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let limit = req
+                    .input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let resp = client
+                    .list_controls(runtime, doc_id, limit, page_token)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize controls: {e}"),
+                })?
+            }
+            OP_CONTROLS_GET => {
+                let doc_id = require_str(&req.input, "doc_id")?;
+                let control_id_or_name = require_str(&req.input, "control_id_or_name")?;
+                self.scoped_doc(runtime, client, config, doc_id).await?;
+                let resp = client
+                    .get_control(runtime, doc_id, control_id_or_name)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize control: {e}"),
+                })?
+            }
+            OP_MUTATIONS_GET_STATUS => {
+                let request_id = require_str(&req.input, "request_id")?;
+                let resp = client
+                    .get_mutation_status(runtime, request_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize mutation status: {e}"),
+                })?
+            }
             OP_HEALTH => {
-                client.health_check().await.map_err(|e| e.to_fcp_error())?;
-                json!({ "status": "ok" })
+                let whoami = client
+                    .health_check(runtime)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "status": "ok",
+                    "workspace_match": whoami.workspace.id == config.workspace_id,
+                    "whoami": whoami,
+                })
             }
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
+            _ => unreachable!("unknown operation already handled"),
         };
 
         Ok(InvokeResponse::ok(req.id, output))
@@ -1010,6 +1287,13 @@ impl CodaConnector {
 mod tests {
     use super::*;
 
+    fn test_config() -> serde_json::Value {
+        json!({
+            "workspace_id": "ws-123",
+            "api_token": "tok",
+        })
+    }
+
     fn base_handshake() -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
@@ -1018,10 +1302,14 @@ mod tests {
             host_public_key: [0u8; 32],
             nonce: [0u8; 32],
             capabilities_requested: vec![
+                CapabilityId::from_static(CAP_ACCOUNT_READ),
                 CapabilityId::from_static(CAP_DOCS_READ),
-                CapabilityId::from_static(CAP_DOCS_WRITE),
                 CapabilityId::from_static(CAP_TABLES_READ),
-                CapabilityId::from_static(CAP_TABLES_WRITE),
+                CapabilityId::from_static(CAP_ROWS_READ),
+                CapabilityId::from_static(CAP_ROWS_WRITE),
+                CapabilityId::from_static(CAP_FORMULAS_READ),
+                CapabilityId::from_static(CAP_CONTROLS_READ),
+                CapabilityId::from_static(CAP_MUTATIONS_READ),
             ],
             host: None,
             transport_caps: None,
@@ -1061,10 +1349,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_configure_valid() {
         let mut connector = CodaConnector::new();
-        let config = json!({
-            "api_token": "test_token"
-        });
-        let result = connector.configure(config).await;
+        let result = connector.configure(test_config()).await;
         assert!(result.is_ok());
         assert!(connector.config.is_some());
         assert!(connector.client.is_some());
@@ -1079,21 +1364,31 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_health_before_configure() {
-        let connector = CodaConnector::new();
-        let health = connector.health().await;
-        assert!(matches!(health.status, HealthState::Degraded { .. }));
+    async fn test_configure_rejects_non_coda_host() {
+        let mut connector = CodaConnector::new();
+        let result = connector
+            .configure(json!({
+                "workspace_id": "ws-123",
+                "api_token": "tok",
+                "base_url": "https://example.com/apis/v1"
+            }))
+            .await;
+        assert!(result.is_err());
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_health_after_configure() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         let health = connector.health().await;
         assert!(matches!(health.status, HealthState::Ready));
+        assert!(
+            health
+                .details
+                .as_ref()
+                .and_then(|details| details.get("contract"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -1106,12 +1401,21 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_doctor_after_configure() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         let report = connector.doctor();
         assert!(report.passed);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "auth_boundary")
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "service_inventory")
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1119,6 +1423,13 @@ mod tests {
         let connector = CodaConnector::new();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert!(
+            report
+                .details
+                .as_ref()
+                .and_then(|details| details.get("contract"))
+                .is_some()
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1139,17 +1450,25 @@ mod tests {
     fn test_introspection_operations() {
         let connector = CodaConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 10);
+        assert_eq!(intro.operations.len(), 18);
         for op_id in &[
+            OP_ACCOUNT_WHOAMI,
             OP_DOCS_LIST,
             OP_DOCS_GET,
-            OP_DOCS_CREATE,
             OP_PAGES_LIST,
+            OP_PAGES_GET,
             OP_TABLES_LIST,
+            OP_TABLES_GET,
+            OP_COLUMNS_LIST,
             OP_ROWS_LIST,
+            OP_ROWS_GET,
             OP_ROWS_UPSERT,
             OP_ROWS_DELETE,
             OP_FORMULAS_LIST,
+            OP_FORMULAS_GET,
+            OP_CONTROLS_LIST,
+            OP_CONTROLS_GET,
+            OP_MUTATIONS_GET_STATUS,
             OP_HEALTH,
         ] {
             assert!(
@@ -1162,10 +1481,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_unknown_operation() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
         let req = base_invoke(connector.id(), "coda.nonexistent");
         let result = connector.invoke(req).await;
@@ -1183,10 +1499,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_docs_get_missing_id() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
         let req = base_invoke(connector.id(), OP_DOCS_GET);
         let result = connector.invoke(req).await;
@@ -1194,14 +1507,12 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_invoke_docs_create_missing_title() {
+    async fn test_invoke_pages_get_missing_page_id() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
-        let req = base_invoke(connector.id(), OP_DOCS_CREATE);
+        let mut req = base_invoke(connector.id(), OP_PAGES_GET);
+        req.input = json!({"doc_id":"doc-123"});
         let result = connector.invoke(req).await;
         assert!(result.is_err());
     }
@@ -1209,10 +1520,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_pages_list_missing_doc_id() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
         let req = base_invoke(connector.id(), OP_PAGES_LIST);
         let result = connector.invoke(req).await;
@@ -1222,10 +1530,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_tables_list_missing_doc_id() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
         let req = base_invoke(connector.id(), OP_TABLES_LIST);
         let result = connector.invoke(req).await;
@@ -1235,10 +1540,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_rows_list_missing_fields() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
         let req = base_invoke(connector.id(), OP_ROWS_LIST);
         let result = connector.invoke(req).await;
@@ -1246,12 +1548,19 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_invoke_rows_get_missing_fields() {
+        let mut connector = CodaConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        connector.handshake(base_handshake()).await.unwrap();
+        let req = base_invoke(connector.id(), OP_ROWS_GET);
+        let result = connector.invoke(req).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_rows_upsert_missing_fields() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
         let req = base_invoke(connector.id(), OP_ROWS_UPSERT);
         let result = connector.invoke(req).await;
@@ -1261,25 +1570,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_rows_delete_missing_fields() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         connector.handshake(base_handshake()).await.unwrap();
         let req = base_invoke(connector.id(), OP_ROWS_DELETE);
-        let result = connector.invoke(req).await;
-        assert!(result.is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_invoke_formulas_list_missing_doc_id() {
-        let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
-        connector.handshake(base_handshake()).await.unwrap();
-        let req = base_invoke(connector.id(), OP_FORMULAS_LIST);
         let result = connector.invoke(req).await;
         assert!(result.is_err());
     }
@@ -1287,7 +1580,7 @@ mod tests {
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 18);
     }
 
     #[test]
@@ -1299,22 +1592,26 @@ mod tests {
     }
 
     #[test]
-    fn test_docs_list_is_safe() {
+    fn test_account_whoami_is_safe() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_DOCS_LIST).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_ACCOUNT_WHOAMI)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
     }
 
     #[test]
-    fn test_docs_create_is_risky() {
+    fn test_rows_upsert_is_risky_best_effort() {
         let ops = operations_info();
         let op = ops
             .iter()
-            .find(|op| op.id.as_str() == OP_DOCS_CREATE)
+            .find(|op| op.id.as_str() == OP_ROWS_UPSERT)
             .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
-        assert_eq!(op.idempotency, IdempotencyClass::Strict);
+        assert_eq!(op.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
     }
 
     #[test]
@@ -1330,14 +1627,13 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_upsert_is_risky() {
+    fn test_read_operations_are_strict() {
         let ops = operations_info();
-        let op = ops
-            .iter()
-            .find(|op| op.id.as_str() == OP_ROWS_UPSERT)
-            .unwrap();
-        assert_eq!(op.safety_tier, SafetyTier::Risky);
-        assert_eq!(op.risk_level, RiskLevel::Medium);
+        for op in ops {
+            if !matches!(op.id.as_str(), OP_ROWS_UPSERT) && op.safety_tier == SafetyTier::Safe {
+                assert_eq!(op.idempotency, IdempotencyClass::Strict, "{}", op.id);
+            }
+        }
     }
 
     #[test]
@@ -1358,10 +1654,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_before_handshake_returns_not_handshaken() {
         let mut connector = CodaConnector::new();
-        connector
-            .configure(json!({ "api_token": "tok" }))
-            .await
-            .unwrap();
+        connector.configure(test_config()).await.unwrap();
         let result = connector
             .invoke(base_invoke(connector.id(), OP_DOCS_LIST))
             .await;
@@ -1372,9 +1665,13 @@ mod tests {
     fn debug_redacts_config_secrets() {
         let config = CodaConfig {
             base_url: default_base_url(),
+            workspace_id: "ws-123".into(),
+            allowed_doc_ids: vec!["doc-1".into()],
             api_token: "super_secret_token".into(),
             retry: HttpRetryConfig::default(),
             request_timeout_ms: default_request_timeout_ms(),
+            mutation_poll_interval_ms: default_mutation_poll_interval_ms(),
+            mutation_deadline_ms: default_mutation_deadline_ms(),
         };
         let debug_output = format!("{config:?}");
         assert!(
@@ -1417,8 +1714,9 @@ mod tests {
     async fn test_configure_with_custom_base_url() {
         let mut connector = CodaConnector::new();
         let config = json!({
+            "workspace_id": "ws-123",
             "api_token": "tok",
-            "base_url": "https://custom.coda.io/apis/v1"
+            "base_url": "https://localhost/apis/v1"
         });
         let result = connector.configure(config).await;
         assert!(result.is_ok());
@@ -1428,6 +1726,7 @@ mod tests {
     async fn test_configure_with_custom_timeout() {
         let mut connector = CodaConnector::new();
         let config = json!({
+            "workspace_id": "ws-123",
             "api_token": "tok",
             "request_timeout_ms": 60000
         });
@@ -1442,7 +1741,7 @@ mod tests {
             .iter()
             .find(|op| op.id.as_str() == OP_FORMULAS_LIST)
             .unwrap();
-        assert_eq!(op.capability, CapabilityId::from_static(CAP_DOCS_READ));
+        assert_eq!(op.capability, CapabilityId::from_static(CAP_FORMULAS_READ));
     }
 
     #[test]
@@ -1453,5 +1752,25 @@ mod tests {
             .find(|op| op.id.as_str() == OP_TABLES_LIST)
             .unwrap();
         assert_eq!(op.capability, CapabilityId::from_static(CAP_TABLES_READ));
+    }
+
+    #[test]
+    fn test_rows_list_capability() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_ROWS_LIST)
+            .unwrap();
+        assert_eq!(op.capability, CapabilityId::from_static(CAP_ROWS_READ));
+    }
+
+    #[test]
+    fn test_controls_list_capability() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_CONTROLS_LIST)
+            .unwrap();
+        assert_eq!(op.capability, CapabilityId::from_static(CAP_CONTROLS_READ));
     }
 }

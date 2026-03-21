@@ -1,109 +1,411 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:2080b28004713881e4734dc4202a5b7e748c2ce62bcadc343c61cb33bfb2cad8"
 
 [connector]
 id = "fcp.coda"
-name = "Coda"
+name = "Coda Connector"
 version = "0.1.0"
-description = "Coda document platform connector for managing docs, pages, tables, rows, and formulas"
-archetype = "operational"
+description = "Workspace-scoped Coda REST connector for docs, pages, tables, rows, formulas, controls, and mutation tracking"
+archetypes = ["operational"]
+format = "native"
 homepage = "https://coda.io/developers/apis/v1"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "One bearer token and one workspace boundary are injected at runtime; the connector keeps no durable local state."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work"]
+allowed_sources = ["z:owner", "z:private", "z:work"]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = ["z:public", "z:community"]
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "network.listen", "system.privileged"]
 
-[provides.operations.docs_list]
-summary = "List documents"
-capability = "coda.docs.read"
-risk = "low"
+[provides.operations."coda.account.whoami"]
+description = "Read authenticated user and workspace info from Coda."
+capability = "coda.account.read"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.docs_list.network_constraints]
-host_allow = ["coda.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."coda.account.whoami".input_schema]
+type = "object"
 
-[provides.operations.docs_list.ai_hints]
-when_to_use = "When you need to list Coda documents accessible to the user"
+[provides.operations."coda.account.whoami".output_schema]
+type = "object"
 
-[provides.operations.docs_get]
-summary = "Get a single document"
+[provides.operations."coda.account.whoami".ai_hints]
+when_to_use = "Use when you need to verify the configured token and workspace boundary."
+common_mistakes = []
+examples = []
+related = ["coda.health", "coda.docs.read"]
+
+[provides.operations."coda.docs.list"]
+description = "List docs visible to the configured token inside the configured workspace."
 capability = "coda.docs.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "none"
+requires_approval = "none"
+idempotency = "strict"
 
-[provides.operations.docs_get.network_constraints]
-host_allow = ["coda.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."coda.docs.list".input_schema]
+type = "object"
 
-[provides.operations.docs_get.ai_hints]
-when_to_use = "When you need details about a specific Coda document"
+[provides.operations."coda.docs.list".output_schema]
+type = "object"
 
-[provides.operations.docs_create]
-summary = "Create a new document"
-capability = "coda.docs.write"
-risk = "medium"
+[provides.operations."coda.docs.list".ai_hints]
+when_to_use = "Use for workspace-scoped doc discovery."
+common_mistakes = ["Only docs in the configured workspace should be returned."]
+examples = []
+related = ["coda.docs.read", "coda.account.read"]
+
+[provides.operations."coda.docs.get"]
+description = "Fetch one Coda doc and verify that it belongs to the configured workspace."
+capability = "coda.docs.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.docs.get".input_schema]
+type = "object"
+required = ["doc_id"]
+
+[provides.operations."coda.docs.get".output_schema]
+type = "object"
+
+[provides.operations."coda.docs.get".ai_hints]
+when_to_use = "Use to inspect one doc's metadata and workspace binding."
+common_mistakes = ["doc_id must be a stable Coda doc ID."]
+examples = []
+related = ["coda.docs.read"]
+
+[provides.operations."coda.pages.list"]
+description = "List pages in a scoped Coda document."
+capability = "coda.docs.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.pages.list".input_schema]
+type = "object"
+required = ["doc_id"]
+
+[provides.operations."coda.pages.list".output_schema]
+type = "object"
+
+[provides.operations."coda.pages.list".ai_hints]
+when_to_use = "Use for structural page discovery."
+common_mistakes = []
+examples = []
+related = ["coda.pages.get", "coda.docs.read"]
+
+[provides.operations."coda.pages.get"]
+description = "Fetch one page by ID or name in a scoped Coda doc."
+capability = "coda.docs.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.pages.get".input_schema]
+type = "object"
+required = ["doc_id", "page_id_or_name"]
+
+[provides.operations."coda.pages.get".output_schema]
+type = "object"
+
+[provides.operations."coda.pages.get".ai_hints]
+when_to_use = "Use to inspect one page."
+common_mistakes = ["Stable page IDs are preferred over names."]
+examples = []
+related = ["coda.docs.read"]
+
+[provides.operations."coda.tables.list"]
+description = "List tables and views in a scoped Coda doc."
+capability = "coda.tables.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.tables.list".input_schema]
+type = "object"
+required = ["doc_id"]
+
+[provides.operations."coda.tables.list".output_schema]
+type = "object"
+
+[provides.operations."coda.tables.list".ai_hints]
+when_to_use = "Use to discover tables before row reads or writes."
+common_mistakes = []
+examples = []
+related = ["coda.tables.get", "coda.columns.list", "coda.rows.read"]
+
+[provides.operations."coda.tables.get"]
+description = "Fetch one table or view by ID or name."
+capability = "coda.tables.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.tables.get".input_schema]
+type = "object"
+required = ["doc_id", "table_id_or_name"]
+
+[provides.operations."coda.tables.get".output_schema]
+type = "object"
+
+[provides.operations."coda.tables.get".ai_hints]
+when_to_use = "Use to inspect one table or view."
+common_mistakes = ["Stable table IDs are preferred over names."]
+examples = []
+related = ["coda.tables.read"]
+
+[provides.operations."coda.columns.list"]
+description = "List columns for a table or view."
+capability = "coda.tables.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.columns.list".input_schema]
+type = "object"
+required = ["doc_id", "table_id_or_name"]
+
+[provides.operations."coda.columns.list".output_schema]
+type = "object"
+
+[provides.operations."coda.columns.list".ai_hints]
+when_to_use = "Use before row writes to learn stable column IDs."
+common_mistakes = []
+examples = []
+related = ["coda.rows.write", "coda.tables.read"]
+
+[provides.operations."coda.rows.list"]
+description = "List rows in a scoped Coda table or view."
+capability = "coda.rows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.rows.list".input_schema]
+type = "object"
+required = ["doc_id", "table_id_or_name"]
+
+[provides.operations."coda.rows.list".output_schema]
+type = "object"
+
+[provides.operations."coda.rows.list".ai_hints]
+when_to_use = "Use for row enumeration and filtered reads."
+common_mistakes = ["Stable IDs are preferred over names for tables and rows."]
+examples = []
+related = ["coda.rows.get", "coda.rows.write"]
+
+[provides.operations."coda.rows.get"]
+description = "Fetch one row by ID or fallback row name."
+capability = "coda.rows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.rows.get".input_schema]
+type = "object"
+required = ["doc_id", "table_id_or_name", "row_id_or_name"]
+
+[provides.operations."coda.rows.get".output_schema]
+type = "object"
+
+[provides.operations."coda.rows.get".ai_hints]
+when_to_use = "Use for point lookup of one row."
+common_mistakes = ["Prefer stable row IDs over row names."]
+examples = []
+related = ["coda.rows.read"]
+
+[provides.operations."coda.rows.upsert"]
+description = "Insert or update rows in a base table and wait for mutation completion."
+capability = "coda.rows.write"
+risk_level = "medium"
 safety_tier = "risky"
-idempotency = "strict"
+requires_approval = "interactive"
+idempotency = "best_effort"
 
-[provides.operations.docs_create.network_constraints]
-host_allow = ["coda.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."coda.rows.upsert".input_schema]
+type = "object"
+required = ["doc_id", "table_id_or_name", "rows"]
 
-[provides.operations.docs_create.ai_hints]
-when_to_use = "When you need to create a new Coda document"
+[provides.operations."coda.rows.upsert".output_schema]
+type = "object"
 
-[provides.operations.rows_delete]
-summary = "Delete rows from a table"
-capability = "coda.tables.write"
-risk = "high"
+[provides.operations."coda.rows.upsert".ai_hints]
+when_to_use = "Use to insert or update rows in a base table."
+common_mistakes = ["Coda may update multiple rows when key_columns match more than one record."]
+examples = []
+related = ["coda.rows.read", "coda.mutations.read"]
+
+[provides.operations."coda.rows.delete"]
+description = "Delete rows by stable row ID and wait for mutation completion."
+capability = "coda.rows.write"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.rows_delete.network_constraints]
-host_allow = ["coda.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."coda.rows.delete".input_schema]
+type = "object"
+required = ["doc_id", "table_id_or_name", "row_ids"]
 
-[provides.operations.rows_delete.ai_hints]
-when_to_use = "When you need to delete rows from a Coda table"
+[provides.operations."coda.rows.delete".output_schema]
+type = "object"
+
+[provides.operations."coda.rows.delete".ai_hints]
+when_to_use = "Use for destructive row deletion after explicit confirmation."
+common_mistakes = ["Stable row IDs are required for destructive operations."]
+examples = []
+related = ["coda.rows.read", "coda.mutations.read"]
+
+[provides.operations."coda.formulas.list"]
+description = "List named formulas in a scoped Coda document."
+capability = "coda.formulas.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.formulas.list".input_schema]
+type = "object"
+required = ["doc_id"]
+
+[provides.operations."coda.formulas.list".output_schema]
+type = "object"
+
+[provides.operations."coda.formulas.list".ai_hints]
+when_to_use = "Use for formula discovery."
+common_mistakes = []
+examples = []
+related = ["coda.formulas.get"]
+
+[provides.operations."coda.formulas.get"]
+description = "Fetch a single formula by ID or name."
+capability = "coda.formulas.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.formulas.get".input_schema]
+type = "object"
+required = ["doc_id", "formula_id_or_name"]
+
+[provides.operations."coda.formulas.get".output_schema]
+type = "object"
+
+[provides.operations."coda.formulas.get".ai_hints]
+when_to_use = "Use for point lookup of one formula."
+common_mistakes = ["Stable IDs are preferred over names."]
+examples = []
+related = ["coda.formulas.read"]
+
+[provides.operations."coda.controls.list"]
+description = "List controls exposed in a scoped Coda document."
+capability = "coda.controls.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.controls.list".input_schema]
+type = "object"
+required = ["doc_id"]
+
+[provides.operations."coda.controls.list".output_schema]
+type = "object"
+
+[provides.operations."coda.controls.list".ai_hints]
+when_to_use = "Use to inspect the doc's exposed controls without executing buttons."
+common_mistakes = []
+examples = []
+related = ["coda.controls.get"]
+
+[provides.operations."coda.controls.get"]
+description = "Fetch one control by ID or name."
+capability = "coda.controls.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.controls.get".input_schema]
+type = "object"
+required = ["doc_id", "control_id_or_name"]
+
+[provides.operations."coda.controls.get".output_schema]
+type = "object"
+
+[provides.operations."coda.controls.get".ai_hints]
+when_to_use = "Use to inspect one control's current value and metadata."
+common_mistakes = ["Button execution is intentionally out of scope."]
+examples = []
+related = ["coda.controls.read"]
+
+[provides.operations."coda.mutations.get_status"]
+description = "Poll Coda for completion of an asynchronous write."
+capability = "coda.mutations.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.mutations.get_status".input_schema]
+type = "object"
+required = ["request_id"]
+
+[provides.operations."coda.mutations.get_status".output_schema]
+type = "object"
+
+[provides.operations."coda.mutations.get_status".ai_hints]
+when_to_use = "Use after rows.upsert or rows.delete when you need the terminal mutation outcome."
+common_mistakes = []
+examples = []
+related = ["coda.rows.write"]
+
+[provides.operations."coda.health"]
+description = "Verify token reachability and workspace binding."
+capability = "coda.account.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."coda.health".input_schema]
+type = "object"
+
+[provides.operations."coda.health".output_schema]
+type = "object"
+
+[provides.operations."coda.health".ai_hints]
+when_to_use = "Use before real Coda operations to validate auth and scope."
+common_mistakes = []
+examples = []
+related = ["coda.account.read"]
 
 [sandbox]
 profile = "strict"

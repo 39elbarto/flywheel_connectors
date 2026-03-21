@@ -20,10 +20,7 @@ pub enum CodaError {
 
     /// Coda API returned an error response.
     #[error("Coda API error ({status}): {message}")]
-    Api {
-        status: u16,
-        message: String,
-    },
+    Api { status: u16, message: String },
 
     /// Rate limited by Coda API.
     #[error("Rate limited, retry after {retry_after_ms}ms")]
@@ -55,9 +52,7 @@ impl CodaError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(_) | Self::RateLimited { .. } | Self::Async(_) => true,
-            Self::Api { status, .. } => {
-                classify_http_status(*status, None).is_retryable()
-            }
+            Self::Api { status, .. } => classify_http_status(*status, None).is_retryable(),
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::NotFound(_)

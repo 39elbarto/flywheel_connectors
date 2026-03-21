@@ -27,10 +27,10 @@ use tracing::{debug, info, warn};
 use crate::client::MattermostClient;
 use crate::error::MattermostError;
 use crate::types::{
-    Channel, CreateDirectChannelRequest, CreatePostRequest, CreateReactionRequest,
-    DeleteReactionRequest, GetThreadRequest, MattermostAuth, MattermostConfig,
-    MattermostWebSocketMessage, Post, Reaction, SearchPostsRequest, ThreadResponse,
-    UploadFileRequest,
+    Channel, CreateDirectChannelRequest, CreateGroupChannelRequest, CreatePostRequest,
+    CreateReactionRequest, DeleteReactionRequest, GetThreadRequest, MattermostAuth,
+    MattermostConfig, MattermostWebSocketMessage, Post, Reaction, SearchPostsRequest,
+    ThreadResponse, UpdatePostRequest, UploadFileRequest,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -339,6 +339,15 @@ impl MattermostConnector {
             }
             "mattermost.upload_file" => invoke_upload_file(client, &req.input).await?,
             "mattermost.delete_post" => invoke_delete_post(client, &req.input).await?,
+            "mattermost.update_post" => invoke_update_post(client, &req.input).await?,
+            "mattermost.pin_post" => invoke_pin_post(client, &req.input).await?,
+            "mattermost.unpin_post" => invoke_unpin_post(client, &req.input).await?,
+            "mattermost.get_reactions_for_post" => {
+                invoke_get_reactions_for_post(client, &req.input).await?
+            }
+            "mattermost.create_group_channel" => {
+                invoke_create_group_channel(client, &req.input).await?
+            }
             _ => {
                 warn!(operation = %operation, "unknown operation");
                 return Err(FcpError::InvalidRequest {
@@ -1113,6 +1122,84 @@ async fn invoke_delete_post(
     Ok(json!({"status": "deleted", "post_id": post_id}))
 }
 
+async fn invoke_update_post(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: UpdatePostRequest =
+        serde_json::from_value(input.clone()).map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid update_post input: {e}"),
+        })?;
+    if request.id.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "post id is required".into(),
+        });
+    }
+    let post = client.update_post(&request).await.map_err(map_mm_err)?;
+    to_json(post)
+}
+
+async fn invoke_pin_post(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let post_id = require_str(input, "post_id")?;
+    client.pin_post(post_id).await.map_err(map_mm_err)?;
+    Ok(json!({"status": "pinned", "post_id": post_id}))
+}
+
+async fn invoke_unpin_post(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let post_id = require_str(input, "post_id")?;
+    client.unpin_post(post_id).await.map_err(map_mm_err)?;
+    Ok(json!({"status": "unpinned", "post_id": post_id}))
+}
+
+async fn invoke_get_reactions_for_post(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let post_id = require_str(input, "post_id")?;
+    let reactions = client
+        .get_reactions_for_post(post_id)
+        .await
+        .map_err(map_mm_err)?;
+    to_json(reactions)
+}
+
+async fn invoke_create_group_channel(
+    client: &MattermostClient,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: CreateGroupChannelRequest =
+        serde_json::from_value(input.clone()).map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid create_group_channel input: {e}"),
+        })?;
+    if request.user_ids.len() < 3 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "user_ids must contain at least three users for a group channel".into(),
+        });
+    }
+    let mut seen = HashSet::new();
+    if request.user_ids.iter().any(|id| !seen.insert(id.as_str())) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "user_ids must not contain duplicates".into(),
+        });
+    }
+    let channel = client
+        .create_group_channel(&request)
+        .await
+        .map_err(map_mm_err)?;
+    to_json(channel)
+}
+
 // ── Operation descriptors ───────────────────────────────────────────────
 
 /// Typed operation descriptors for introspection.
@@ -1121,6 +1208,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
     let mut ops = user_and_team_operations();
     ops.extend(channel_and_post_read_operations());
     ops.extend(file_read_operations());
+    ops.extend(read_reaction_operations());
     ops.extend(search_operations());
     ops.extend(write_operations());
     ops
@@ -1232,9 +1320,14 @@ fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId>
         | "mattermost.get_file_info"
         | "mattermost.get_file_link"
         | "mattermost.download_file"
-        | "mattermost.get_file_infos_for_post" => "mattermost.read",
+        | "mattermost.get_file_infos_for_post"
+        | "mattermost.get_reactions_for_post" => "mattermost.read",
         "mattermost.create_direct_channel"
+        | "mattermost.create_group_channel"
         | "mattermost.create_post"
+        | "mattermost.update_post"
+        | "mattermost.pin_post"
+        | "mattermost.unpin_post"
         | "mattermost.create_reaction"
         | "mattermost.delete_reaction"
         | "mattermost.upload_file"
@@ -1621,10 +1714,18 @@ fn search_operations() -> Vec<OperationInfo> {
     }]
 }
 
+fn read_reaction_operations() -> Vec<OperationInfo> {
+    vec![get_reactions_for_post_operation()]
+}
+
 fn write_operations() -> Vec<OperationInfo> {
     vec![
         create_direct_channel_operation(),
+        create_group_channel_operation(),
         create_post_operation(),
+        update_post_operation(),
+        pin_post_operation(),
+        unpin_post_operation(),
         create_reaction_operation(),
         delete_reaction_operation(),
         upload_file_operation(),
@@ -1864,6 +1965,182 @@ fn delete_post_operation() -> OperationInfo {
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::Interactive),
+    }
+}
+
+fn get_reactions_for_post_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.get_reactions_for_post"),
+        summary: "Get all reactions for a post.".into(),
+        description: Some(
+            "Returns the full list of emoji reactions on a post, including user IDs and timestamps."
+                .into(),
+        ),
+        input_schema: json!({"type": "object", "properties": {"post_id": {"type": "string"}}, "required": ["post_id"]}),
+        output_schema: json!({"type": "array", "items": {"type": "object", "properties": {"user_id": {"type": "string"}, "post_id": {"type": "string"}, "emoji_name": {"type": "string"}, "create_at": {"type": "integer"}}}}),
+        capability: CapabilityId::from_static("mattermost.read"),
+        risk_level: RiskLevel::Low,
+        safety_tier: SafetyTier::Safe,
+        idempotency: IdempotencyClass::Strict,
+        ai_hints: AgentHint {
+            when_to_use: "Use to retrieve all reactions on a message, such as counting votes or checking acknowledgments.".into(),
+            common_mistakes: vec![
+                "Assuming reaction names include colons; Mattermost uses bare emoji names like 'thumbsup'.".into(),
+            ],
+            examples: vec![r#"{"post_id": "abc123"}"#.into()],
+            related: vec![
+                CapabilityId::from_static("mattermost.create_reaction"),
+                CapabilityId::from_static("mattermost.delete_reaction"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn create_group_channel_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.create_group_channel"),
+        summary: "Create or fetch a group message channel.".into(),
+        description: Some(
+            "Creates a group direct-message channel for three or more Mattermost user IDs, or returns the existing channel if one already exists for that exact set of participants."
+                .into(),
+        ),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "user_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 3,
+                    "uniqueItems": true
+                }
+            },
+            "required": ["user_ids"]
+        }),
+        output_schema: json!({"type": "object", "properties": {"id": {"type": "string"}, "display_name": {"type": "string"}, "type": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Medium,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use: "Use when a workflow needs a group DM channel with three or more participants.".into(),
+            common_mistakes: vec![
+                "Passing fewer than three user IDs; use create_direct_channel for 1:1 conversations.".into(),
+                "Passing duplicate user IDs.".into(),
+            ],
+            examples: vec![r#"{"user_ids": ["user_a", "user_b", "user_c"]}"#.into()],
+            related: vec![
+                CapabilityId::from_static("mattermost.create_direct_channel"),
+                CapabilityId::from_static("mattermost.create_post"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn update_post_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.update_post"),
+        summary: "Edit an existing post.".into(),
+        description: Some(
+            "Update the message text, props, or file attachments of an existing post. Only the fields provided in the request body are patched."
+                .into(),
+        ),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Post ID to update"},
+                "message": {"type": "string", "description": "New message text"},
+                "props": {"type": "object", "description": "Updated post props"},
+                "file_ids": {"type": "array", "items": {"type": "string"}, "description": "Updated file attachment IDs"},
+                "has_reactions": {"type": "boolean"}
+            },
+            "required": ["id"]
+        }),
+        output_schema: json!({"type": "object", "properties": {"id": {"type": "string"}, "message": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Medium,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use: "Use to edit a message after it has been posted, such as correcting a typo or updating status information.".into(),
+            common_mistakes: vec![
+                "Forgetting to include the post id field.".into(),
+                "Assuming you can change the channel_id or user_id of an existing post.".into(),
+                "Not having edit permissions for the target post.".into(),
+            ],
+            examples: vec![
+                r#"{"id": "abc123", "message": "Updated message text"}"#.into(),
+            ],
+            related: vec![
+                CapabilityId::from_static("mattermost.create_post"),
+                CapabilityId::from_static("mattermost.get_post"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn pin_post_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.pin_post"),
+        summary: "Pin a post to its channel.".into(),
+        description: Some(
+            "Pins a post so it appears in the channel's pinned messages list. Pinning is idempotent."
+                .into(),
+        ),
+        input_schema: json!({"type": "object", "properties": {"post_id": {"type": "string"}}, "required": ["post_id"]}),
+        output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}, "post_id": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Low,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use: "Use to highlight an important message so channel members can find it easily.".into(),
+            common_mistakes: vec![
+                "Pinning without verifying the post_id first.".into(),
+            ],
+            examples: vec![r#"{"post_id": "abc123"}"#.into()],
+            related: vec![
+                CapabilityId::from_static("mattermost.unpin_post"),
+                CapabilityId::from_static("mattermost.get_post"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
+}
+
+fn unpin_post_operation() -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static("mattermost.unpin_post"),
+        summary: "Unpin a post from its channel.".into(),
+        description: Some(
+            "Removes a post from the channel's pinned messages list. Unpinning is idempotent."
+                .into(),
+        ),
+        input_schema: json!({"type": "object", "properties": {"post_id": {"type": "string"}}, "required": ["post_id"]}),
+        output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}, "post_id": {"type": "string"}}}),
+        capability: CapabilityId::from_static("mattermost.write"),
+        risk_level: RiskLevel::Low,
+        safety_tier: SafetyTier::Risky,
+        idempotency: IdempotencyClass::BestEffort,
+        ai_hints: AgentHint {
+            when_to_use: "Use to remove a post from the pinned messages list.".into(),
+            common_mistakes: vec![
+                "Unpinning a post that was not pinned; this is a no-op on most Mattermost versions.".into(),
+            ],
+            examples: vec![r#"{"post_id": "abc123"}"#.into()],
+            related: vec![
+                CapabilityId::from_static("mattermost.pin_post"),
+                CapabilityId::from_static("mattermost.get_post"),
+            ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
     }
 }
 
@@ -2356,7 +2633,7 @@ mod tests {
     fn operations_info_has_entries() {
         let ops = operations_info();
         assert!(!ops.is_empty());
-        assert!(ops.len() >= 16);
+        assert!(ops.len() >= 22);
     }
 
     #[test]
@@ -2415,7 +2692,7 @@ mod tests {
     fn introspect_returns_operations_and_events() {
         let connector = MattermostConnector::new();
         let introspection = connector.introspect();
-        assert!(introspection.operations.len() >= 16);
+        assert!(introspection.operations.len() >= 22);
         assert!(introspection.events.len() >= 10);
         assert!(introspection.event_caps.as_ref().unwrap().streaming);
         assert_eq!(
@@ -2901,5 +3178,119 @@ mod tests {
         ));
         assert_eq!(connection_id, "conn-a");
         assert_eq!(expected_server_seq, 3);
+    }
+
+    #[test]
+    fn new_mutation_operations_present() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
+        assert!(ids.contains(&"mattermost.update_post"), "missing update_post");
+        assert!(ids.contains(&"mattermost.pin_post"), "missing pin_post");
+        assert!(ids.contains(&"mattermost.unpin_post"), "missing unpin_post");
+        assert!(
+            ids.contains(&"mattermost.get_reactions_for_post"),
+            "missing get_reactions_for_post"
+        );
+        assert!(
+            ids.contains(&"mattermost.create_group_channel"),
+            "missing create_group_channel"
+        );
+    }
+
+    #[test]
+    fn update_post_operation_has_correct_classification() {
+        let op = update_post_operation();
+        assert_eq!(op.capability.as_str(), "mattermost.write");
+        assert!(matches!(op.safety_tier, SafetyTier::Risky));
+        assert!(matches!(op.risk_level, RiskLevel::Medium));
+        assert!(matches!(op.idempotency, IdempotencyClass::BestEffort));
+    }
+
+    #[test]
+    fn pin_unpin_operations_have_correct_classification() {
+        let pin = pin_post_operation();
+        assert_eq!(pin.capability.as_str(), "mattermost.write");
+        assert!(matches!(pin.risk_level, RiskLevel::Low));
+        assert!(matches!(pin.safety_tier, SafetyTier::Risky));
+
+        let unpin = unpin_post_operation();
+        assert_eq!(unpin.capability.as_str(), "mattermost.write");
+        assert!(matches!(unpin.risk_level, RiskLevel::Low));
+        assert!(matches!(unpin.safety_tier, SafetyTier::Risky));
+    }
+
+    #[test]
+    fn get_reactions_for_post_is_safe_read() {
+        let op = get_reactions_for_post_operation();
+        assert_eq!(op.capability.as_str(), "mattermost.read");
+        assert!(matches!(op.safety_tier, SafetyTier::Safe));
+        assert!(matches!(op.risk_level, RiskLevel::Low));
+    }
+
+    #[test]
+    fn create_group_channel_operation_classification() {
+        let op = create_group_channel_operation();
+        assert_eq!(op.capability.as_str(), "mattermost.write");
+        assert!(matches!(op.safety_tier, SafetyTier::Risky));
+        assert!(matches!(op.risk_level, RiskLevel::Medium));
+    }
+
+    #[test]
+    fn update_post_requires_id() {
+        let input = json!({"id": "  ", "message": "new text"});
+        let req: crate::types::UpdatePostRequest = serde_json::from_value(input).unwrap();
+        assert!(req.id.trim().is_empty());
+    }
+
+    #[test]
+    fn create_group_channel_rejects_too_few_users() {
+        let input = json!({"user_ids": ["u1", "u2"]});
+        let req: crate::types::CreateGroupChannelRequest =
+            serde_json::from_value(input).unwrap();
+        assert!(req.user_ids.len() < 3);
+    }
+
+    #[test]
+    fn create_group_channel_rejects_duplicates() {
+        let input = json!({"user_ids": ["u1", "u2", "u1"]});
+        let req: crate::types::CreateGroupChannelRequest =
+            serde_json::from_value(input).unwrap();
+        let mut seen = HashSet::new();
+        let has_dup = req.user_ids.iter().any(|id| !seen.insert(id.as_str()));
+        assert!(has_dup);
+    }
+
+    #[test]
+    fn required_capability_for_new_operations() {
+        assert_eq!(
+            required_capability_for_operation("mattermost.update_post")
+                .unwrap()
+                .as_str(),
+            "mattermost.write"
+        );
+        assert_eq!(
+            required_capability_for_operation("mattermost.pin_post")
+                .unwrap()
+                .as_str(),
+            "mattermost.write"
+        );
+        assert_eq!(
+            required_capability_for_operation("mattermost.unpin_post")
+                .unwrap()
+                .as_str(),
+            "mattermost.write"
+        );
+        assert_eq!(
+            required_capability_for_operation("mattermost.get_reactions_for_post")
+                .unwrap()
+                .as_str(),
+            "mattermost.read"
+        );
+        assert_eq!(
+            required_capability_for_operation("mattermost.create_group_channel")
+                .unwrap()
+                .as_str(),
+            "mattermost.write"
+        );
     }
 }

@@ -150,9 +150,29 @@ pub struct CreatePostRequest {
     pub props: Option<serde_json::Value>,
 }
 
+/// Request for updating (patching) an existing post.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePostRequest {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub props: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_reactions: Option<bool>,
+}
+
 /// Request for creating or retrieving a direct channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateDirectChannelRequest {
+    pub user_ids: Vec<String>,
+}
+
+/// Request for creating a group message channel (3+ users).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGroupChannelRequest {
     pub user_ids: Vec<String>,
 }
 
@@ -610,6 +630,48 @@ mod tests {
         assert_eq!(response.file_infos.len(), 1);
         assert_eq!(response.file_infos[0].id, "f1");
         assert_eq!(response.client_ids, vec![String::from("client-1")]);
+    }
+
+    #[test]
+    fn update_post_request_serialize_minimal() {
+        let req = UpdatePostRequest {
+            id: "p1".into(),
+            message: None,
+            props: None,
+            file_ids: None,
+            has_reactions: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["id"], "p1");
+        assert!(json.get("message").is_none());
+        assert!(json.get("props").is_none());
+    }
+
+    #[test]
+    fn update_post_request_serialize_with_message() {
+        let req = UpdatePostRequest {
+            id: "p1".into(),
+            message: Some("edited text".into()),
+            props: None,
+            file_ids: Some(vec!["f1".into()]),
+            has_reactions: Some(true),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["id"], "p1");
+        assert_eq!(json["message"], "edited text");
+        assert_eq!(json["file_ids"][0], "f1");
+        assert_eq!(json["has_reactions"], true);
+    }
+
+    #[test]
+    fn create_group_channel_request_serializes() {
+        let req = CreateGroupChannelRequest {
+            user_ids: vec!["u1".into(), "u2".into(), "u3".into()],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["user_ids"][0], "u1");
+        assert_eq!(json["user_ids"][1], "u2");
+        assert_eq!(json["user_ids"][2], "u3");
     }
 
     #[test]

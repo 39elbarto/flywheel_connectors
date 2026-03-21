@@ -13,9 +13,10 @@ use tracing::debug;
 
 use crate::error::{MattermostError, MattermostResult};
 use crate::types::{
-    Channel, CreateDirectChannelRequest, CreatePostRequest, CreateReactionRequest,
-    DeleteReactionRequest, FileDownload, FileInfo, GetThreadRequest, MattermostAuth, Post,
-    PostList, Reaction, SearchPostsRequest, Team, UploadFileRequest, UploadFileResponse, User,
+    Channel, CreateDirectChannelRequest, CreateGroupChannelRequest, CreatePostRequest,
+    CreateReactionRequest, DeleteReactionRequest, FileDownload, FileInfo, GetThreadRequest,
+    MattermostAuth, Post, PostList, Reaction, SearchPostsRequest, Team, UpdatePostRequest,
+    UploadFileRequest, UploadFileResponse, User,
 };
 
 const CREDENTIAL_ID_HEADER: &str = "x-fcp-credential-id";
@@ -328,6 +329,62 @@ impl MattermostClient {
         self.delete_path(&format!("/api/v4/posts/{post_id}")).await
     }
 
+    /// Update (patch) an existing post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the post is not found or permission is denied.
+    pub async fn update_post(&self, req: &UpdatePostRequest) -> MattermostResult<Post> {
+        let post_id = encode_path_segment(&req.id);
+        self.put(&format!("/api/v4/posts/{post_id}/patch"), req)
+            .await
+    }
+
+    /// Pin a post to its channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the post is not found or permission is denied.
+    pub async fn pin_post(&self, post_id: &str) -> MattermostResult<()> {
+        let post_id = encode_path_segment(post_id);
+        self.post_empty(&format!("/api/v4/posts/{post_id}/pin"))
+            .await
+    }
+
+    /// Unpin a post from its channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the post is not found or permission is denied.
+    pub async fn unpin_post(&self, post_id: &str) -> MattermostResult<()> {
+        let post_id = encode_path_segment(post_id);
+        self.post_empty(&format!("/api/v4/posts/{post_id}/unpin"))
+            .await
+    }
+
+    /// Get all reactions for a post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the post is not found.
+    pub async fn get_reactions_for_post(&self, post_id: &str) -> MattermostResult<Vec<Reaction>> {
+        let post_id = encode_path_segment(post_id);
+        self.get(&format!("/api/v4/posts/{post_id}/reactions"))
+            .await
+    }
+
+    /// Create a group message channel (3+ users).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failure or if the server rejects the request.
+    pub async fn create_group_channel(
+        &self,
+        req: &CreateGroupChannelRequest,
+    ) -> MattermostResult<Channel> {
+        self.post("/api/v4/channels/group", &req.user_ids).await
+    }
+
     /// Save a reaction on a post.
     ///
     /// # Errors
@@ -480,6 +537,37 @@ impl MattermostClient {
             .await
             .map_err(MattermostError::Http)?;
         self.handle_response(response).await
+    }
+
+    async fn put<T: DeserializeOwned, B: serde::Serialize + Sync>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> MattermostResult<T> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "PUT");
+
+        let response = self
+            .client
+            .put(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
+        self.handle_response(response).await
+    }
+
+    async fn post_empty(&self, path: &str) -> MattermostResult<()> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST (empty body)");
+
+        let response = self
+            .client
+            .post(&url)
+            .send()
+            .await
+            .map_err(MattermostError::Http)?;
+        self.handle_empty_response(response).await
     }
 
     async fn delete_path(&self, path: &str) -> MattermostResult<()> {

@@ -215,14 +215,38 @@ impl BoxClient {
         self.handle_response(resp).await
     }
 
+    /// Reject path-segment values that contain traversal characters.
+    fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BoxResult<&'a str> {
+        if value.trim().is_empty() {
+            return Err(BoxError::Api {
+                status_code: 400,
+                message: format!("{field} must not be empty"),
+            });
+        }
+        let lower = value.to_ascii_lowercase();
+        if value.contains('/')
+            || value.contains('\\')
+            || value.contains("..")
+            || lower.contains("%2f")
+            || lower.contains("%5c")
+        {
+            return Err(BoxError::Api {
+                status_code: 400,
+                message: format!("{field} contains path traversal characters"),
+            });
+        }
+        Ok(value)
+    }
+
     // -- Files --
 
     /// Get file metadata.
     pub async fn get_file(&self, file_id: &str) -> BoxResult<serde_json::Value> {
+        Self::sanitize_path_segment(file_id, "file_id")?;
         self.get(&format!("/files/{file_id}"), None).await
     }
 
-    /// Upload a file (simplified — sends JSON attributes, not real multipart binary).
+    /// Upload a file (simplified -- sends JSON attributes, not real multipart binary).
     /// In production, the actual binary content would be sent via multipart form.
     /// For the connector protocol, we pass metadata and let the host handle content.
     pub async fn upload_file(
@@ -231,6 +255,7 @@ impl BoxClient {
         name: &str,
         content: Option<&str>,
     ) -> BoxResult<serde_json::Value> {
+        Self::sanitize_path_segment(folder_id, "folder_id")?;
         let attributes = serde_json::json!({
             "name": name,
             "parent": {"id": folder_id}
@@ -255,6 +280,7 @@ impl BoxClient {
 
     /// Delete a file.
     pub async fn delete_file(&self, file_id: &str) -> BoxResult<serde_json::Value> {
+        Self::sanitize_path_segment(file_id, "file_id")?;
         self.delete(&format!("/files/{file_id}")).await
     }
 
@@ -267,6 +293,7 @@ impl BoxClient {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> BoxResult<serde_json::Value> {
+        Self::sanitize_path_segment(folder_id, "folder_id")?;
         let mut query = Vec::new();
         if let Some(l) = limit {
             query.push(("limit", l.to_string()));
@@ -285,6 +312,7 @@ impl BoxClient {
 
     /// List collaborations for a file.
     pub async fn list_file_collaborations(&self, file_id: &str) -> BoxResult<serde_json::Value> {
+        Self::sanitize_path_segment(file_id, "file_id")?;
         self.get(&format!("/files/{file_id}/collaborations"), None)
             .await
     }
@@ -464,5 +492,28 @@ mod tests {
         #[allow(clippy::redundant_clone)]
         let cloned = auth.clone();
         assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(BoxClient::sanitize_path_segment("../admin", "file_id").is_err());
+        assert!(BoxClient::sanitize_path_segment("foo/bar", "file_id").is_err());
+        assert!(BoxClient::sanitize_path_segment("foo\\bar", "file_id").is_err());
+        assert!(BoxClient::sanitize_path_segment("foo%2fbar", "file_id").is_err());
+        assert!(BoxClient::sanitize_path_segment("foo%5Cbar", "file_id").is_err());
+        assert!(BoxClient::sanitize_path_segment("", "file_id").is_err());
+        assert!(BoxClient::sanitize_path_segment("  ", "file_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            BoxClient::sanitize_path_segment("12345678", "file_id").unwrap(),
+            "12345678"
+        );
+        assert_eq!(
+            BoxClient::sanitize_path_segment("folder-id-42", "folder_id").unwrap(),
+            "folder-id-42"
+        );
     }
 }

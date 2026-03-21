@@ -5,8 +5,19 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
+
+/// Percent-encode a query parameter value.
+fn encode_query_value(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
+
+/// Sanitize a path segment by percent-encoding special characters.
+fn sanitize_path_segment(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
 
 use crate::{
     error::{HubSpotError, HubSpotResult},
@@ -240,11 +251,11 @@ impl HubSpotClient {
             params.push(format!("limit={l}"));
         }
         if let Some(a) = after {
-            params.push(format!("after={a}"));
+            params.push(format!("after={}", encode_query_value(a)));
         }
         if let Some(props) = properties {
             for p in props {
-                params.push(format!("properties={p}"));
+                params.push(format!("properties={}", encode_query_value(p)));
             }
         }
         let qs = if params.is_empty() {
@@ -261,10 +272,11 @@ impl HubSpotClient {
         contact_id: &str,
         properties: Option<&[String]>,
     ) -> HubSpotResult<serde_json::Value> {
+        let contact_id = sanitize_path_segment(contact_id);
         let mut params = Vec::new();
         if let Some(props) = properties {
             for p in props {
-                params.push(format!("properties={p}"));
+                params.push(format!("properties={}", encode_query_value(p)));
             }
         }
         let qs = if params.is_empty() {
@@ -290,12 +302,14 @@ impl HubSpotClient {
         contact_id: &str,
         body: &serde_json::Value,
     ) -> HubSpotResult<serde_json::Value> {
+        let contact_id = sanitize_path_segment(contact_id);
         self.patch(&format!("/crm/v3/objects/contacts/{contact_id}"), body)
             .await
     }
 
     /// Delete a contact.
     pub async fn delete_contact(&self, contact_id: &str) -> HubSpotResult<serde_json::Value> {
+        let contact_id = sanitize_path_segment(contact_id);
         self.delete(&format!("/crm/v3/objects/contacts/{contact_id}"))
             .await
     }
@@ -314,11 +328,11 @@ impl HubSpotClient {
             params.push(format!("limit={l}"));
         }
         if let Some(a) = after {
-            params.push(format!("after={a}"));
+            params.push(format!("after={}", encode_query_value(a)));
         }
         if let Some(props) = properties {
             for p in props {
-                params.push(format!("properties={p}"));
+                params.push(format!("properties={}", encode_query_value(p)));
             }
         }
         let qs = if params.is_empty() {
@@ -335,10 +349,11 @@ impl HubSpotClient {
         company_id: &str,
         properties: Option<&[String]>,
     ) -> HubSpotResult<serde_json::Value> {
+        let company_id = sanitize_path_segment(company_id);
         let mut params = Vec::new();
         if let Some(props) = properties {
             for p in props {
-                params.push(format!("properties={p}"));
+                params.push(format!("properties={}", encode_query_value(p)));
             }
         }
         let qs = if params.is_empty() {
@@ -364,6 +379,7 @@ impl HubSpotClient {
         company_id: &str,
         body: &serde_json::Value,
     ) -> HubSpotResult<serde_json::Value> {
+        let company_id = sanitize_path_segment(company_id);
         self.patch(&format!("/crm/v3/objects/companies/{company_id}"), body)
             .await
     }
@@ -395,6 +411,9 @@ impl HubSpotClient {
         from_object_id: &str,
         to_object_type: &str,
     ) -> HubSpotResult<serde_json::Value> {
+        let from_object_type = sanitize_path_segment(from_object_type);
+        let from_object_id = sanitize_path_segment(from_object_id);
+        let to_object_type = sanitize_path_segment(to_object_type);
         self.get(&format!(
             "/crm/v4/objects/{from_object_type}/{from_object_id}/associations/{to_object_type}"
         ))
@@ -415,11 +434,11 @@ impl HubSpotClient {
             params.push(format!("limit={l}"));
         }
         if let Some(a) = after {
-            params.push(format!("after={a}"));
+            params.push(format!("after={}", encode_query_value(a)));
         }
         if let Some(props) = properties {
             for p in props {
-                params.push(format!("properties={p}"));
+                params.push(format!("properties={}", encode_query_value(p)));
             }
         }
         let qs = if params.is_empty() {
@@ -441,10 +460,11 @@ impl HubSpotClient {
         deal_id: &str,
         properties: Option<&[String]>,
     ) -> HubSpotResult<serde_json::Value> {
+        let deal_id = sanitize_path_segment(deal_id);
         let mut params = Vec::new();
         if let Some(props) = properties {
             for p in props {
-                params.push(format!("properties={p}"));
+                params.push(format!("properties={}", encode_query_value(p)));
             }
         }
         let qs = if params.is_empty() {
@@ -462,6 +482,7 @@ impl HubSpotClient {
         deal_id: &str,
         body: &serde_json::Value,
     ) -> HubSpotResult<serde_json::Value> {
+        let deal_id = sanitize_path_segment(deal_id);
         self.patch(&format!("/crm/v3/objects/deals/{deal_id}"), body)
             .await
     }
@@ -480,6 +501,10 @@ impl HubSpotClient {
         to_object_id: &str,
         association_type: &str,
     ) -> HubSpotResult<serde_json::Value> {
+        let from_object_type = sanitize_path_segment(from_object_type);
+        let from_object_id = sanitize_path_segment(from_object_id);
+        let to_object_type = sanitize_path_segment(to_object_type);
+        let to_object_id = sanitize_path_segment(to_object_id);
         let body = serde_json::json!([{
             "associationCategory": "HUBSPOT_DEFINED",
             "associationTypeId": association_type
@@ -497,6 +522,7 @@ impl HubSpotClient {
 
     /// List pipelines for an object type.
     pub async fn list_pipelines(&self, object_type: &str) -> HubSpotResult<serde_json::Value> {
+        let object_type = sanitize_path_segment(object_type);
         self.get(&format!("/crm/v3/pipelines/{object_type}")).await
     }
 
@@ -580,7 +606,7 @@ impl HubSpotClient {
     ) -> HubSpotResult<serde_json::Value> {
         let mut params = Vec::new();
         if let Some(ot) = object_type {
-            params.push(format!("objectType={ot}"));
+            params.push(format!("objectType={}", encode_query_value(ot)));
         }
         if let Some(a) = after {
             params.push(format!("occurredAfter={a}"));
@@ -597,6 +623,35 @@ impl HubSpotClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_query_value_special_chars() {
+        let encoded = encode_query_value("my property&foo=bar");
+        assert!(!encoded.contains(' '));
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+    }
+
+    #[test]
+    fn encode_query_value_empty() {
+        assert_eq!(encode_query_value(""), "");
+    }
+
+    #[test]
+    fn encode_query_value_alphanumeric_preserved() {
+        assert_eq!(encode_query_value("abc123"), "abc123");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slashes() {
+        let sanitized = sanitize_path_segment("contacts/../admin");
+        assert!(!sanitized.contains('/'));
+    }
+
+    #[test]
+    fn sanitize_path_segment_normal() {
+        assert_eq!(sanitize_path_segment("abc123"), "abc123");
+    }
 
     #[test]
     fn auth_debug_redacts_token() {

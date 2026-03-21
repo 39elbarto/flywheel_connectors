@@ -13,6 +13,27 @@ use crate::{
     types::ApiErrorResponse,
 };
 
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocuSignResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(DocuSignError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(DocuSignError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(value)
+}
+
 /// Default `DocuSign` API base URL (demo environment).
 pub const DEFAULT_BASE_URL: &str = "https://demo.docusign.net/restapi/v2.1/accounts";
 
@@ -239,6 +260,7 @@ impl DocuSignClient {
         &self,
         params: &ListEnvelopesParams<'_>,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(params.account_id, "account_id")?;
         let mut q = Vec::new();
         if let Some(v) = params.from_date {
             q.push(("from_date", v.to_string()));
@@ -259,7 +281,7 @@ impl DocuSignClient {
             q.push(("start_position", v.to_string()));
         }
         self.get(
-            &format!("/{}/envelopes", params.account_id),
+            &format!("/{account_id}/envelopes"),
             if q.is_empty() { None } else { Some(&q) },
         )
         .await
@@ -272,6 +294,8 @@ impl DocuSignClient {
         envelope_id: &str,
         include: Option<&str>,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         let q = include.map(|v| vec![("include", v.to_string())]);
         self.get(
             &format!("/{account_id}/envelopes/{envelope_id}"),
@@ -286,6 +310,7 @@ impl DocuSignClient {
         account_id: &str,
         body: &serde_json::Value,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
         self.post(&format!("/{account_id}/envelopes"), body).await
     }
 
@@ -295,6 +320,8 @@ impl DocuSignClient {
         account_id: &str,
         envelope_id: &str,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         let body = serde_json::json!({"status": "sent"});
         self.put(&format!("/{account_id}/envelopes/{envelope_id}"), &body)
             .await
@@ -307,6 +334,8 @@ impl DocuSignClient {
         envelope_id: &str,
         voided_reason: &str,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         let body = serde_json::json!({
             "status": "voided",
             "voidedReason": voided_reason,
@@ -322,6 +351,8 @@ impl DocuSignClient {
         envelope_id: &str,
         recipients: &serde_json::Value,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         self.post(
             &format!("/{account_id}/envelopes/{envelope_id}/recipients"),
             recipients,
@@ -337,6 +368,7 @@ impl DocuSignClient {
         account_id: &str,
         search_text: Option<&str>,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
         let q = search_text.map(|v| vec![("search_text", v.to_string())]);
         self.get(&format!("/{account_id}/templates"), q.as_deref())
             .await
@@ -348,6 +380,8 @@ impl DocuSignClient {
         account_id: &str,
         template_id: &str,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let template_id = sanitize_path_segment(template_id, "template_id")?;
         self.get(&format!("/{account_id}/templates/{template_id}"), None)
             .await
     }
@@ -361,6 +395,8 @@ impl DocuSignClient {
         envelope_id: &str,
         recipients: &serde_json::Value,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         self.put(
             &format!("/{account_id}/envelopes/{envelope_id}/recipients"),
             recipients,
@@ -376,6 +412,9 @@ impl DocuSignClient {
         recipient_id: &str,
         tabs: &serde_json::Value,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
+        let recipient_id = sanitize_path_segment(recipient_id, "recipient_id")?;
         self.post(
             &format!("/{account_id}/envelopes/{envelope_id}/recipients/{recipient_id}/tabs"),
             tabs,
@@ -389,6 +428,8 @@ impl DocuSignClient {
         account_id: &str,
         envelope_id: &str,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         let url = format!(
             "{}/{account_id}/envelopes/{envelope_id}?resend_envelope=true",
             self.base_url
@@ -408,6 +449,8 @@ impl DocuSignClient {
         account_id: &str,
         envelope_id: &str,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         self.get(
             &format!("/{account_id}/envelopes/{envelope_id}/documents"),
             None,
@@ -423,6 +466,7 @@ impl DocuSignClient {
         roles: &serde_json::Value,
         status: Option<&str>,
     ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
         let body = serde_json::json!({
             "templateId": template_id,
             "templateRoles": roles,
@@ -438,7 +482,10 @@ impl DocuSignClient {
         envelope_id: &str,
         document_id: Option<&str>,
     ) -> DocuSignResult<Vec<u8>> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        let envelope_id = sanitize_path_segment(envelope_id, "envelope_id")?;
         let doc_path = document_id.unwrap_or("combined");
+        let doc_path = sanitize_path_segment(doc_path, "document_id")?;
         self.get_raw(
             &format!("/{account_id}/envelopes/{envelope_id}/documents/{doc_path}"),
             None,
@@ -620,5 +667,65 @@ mod tests {
         let dbg = format!("{p:?}");
         assert!(dbg.contains("ListEnvelopesParams"));
         assert!(dbg.contains("acc-123"));
+    }
+
+    // -- sanitize_path_segment tests --
+
+    #[test]
+    fn sanitize_path_segment_valid() {
+        assert_eq!(
+            sanitize_path_segment("abc-123-def", "id").unwrap(),
+            "abc-123-def"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        let err = sanitize_path_segment("", "account_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        let err = sanitize_path_segment("   ", "account_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        let err = sanitize_path_segment("acc/evil", "account_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        let err = sanitize_path_segment("acc\\evil", "account_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        let err = sanitize_path_segment("acc..evil", "account_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        let err = sanitize_path_segment("acc%2Fevil", "account_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash_lower() {
+        let err = sanitize_path_segment("acc%5cevil", "envelope_id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_allows_guid_format() {
+        assert_eq!(
+            sanitize_path_segment("d8e7f6a5-b4c3-2d1e-0f9a-8b7c6d5e4f3a", "envelope_id").unwrap(),
+            "d8e7f6a5-b4c3-2d1e-0f9a-8b7c6d5e4f3a"
+        );
     }
 }

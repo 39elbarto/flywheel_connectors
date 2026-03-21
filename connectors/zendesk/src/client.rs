@@ -243,10 +243,12 @@ impl ZendeskClient {
             self.base_url, encoded_query
         );
         if let Some(sb) = sort_by {
-            url = format!("{url}&sort_by={sb}");
+            sanitize_query_value(sb, "sort_by")?;
+            url = format!("{url}&sort_by={}", percent_encode(sb));
         }
         if let Some(so) = sort_order {
-            url = format!("{url}&sort_order={so}");
+            sanitize_query_value(so, "sort_order")?;
+            url = format!("{url}&sort_order={}", percent_encode(so));
         }
         if let Some(p) = page {
             url = format!("{url}&page={p}");
@@ -267,7 +269,8 @@ impl ZendeskClient {
     ) -> ZendeskResult<serde_json::Value> {
         let mut url = format!("{}/tickets/{ticket_id}/comments.json", self.base_url);
         if let Some(so) = sort_order {
-            url = format!("{url}?sort_order={so}");
+            sanitize_query_value(so, "sort_order")?;
+            url = format!("{url}?sort_order={}", percent_encode(so));
         }
         self.get(&url).await
     }
@@ -288,7 +291,8 @@ impl ZendeskClient {
             self.base_url
         );
         if let Some(l) = locale {
-            url = format!("{url}&locale={l}");
+            sanitize_query_value(l, "locale")?;
+            url = format!("{url}&locale={}", percent_encode(l));
         }
         if let Some(cid) = category_id {
             url = format!("{url}&category={cid}");
@@ -306,6 +310,7 @@ impl ZendeskClient {
         locale: Option<&str>,
     ) -> ZendeskResult<serde_json::Value> {
         let url = if let Some(l) = locale {
+            sanitize_query_value(l, "locale")?;
             format!(
                 "{}/help_center/{l}/articles/{article_id}.json",
                 self.base_url
@@ -380,7 +385,8 @@ impl ZendeskClient {
         let mut url = format!("{}/satisfaction_ratings.json", self.base_url);
         let mut params = Vec::new();
         if let Some(s) = score {
-            params.push(format!("score={s}"));
+            sanitize_query_value(s, "score")?;
+            params.push(format!("score={}", percent_encode(s)));
         }
         if let Some(ps) = page_size {
             params.push(format!("page[size]={ps}"));
@@ -524,6 +530,27 @@ impl ZendeskClient {
         })
         .await
     }
+}
+
+/// Reject query-parameter values that contain URL-breaking characters.
+fn sanitize_query_value<'a>(value: &'a str, field: &str) -> ZendeskResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(ZendeskError::InvalidConfig(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(ZendeskError::InvalidConfig(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(value)
 }
 
 /// Simple percent encoding for query parameters.
@@ -1338,5 +1365,28 @@ mod tests {
 
         let result = client.list_satisfaction_ratings(None, None).await.unwrap();
         assert_eq!(result["count"], 0);
+    }
+
+    #[test]
+    fn sanitize_query_value_rejects_traversal() {
+        assert!(sanitize_query_value("../admin", "sort_by").is_err());
+        assert!(sanitize_query_value("foo/bar", "sort_by").is_err());
+        assert!(sanitize_query_value("foo\\bar", "sort_by").is_err());
+        assert!(sanitize_query_value("foo%2fbar", "sort_by").is_err());
+        assert!(sanitize_query_value("foo%5Cbar", "sort_by").is_err());
+        assert!(sanitize_query_value("", "sort_by").is_err());
+        assert!(sanitize_query_value("  ", "sort_by").is_err());
+    }
+
+    #[test]
+    fn sanitize_query_value_accepts_valid() {
+        assert_eq!(
+            sanitize_query_value("created_at", "sort_by").unwrap(),
+            "created_at"
+        );
+        assert_eq!(
+            sanitize_query_value("desc", "sort_order").unwrap(),
+            "desc"
+        );
     }
 }

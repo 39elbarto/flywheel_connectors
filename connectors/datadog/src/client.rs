@@ -5,8 +5,14 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
+
+/// Percent-encode a query parameter value.
+fn encode_query_value(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
 
 use crate::{
     error::{DatadogError, DatadogResult},
@@ -260,13 +266,13 @@ impl DatadogClient {
     ) -> DatadogResult<serde_json::Value> {
         let mut params = vec![format!("start={start}"), format!("end={end}")];
         if let Some(p) = priority {
-            params.push(format!("priority={p}"));
+            params.push(format!("priority={}", encode_query_value(p)));
         }
         if let Some(s) = sources {
-            params.push(format!("sources={s}"));
+            params.push(format!("sources={}", encode_query_value(s)));
         }
         if let Some(t) = tags {
-            params.push(format!("tags={t}"));
+            params.push(format!("tags={}", encode_query_value(t)));
         }
         let qs = params.join("&");
         self.get(&format!("/events?{qs}")).await
@@ -281,8 +287,11 @@ impl DatadogClient {
         from_ts: i64,
         to_ts: i64,
     ) -> DatadogResult<serde_json::Value> {
-        self.get(&format!("/query?query={query}&from={from_ts}&to={to_ts}"))
-            .await
+        self.get(&format!(
+            "/query?query={}&from={from_ts}&to={to_ts}",
+            encode_query_value(query)
+        ))
+        .await
     }
 
     /// Submit custom metrics.
@@ -303,10 +312,10 @@ impl DatadogClient {
     ) -> DatadogResult<serde_json::Value> {
         let mut params = Vec::new();
         if let Some(t) = tags {
-            params.push(format!("tags={t}"));
+            params.push(format!("tags={}", encode_query_value(t)));
         }
         if let Some(mt) = monitor_tags {
-            params.push(format!("monitor_tags={mt}"));
+            params.push(format!("monitor_tags={}", encode_query_value(mt)));
         }
         let qs = if params.is_empty() {
             String::new()
@@ -340,6 +349,25 @@ impl DatadogClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_query_value_special_chars() {
+        let encoded = encode_query_value("avg:system.cpu{host:web01}&extra=1");
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+        assert!(!encoded.contains('{'));
+        assert!(!encoded.contains('}'));
+    }
+
+    #[test]
+    fn encode_query_value_empty() {
+        assert_eq!(encode_query_value(""), "");
+    }
+
+    #[test]
+    fn encode_query_value_alphanumeric_preserved() {
+        assert_eq!(encode_query_value("abc123"), "abc123");
+    }
 
     #[test]
     fn region_from_str() {

@@ -40,6 +40,10 @@ pub enum SnowflakeError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (SQL injection attempt, invalid identifier, etc.)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl SnowflakeError {
@@ -110,6 +114,9 @@ impl SnowflakeError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }
@@ -623,6 +630,39 @@ mod tests {
                 message: "conflict".into()
             }
             .is_retryable()
+        );
+    }
+
+    // -- InvalidInput --
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        assert!(!SnowflakeError::InvalidInput("bad".into()).is_retryable());
+    }
+
+    #[test]
+    fn invalid_input_retry_after_none() {
+        assert_eq!(
+            SnowflakeError::InvalidInput("bad".into()).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_error() {
+        match SnowflakeError::InvalidInput("SQL injection attempt".into()).to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("SQL injection attempt"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        assert_eq!(
+            SnowflakeError::InvalidInput("bad identifier".into()).to_string(),
+            "Invalid input: bad identifier"
         );
     }
 }

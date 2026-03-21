@@ -193,6 +193,29 @@ impl IntercomClient {
         self.handle_response(resp).await
     }
 
+    /// Reject path-segment values that contain traversal characters.
+    fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> IntercomResult<&'a str> {
+        if value.trim().is_empty() {
+            return Err(IntercomError::Api {
+                status_code: 400,
+                message: format!("{field} must not be empty"),
+            });
+        }
+        let lower = value.to_ascii_lowercase();
+        if value.contains('/')
+            || value.contains('\\')
+            || value.contains("..")
+            || lower.contains("%2f")
+            || lower.contains("%5c")
+        {
+            return Err(IntercomError::Api {
+                status_code: 400,
+                message: format!("{field} contains path traversal characters"),
+            });
+        }
+        Ok(value)
+    }
+
     // -- Contacts --
 
     /// List contacts.
@@ -222,6 +245,7 @@ impl IntercomClient {
 
     /// Delete a contact.
     pub async fn delete_contact(&self, contact_id: &str) -> IntercomResult<serde_json::Value> {
+        Self::sanitize_path_segment(contact_id, "contact_id")?;
         self.delete(&format!("/contacts/{contact_id}")).await
     }
 
@@ -250,6 +274,7 @@ impl IntercomClient {
         conversation_id: &str,
         body: &serde_json::Value,
     ) -> IntercomResult<serde_json::Value> {
+        Self::sanitize_path_segment(conversation_id, "conversation_id")?;
         self.post(&format!("/conversations/{conversation_id}/reply"), body)
             .await
     }
@@ -419,5 +444,28 @@ mod tests {
             IntercomClient::new(IntercomAuth::BearerToken("tok".into()), Some("")).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("IntercomClient"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(IntercomClient::sanitize_path_segment("../admin", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("foo/bar", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("foo\\bar", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("foo%2fbar", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("foo%5Cbar", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("  ", "contact_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            IntercomClient::sanitize_path_segment("abc123", "contact_id").unwrap(),
+            "abc123"
+        );
+        assert_eq!(
+            IntercomClient::sanitize_path_segment("contact-id-42", "contact_id").unwrap(),
+            "contact-id-42"
+        );
     }
 }

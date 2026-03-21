@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -226,8 +227,12 @@ impl SentryClient {
         org: &str,
         cursor: Option<&str>,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
         let path = if let Some(cursor) = cursor {
-            format!("/organizations/{org}/projects/?cursor={cursor}")
+            format!(
+                "/organizations/{org}/projects/?cursor={}",
+                encode_query_value(cursor)
+            )
         } else {
             format!("/organizations/{org}/projects/")
         };
@@ -245,24 +250,27 @@ impl SentryClient {
         sort: Option<&str>,
         cursor: Option<&str>,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project_seg = sanitize_path_segment(project);
         let mut params = Vec::new();
-        params.push(format!("project={project}"));
+        params.push(format!("project={}", encode_query_value(project)));
         if let Some(q) = query {
-            params.push(format!("query={q}"));
+            params.push(format!("query={}", encode_query_value(q)));
         }
         if let Some(s) = sort {
-            params.push(format!("sort={s}"));
+            params.push(format!("sort={}", encode_query_value(s)));
         }
         if let Some(c) = cursor {
-            params.push(format!("cursor={c}"));
+            params.push(format!("cursor={}", encode_query_value(c)));
         }
         let qs = params.join("&");
-        self.get(&format!("/projects/{org}/{project}/issues/?{qs}"))
+        self.get(&format!("/projects/{org}/{project_seg}/issues/?{qs}"))
             .await
     }
 
     /// Get a single issue by ID.
     pub async fn get_issue(&self, issue_id: &str) -> SentryResult<serde_json::Value> {
+        let issue_id = sanitize_path_segment(issue_id);
         self.get(&format!("/issues/{issue_id}/")).await
     }
 
@@ -281,6 +289,8 @@ impl SentryClient {
         cursor: Option<&str>,
         per_page: Option<u32>,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project_seg = sanitize_path_segment(project);
         let mut parts = Vec::new();
         // Build the Sentry search query string from structured params
         if let Some(q) = query {
@@ -304,26 +314,27 @@ impl SentryClient {
         let combined_query = parts.join(" ");
 
         let mut params = Vec::new();
-        params.push(format!("project={project}"));
+        params.push(format!("project={}", encode_query_value(project)));
         if !combined_query.is_empty() {
-            params.push(format!("query={combined_query}"));
+            params.push(format!("query={}", encode_query_value(&combined_query)));
         }
         if let Some(s) = sort {
-            params.push(format!("sort={s}"));
+            params.push(format!("sort={}", encode_query_value(s)));
         }
         if let Some(c) = cursor {
-            params.push(format!("cursor={c}"));
+            params.push(format!("cursor={}", encode_query_value(c)));
         }
         if let Some(pp) = per_page {
             params.push(format!("per_page={pp}"));
         }
         let qs = params.join("&");
-        self.get(&format!("/projects/{org}/{project}/issues/?{qs}"))
+        self.get(&format!("/projects/{org}/{project_seg}/issues/?{qs}"))
             .await
     }
 
     /// Get issue summary (concise metadata without full event data).
     pub async fn get_issue_summary(&self, issue_id: &str) -> SentryResult<serde_json::Value> {
+        let issue_id = sanitize_path_segment(issue_id);
         self.get(&format!("/issues/{issue_id}/")).await
     }
 
@@ -333,11 +344,13 @@ impl SentryClient {
         issue_id: &str,
         update: &serde_json::Value,
     ) -> SentryResult<serde_json::Value> {
+        let issue_id = sanitize_path_segment(issue_id);
         self.put(&format!("/issues/{issue_id}/"), update).await
     }
 
     /// Delete an issue permanently.
     pub async fn delete_issue(&self, issue_id: &str) -> SentryResult<serde_json::Value> {
+        let issue_id = sanitize_path_segment(issue_id);
         self.delete(&format!("/issues/{issue_id}/")).await
     }
 
@@ -350,12 +363,13 @@ impl SentryClient {
         full: bool,
         cursor: Option<&str>,
     ) -> SentryResult<serde_json::Value> {
+        let issue_id = sanitize_path_segment(issue_id);
         let mut params = Vec::new();
         if full {
             params.push("full=true".to_string());
         }
         if let Some(c) = cursor {
-            params.push(format!("cursor={c}"));
+            params.push(format!("cursor={}", encode_query_value(c)));
         }
         let qs = if params.is_empty() {
             String::new()
@@ -372,6 +386,9 @@ impl SentryClient {
         project: &str,
         event_id: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
+        let event_id = sanitize_path_segment(event_id);
         self.get(&format!("/projects/{org}/{project}/events/{event_id}/"))
             .await
     }
@@ -386,15 +403,16 @@ impl SentryClient {
         query: Option<&str>,
         cursor: Option<&str>,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
         let mut params = Vec::new();
         if let Some(p) = project {
-            params.push(format!("project={p}"));
+            params.push(format!("project={}", encode_query_value(p)));
         }
         if let Some(q) = query {
-            params.push(format!("query={q}"));
+            params.push(format!("query={}", encode_query_value(q)));
         }
         if let Some(c) = cursor {
-            params.push(format!("cursor={c}"));
+            params.push(format!("cursor={}", encode_query_value(c)));
         }
         let qs = if params.is_empty() {
             String::new()
@@ -407,6 +425,7 @@ impl SentryClient {
 
     /// Get a single release.
     pub async fn get_release(&self, org: &str, version: &str) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
         let encoded_version = urlencoded(version);
         self.get(&format!("/organizations/{org}/releases/{encoded_version}/"))
             .await
@@ -418,6 +437,7 @@ impl SentryClient {
         org: &str,
         version: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
         let encoded_version = urlencoded(version);
         self.get(&format!(
             "/organizations/{org}/releases/{encoded_version}/deploys/"
@@ -439,22 +459,23 @@ impl SentryClient {
         sort: Option<&str>,
         per_page: Option<u32>,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
         let mut params = Vec::new();
-        params.push(format!("query={query}"));
+        params.push(format!("query={}", encode_query_value(query)));
         for f in fields {
-            params.push(format!("field={f}"));
+            params.push(format!("field={}", encode_query_value(f)));
         }
         if let Some(sp) = stats_period {
-            params.push(format!("statsPeriod={sp}"));
+            params.push(format!("statsPeriod={}", encode_query_value(sp)));
         }
         if let Some(s) = start {
-            params.push(format!("start={s}"));
+            params.push(format!("start={}", encode_query_value(s)));
         }
         if let Some(e) = end {
-            params.push(format!("end={e}"));
+            params.push(format!("end={}", encode_query_value(e)));
         }
         if let Some(s) = sort {
-            params.push(format!("sort={s}"));
+            params.push(format!("sort={}", encode_query_value(s)));
         }
         if let Some(pp) = per_page {
             params.push(format!("per_page={pp}"));
@@ -473,6 +494,9 @@ impl SentryClient {
         project: &str,
         event_id: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
+        let event_id = sanitize_path_segment(event_id);
         self.get(&format!("/projects/{org}/{project}/events/{event_id}/"))
             .await
     }
@@ -492,8 +516,9 @@ impl SentryClient {
         per_page: Option<u32>,
         cursor: Option<&str>,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
         let mut params = vec![
-            format!("project={project}"),
+            format!("project={}", encode_query_value(project)),
             "field=transaction".to_string(),
             "field=count()".to_string(),
             "field=p50()".to_string(),
@@ -505,24 +530,24 @@ impl SentryClient {
             query_parts.push(format!("transaction:{t}"));
         }
         if let Some(e) = environment {
-            params.push(format!("environment={e}"));
+            params.push(format!("environment={}", encode_query_value(e)));
         }
         let query = query_parts.join(" ");
-        params.push(format!("query={query}"));
+        params.push(format!("query={}", encode_query_value(&query)));
         if let Some(s) = start {
-            params.push(format!("start={s}"));
+            params.push(format!("start={}", encode_query_value(s)));
         }
         if let Some(e) = end {
-            params.push(format!("end={e}"));
+            params.push(format!("end={}", encode_query_value(e)));
         }
         if let Some(s) = sort {
-            params.push(format!("sort={s}"));
+            params.push(format!("sort={}", encode_query_value(s)));
         }
         if let Some(pp) = per_page {
             params.push(format!("per_page={pp}"));
         }
         if let Some(c) = cursor {
-            params.push(format!("cursor={c}"));
+            params.push(format!("cursor={}", encode_query_value(c)));
         }
         let qs = params.join("&");
         self.get(&format!("/organizations/{org}/events/?{qs}"))
@@ -539,8 +564,10 @@ impl SentryClient {
         start: Option<&str>,
         end: Option<&str>,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let query_str = format!("event.type:transaction transaction:{transaction}");
         let mut params = vec![
-            format!("project={project}"),
+            format!("project={}", encode_query_value(project)),
             "field=count()".to_string(),
             "field=p50(transaction.duration)".to_string(),
             "field=p75(transaction.duration)".to_string(),
@@ -548,16 +575,16 @@ impl SentryClient {
             "field=p99(transaction.duration)".to_string(),
             "field=failure_rate()".to_string(),
             "field=apdex()".to_string(),
-            format!("query=event.type:transaction transaction:{transaction}"),
+            format!("query={}", encode_query_value(&query_str)),
         ];
         if let Some(e) = environment {
-            params.push(format!("environment={e}"));
+            params.push(format!("environment={}", encode_query_value(e)));
         }
         if let Some(s) = start {
-            params.push(format!("start={s}"));
+            params.push(format!("start={}", encode_query_value(s)));
         }
         if let Some(e) = end {
-            params.push(format!("end={e}"));
+            params.push(format!("end={}", encode_query_value(e)));
         }
         let qs = params.join("&");
         self.get(&format!("/organizations/{org}/events/?{qs}"))
@@ -570,6 +597,8 @@ impl SentryClient {
         org: &str,
         trace_id: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let trace_id = sanitize_path_segment(trace_id);
         self.get(&format!("/organizations/{org}/events-trace/{trace_id}/"))
             .await
     }
@@ -583,7 +612,8 @@ impl SentryClient {
         project: &str,
         version: &str,
     ) -> SentryResult<serde_json::Value> {
-        let qs = format!("project={project}");
+        let org = sanitize_path_segment(org);
+        let qs = format!("project={}", encode_query_value(project));
         let encoded_version = urlencoded(version);
         self.get(&format!(
             "/organizations/{org}/releases/{encoded_version}/health/?{qs}"
@@ -597,6 +627,7 @@ impl SentryClient {
         org: &str,
         body: &serde_json::Value,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
         self.post(&format!("/organizations/{org}/releases/"), body)
             .await
     }
@@ -609,6 +640,8 @@ impl SentryClient {
         org: &str,
         project: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
         self.get(&format!("/projects/{org}/{project}/rules/")).await
     }
 
@@ -619,6 +652,8 @@ impl SentryClient {
         project: &str,
         rule: &serde_json::Value,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
         self.post(&format!("/projects/{org}/{project}/rules/"), rule)
             .await
     }
@@ -631,6 +666,9 @@ impl SentryClient {
         rule_id: &str,
         rule: &serde_json::Value,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
+        let rule_id = sanitize_path_segment(rule_id);
         self.put(&format!("/projects/{org}/{project}/rules/{rule_id}/"), rule)
             .await
     }
@@ -642,6 +680,9 @@ impl SentryClient {
         project: &str,
         rule_id: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
+        let rule_id = sanitize_path_segment(rule_id);
         self.delete(&format!("/projects/{org}/{project}/rules/{rule_id}/"))
             .await
     }
@@ -653,6 +694,9 @@ impl SentryClient {
         project: &str,
         rule_id: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
+        let rule_id = sanitize_path_segment(rule_id);
         self.get(&format!("/projects/{org}/{project}/rules/{rule_id}/"))
             .await
     }
@@ -664,6 +708,9 @@ impl SentryClient {
         project: &str,
         rule_id: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
+        let rule_id = sanitize_path_segment(rule_id);
         self.put(
             &format!("/projects/{org}/{project}/rules/{rule_id}/"),
             &serde_json::json!({"status": "active"}),
@@ -678,12 +725,25 @@ impl SentryClient {
         project: &str,
         rule_id: &str,
     ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let project = sanitize_path_segment(project);
+        let rule_id = sanitize_path_segment(rule_id);
         self.put(
             &format!("/projects/{org}/{project}/rules/{rule_id}/"),
             &serde_json::json!({"status": "disabled"}),
         )
         .await
     }
+}
+
+/// Percent-encode a query parameter value.
+fn encode_query_value(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
+
+/// Sanitize a path segment by rejecting slashes and other path-traversal characters.
+fn sanitize_path_segment(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
 
 /// Minimal URL encoding for version strings.
@@ -697,6 +757,39 @@ fn urlencoded(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_query_value_special_chars() {
+        let encoded = encode_query_value("hello world&foo=bar");
+        assert!(!encoded.contains(' '));
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+    }
+
+    #[test]
+    fn encode_query_value_empty() {
+        assert_eq!(encode_query_value(""), "");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slashes() {
+        let sanitized = sanitize_path_segment("my/org");
+        assert!(!sanitized.contains('/'));
+    }
+
+    #[test]
+    fn sanitize_path_segment_normal_input() {
+        // Alphanumeric chars are preserved
+        let sanitized = sanitize_path_segment("myorg123");
+        assert_eq!(sanitized, "myorg123");
+    }
+
+    #[test]
+    fn sanitize_path_segment_dots_and_dashes() {
+        let sanitized = sanitize_path_segment("my-org.name");
+        assert!(!sanitized.contains('.'));
+        assert!(!sanitized.contains('-'));
+    }
 
     #[test]
     fn url_encode_version_strings() {

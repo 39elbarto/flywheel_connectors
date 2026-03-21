@@ -44,6 +44,10 @@ pub enum DocuSignError {
     /// Envelope cannot be modified (already sent/completed/voided)
     #[error("Envelope not modifiable: {reason}")]
     EnvelopeNotModifiable { reason: String },
+
+    /// Invalid input (path traversal, injection attempt, etc.)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl DocuSignError {
@@ -121,6 +125,9 @@ impl DocuSignError {
                 status_code: Some(400),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }
@@ -668,5 +675,38 @@ mod tests {
             }
             other => panic!("expected External, got {other:?}"),
         }
+    }
+
+    // -- InvalidInput --
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        assert!(!DocuSignError::InvalidInput("bad".into()).is_retryable());
+    }
+
+    #[test]
+    fn invalid_input_retry_after_none() {
+        assert_eq!(
+            DocuSignError::InvalidInput("bad".into()).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_error() {
+        match DocuSignError::InvalidInput("path traversal".into()).to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("path traversal"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        assert_eq!(
+            DocuSignError::InvalidInput("bad id".into()).to_string(),
+            "Invalid input: bad id"
+        );
     }
 }

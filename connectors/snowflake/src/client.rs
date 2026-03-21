@@ -12,6 +12,41 @@ use crate::{
     types::ApiErrorResponse,
 };
 
+/// Validate a Snowflake SQL identifier (database, schema, table name).
+///
+/// Only allows alphanumeric characters, underscores, dots (for qualified names
+/// like `db.schema`), and dollar signs (Snowflake allows `$` in identifiers).
+/// Rejects anything that could be used for SQL injection.
+fn validate_sql_identifier<'a>(value: &'a str, field: &str) -> SnowflakeResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(SnowflakeError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    // Must start with a letter or underscore
+    let first = value.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return Err(SnowflakeError::InvalidInput(format!(
+            "{field} must start with a letter or underscore"
+        )));
+    }
+    // Only allow alphanumeric, underscore, dot (for qualified names), dollar sign
+    for ch in value.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.' && ch != '$' {
+            return Err(SnowflakeError::InvalidInput(format!(
+                "{field} contains invalid character '{ch}'"
+            )));
+        }
+    }
+    // Reject consecutive dots or leading/trailing dots
+    if value.starts_with('.') || value.ends_with('.') || value.contains("..") {
+        return Err(SnowflakeError::InvalidInput(format!(
+            "{field} has invalid dot placement"
+        )));
+    }
+    Ok(value)
+}
+
 /// `Snowflake` authentication credentials.
 #[derive(Clone)]
 pub struct SnowflakeAuth {
@@ -266,8 +301,12 @@ impl SnowflakeClient {
         database: &str,
         schema: Option<&str>,
     ) -> SnowflakeResult<serde_json::Value> {
+        let database = validate_sql_identifier(database, "database")?;
         let statement = match schema {
-            Some(s) => format!("SHOW TABLES IN SCHEMA {database}.{s}"),
+            Some(s) => {
+                let s = validate_sql_identifier(s, "schema")?;
+                format!("SHOW TABLES IN SCHEMA {database}.{s}")
+            }
             None => format!("SHOW TABLES IN DATABASE {database}"),
         };
 
@@ -536,5 +575,114 @@ mod tests {
         let client = SnowflakeClient::new(auth, None, None, None, None).unwrap();
         assert!(client.base_url.contains("xy12345.us-east-1"));
         assert!(client.base_url.contains("snowflakecomputing.com"));
+    }
+
+    // -- validate_sql_identifier tests --
+
+    #[test]
+    fn validate_sql_identifier_simple() {
+        assert_eq!(validate_sql_identifier("MY_DB", "database").unwrap(), "MY_DB");
+    }
+
+    #[test]
+    fn validate_sql_identifier_with_dollar() {
+        assert_eq!(validate_sql_identifier("MY$DB", "database").unwrap(), "MY$DB");
+    }
+
+    #[test]
+    fn validate_sql_identifier_qualified_name() {
+        assert_eq!(
+            validate_sql_identifier("MY_DB.PUBLIC", "database.schema").unwrap(),
+            "MY_DB.PUBLIC"
+        );
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_empty() {
+        let err = validate_sql_identifier("", "database").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_whitespace_only() {
+        let err = validate_sql_identifier("   ", "database").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_starting_digit() {
+        let err = validate_sql_identifier("1BAD", "database").unwrap_err();
+        assert!(err.to_string().contains("must start with"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_semicolon() {
+        let err = validate_sql_identifier("MY_DB; DROP TABLE", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_single_quote() {
+        let err = validate_sql_identifier("MY_DB' OR '1'='1", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_dash() {
+        let err = validate_sql_identifier("MY-DB", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_space() {
+        let err = validate_sql_identifier("MY DB", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_parenthesis() {
+        let err = validate_sql_identifier("DB()", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_double_dash_comment() {
+        // -- is a SQL comment. The dash itself is invalid.
+        let err = validate_sql_identifier("DB--comment", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_leading_dot() {
+        let err = validate_sql_identifier(".MY_DB", "database").unwrap_err();
+        assert!(err.to_string().contains("must start with"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_trailing_dot() {
+        let err = validate_sql_identifier("MY_DB.", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid dot placement"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_rejects_consecutive_dots() {
+        let err = validate_sql_identifier("MY_DB..SCHEMA", "database").unwrap_err();
+        assert!(err.to_string().contains("invalid dot placement"));
+    }
+
+    #[test]
+    fn validate_sql_identifier_allows_underscore_start() {
+        assert_eq!(
+            validate_sql_identifier("_internal", "schema").unwrap(),
+            "_internal"
+        );
+    }
+
+    #[test]
+    fn validate_sql_identifier_allows_mixed_case() {
+        assert_eq!(
+            validate_sql_identifier("MyDatabase123", "database").unwrap(),
+            "MyDatabase123"
+        );
     }
 }

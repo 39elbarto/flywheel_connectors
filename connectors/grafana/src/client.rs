@@ -5,8 +5,19 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
+
+/// Percent-encode a query parameter value.
+fn encode_query_value(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
+
+/// Sanitize a path segment by percent-encoding special characters.
+fn sanitize_path_segment(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
 
 use crate::{
     error::{GrafanaError, GrafanaResult},
@@ -212,11 +223,11 @@ impl GrafanaClient {
         let mut params = Vec::new();
         params.push("type=dash-db".to_string());
         if let Some(q) = query {
-            params.push(format!("query={q}"));
+            params.push(format!("query={}", encode_query_value(q)));
         }
         if let Some(tags) = tag {
             for t in tags {
-                params.push(format!("tag={t}"));
+                params.push(format!("tag={}", encode_query_value(t)));
             }
         }
         if let Some(l) = limit {
@@ -228,6 +239,7 @@ impl GrafanaClient {
 
     /// Get a dashboard by UID.
     pub async fn get_dashboard(&self, uid: &str) -> GrafanaResult<serde_json::Value> {
+        let uid = sanitize_path_segment(uid);
         self.get(&format!("/dashboards/uid/{uid}")).await
     }
 
@@ -241,6 +253,7 @@ impl GrafanaClient {
 
     /// Delete a dashboard by UID.
     pub async fn delete_dashboard(&self, uid: &str) -> GrafanaResult<serde_json::Value> {
+        let uid = sanitize_path_segment(uid);
         self.delete(&format!("/dashboards/uid/{uid}")).await
     }
 
@@ -269,7 +282,7 @@ impl GrafanaClient {
     ) -> GrafanaResult<serde_json::Value> {
         let mut params = Vec::new();
         if let Some(s) = state {
-            params.push(format!("state={s}"));
+            params.push(format!("state={}", encode_query_value(s)));
         }
         if let Some(l) = limit {
             params.push(format!("limit={l}"));
@@ -304,6 +317,35 @@ impl GrafanaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_query_value_special_chars() {
+        let encoded = encode_query_value("my dashboard&foo=bar");
+        assert!(!encoded.contains(' '));
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+    }
+
+    #[test]
+    fn encode_query_value_empty() {
+        assert_eq!(encode_query_value(""), "");
+    }
+
+    #[test]
+    fn encode_query_value_alphanumeric_preserved() {
+        assert_eq!(encode_query_value("abc123"), "abc123");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slashes() {
+        let sanitized = sanitize_path_segment("uid/../../etc");
+        assert!(!sanitized.contains('/'));
+    }
+
+    #[test]
+    fn sanitize_path_segment_normal() {
+        assert_eq!(sanitize_path_segment("abc123"), "abc123");
+    }
 
     #[test]
     fn auth_debug_redacts_token() {

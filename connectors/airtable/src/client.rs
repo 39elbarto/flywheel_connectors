@@ -168,6 +168,31 @@ impl AirtableClient {
         }
     }
 
+    /// Reject path-segment values that contain traversal characters.
+    fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AirtableResult<&'a str> {
+        if value.trim().is_empty() {
+            return Err(AirtableError::Api {
+                error_type: "INVALID_REQUEST".into(),
+                message: format!("{field} must not be empty"),
+                status_code: Some(400),
+            });
+        }
+        let lower = value.to_ascii_lowercase();
+        if value.contains('/')
+            || value.contains('\\')
+            || value.contains("..")
+            || lower.contains("%2f")
+            || lower.contains("%5c")
+        {
+            return Err(AirtableError::Api {
+                error_type: "INVALID_REQUEST".into(),
+                message: format!("{field} contains path traversal characters"),
+                status_code: Some(400),
+            });
+        }
+        Ok(value)
+    }
+
     /// Lightweight connectivity probe (list bases with no offset).
     pub async fn health_check(&self) -> AirtableResult<()> {
         let _: ListBasesResponse = self.get_with_params("/meta/bases", &[]).await?;
@@ -189,6 +214,7 @@ impl AirtableClient {
     /// Get the schema of a base.
     #[instrument(skip(self))]
     pub async fn get_base_schema(&self, base_id: &str) -> AirtableResult<BaseSchemaResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
         let path = format!("/meta/bases/{base_id}/tables");
         self.get_with_params(&path, &[]).await
     }
@@ -198,6 +224,7 @@ impl AirtableClient {
     /// List webhooks configured for a base.
     #[instrument(skip(self))]
     pub async fn list_webhooks(&self, base_id: &str) -> AirtableResult<ListWebhooksResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
         let path = format!("/bases/{base_id}/webhooks");
         self.get_with_params(&path, &[]).await
     }
@@ -210,6 +237,7 @@ impl AirtableClient {
         notification_url: Option<&str>,
         specification: &serde_json::Value,
     ) -> AirtableResult<CreateWebhookResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
         let path = format!("/bases/{base_id}/webhooks");
         let mut body = serde_json::json!({
             "specification": specification,
@@ -227,6 +255,8 @@ impl AirtableClient {
         base_id: &str,
         webhook_id: &str,
     ) -> AirtableResult<serde_json::Value> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(webhook_id, "webhook_id")?;
         let path = format!("/bases/{base_id}/webhooks/{webhook_id}");
         self.delete(&path).await
     }
@@ -238,6 +268,8 @@ impl AirtableClient {
         base_id: &str,
         webhook_id: &str,
     ) -> AirtableResult<RefreshWebhookResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(webhook_id, "webhook_id")?;
         let path = format!("/bases/{base_id}/webhooks/{webhook_id}/refresh");
         self.post_json(&path, &serde_json::json!({})).await
     }
@@ -250,6 +282,8 @@ impl AirtableClient {
         webhook_id: &str,
         enable: bool,
     ) -> AirtableResult<serde_json::Value> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(webhook_id, "webhook_id")?;
         let path = format!("/bases/{base_id}/webhooks/{webhook_id}/enableNotifications");
         self.post_json(&path, &serde_json::json!({ "enable": enable }))
             .await
@@ -264,6 +298,8 @@ impl AirtableClient {
         cursor: Option<u64>,
         limit: Option<u32>,
     ) -> AirtableResult<ListWebhookPayloadsResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(webhook_id, "webhook_id")?;
         let path = format!("/bases/{base_id}/webhooks/{webhook_id}/payloads");
         let mut params = Vec::new();
         if let Some(cursor) = cursor {
@@ -292,6 +328,8 @@ impl AirtableClient {
         view: Option<&str>,
         offset: Option<&str>,
     ) -> AirtableResult<ListRecordsResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
         let path = format!("/{base_id}/{table_id}");
 
         // Build URL manually since sort params need dynamic keys
@@ -350,6 +388,9 @@ impl AirtableClient {
         table_id: &str,
         record_id: &str,
     ) -> AirtableResult<Record> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
+        Self::sanitize_path_segment(record_id, "record_id")?;
         let path = format!("/{base_id}/{table_id}/{record_id}");
         self.get_with_params(&path, &[]).await
     }
@@ -363,6 +404,8 @@ impl AirtableClient {
         fields: &serde_json::Value,
         typecast: Option<bool>,
     ) -> AirtableResult<Record> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
         let path = format!("/{base_id}/{table_id}");
         let mut body = serde_json::json!({ "fields": fields });
         if let Some(tc) = typecast {
@@ -380,6 +423,8 @@ impl AirtableClient {
         records: &[serde_json::Value],
         typecast: Option<bool>,
     ) -> AirtableResult<CreateRecordsResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
         let path = format!("/{base_id}/{table_id}");
         let mut body = serde_json::json!({ "records": records });
         if let Some(tc) = typecast {
@@ -397,6 +442,8 @@ impl AirtableClient {
         records: &[serde_json::Value],
         typecast: Option<bool>,
     ) -> AirtableResult<CreateRecordsResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
         let path = format!("/{base_id}/{table_id}");
         let mut body = serde_json::json!({ "records": records });
         if let Some(tc) = typecast {
@@ -415,6 +462,8 @@ impl AirtableClient {
         fields_to_merge_on: &[String],
         typecast: Option<bool>,
     ) -> AirtableResult<UpsertRecordsResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
         let path = format!("/{base_id}/{table_id}");
         let mut body = serde_json::json!({
             "records": records,
@@ -438,6 +487,9 @@ impl AirtableClient {
         fields: &serde_json::Value,
         typecast: Option<bool>,
     ) -> AirtableResult<Record> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
+        Self::sanitize_path_segment(record_id, "record_id")?;
         let path = format!("/{base_id}/{table_id}/{record_id}");
         let mut body = serde_json::json!({ "fields": fields });
         if let Some(tc) = typecast {
@@ -455,6 +507,9 @@ impl AirtableClient {
         record_id: &str,
         fields: &serde_json::Value,
     ) -> AirtableResult<Record> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
+        Self::sanitize_path_segment(record_id, "record_id")?;
         let path = format!("/{base_id}/{table_id}/{record_id}");
         let body = serde_json::json!({ "fields": fields });
         self.put_json(&path, &body).await
@@ -468,6 +523,9 @@ impl AirtableClient {
         table_id: &str,
         record_id: &str,
     ) -> AirtableResult<DeleteRecordResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
+        Self::sanitize_path_segment(record_id, "record_id")?;
         let path = format!("/{base_id}/{table_id}/{record_id}");
         self.delete(&path).await
     }
@@ -480,6 +538,8 @@ impl AirtableClient {
         table_id: &str,
         record_ids: &[String],
     ) -> AirtableResult<DeleteRecordsResponse> {
+        Self::sanitize_path_segment(base_id, "base_id")?;
+        Self::sanitize_path_segment(table_id, "table_id")?;
         let path = format!("/{base_id}/{table_id}");
         let params: Vec<(&str, String)> = record_ids
             .iter()
@@ -1648,6 +1708,33 @@ mod tests {
                 false
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(AirtableClient::sanitize_path_segment("../admin", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("foo/bar", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("foo\\bar", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("foo%2fbar", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("foo%5Cbar", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("  ", "base_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            AirtableClient::sanitize_path_segment("appABC123", "base_id").unwrap(),
+            "appABC123"
+        );
+        assert_eq!(
+            AirtableClient::sanitize_path_segment("tblXYZ", "table_id").unwrap(),
+            "tblXYZ"
+        );
+        assert_eq!(
+            AirtableClient::sanitize_path_segment("recDEF456", "record_id").unwrap(),
+            "recDEF456"
         );
     }
 }

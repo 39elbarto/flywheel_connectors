@@ -55,6 +55,27 @@ impl fmt::Debug for SalesforceAuth {
     }
 }
 
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SalesforceResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(SalesforceError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(SalesforceError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(value)
+}
+
 /// `Salesforce` API client.
 pub struct SalesforceClient {
     client: Client,
@@ -223,6 +244,7 @@ impl SalesforceClient {
         account_id: &str,
         fields: Option<&[String]>,
     ) -> SalesforceResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
         let qs = fields.map_or_else(String::new, |f| format!("?fields={}", f.join(",")));
         self.get(&format!("/sobjects/Account/{account_id}{qs}"))
             .await
@@ -275,6 +297,7 @@ impl SalesforceClient {
 
     /// Delete a contact.
     pub async fn delete_contact(&self, contact_id: &str) -> SalesforceResult<serde_json::Value> {
+        let contact_id = sanitize_path_segment(contact_id, "contact_id")?;
         self.delete(&format!("/sobjects/Contact/{contact_id}"))
             .await
     }
@@ -388,6 +411,7 @@ impl SalesforceClient {
         report_id: &str,
         include_details: bool,
     ) -> SalesforceResult<serde_json::Value> {
+        let report_id = sanitize_path_segment(report_id, "report_id")?;
         let qs = if include_details {
             "?includeDetails=true"
         } else {
@@ -574,5 +598,62 @@ mod tests {
     #[test]
     fn api_path_value() {
         assert_eq!(API_PATH, "/services/data/v59.0");
+    }
+
+    // -- sanitize_path_segment tests --
+
+    #[test]
+    fn sanitize_path_segment_valid() {
+        assert_eq!(sanitize_path_segment("001Abc123", "id").unwrap(), "001Abc123");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        let err = sanitize_path_segment("", "account_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        let err = sanitize_path_segment("   ", "account_id").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        let err = sanitize_path_segment("abc/def", "id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        let err = sanitize_path_segment("abc\\def", "id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        let err = sanitize_path_segment("abc..def", "id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        let err = sanitize_path_segment("abc%2fdef", "id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        let err = sanitize_path_segment("abc%5Cdef", "id").unwrap_err();
+        assert!(err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_allows_hyphens_and_underscores() {
+        assert_eq!(
+            sanitize_path_segment("abc-def_ghi", "id").unwrap(),
+            "abc-def_ghi"
+        );
     }
 }

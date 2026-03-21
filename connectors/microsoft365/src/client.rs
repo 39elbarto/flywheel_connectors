@@ -179,8 +179,17 @@ impl M365Client {
         skip: Option<u32>,
         filter: Option<&str>,
     ) -> M365Result<GraphListResponse> {
-        let folder_part = folder_id.map_or(String::new(), |f| format!("/mailFolders/{f}"));
-        let mut url = format!("{}/users/{user_id}{folder_part}/messages", self.api_url);
+        let folder_part = match folder_id {
+            Some(f) => {
+                sanitize_path_segment(f, "folder_id")?;
+                format!("/mailFolders/{f}")
+            }
+            None => String::new(),
+        };
+        let mut url = self.build_api_url(&format!(
+            "{}{folder_part}/messages",
+            user_scope_path(user_id)?
+        ))?;
         let mut params = Vec::new();
         if let Some(t) = top {
             params.push(format!("$top={t}"));
@@ -204,13 +213,17 @@ impl M365Client {
         user_id: &str,
         message_id: &str,
     ) -> M365Result<serde_json::Value> {
-        let url = format!("{}/users/{user_id}/messages/{message_id}", self.api_url);
+        sanitize_path_segment(message_id, "message_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/messages/{message_id}",
+            user_scope_path(user_id)?
+        ))?;
         self.get(&url).await
     }
 
     /// Send a mail message.
     pub async fn send_message(&self, user_id: &str, message: &serde_json::Value) -> M365Result<()> {
-        let url = format!("{}/users/{user_id}/sendMail", self.api_url);
+        let url = self.build_api_url(&format!("{}/sendMail", user_scope_path(user_id)?))?;
         let body = serde_json::json!({ "message": message });
         self.post_json_no_content(&url, &body).await
     }
@@ -221,7 +234,7 @@ impl M365Client {
         user_id: &str,
         message: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        let url = format!("{}/users/{user_id}/messages", self.api_url);
+        let url = self.build_api_url(&format!("{}/messages", user_scope_path(user_id)?))?;
         self.post_json(&url, message).await
     }
 
@@ -233,7 +246,7 @@ impl M365Client {
         top: Option<u32>,
         skip: Option<u32>,
     ) -> M365Result<GraphListResponse> {
-        let base = format!("{}/users/{user_id}/messages", self.api_url);
+        let base = self.build_api_url(&format!("{}/messages", user_scope_path(user_id)?))?;
         let mut url = reqwest::Url::parse(&base)
             .map_err(|e| M365Error::InvalidConfig(format!("Invalid Graph base URL: {e}")))?;
         {
@@ -267,10 +280,11 @@ impl M365Client {
         comment: Option<&str>,
         message: Option<&serde_json::Value>,
     ) -> M365Result<()> {
-        let url = format!(
-            "{}/users/{user_id}/messages/{message_id}/reply",
-            self.api_url
-        );
+        sanitize_path_segment(message_id, "message_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/messages/{message_id}/reply",
+            user_scope_path(user_id)?
+        ))?;
         let mut body = serde_json::Map::new();
         if let Some(comment) = comment {
             body.insert(
@@ -293,10 +307,11 @@ impl M365Client {
         comment: Option<&str>,
         to_recipients: &[serde_json::Value],
     ) -> M365Result<()> {
-        let url = format!(
-            "{}/users/{user_id}/messages/{message_id}/forward",
-            self.api_url
-        );
+        sanitize_path_segment(message_id, "message_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/messages/{message_id}/forward",
+            user_scope_path(user_id)?
+        ))?;
         let mut body = serde_json::Map::new();
         body.insert(
             "toRecipients".into(),
@@ -320,10 +335,11 @@ impl M365Client {
         top: Option<u32>,
         skip: Option<u32>,
     ) -> M365Result<GraphListResponse> {
-        let mut url = format!(
-            "{}/users/{user_id}/messages/{message_id}/attachments",
-            self.api_url
-        );
+        sanitize_path_segment(message_id, "message_id")?;
+        let mut url = self.build_api_url(&format!(
+            "{}/messages/{message_id}/attachments",
+            user_scope_path(user_id)?
+        ))?;
         let mut params = Vec::new();
         if let Some(t) = top {
             params.push(format!("$top={t}"));
@@ -345,10 +361,11 @@ impl M365Client {
         message_id: &str,
         attachment: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        let url = format!(
-            "{}/users/{user_id}/messages/{message_id}/attachments",
-            self.api_url
-        );
+        sanitize_path_segment(message_id, "message_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/messages/{message_id}/attachments",
+            user_scope_path(user_id)?
+        ))?;
         self.post_json(&url, attachment).await
     }
 
@@ -360,18 +377,19 @@ impl M365Client {
         user_id: &str,
         path: Option<&str>,
     ) -> M365Result<GraphListResponse> {
+        let user_scope = user_scope_path(user_id)?;
         let url = match path {
             Some(p) if !p.is_empty() => {
                 let normalized_path = p.trim_matches('/');
                 if normalized_path.is_empty() {
-                    self.build_api_url(&format!("users/{user_id}/drive/root/children"))?
+                    self.build_api_url(&format!("{user_scope}/drive/root/children"))?
                 } else {
                     self.build_api_url(&format!(
-                        "users/{user_id}/drive/root:/{normalized_path}:/children"
+                        "{user_scope}/drive/root:/{normalized_path}:/children"
                     ))?
                 }
             }
-            _ => self.build_api_url(&format!("users/{user_id}/drive/root/children"))?,
+            _ => self.build_api_url(&format!("{user_scope}/drive/root/children"))?,
         };
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -417,20 +435,29 @@ impl M365Client {
     ) -> M365Result<serde_json::Value> {
         let normalized_path = normalize_drive_root_path(path)?;
         let url = self.build_api_url(&format!(
-            "users/{user_id}/drive/root:/{normalized_path}:/content"
+            "{}/drive/root:/{normalized_path}:/content",
+            user_scope_path(user_id)?
         ))?;
         self.put_bytes(&url, content).await
     }
 
     /// Delete a drive item.
     pub async fn delete_item(&self, user_id: &str, item_id: &str) -> M365Result<()> {
-        let url = format!("{}/users/{user_id}/drive/items/{item_id}", self.api_url);
+        sanitize_path_segment(item_id, "item_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/drive/items/{item_id}",
+            user_scope_path(user_id)?
+        ))?;
         self.delete_no_content(&url).await
     }
 
     /// Get metadata for a single drive item by ID.
     pub async fn get_item(&self, user_id: &str, item_id: &str) -> M365Result<serde_json::Value> {
-        let url = format!("{}/users/{user_id}/drive/items/{item_id}", self.api_url);
+        sanitize_path_segment(item_id, "item_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/drive/items/{item_id}",
+            user_scope_path(user_id)?
+        ))?;
         self.get(&url).await
     }
 
@@ -438,10 +465,10 @@ impl M365Client {
     pub async fn search_files(&self, user_id: &str, query: &str) -> M365Result<GraphListResponse> {
         let encoded =
             percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
-        let url = format!(
-            "{}/users/{user_id}/drive/root/search(q='{encoded}')",
-            self.api_url
-        );
+        let url = self.build_api_url(&format!(
+            "{}/drive/root/search(q='{encoded}')",
+            user_scope_path(user_id)?
+        ))?;
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -454,10 +481,11 @@ impl M365Client {
         link_type: &str,
         scope: Option<&str>,
     ) -> M365Result<serde_json::Value> {
-        let url = format!(
-            "{}/users/{user_id}/drive/items/{item_id}/createLink",
-            self.api_url
-        );
+        sanitize_path_segment(item_id, "item_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/drive/items/{item_id}/createLink",
+            user_scope_path(user_id)?
+        ))?;
         let mut body = serde_json::json!({ "type": link_type });
         if let Some(s) = scope {
             body["scope"] = serde_json::Value::String(s.to_string());
@@ -472,10 +500,11 @@ impl M365Client {
         item_id: &str,
         content: &[u8],
     ) -> M365Result<serde_json::Value> {
-        let url = format!(
-            "{}/users/{user_id}/drive/items/{item_id}/content",
-            self.api_url
-        );
+        sanitize_path_segment(item_id, "item_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/drive/items/{item_id}/content",
+            user_scope_path(user_id)?
+        ))?;
         self.put_bytes(&url, content).await
     }
 
@@ -488,14 +517,21 @@ impl M365Client {
         start_datetime: Option<&str>,
         end_datetime: Option<&str>,
     ) -> M365Result<GraphListResponse> {
+        let user_scope = user_scope_path(user_id)?;
         let url = match (start_datetime, end_datetime) {
             (Some(start), Some(end)) => {
-                format!(
-                    "{}/users/{user_id}/calendarView?startDateTime={start}&endDateTime={end}",
-                    self.api_url
+                let mut url = reqwest::Url::parse(
+                    &self.build_api_url(&format!("{user_scope}/calendarView"))?,
                 )
+                .map_err(|e| M365Error::InvalidConfig(format!("Invalid calendarView URL: {e}")))?;
+                {
+                    let mut pairs = url.query_pairs_mut();
+                    pairs.append_pair("startDateTime", start);
+                    pairs.append_pair("endDateTime", end);
+                }
+                url.to_string()
             }
-            _ => format!("{}/users/{user_id}/events", self.api_url),
+            _ => self.build_api_url(&format!("{user_scope}/events"))?,
         };
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -507,19 +543,21 @@ impl M365Client {
         user_id: &str,
         event: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        let url = format!("{}/users/{user_id}/events", self.api_url);
+        let url = self.build_api_url(&format!("{}/events", user_scope_path(user_id)?))?;
         self.post_json(&url, event).await
     }
 
     /// Delete a calendar event.
     pub async fn delete_event(&self, user_id: &str, event_id: &str) -> M365Result<()> {
-        let url = format!("{}/users/{user_id}/events/{event_id}", self.api_url);
+        sanitize_path_segment(event_id, "event_id")?;
+        let url = self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
         self.delete_no_content(&url).await
     }
 
     /// Get a single calendar event by ID.
     pub async fn get_event(&self, user_id: &str, event_id: &str) -> M365Result<serde_json::Value> {
-        let url = format!("{}/users/{user_id}/events/{event_id}", self.api_url);
+        sanitize_path_segment(event_id, "event_id")?;
+        let url = self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
         self.get(&url).await
     }
 
@@ -530,7 +568,8 @@ impl M365Client {
         event_id: &str,
         updates: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        let url = format!("{}/users/{user_id}/events/{event_id}", self.api_url);
+        sanitize_path_segment(event_id, "event_id")?;
+        let url = self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
         self.patch_json(&url, updates).await
     }
 
@@ -554,17 +593,18 @@ impl M365Client {
 
     /// List all To Do task lists.
     pub async fn list_task_lists(&self, user_id: &str) -> M365Result<GraphListResponse> {
-        let url = format!("{}/users/{user_id}/todo/lists", self.api_url);
+        let url = self.build_api_url(&format!("{}/todo/lists", user_scope_path(user_id)?))?;
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// List tasks in a To Do list.
     pub async fn list_tasks(&self, user_id: &str, list_id: &str) -> M365Result<GraphListResponse> {
-        let url = format!(
-            "{}/users/{user_id}/todo/lists/{list_id}/tasks",
-            self.api_url
-        );
+        sanitize_path_segment(list_id, "list_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/todo/lists/{list_id}/tasks",
+            user_scope_path(user_id)?
+        ))?;
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -576,10 +616,11 @@ impl M365Client {
         list_id: &str,
         task: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        let url = format!(
-            "{}/users/{user_id}/todo/lists/{list_id}/tasks",
-            self.api_url
-        );
+        sanitize_path_segment(list_id, "list_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/todo/lists/{list_id}/tasks",
+            user_scope_path(user_id)?
+        ))?;
         self.post_json(&url, task).await
     }
 
@@ -591,7 +632,8 @@ impl M365Client {
         user_id: &str,
         top: Option<u32>,
     ) -> M365Result<GraphListResponse> {
-        let mut url = format!("{}/users/{user_id}/onenote/notebooks", self.api_url);
+        let mut url =
+            self.build_api_url(&format!("{}/onenote/notebooks", user_scope_path(user_id)?))?;
         if let Some(top) = top {
             url = format!("{url}?$top={top}");
         }
@@ -607,18 +649,19 @@ impl M365Client {
         section_group_id: Option<&str>,
         top: Option<u32>,
     ) -> M365Result<GraphListResponse> {
+        let user_scope = user_scope_path(user_id)?;
         let mut url = if let Some(notebook_id) = notebook_id {
-            format!(
-                "{}/users/{user_id}/onenote/notebooks/{notebook_id}/sections",
-                self.api_url
-            )
+            sanitize_path_segment(notebook_id, "notebook_id")?;
+            self.build_api_url(&format!(
+                "{user_scope}/onenote/notebooks/{notebook_id}/sections"
+            ))?
         } else if let Some(section_group_id) = section_group_id {
-            format!(
-                "{}/users/{user_id}/onenote/sectionGroups/{section_group_id}/sections",
-                self.api_url
-            )
+            sanitize_path_segment(section_group_id, "section_group_id")?;
+            self.build_api_url(&format!(
+                "{user_scope}/onenote/sectionGroups/{section_group_id}/sections"
+            ))?
         } else {
-            format!("{}/users/{user_id}/onenote/sections", self.api_url)
+            self.build_api_url(&format!("{user_scope}/onenote/sections"))?
         };
 
         if let Some(top) = top {
@@ -636,10 +679,11 @@ impl M365Client {
         section_id: &str,
         top: Option<u32>,
     ) -> M365Result<GraphListResponse> {
-        let mut url = format!(
-            "{}/users/{user_id}/onenote/sections/{section_id}/pages",
-            self.api_url
-        );
+        sanitize_path_segment(section_id, "section_id")?;
+        let mut url = self.build_api_url(&format!(
+            "{}/onenote/sections/{section_id}/pages",
+            user_scope_path(user_id)?
+        ))?;
         if let Some(top) = top {
             url = format!("{url}?$top={top}");
         }
@@ -649,7 +693,11 @@ impl M365Client {
 
     /// Get OneNote page metadata by page ID.
     pub async fn get_page(&self, user_id: &str, page_id: &str) -> M365Result<serde_json::Value> {
-        let url = format!("{}/users/{user_id}/onenote/pages/{page_id}", self.api_url);
+        sanitize_path_segment(page_id, "page_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/onenote/pages/{page_id}",
+            user_scope_path(user_id)?
+        ))?;
         self.get(&url).await
     }
 
@@ -660,10 +708,11 @@ impl M365Client {
         page_id: &str,
         include_ids: bool,
     ) -> M365Result<String> {
-        let mut url = reqwest::Url::parse(&format!(
-            "{}/users/{user_id}/onenote/pages/{page_id}/content",
-            self.api_url
-        ))
+        sanitize_path_segment(page_id, "page_id")?;
+        let mut url = reqwest::Url::parse(&self.build_api_url(&format!(
+            "{}/onenote/pages/{page_id}/content",
+            user_scope_path(user_id)?
+        ))?)
         .map_err(|error| {
             M365Error::InvalidConfig(format!("Invalid OneNote content URL: {error}"))
         })?;
@@ -680,10 +729,11 @@ impl M365Client {
         section_id: &str,
         html: &str,
     ) -> M365Result<serde_json::Value> {
-        let url = format!(
-            "{}/users/{user_id}/onenote/sections/{section_id}/pages",
-            self.api_url
-        );
+        sanitize_path_segment(section_id, "section_id")?;
+        let url = self.build_api_url(&format!(
+            "{}/onenote/sections/{section_id}/pages",
+            user_scope_path(user_id)?
+        ))?;
         self.post_html(&url, html).await
     }
 
@@ -694,11 +744,12 @@ impl M365Client {
         page_id: &str,
         commands: &[PageContentCommand],
     ) -> M365Result<()> {
+        sanitize_path_segment(page_id, "page_id")?;
         let body = serde_json::to_value(commands)?;
-        let url = format!(
-            "{}/users/{user_id}/onenote/pages/{page_id}/content",
-            self.api_url
-        );
+        let url = self.build_api_url(&format!(
+            "{}/onenote/pages/{page_id}/content",
+            user_scope_path(user_id)?
+        ))?;
         self.patch_json_no_content(&url, &body).await
     }
 
@@ -719,6 +770,7 @@ impl M365Client {
         subscription_id: &str,
         expiration_datetime: &str,
     ) -> M365Result<serde_json::Value> {
+        sanitize_path_segment(subscription_id, "subscription_id")?;
         let url = format!("{}/subscriptions/{subscription_id}", self.api_url);
         let body = serde_json::json!({
             "expirationDateTime": expiration_datetime,
@@ -728,6 +780,7 @@ impl M365Client {
 
     /// Delete a webhook subscription.
     pub async fn delete_subscription(&self, subscription_id: &str) -> M365Result<()> {
+        sanitize_path_segment(subscription_id, "subscription_id")?;
         let url = format!("{}/subscriptions/{subscription_id}", self.api_url);
         self.delete_no_content(&url).await
     }
@@ -789,18 +842,16 @@ impl M365Client {
         item_id: &str,
         format: Option<&str>,
     ) -> M365Result<(Vec<u8>, serde_json::Value)> {
-        let meta_url = format!("{}/users/{user_id}/drive/items/{item_id}", self.api_url);
+        sanitize_path_segment(item_id, "item_id")?;
+        let user_scope = user_scope_path(user_id)?;
+        let meta_url = self.build_api_url(&format!("{user_scope}/drive/items/{item_id}"))?;
         let metadata = self.get(&meta_url).await?;
 
         let content_url = match format {
-            Some(format) => format!(
-                "{}/users/{user_id}/drive/items/{item_id}/content?format={format}",
-                self.api_url
-            ),
-            None => format!(
-                "{}/users/{user_id}/drive/items/{item_id}/content",
-                self.api_url
-            ),
+            Some(format) => self.build_api_url(&format!(
+                "{user_scope}/drive/items/{item_id}/content?format={format}"
+            ))?,
+            None => self.build_api_url(&format!("{user_scope}/drive/items/{item_id}/content"))?,
         };
         let bytes = self.get_bytes(&content_url).await?;
         Ok((bytes, metadata))
@@ -1098,6 +1149,38 @@ fn normalize_drive_root_path(path: &str) -> M365Result<&str> {
     Ok(normalized)
 }
 
+/// Reject path-segment values that contain traversal characters.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> M365Result<&'a str> {
+    if value.trim().is_empty() {
+        return Err(M365Error::InvalidConfig(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(M365Error::InvalidConfig(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn user_scope_path(user_id: &str) -> M365Result<String> {
+    if user_id.eq_ignore_ascii_case("me") {
+        Ok("me".to_string())
+    } else {
+        // user_id can be an email address (alice@contoso.com) which is safe,
+        // but must not contain path traversal characters.
+        sanitize_path_segment(user_id, "user_id")?;
+        Ok(format!("users/{user_id}"))
+    }
+}
+
 enum ErrorAction {
     Return(M365Error),
     Retry(M365Error),
@@ -1117,7 +1200,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages"))
+            .and(path("/me/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
                     { "id": "msg_1", "subject": "Hello" },
@@ -1139,11 +1222,34 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_list_messages_explicit_user_keeps_users_prefix() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/alice@contoso.com/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "msg_9", "subject": "Hello Alice" }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+
+        let result = client
+            .list_messages("alice@contoso.com", None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_get_message() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages/msg_123"))
+            .and(path("/me/messages/msg_123"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "msg_123",
                 "subject": "Test Message"
@@ -1164,7 +1270,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/users/me/sendMail"))
+            .and(path("/me/sendMail"))
             .respond_with(ResponseTemplate::new(202))
             .mount(&mock_server)
             .await;
@@ -1187,7 +1293,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages"))
+            .and(path("/me/messages"))
             .and(query_param("$search", "\"project status\""))
             .and(query_param("$top", "10"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1213,7 +1319,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/users/me/messages/msg_123/reply"))
+            .and(path("/me/messages/msg_123/reply"))
             .respond_with(ResponseTemplate::new(202))
             .mount(&mock_server)
             .await;
@@ -1263,7 +1369,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/users/me/messages/msg_123/forward"))
+            .and(path("/me/messages/msg_123/forward"))
             .respond_with(ResponseTemplate::new(202))
             .mount(&mock_server)
             .await;
@@ -1285,7 +1391,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages/msg_123/attachments"))
+            .and(path("/me/messages/msg_123/attachments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
                     { "id": "att_1", "name": "report.pdf" }
@@ -1309,7 +1415,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/users/me/messages/msg_123/attachments"))
+            .and(path("/me/messages/msg_123/attachments"))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": "att_1",
                 "name": "report.pdf"
@@ -1338,7 +1444,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/drive/root/children"))
+            .and(path("/me/drive/root/children"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
                     { "id": "item_1", "name": "Documents", "folder": { "childCount": 5 } },
@@ -1361,7 +1467,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/drive/root:/Shared%20Documents:/children"))
+            .and(path("/me/drive/root:/Shared%20Documents:/children"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [{ "id": "item_1", "name": "Quarterly Report.docx" }]
             })))
@@ -1384,7 +1490,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/drive/items/doc-1"))
+            .and(path("/me/drive/items/doc-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "doc-1",
                 "name": "Quarterly Report.docx",
@@ -1394,7 +1500,7 @@ mod tests {
             .await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/drive/items/doc-1/content"))
+            .and(path("/me/drive/items/doc-1/content"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-test".to_vec()))
             .mount(&mock_server)
             .await;
@@ -1413,7 +1519,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("PUT"))
-            .and(path("/users/me/drive/items/doc-1/content"))
+            .and(path("/me/drive/items/doc-1/content"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "doc-1",
                 "name": "Updated Report.docx",
@@ -1439,7 +1545,7 @@ mod tests {
 
         Mock::given(method("PUT"))
             .and(path(
-                "/users/me/drive/root:/Documents/Meeting%20Notes.docx:/content",
+                "/me/drive/root:/Documents/Meeting%20Notes.docx:/content",
             ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": "doc-9",
@@ -1465,7 +1571,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/events"))
+            .and(path("/me/events"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
                     { "id": "evt_1", "subject": "Standup" }
@@ -1487,7 +1593,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/todo/lists"))
+            .and(path("/me/todo/lists"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
                     { "id": "list_1", "displayName": "Tasks" }
@@ -1509,7 +1615,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/onenote/notebooks"))
+            .and(path("/me/onenote/notebooks"))
             .and(query_param("$top", "10"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "value": [
@@ -1531,7 +1637,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/onenote/pages/page_123/content"))
+            .and(path("/me/onenote/pages/page_123/content"))
             .and(query_param("includeIDs", "true"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -1556,7 +1662,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/users/me/onenote/sections/section_123/pages"))
+            .and(path("/me/onenote/sections/section_123/pages"))
             .and(header("content-type", "text/html"))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": "page_123",
@@ -1584,7 +1690,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("PATCH"))
-            .and(path("/users/me/onenote/pages/page_123/content"))
+            .and(path("/me/onenote/pages/page_123/content"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&mock_server)
             .await;
@@ -1639,7 +1745,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages"))
+            .and(path("/me/messages"))
             .respond_with(ResponseTemplate::new(401))
             .mount(&mock_server)
             .await;
@@ -1662,7 +1768,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages/nonexistent"))
+            .and(path("/me/messages/nonexistent"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&mock_server)
             .await;
@@ -1685,7 +1791,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/users/me/messages"))
+            .and(path("/me/messages"))
             .respond_with(ResponseTemplate::new(429))
             .mount(&mock_server)
             .await;
@@ -1727,7 +1833,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("DELETE"))
-            .and(path("/users/me/events/evt_123"))
+            .and(path("/me/events/evt_123"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&mock_server)
             .await;
@@ -1755,5 +1861,41 @@ mod tests {
             error_code: None,
         };
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "user_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "user_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "user_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "user_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "user_id").is_err());
+        assert!(sanitize_path_segment("", "user_id").is_err());
+        assert!(sanitize_path_segment("  ", "user_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            sanitize_path_segment("msg_123", "message_id").unwrap(),
+            "msg_123"
+        );
+        assert_eq!(
+            sanitize_path_segment("alice@contoso.com", "user_id").unwrap(),
+            "alice@contoso.com"
+        );
+    }
+
+    #[test]
+    fn user_scope_path_me_shortcut() {
+        assert_eq!(user_scope_path("me").unwrap(), "me");
+        assert_eq!(user_scope_path("ME").unwrap(), "me");
+        assert_eq!(user_scope_path("Me").unwrap(), "me");
+    }
+
+    #[test]
+    fn user_scope_path_rejects_traversal() {
+        assert!(user_scope_path("../admin").is_err());
+        assert!(user_scope_path("user/evil").is_err());
     }
 }

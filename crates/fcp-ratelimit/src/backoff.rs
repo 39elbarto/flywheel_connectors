@@ -85,18 +85,38 @@ impl Default for ExponentialBackoff {
 
 impl BackoffStrategy for ExponentialBackoff {
     fn next_backoff(&mut self, attempt: u32) -> Duration {
-        #[allow(clippy::cast_possible_wrap)]
-        let base = self.initial.as_secs_f64() * self.multiplier.powi(attempt as i32);
-        let capped = base.min(self.max.as_secs_f64());
+        let max_secs = self.max.as_secs_f64();
 
-        self.jitter.map_or_else(
-            || Duration::from_secs_f64(capped),
-            |jitter| {
-                let random_float = || rand::random::<f64>();
-                let jitter_factor = random_float().mul_add(jitter * 2.0, 1.0 - jitter);
-                Duration::from_secs_f64(capped * jitter_factor)
-            },
-        )
+        // Guard: if initial is zero or max is zero, return max (or zero) immediately.
+        let initial_secs = self.initial.as_secs_f64();
+        if initial_secs <= 0.0 || max_secs <= 0.0 {
+            return self.max;
+        }
+
+        #[allow(clippy::cast_possible_wrap)]
+        let base = initial_secs * self.multiplier.powi(attempt as i32);
+
+        // Guard against NaN/infinity from extreme multiplier or attempt values.
+        let capped = if base.is_finite() {
+            base.min(max_secs)
+        } else {
+            max_secs
+        };
+
+        let result = self.jitter.map_or(capped, |jitter| {
+            // Clamp jitter to valid range to prevent NaN propagation.
+            let jitter = jitter.clamp(0.0, 1.0);
+            let random_float = rand::random::<f64>();
+            let jitter_factor = random_float.mul_add(jitter * 2.0, 1.0 - jitter);
+            capped * jitter_factor
+        });
+
+        // Final guard: Duration::from_secs_f64 panics on NaN/negative/infinite.
+        if result.is_finite() && result >= 0.0 {
+            Duration::from_secs_f64(result.min(max_secs))
+        } else {
+            self.max
+        }
     }
 
     fn reset(&mut self) {

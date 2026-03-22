@@ -42,6 +42,20 @@ const CAP_PROFILE_READ: &str = "line.profile.read";
 const CAP_MENU_READ: &str = "line.menu.read";
 const CAP_MENU_WRITE: &str = "line.menu.write";
 const LINE_API_HOST: &str = "api.line.me";
+const LINE_IMPLEMENTATION_STATUS: &str = "first_slice";
+const LINE_BINDING_MODEL: &str = "single_channel";
+const LINE_AUTH_MODEL: &str = "bearer_channel_access_token";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/line_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/line_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 7] = [
+    "scripts/e2e/line_connector_verification.sh",
+    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/line/manifest.toml --check --json",
+    "rch exec -- cargo check -p fcp-line --all-targets",
+    "rch exec -- cargo fmt --manifest-path connectors/line/Cargo.toml --check",
+    "rch exec -- cargo test -p fcp-line --test integration -- --nocapture",
+    "rch exec -- cargo test -p fcp-line -- --nocapture",
+    "rch exec -- cargo clippy -p fcp-line --all-targets -- -D warnings",
+];
 
 /// LINE connector configuration.
 #[derive(Clone, Deserialize)]
@@ -164,8 +178,13 @@ fn validate_config(config: &LineConfig) -> FcpResult<()> {
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -177,10 +196,154 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
         let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RetryReadiness {
+    max_retries: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    base_url: String,
+    auth_mode: &'static str,
+    request_timeout_ms: u64,
+    retry: RetryReadiness,
+    authenticated_identity_probe: &'static str,
+    risky_mutations: Vec<&'static str>,
+    reply_token_source: &'static str,
+    group_membership_scope: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn auth_mode_label(config: &LineConfig) -> &'static str {
+    if config.channel_access_token.trim().is_empty() {
+        "unconfigured"
+    } else {
+        LINE_AUTH_MODEL
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable LINE Messaging API channel or a localhost mock server before exercising live message or rich-menu mutations.",
+            "Configure exactly one channel_access_token per connector instance and keep base_url on https://api.line.me unless you are running a localhost or 127.0.0.1 test override.",
+            "Treat line.messages.push, line.messages.reply, line.messages.multicast, line.rich_menu.create, and line.rich_menu.delete as live side effects unless the verification bundle is pointed at a mock server.",
+        ],
+        dedicated_environment: "Prefer a disposable LINE bot channel or a localhost mock server. Avoid shared production channels because push, reply, multicast, and rich-menu deletion are irreversible from the connector's perspective.",
+        redaction_rules: vec![
+            "Redact channel access tokens, Authorization headers, reply tokens, request IDs, and copied HTTP logs before sharing artifacts.",
+            "Treat user IDs, group IDs, room IDs, richMenuIds, picture URLs, and bot profile metadata as potentially sensitive operational data.",
+            "If verification touches live channels, sanitize message payloads, chat-bar text, rich-menu names, and any archived recipient identifiers before exporting evidence.",
+        ],
+        limitations: vec![
+            "The current slice is request-response only and does not receive webhooks, verify LINE signatures, or persist inbound event state.",
+            "line.messages.reply depends on a fresh webhook-sourced reply token handled outside this connector.",
+            "line.group.members inherits LINE's verified-or-premium-account restriction for full member-ID enumeration.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "not_configured",
+                symptom: "health or self_check reports that the connector is not configured",
+                action: "Configure channel_access_token, request_timeout_ms, retry policy, and an allowed base_url, then rerun self_check.",
+            },
+            RemediationHint {
+                code: "line_auth_rejected",
+                symptom: "self_check or invoke returns HTTP 401 or an unauthorized error from LINE",
+                action: "Replace the channel access token, confirm GET /v2/bot/info succeeds, and rerun the verification bundle.",
+            },
+            RemediationHint {
+                code: "reply_token_invalid_or_expired",
+                symptom: "line.messages.reply fails because LINE rejects the supplied reply token",
+                action: "Use a fresh webhook-sourced reply token and rerun the targeted reply verification immediately after receipt.",
+            },
+            RemediationHint {
+                code: "membership_tier_restricted",
+                symptom: "line.group.members fails even though the bot can see the target group",
+                action: "Verify the official account tier supports member enumeration or switch verification to a mock server for deterministic pagination coverage.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "self_check reports a timeout, rate limit, or temporary 5xx from LINE",
+                action: "Wait for the upstream to recover or increase request_timeout_ms and retry settings before rerunning verification.",
+            },
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "doctor reports that base_url falls outside the live LINE host or localhost override rules",
+                action: "Use https://api.line.me for live verification or an explicit localhost / 127.0.0.1 override for deterministic mock-server runs.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
+fn contract_details(config: Option<&LineConfig>) -> serde_json::Value {
+    let credential_mode = config.map_or("unconfigured", auth_mode_label);
+
+    json!({
+        "implementation": {
+            "api": "line_messaging_api_v2",
+            "status": LINE_IMPLEMENTATION_STATUS,
+            "notes": [
+                "The connector targets outbound LINE Messaging API operations for one configured channel access token boundary.",
+                "Reply operations depend on webhook-sourced reply tokens handled outside this request-response connector."
+            ],
+        },
+        "auth_boundary": {
+            "binding": LINE_BINDING_MODEL,
+            "token_type": LINE_AUTH_MODEL,
+            "credential_mode": credential_mode,
+            "base_url": config.map(|cfg| cfg.base_url.clone()),
+            "webhook_receiver_included": false,
+            "multicast_user_only": true,
+            "room_summary_supported": false,
+            "rich_menu_image_upload_supported": false,
+        },
+        "service_inventory": {
+            "messages": [OP_PUSH, OP_REPLY, OP_MULTICAST],
+            "profiles": [OP_PROFILE_GET, OP_GROUP_PROFILE, OP_GROUP_MEMBERS],
+            "rich_menus": [OP_RICH_MENU_LIST, OP_RICH_MENU_CREATE, OP_RICH_MENU_DELETE],
+            "health": [OP_HEALTH],
+        },
+        "non_goals": [
+            "Webhook reception, signature verification, and replay control",
+            "Broadcast, narrowcast, analytics, audience, and delivery-reporting surfaces",
+            "Rich-menu image upload, alias management, default assignment, and per-user linking"
+        ]
+    })
 }
 
 /// LINE connector state.
@@ -216,14 +379,38 @@ impl LineConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
-    fn self_check_details(&self, live_probe: Option<&str>) -> serde_json::Value {
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| ProvisioningReadiness {
+            base_url: config.base_url.clone(),
+            auth_mode: auth_mode_label(config),
+            request_timeout_ms: config.request_timeout_ms,
+            retry: RetryReadiness {
+                max_retries: config.retry.max_retries,
+                initial_delay_ms: config.retry.initial_delay_ms,
+                max_delay_ms: config.retry.max_delay_ms,
+                jitter_enabled: config.retry.jitter_enabled,
+            },
+            authenticated_identity_probe: "GET /v2/bot/info",
+            risky_mutations: vec![
+                OP_PUSH,
+                OP_REPLY,
+                OP_MULTICAST,
+                OP_RICH_MENU_CREATE,
+                OP_RICH_MENU_DELETE,
+            ],
+            reply_token_source: "external_webhook_event",
+            group_membership_scope: "verified_or_premium_official_account_required_for_live_full_member_enumeration",
+        })
+    }
+
+    fn diagnostic_details(&self, live_probe: Option<serde_json::Value>) -> serde_json::Value {
         json!({
             "configured": self.config.is_some(),
             "client_initialized": self.client.is_some(),
             "runtime_initialized": self.runtime.is_some(),
             "handshaken": self.base.handshaken.load(Ordering::Acquire),
             "manifest_hash": Self::manifest_hash(),
-            "auth_mode": self.config.as_ref().map(|_| "bearer_token"),
+            "auth_mode": self.config.as_ref().map(auth_mode_label),
             "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
             "base_url_validation": self.config.as_ref().map(|config| {
                 match parse_base_url(&config.base_url) {
@@ -239,6 +426,11 @@ impl LineConnector {
                 }
             }),
             "request_timeout_ms": self.config.as_ref().map(|config| config.request_timeout_ms),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "operator_guidance": operator_guidance(),
+            "contract": contract_details(self.config.as_ref()),
             "live_probe": live_probe,
         })
     }
@@ -246,15 +438,16 @@ impl LineConnector {
     fn attach_self_check_details(
         &self,
         mut report: SelfCheckReport,
-        live_probe: Option<&str>,
+        live_probe: Option<serde_json::Value>,
     ) -> SelfCheckReport {
-        report.details = Some(self.self_check_details(live_probe));
+        report.details = Some(self.diagnostic_details(live_probe));
         report
     }
 
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
+        let provisioning = self.provisioning_readiness();
 
         let configured = self.config.is_some();
         checks.push(DoctorCheck {
@@ -325,7 +518,7 @@ impl LineConnector {
             });
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 }
 
@@ -753,20 +946,15 @@ impl FcpConnector for LineConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
+        let ready = self.config.is_some() && self.client.is_some() && self.runtime.is_some();
+        let mut snapshot = if ready {
             HealthSnapshot::ready()
         } else {
             HealthSnapshot::degraded("not configured")
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        snapshot.details = Some(json!({
-            "configured": self.config.is_some(),
-            "client_initialized": self.client.is_some(),
-            "runtime_initialized": self.runtime.is_some(),
-            "manifest_hash": Self::manifest_hash(),
-            "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
-        }));
+        snapshot.details = Some(self.diagnostic_details(None));
         snapshot
     }
 
@@ -778,18 +966,45 @@ impl FcpConnector for LineConnector {
             ));
         };
 
-        let report = match client.health_check().await {
-            Ok(()) => SelfCheckReport::ok(),
+        let (report, live_probe) = match client.health_check().await {
+            Ok(()) => (
+                SelfCheckReport::ok(),
+                Some(json!({
+                    "endpoint": "GET /v2/bot/info",
+                    "status": "ok",
+                })),
+            ),
             Err(err) => {
                 if err.is_retryable() {
-                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                    (
+                        SelfCheckReport::degraded("self_check_retryable", err.to_string()),
+                        Some(json!({
+                            "endpoint": "GET /v2/bot/info",
+                            "status": "retryable_error",
+                            "retryable": true,
+                            "error": err.to_string(),
+                        })),
+                    )
                 } else {
-                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                    let reason_code = if matches!(err, crate::error::LineError::Unauthorized(_)) {
+                        "line_auth_rejected"
+                    } else {
+                        "self_check_failed"
+                    };
+                    (
+                        SelfCheckReport::failed(reason_code, err.to_string()),
+                        Some(json!({
+                            "endpoint": "GET /v2/bot/info",
+                            "status": "error",
+                            "retryable": false,
+                            "error": err.to_string(),
+                        })),
+                    )
                 }
             }
         };
 
-        Ok(self.attach_self_check_details(report, Some("GET /v2/bot/info")))
+        Ok(self.attach_self_check_details(report, live_probe))
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
@@ -1241,6 +1456,9 @@ mod tests {
         let connector = LineConnector::new();
         let health = connector.health().await;
         assert!(matches!(health.status, HealthState::Degraded { .. }));
+        let details = health.details.expect("health details");
+        assert_eq!(details["verification_script"], VERIFICATION_SCRIPT_PATH);
+        assert!(details["operator_guidance"]["prerequisites"].is_array());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1258,7 +1476,9 @@ mod tests {
     fn test_doctor_before_configure() {
         let connector = LineConnector::new();
         let report = connector.doctor();
+        assert!(!report.ready);
         assert!(!report.passed);
+        assert_eq!(report.verification_script, VERIFICATION_SCRIPT_PATH);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1269,6 +1489,7 @@ mod tests {
             .await
             .unwrap();
         let report = connector.doctor();
+        assert!(report.ready);
         assert!(report.passed);
     }
 
@@ -1277,7 +1498,9 @@ mod tests {
         let connector = LineConnector::new();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
-        assert!(report.details.is_some());
+        let details = report.details.expect("self-check details");
+        assert_eq!(details["verification_script"], VERIFICATION_SCRIPT_PATH);
+        assert_eq!(details["artifact_root_hint"], ARTIFACT_ROOT_HINT);
     }
 
     #[fcp_async_core::runtime::test]

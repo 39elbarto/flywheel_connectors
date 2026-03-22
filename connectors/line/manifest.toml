@@ -7,7 +7,7 @@ id = "fcp.line"
 name = "LINE Messaging"
 version = "0.1.0"
 description = "One-channel LINE Messaging API connector for outbound messages, profile or group lookups, rich-menu metadata management, and health verification"
-archetype = "operational"
+archetypes = ["operational"]
 homepage = "https://developers.line.biz/en/reference/messaging-api/"
 
 # Auth and scope model:

@@ -1,8 +1,9 @@
 # LINE Connector V3 Contract
 
-> **Status**: planning contract
+> **Status**: implemented first-slice contract
 > **Bead**: `flywheel_connectors-j05nu.8.6.1`
 > **Unblocks**: `flywheel_connectors-j05nu.8.6.2`
+> **Verification script**: `scripts/e2e/line_connector_verification.sh`
 > **Primary upstreams**:
 > - https://developers.line.biz/en/reference/messaging-api/nojs/
 > - https://developers.line.biz/en/docs/basics/channel-access-token/
@@ -37,7 +38,7 @@ Important implementation truths from `connector.rs`, `client.rs`, and `manifest.
 - The connector is bound to one Messaging API channel through one pre-issued channel access token.
 - The runtime now requires a non-empty `channel_access_token`; secretless proxy-injected auth is no longer accepted for this connector slice.
 - The accepted production API root is `https://api.line.me`, and configure-time validation now rejects non-LINE hosts while still allowing `localhost` and `127.0.0.1` overrides for test harnesses.
-- `line.health` and `self_check()` are grounded in `GET /v2/bot/info`.
+- `line.health` and `self_check()` are grounded in `GET /v2/bot/info`, and the readiness surface now emits operator guidance, verification-script references, provisioning details, and structured self-check evidence.
 - `line.messages.reply` depends on a reply token supplied from an external webhook flow, but the connector itself doesn't receive webhooks, verify signatures, or persist webhook state.
 - `line.messages.multicast` is implemented only for user IDs, not group chats or multi-person chats.
 - `line.group.members` is implemented against the group-member-ID endpoint and therefore inherits the upstream verified-or-premium-account restriction.
@@ -154,6 +155,68 @@ These are excluded on purpose:
 - Reconcile runtime and manifest idempotency metadata with actual provider behavior. In particular, push and multicast shouldn't claim exact-once semantics until retry-key propagation is wired; rich-menu create should stay best-effort for the same reason, while rich-menu delete remains strict because the FCP safety model treats dangerous mutations conservatively.
 - If production-host validation is part of the accepted V3 contract, enforce it during configure rather than only reporting it via `doctor()`.
 - If rich-menu image upload or user/default linking is needed, add separate operations instead of broadening `line.rich_menu.create`.
+
+## Readiness And Verification
+
+The readiness closeout bead for this connector surface is `flywheel_connectors-j05nu.8.6.3`. Verification artifacts should be reproducible without reopening planning notes.
+
+- Replayable verification bundle: `scripts/e2e/line_connector_verification.sh`
+- Artifact root: `artifacts/e2e/line_connector/<timestamp>`
+- Manifest verification command: `rch exec -- cargo run -q -p fwc -- manifest fix connectors/line/manifest.toml --check --json`
+- Focused cargo checks:
+  - `rch exec -- cargo check -p fcp-line --all-targets`
+  - `rch exec -- cargo fmt --manifest-path connectors/line/Cargo.toml --check`
+  - `rch exec -- cargo test -p fcp-line --test integration -- --nocapture`
+  - `rch exec -- cargo test -p fcp-line -- --nocapture`
+  - `rch exec -- cargo clippy -p fcp-line --all-targets -- -D warnings`
+
+Operator guidance for verification:
+
+- Prefer a disposable LINE bot channel or a localhost mock server before exercising push, reply, multicast, or rich-menu mutations.
+- Keep one connector instance bound to one `channel_access_token`, and keep `base_url` on `https://api.line.me` unless the verification bundle is pointed at `localhost` or `127.0.0.1`.
+- Redact channel access tokens, Authorization headers, reply tokens, user IDs, group IDs, room IDs, `richMenuId` values, picture URLs, and copied request logs before sharing artifacts.
+- Treat `line.messages.reply` as dependent on a fresh webhook-sourced reply token that the connector itself does not mint or persist.
+- Common remediation:
+  - `not_configured`: configure `channel_access_token`, timeout, retry policy, and a valid `base_url`, then rerun `self_check`.
+  - `line_auth_rejected`: replace the token and confirm `GET /v2/bot/info` succeeds.
+  - `reply_token_invalid_or_expired`: capture a fresh webhook event and rerun the reply path immediately.
+  - `membership_tier_restricted`: verify the official-account tier supports group member enumeration or rerun the pagination coverage against a localhost mock.
+  - `self_check_retryable`: wait for LINE to recover or increase timeout / retry settings before rerunning the verification bundle.
+  - `network_constraints_invalid`: use `https://api.line.me` for live runs or an explicit localhost override for deterministic tests.
+
+## Verification Bundle
+
+The readiness closeout is anchored on `scripts/e2e/line_connector_verification.sh`.
+It writes replayable artifacts under `artifacts/e2e/line_connector/<timestamp>` and captures manifest validation, focused `rch`-offloaded cargo checks, targeted readiness evidence, the full integration suite, the full crate test suite, and `clippy`.
+
+## Operator Guidance
+
+Prerequisites:
+- Use a disposable LINE channel or localhost mock server, and avoid shared production channels for verification.
+- Configure a dedicated channel access token for the target environment and keep the token/channel pairing stable while gathering evidence.
+- If you need reply-path evidence, obtain a fresh webhook-sourced `replyToken` from an external receiver because this connector does not ingest webhooks.
+
+Dedicated environment:
+- Never point the verification bundle at a channel where unexpected push, multicast, or rich-menu deletion would be operationally harmful.
+
+Redaction rules:
+- Redact `channel_access_token`, Authorization headers, reply tokens, recipient identifiers, `richMenuId` values, picture URLs, and copied payloads before exporting artifacts.
+- Treat bot display names, group names, message text, and chat-bar text as potentially sensitive operational data.
+
+Common remediation:
+- If `configure` rejects `base_url`, use `https://api.line.me` for live runs or `http://localhost` / `http://127.0.0.1` for deterministic mock-server tests.
+- If `self_check` reports `line_auth_rejected`, rotate the token and confirm `GET /v2/bot/info` succeeds for the intended channel.
+- If `line.group.members` fails in live verification, assume official-account tier restrictions first and fall back to the mock-server pagination test for deterministic coverage.
+- If verification hits 429s or transport timeouts, respect the upstream backoff window, lower concurrency, and rerun once the provider bucket recovers.
+
+Rerun commands:
+- `scripts/e2e/line_connector_verification.sh`
+- `rch exec -- cargo run -q -p fwc -- manifest fix connectors/line/manifest.toml --check --json`
+- `rch exec -- cargo check -p fcp-line --all-targets`
+- `rch exec -- cargo fmt --manifest-path connectors/line/Cargo.toml --check`
+- `rch exec -- cargo test -p fcp-line --test integration -- --nocapture`
+- `rch exec -- cargo test -p fcp-line -- --nocapture`
+- `rch exec -- cargo clippy -p fcp-line --all-targets -- -D warnings`
 
 ## Source Notes
 

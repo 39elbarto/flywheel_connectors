@@ -60,14 +60,21 @@ impl MastodonClient {
 
     /// Sanitize a path segment to prevent path traversal.
     fn sanitize_path_segment(segment: &str) -> MastodonResult<&str> {
-        if segment.is_empty()
-            || segment.contains('/')
+        if segment.trim().is_empty() {
+            return Err(MastodonError::Config(
+                "Path segment must not be empty".to_string(),
+            ));
+        }
+        let lower = segment.to_ascii_lowercase();
+        if segment.contains('/')
             || segment.contains('\\')
             || segment.contains("..")
             || segment.contains('\0')
+            || lower.contains("%2f")
+            || lower.contains("%5c")
         {
             return Err(MastodonError::Config(
-                "Invalid path segment: contains forbidden characters".to_string(),
+                "Path segment contains traversal characters".to_string(),
             ));
         }
         Ok(segment)

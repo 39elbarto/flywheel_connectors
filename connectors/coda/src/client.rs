@@ -43,7 +43,7 @@ const CODA_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
 /// Sanitize a path segment to prevent path traversal.
 fn sanitize_path_segment(segment: &str) -> CodaResult<&str> {
     let lower = segment.to_ascii_lowercase();
-    if segment.is_empty()
+    if segment.trim().is_empty()
         || segment.contains('/')
         || segment.contains('\\')
         || segment.contains("..")

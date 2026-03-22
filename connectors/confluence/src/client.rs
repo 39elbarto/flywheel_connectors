@@ -34,7 +34,7 @@ impl std::fmt::Debug for ConfluenceClient {
 
 /// Sanitize a path segment to prevent path traversal.
 fn sanitize_path_segment(segment: &str) -> Result<&str> {
-    if segment.is_empty()
+    if segment.trim().is_empty()
         || segment.contains('/')
         || segment.contains('\\')
         || segment.contains('\0')

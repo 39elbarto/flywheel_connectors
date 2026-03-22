@@ -273,10 +273,8 @@ impl LockStore {
         let json = serde_json::to_string_pretty(data)
             .map_err(|e| format!("failed to serialize locks: {e}"))?;
 
-        let mut temp_path = self.data_path().into_os_string();
-        temp_path.push(".tmp");
-        let temp_path = PathBuf::from(temp_path);
         let path = self.data_path();
+        let temp_path = Self::temp_path_for(&path);
 
         let write_result = (|| -> std::io::Result<()> {
             use std::io::Write;
@@ -306,6 +304,10 @@ impl LockStore {
 
     fn data_path(&self) -> PathBuf {
         self.dir.join("locks.json")
+    }
+
+    fn temp_path_for(path: &Path) -> PathBuf {
+        path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()))
     }
 
     /// Remove expired locks from the data structure.
@@ -495,6 +497,18 @@ mod tests {
         assert_eq!(restored.resource, "github.issues");
         assert_eq!(restored.agent, "SunnyMoose");
         assert_eq!(restored.reason.as_deref(), Some("batch operation"));
+    }
+
+    #[test]
+    fn lock_store_temp_path_is_unique() {
+        let store = temp_store();
+        let path = store.data_path();
+        let first = LockStore::temp_path_for(&path);
+        let second = LockStore::temp_path_for(&path);
+
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains(".tmp."));
+        assert!(second.to_string_lossy().contains(".tmp."));
     }
 
     // ── AcquireResult ─────────────────────────────────────────────

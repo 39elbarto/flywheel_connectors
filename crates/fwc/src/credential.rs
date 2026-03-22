@@ -264,6 +264,10 @@ impl FileBackend {
         self.base_dir.join(format!("{connector_id}.json"))
     }
 
+    fn temp_path_for(path: &Path) -> PathBuf {
+        path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()))
+    }
+
     fn ensure_dir(&self) -> Result<()> {
         if !self.base_dir.exists() {
             fs::create_dir_all(&self.base_dir)
@@ -329,9 +333,7 @@ impl CredentialBackend for FileBackend {
         let json = serde_json::to_string_pretty(&disk)?;
         let path = self.credential_path(&entry.connector_id);
 
-        let mut temp_path = path.as_os_str().to_os_string();
-        temp_path.push(".tmp");
-        let temp_path = std::path::PathBuf::from(temp_path);
+        let temp_path = Self::temp_path_for(&path);
 
         let write_result = (|| -> Result<()> {
             let mut opts = fs::OpenOptions::new();
@@ -1057,6 +1059,18 @@ mod tests {
         let encoded = BASE64.encode(b"ghp_abc123xyz789");
         assert!(raw.contains(&encoded));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_backend_temp_path_is_unique() {
+        let backend = FileBackend::new(PathBuf::from("/tmp/fwc-credentials"));
+        let path = backend.credential_path("github");
+        let first = FileBackend::temp_path_for(&path);
+        let second = FileBackend::temp_path_for(&path);
+
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains(".tmp."));
+        assert!(second.to_string_lossy().contains(".tmp."));
     }
 
     #[test]

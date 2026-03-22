@@ -420,9 +420,7 @@ impl PreferenceStore {
         let json = serde_json::to_string_pretty(&self.data)
             .map_err(|e| format!("failed to serialize preferences: {e}"))?;
 
-        let mut temp_path = self.path.as_os_str().to_os_string();
-        temp_path.push(".tmp");
-        let temp_path = std::path::PathBuf::from(temp_path);
+        let temp_path = Self::temp_path_for(&self.path);
 
         let write_result = (|| -> std::io::Result<()> {
             use std::io::Write;
@@ -449,6 +447,10 @@ impl PreferenceStore {
 
         write_result.map_err(|e| format!("failed to safely write preferences: {e}"))?;
         Ok(())
+    }
+
+    fn temp_path_for(path: &Path) -> PathBuf {
+        path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()))
     }
 
     /// Record that `connector_id` was chosen for `intent`.
@@ -641,6 +643,17 @@ mod tests {
         assert!(a > b);
         assert!(b > c);
         assert!(c > 0.0);
+    }
+
+    #[test]
+    fn preference_store_temp_path_is_unique() {
+        let store = PreferenceStore::new("/tmp/fwc-preferences.json");
+        let first = PreferenceStore::temp_path_for(&store.path);
+        let second = PreferenceStore::temp_path_for(&store.path);
+
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains(".tmp."));
+        assert!(second.to_string_lossy().contains(".tmp."));
     }
 
     // -----------------------------------------------------------------------

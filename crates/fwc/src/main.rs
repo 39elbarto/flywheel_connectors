@@ -3801,6 +3801,10 @@ fn load_context_config() -> Result<(PathBuf, ContextConfigFile)> {
     Ok((path, config))
 }
 
+fn context_config_temp_path(path: &std::path::Path) -> PathBuf {
+    path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()))
+}
+
 fn save_context_config(path: &PathBuf, config: &ContextConfigFile) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -3812,9 +3816,7 @@ fn save_context_config(path: &PathBuf, config: &ContextConfigFile) -> Result<()>
     }
     let raw = toml::to_string_pretty(config)?;
 
-    let mut temp_path = path.as_os_str().to_os_string();
-    temp_path.push(".tmp");
-    let temp_path = PathBuf::from(temp_path);
+    let temp_path = context_config_temp_path(path);
 
     let write_result = (|| -> std::io::Result<()> {
         use std::io::Write;
@@ -22670,6 +22672,17 @@ mod tests {
         let path = tempdir.path().join("contexts.toml");
         let guard = super::install_test_context_config_path(path.clone());
         (tempdir, path, guard)
+    }
+
+    #[test]
+    fn context_config_temp_path_is_unique() {
+        let path = PathBuf::from("/tmp/contexts.toml");
+        let first = super::context_config_temp_path(&path);
+        let second = super::context_config_temp_path(&path);
+
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains(".tmp."));
+        assert!(second.to_string_lossy().contains(".tmp."));
     }
 
     fn assert_discovery_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {

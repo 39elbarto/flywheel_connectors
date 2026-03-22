@@ -1598,9 +1598,39 @@ fn write_connector_configs_file(
             path.display()
         ))
     })?;
-    std::fs::write(path, format!("{encoded}\n")).map_err(|err| {
+
+    let mut temp_path = path.as_os_str().to_os_string();
+    temp_path.push(".tmp");
+    let temp_path = std::path::PathBuf::from(temp_path);
+
+    let write_result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temp_path)?;
+        file.write_all(encoded.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+
+        #[cfg(not(windows))]
+        std::fs::rename(&temp_path, path)?;
+
+        #[cfg(windows)]
+        {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            std::fs::rename(&temp_path, path)?;
+        }
+
+        Ok(())
+    })();
+
+    if write_result.is_err() && temp_path.exists() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result.map_err(|err| {
         HostError::Internal(format!(
-            "failed to write connectors file '{}': {err}",
+            "failed to safely write connectors file '{}': {err}",
             path.display()
         ))
     })

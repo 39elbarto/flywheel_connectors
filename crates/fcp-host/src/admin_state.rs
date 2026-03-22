@@ -3974,6 +3974,10 @@ impl HostAdminStateStore {
         let mut rejection_reasons = Vec::new();
 
         // 1. Structural validity (parsing succeeded = structurally valid)
+        // FIXME: cryptographic verification requires the issuer's public key, which
+        // this method does not currently resolve — `signature_valid` reflects
+        // structural validity only. A future version should verify the token signature
+        // against the host keyring.
         let signature_valid = true;
 
         // 2. Temporal validity

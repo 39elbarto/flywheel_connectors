@@ -6,17 +6,18 @@
 //!
 //! # Architecture
 //!
-//! The pipeline comprises 10 concrete checks executed in sequence:
+//! The pipeline comprises 11 concrete checks executed in sequence:
 //! 1. Canonical decode — validates request has required non-empty fields
 //! 2. Zone membership — validates principal is allowed in the zone
 //! 3. Capability verify — validates capability claims include the operation's required capability
-//! 4. Checkpoint freshness — validates checkpoint age is within window
-//! 5. Revocation freshness — validates revocation list age is within window
-//! 6. Taint approval — validates critical taints have approval tokens
-//! 7. Policy ceiling — validates zone policy permits connector/operation
-//! 8. Connector manifest — validates manifest includes the operation
-//! 9. Budget — validates request is within the current usage budget
-//! 10. Rate limit — validates request is within rate quota
+//! 4. Holder proof — validates holder-bound tokens present a verified holder proof
+//! 5. Checkpoint freshness — validates checkpoint age is within window
+//! 6. Revocation freshness — validates revocation list age is within window
+//! 7. Taint approval — validates critical taints have approval tokens
+//! 8. Policy ceiling — validates zone policy permits connector/operation
+//! 9. Connector manifest — validates manifest includes the operation
+//! 10. Budget — validates request is within the current usage budget
+//! 11. Rate limit — validates request is within rate quota
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -142,6 +143,8 @@ pub struct EnforcementContext {
     pub approval_scopes: Vec<String>,
     /// Request timestamp in milliseconds since epoch.
     pub timestamp_ms: u64,
+    /// Whether the presented capability token requires holder-proof binding.
+    pub holder_proof_required: bool,
     /// Whether the capability holder proof has been verified.
     pub holder_verified: bool,
     /// Age of the latest checkpoint in milliseconds (None if unavailable).
@@ -173,6 +176,7 @@ pub struct EnforcementContextBuilder {
     taint_flags: Vec<String>,
     approval_scopes: Vec<String>,
     timestamp_ms: u64,
+    holder_proof_required: bool,
     holder_verified: bool,
     checkpoint_age_ms: Option<u64>,
     revocation_list_age_ms: Option<u64>,
@@ -260,6 +264,13 @@ impl EnforcementContextBuilder {
         self
     }
 
+    /// Set whether the token requires a verified holder proof.
+    #[must_use]
+    pub const fn holder_proof_required(mut self, required: bool) -> Self {
+        self.holder_proof_required = required;
+        self
+    }
+
     /// Set whether the holder proof is verified.
     #[must_use]
     pub const fn holder_verified(mut self, verified: bool) -> Self {
@@ -333,6 +344,7 @@ impl EnforcementContextBuilder {
             taint_flags: self.taint_flags,
             approval_scopes: self.approval_scopes,
             timestamp_ms: self.timestamp_ms,
+            holder_proof_required: self.holder_proof_required,
             holder_verified: self.holder_verified,
             checkpoint_age_ms: self.checkpoint_age_ms,
             revocation_list_age_ms: self.revocation_list_age_ms,
@@ -620,6 +632,34 @@ impl EnforcementCheck for CapabilityVerifyCheck {
     }
 }
 
+/// Validates that holder-bound tokens present a verified holder proof.
+pub struct HolderProofCheck;
+
+impl EnforcementCheck for HolderProofCheck {
+    fn name(&self) -> &'static str {
+        "holder_proof"
+    }
+
+    fn check(&self, ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
+        if !ctx.holder_proof_required {
+            return CheckOutcome::Skip {
+                reason: "capability token is not holder-bound".into(),
+            };
+        }
+
+        if ctx.holder_verified {
+            CheckOutcome::Allow
+        } else {
+            CheckOutcome::Deny {
+                reason_code: "HOLDER_PROOF_NOT_VERIFIED".into(),
+                explanation:
+                    "capability token is holder-bound but request did not include a verified holder proof"
+                        .into(),
+            }
+        }
+    }
+}
+
 /// Validates that the checkpoint is fresh enough.
 pub struct CheckpointFreshnessCheck;
 
@@ -827,7 +867,7 @@ pub struct EnforcementPipeline {
 }
 
 impl EnforcementPipeline {
-    /// Create a pipeline with the default 10 checks and default config.
+    /// Create a pipeline with the default 11 checks and default config.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -929,12 +969,13 @@ impl EnforcementPipeline {
         }
     }
 
-    /// The default set of 10 checks in canonical order.
+    /// The default set of 11 checks in canonical order.
     fn default_checks() -> Vec<Box<dyn EnforcementCheck>> {
         vec![
             Box::new(CanonicalDecodeCheck),
             Box::new(ZoneMembershipCheck),
             Box::new(CapabilityVerifyCheck),
+            Box::new(HolderProofCheck),
             Box::new(CheckpointFreshnessCheck),
             Box::new(RevocationFreshnessCheck),
             Box::new(TaintApprovalCheck),
@@ -980,6 +1021,7 @@ fn test_context() -> EnforcementContext {
         taint_flags: Vec::new(),
         approval_scopes: Vec::new(),
         timestamp_ms: 1_700_000_000_000,
+        holder_proof_required: true,
         holder_verified: true,
         checkpoint_age_ms: Some(10_000),
         revocation_list_age_ms: Some(20_000),
@@ -1240,6 +1282,20 @@ mod tests {
     }
 
     #[test]
+    fn builder_with_holder_proof_required() {
+        let ctx = EnforcementContextBuilder::new()
+            .request_id("r1")
+            .connector_id("c1")
+            .operation("op1")
+            .zone_id("z1")
+            .principal("p1")
+            .holder_proof_required(true)
+            .build()
+            .unwrap();
+        assert!(ctx.holder_proof_required);
+    }
+
+    #[test]
     fn builder_with_holder_verified() {
         let ctx = EnforcementContextBuilder::new()
             .request_id("r1")
@@ -1338,6 +1394,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(ctx.timestamp_ms, 0);
+        assert!(!ctx.holder_proof_required);
         assert!(!ctx.holder_verified);
         assert!(ctx.checkpoint_age_ms.is_none());
         assert!(ctx.revocation_list_age_ms.is_none());
@@ -1653,6 +1710,39 @@ mod tests {
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn holder_proof_skip_when_not_required() {
+        let mut ctx = test_context();
+        ctx.holder_proof_required = false;
+        ctx.holder_verified = false;
+        let config = EnforcementConfig::default();
+        let outcome = HolderProofCheck.check(&ctx, &config);
+        assert!(outcome.is_skip());
+    }
+
+    #[test]
+    fn holder_proof_allow_when_verified() {
+        let mut ctx = test_context();
+        ctx.holder_proof_required = true;
+        ctx.holder_verified = true;
+        let config = EnforcementConfig::default();
+        let outcome = HolderProofCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn holder_proof_deny_when_required_but_not_verified() {
+        let mut ctx = test_context();
+        ctx.holder_proof_required = true;
+        ctx.holder_verified = false;
+        let config = EnforcementConfig::default();
+        let outcome = HolderProofCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "HOLDER_PROOF_NOT_VERIFIED");
+        }
     }
 
     #[test]
@@ -2287,9 +2377,9 @@ mod tests {
     // ── EnforcementPipeline ──
 
     #[test]
-    fn pipeline_default_has_10_checks() {
+    fn pipeline_default_has_11_checks() {
         let pipeline = EnforcementPipeline::new();
-        assert_eq!(pipeline.check_count(), 10);
+        assert_eq!(pipeline.check_count(), 11);
     }
 
     #[test]
@@ -2299,13 +2389,14 @@ mod tests {
         assert_eq!(names[0], "canonical_decode");
         assert_eq!(names[1], "zone_membership");
         assert_eq!(names[2], "capability_verify");
-        assert_eq!(names[3], "checkpoint_freshness");
-        assert_eq!(names[4], "revocation_freshness");
-        assert_eq!(names[5], "taint_approval");
-        assert_eq!(names[6], "policy_ceiling");
-        assert_eq!(names[7], "connector_manifest");
-        assert_eq!(names[8], "budget");
-        assert_eq!(names[9], "rate_limit");
+        assert_eq!(names[3], "holder_proof");
+        assert_eq!(names[4], "checkpoint_freshness");
+        assert_eq!(names[5], "revocation_freshness");
+        assert_eq!(names[6], "taint_approval");
+        assert_eq!(names[7], "policy_ceiling");
+        assert_eq!(names[8], "connector_manifest");
+        assert_eq!(names[9], "budget");
+        assert_eq!(names[10], "rate_limit");
     }
 
     #[test]
@@ -2334,7 +2425,7 @@ mod tests {
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
         assert!(decision.elapsed_ms >= 0.0);
-        assert_eq!(decision.checks_executed(), 10);
+        assert_eq!(decision.checks_executed(), 11);
     }
 
     #[test]
@@ -2384,6 +2475,24 @@ mod tests {
         {
             assert_eq!(check_name, "capability_verify");
             assert_eq!(reason_code, "MISSING_REQUIRED_CAPABILITY");
+        }
+    }
+
+    #[test]
+    fn pipeline_evaluate_deny_at_holder_proof() {
+        let pipeline = EnforcementPipeline::new();
+        let mut ctx = test_context();
+        ctx.holder_verified = false;
+        let decision = pipeline.evaluate(&ctx);
+        assert!(!decision.is_allowed());
+        if let PipelineOutcome::Deny {
+            check_name,
+            reason_code,
+            ..
+        } = &decision.outcome
+        {
+            assert_eq!(check_name, "holder_proof");
+            assert_eq!(reason_code, "HOLDER_PROOF_NOT_VERIFIED");
         }
     }
 
@@ -2485,7 +2594,7 @@ mod tests {
         ctx.rate_limit = Some(100);
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
-        assert_eq!(decision.checks_executed(), 9);
+        assert_eq!(decision.checks_executed(), 10);
         if let PipelineOutcome::Deny {
             check_name,
             reason_code,
@@ -2544,7 +2653,7 @@ mod tests {
         let config = EnforcementConfig::new().with_checkpoint_max_age_ms(100);
         let pipeline = EnforcementPipeline::with_config(config);
         assert_eq!(pipeline.config().checkpoint_max_age_ms, 100);
-        assert_eq!(pipeline.check_count(), 10);
+        assert_eq!(pipeline.check_count(), 11);
     }
 
     #[test]
@@ -2569,7 +2678,7 @@ mod tests {
     #[test]
     fn pipeline_default_trait() {
         let pipeline = EnforcementPipeline::default();
-        assert_eq!(pipeline.check_count(), 10);
+        assert_eq!(pipeline.check_count(), 11);
     }
 
     // ── Custom check implementation ──
@@ -3102,6 +3211,7 @@ mod tests {
             .taint_flags(vec!["pii".into()])
             .approval_scopes(vec!["pii".into()])
             .timestamp_ms(12345)
+            .holder_proof_required(true)
             .holder_verified(true)
             .checkpoint_age_ms(100)
             .revocation_list_age_ms(200)
@@ -3113,6 +3223,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(ctx.timestamp_ms, 12345);
+        assert!(ctx.holder_proof_required);
         assert!(ctx.holder_verified);
         assert_eq!(ctx.checkpoint_age_ms, Some(100));
         assert_eq!(ctx.revocation_list_age_ms, Some(200));
@@ -3652,6 +3763,7 @@ mod tests {
         assert_eq!(ctx.taint_flags, cloned.taint_flags);
         assert_eq!(ctx.approval_scopes, cloned.approval_scopes);
         assert_eq!(ctx.timestamp_ms, cloned.timestamp_ms);
+        assert_eq!(ctx.holder_proof_required, cloned.holder_proof_required);
         assert_eq!(ctx.holder_verified, cloned.holder_verified);
         assert_eq!(ctx.checkpoint_age_ms, cloned.checkpoint_age_ms);
         assert_eq!(ctx.revocation_list_age_ms, cloned.revocation_list_age_ms);
@@ -3680,7 +3792,7 @@ mod tests {
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
-        assert_eq!(decision.checks_executed(), 10);
+        assert_eq!(decision.checks_executed(), 11);
         // With zone membership configured, it should be allow not skip
         let zone_check = &decision.checks_run[1];
         assert_eq!(zone_check.name, "zone_membership");

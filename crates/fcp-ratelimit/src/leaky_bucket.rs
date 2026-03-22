@@ -15,16 +15,13 @@ use crate::{RateLimitError, RateLimitState, RateLimiter};
 ///
 /// Requests "leak" out at a constant rate. New requests are added to the bucket.
 /// If the bucket is full, requests are rejected or queued.
-/// Guard band for floating-point comparison of level vs capacity.
 ///
 /// Between consecutive `try_acquire` calls, real time passes and the bucket
 /// leaks `leak_rate * elapsed` units.  With high leak rates (e.g. 100/s)
 /// even a 1 ms scheduling gap drains 0.1 units, making a full bucket
-/// appear to have room.  A guard of 0.5 (half a request unit) prevents
-/// these timing artifacts from creating false capacity while still allowing
-/// the bucket to fill to its declared capacity.
-const LEVEL_GUARD: f64 = 0.5;
-
+/// appear to have room. To prevent timing artifacts from creating false capacity
+/// while still allowing the bucket to fill to its declared capacity,
+/// we wait until there is room for a full permit (1.0 - epsilon) before waking up.
 pub struct LeakyBucket {
     /// Bucket capacity.
     capacity: u32,
@@ -92,13 +89,14 @@ impl LeakyBucket {
 
         let level = *self.level.lock();
         let capacity = f64::from(self.capacity);
+        let room_needed = 1.0 - 1e-9;
 
-        if level <= capacity - LEVEL_GUARD {
+        if level + room_needed <= capacity {
             Duration::ZERO
         } else if self.leak_rate <= 0.0 {
             Duration::MAX
         } else {
-            let overflow = level - (capacity - LEVEL_GUARD);
+            let overflow = (level + room_needed) - capacity;
             let secs = overflow / self.leak_rate;
             if secs.is_finite() && secs >= 0.0 {
                 Duration::from_secs_f64(secs)
@@ -189,7 +187,7 @@ impl RateLimiter for LeakyBucket {
             limit: self.capacity,
             remaining,
             reset_after: self.time_until_room(),
-            is_limited: level + LEVEL_GUARD >= capacity,
+            is_limited: level + 1.0 > capacity + 1e-9,
         }
     }
 }
@@ -689,7 +687,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn leaky_bucket_state_is_limited_uses_guard_band() {
-        // Fill to capacity → is_limited should be true due to LEVEL_GUARD
+        // Fill to capacity → is_limited should be true due to room requirements
         let limiter = LeakyBucket::new(3, 0.001);
         limiter.try_acquire().await;
         limiter.try_acquire().await;
@@ -876,11 +874,6 @@ mod tests {
         // Manually set level to capacity
         *limiter.level.lock() = 2.0;
         assert_eq!(limiter.time_until_room(), Duration::MAX);
-    }
-
-    #[test]
-    fn leaky_bucket_level_guard_constant() {
-        assert!((LEVEL_GUARD - 0.5).abs() < f64::EPSILON);
     }
 
     // ── Sync-only SmoothPacer tests ──────────────────────────────────

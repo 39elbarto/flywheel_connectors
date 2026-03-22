@@ -367,11 +367,23 @@ impl ResilienceLayer {
         let state = self.connector_state(connector_id);
         let effective_load = self.record_request(&state);
         self.check_load_shed(&state, connector_id, priority, operation, effective_load)?;
-        self.check_routing(&state, connector_id, operation)?;
-        Self::check_circuit(&state, connector_id, operation)?;
-        let permit = self
-            .acquire_bulkhead(&state, connector_id, operation)
-            .await?;
+        let probe_reservation = self.check_routing(connector_id, operation)?;
+        if let Err(error) = Self::check_circuit(&state, connector_id, operation) {
+            self.health_router
+                .cancel_probe_reservation(probe_reservation);
+            return Err(error);
+        }
+        let permit = match self.acquire_bulkhead(&state, connector_id, operation).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                self.health_router
+                    .cancel_probe_reservation(probe_reservation);
+                return Err(error);
+            }
+        };
+        if probe_reservation.is_some() {
+            state.metrics.probe_requests.fetch_add(1, Ordering::Relaxed);
+        }
         let started_at = Instant::now();
         let result = self
             .run_operation(&state, connector_id, operation, future, started_at)
@@ -414,17 +426,13 @@ impl ResilienceLayer {
 
     fn check_routing<E>(
         &self,
-        state: &ConnectorState,
         connector_id: &ConnectorId,
         operation: &str,
-    ) -> Result<(), ResilienceError<E>> {
-        match self.health_router.can_route(connector_id) {
-            RoutingDecision::Allow | RoutingDecision::AllowDegraded { .. } => Ok(()),
-            RoutingDecision::AllowProbe => {
-                state.metrics.probe_requests.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-            RoutingDecision::Reject { reason } => {
+    ) -> Result<Option<ProbeReservation>, ResilienceError<E>> {
+        match self.health_router.reserve_route(connector_id) {
+            RouteReservation::Allow => Ok(None),
+            RouteReservation::AllowProbe(reservation) => Ok(Some(reservation)),
+            RouteReservation::Reject { reason } => {
                 tracing::warn!(
                     connector_id = %connector_id,
                     operation,
@@ -969,6 +977,20 @@ struct HealthEntry {
     error_window: ErrorWindow,
 }
 
+#[derive(Debug)]
+struct ProbeReservation {
+    connector_id: ConnectorId,
+    reserved_at: Instant,
+    previous_last_probe_at: Option<Instant>,
+}
+
+#[derive(Debug)]
+enum RouteReservation {
+    Allow,
+    AllowProbe(ProbeReservation),
+    Reject { reason: String },
+}
+
 impl HealthEntry {
     fn new(config: &HealthRouterConfig) -> Self {
         Self {
@@ -991,6 +1013,43 @@ impl HealthRouter {
         }
     }
 
+    fn reserve_route(&self, connector_id: &ConnectorId) -> RouteReservation {
+        let mut entries = lock_unpoisoned(&self.entries);
+        let decision = {
+            let entry = entries
+                .entry(connector_id.clone())
+                .or_insert_with(|| HealthEntry::new(&self.config));
+            match &entry.status {
+                ConnectorHealth::Healthy | ConnectorHealth::Degraded { .. } => {
+                    RouteReservation::Allow
+                }
+                ConnectorHealth::Unavailable { reason, .. } => {
+                    let now = Instant::now();
+                    let probe_allowed = entry.last_probe_at.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= self.config.probe_interval
+                    });
+                    if probe_allowed {
+                        let reserved_at = now;
+                        let previous_last_probe_at = entry.last_probe_at;
+                        entry.last_probe_at = Some(reserved_at);
+                        RouteReservation::AllowProbe(ProbeReservation {
+                            connector_id: connector_id.clone(),
+                            reserved_at,
+                            previous_last_probe_at,
+                        })
+                    } else {
+                        RouteReservation::Reject {
+                            reason: reason.clone(),
+                        }
+                    }
+                }
+            }
+        };
+        drop(entries);
+        decision
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     fn can_route(&self, connector_id: &ConnectorId) -> RoutingDecision {
         let mut entries = lock_unpoisoned(&self.entries);
         let decision = {
@@ -1020,6 +1079,20 @@ impl HealthRouter {
         };
         drop(entries);
         decision
+    }
+
+    fn cancel_probe_reservation(&self, reservation: Option<ProbeReservation>) {
+        let Some(reservation) = reservation else {
+            return;
+        };
+
+        let mut entries = lock_unpoisoned(&self.entries);
+        if let Some(entry) = entries.get_mut(&reservation.connector_id)
+            && matches!(entry.status, ConnectorHealth::Unavailable { .. })
+            && entry.last_probe_at == Some(reservation.reserved_at)
+        {
+            entry.last_probe_at = reservation.previous_last_probe_at;
+        }
     }
 
     fn record_success(&self, connector_id: &ConnectorId, latency: Duration) {
@@ -1590,6 +1663,56 @@ mod tests {
         assert!(matches!(result, Err(ResilienceError::TimedOut { .. })));
         assert_eq!(layer.circuit_state(&connector_id), CircuitState::Open);
         assert_eq!(layer.metrics(&connector_id).timeouts, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn probe_reservation_rolls_back_when_circuit_is_still_open() {
+        let layer = ResilienceLayer::new(ResilienceConfig {
+            circuit_breaker: CircuitBreakerConfig {
+                failure_threshold: 1,
+                success_threshold: 1,
+                open_duration: Duration::from_millis(200),
+                window_duration: Duration::from_secs(1),
+                failure_predicate: FailurePredicate::AnyError,
+            },
+            health: HealthRouterConfig {
+                unhealthy_threshold: 1,
+                recovery_success_threshold: 1,
+                probe_interval: Duration::from_millis(100),
+                ..HealthRouterConfig::default()
+            },
+            ..ResilienceConfig::default()
+        });
+        let connector_id = test_connector_id();
+
+        let failure = layer
+            .execute(&connector_id, RequestPriority::Normal, "invoke", async {
+                Err::<(), _>("boom")
+            })
+            .await;
+        assert!(matches!(failure, Err(ResilienceError::Inner("boom"))));
+        assert!(matches!(
+            layer.connector_health(&connector_id),
+            ConnectorHealth::Unavailable { .. }
+        ));
+
+        time::sleep(Duration::from_millis(110)).await;
+        let rejected = layer
+            .execute(&connector_id, RequestPriority::Normal, "invoke", async {
+                Ok::<(), &str>(())
+            })
+            .await;
+        assert!(matches!(rejected, Err(ResilienceError::CircuitOpen { .. })));
+        assert_eq!(layer.metrics(&connector_id).probe_requests, 0);
+
+        time::sleep(Duration::from_millis(100)).await;
+        let recovered = layer
+            .execute(&connector_id, RequestPriority::Normal, "invoke", async {
+                Ok::<(), &str>(())
+            })
+            .await;
+        assert!(recovered.is_ok());
+        assert_eq!(layer.metrics(&connector_id).probe_requests, 1);
     }
 
     #[test]
@@ -3669,8 +3792,8 @@ mod tests {
     #[test]
     fn latency_ewma_very_large_latency() {
         let mut ewma = LatencyEwma::new(500);
-        ewma.record(Duration::from_secs(3600)); // 1 hour
-        assert_eq!(ewma.value(), Some(Duration::from_secs(3600)));
+        ewma.record(Duration::from_hours(1));
+        assert_eq!(ewma.value(), Some(Duration::from_hours(1)));
     }
 
     #[test]
@@ -3928,7 +4051,8 @@ mod tests {
     fn resilience_error_is_std_error() {
         // Verify the std::error::Error impl compiles and works
         let err: ResilienceError<std::io::Error> = ResilienceError::BulkheadFull;
-        let _as_error: &dyn std::error::Error = &err;
+        let as_error: &dyn std::error::Error = &err;
+        assert_eq!(as_error.to_string(), err.to_string());
     }
 
     #[test]

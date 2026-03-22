@@ -236,15 +236,14 @@ impl RateLimiter for FixedWindow {
     }
 
     fn remaining(&self) -> u32 {
-        let mut state = self.state.lock();
+        let state = self.state.lock();
         let now = Instant::now();
 
         if now.saturating_duration_since(state.window_start) >= self.window {
-            state.count = 0;
-            state.window_start = now;
+            self.limit
+        } else {
+            self.limit.saturating_sub(state.count)
         }
-
-        self.limit.saturating_sub(state.count)
     }
 
     async fn wait_time(&self) -> Duration {
@@ -252,13 +251,11 @@ impl RateLimiter for FixedWindow {
             return Duration::MAX;
         }
 
-        let mut state = self.state.lock();
+        let state = self.state.lock();
         let now = Instant::now();
 
-        // Check reset inside wait_time to ensure consistency
         if now.saturating_duration_since(state.window_start) >= self.window {
-            state.count = 0;
-            state.window_start = now;
+            return Duration::ZERO;
         }
 
         if state.count < self.limit {
@@ -266,7 +263,6 @@ impl RateLimiter for FixedWindow {
         }
 
         let elapsed = now.saturating_duration_since(state.window_start);
-        drop(state);
         self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
     }
 
@@ -277,24 +273,27 @@ impl RateLimiter for FixedWindow {
     }
 
     fn state(&self) -> RateLimitState {
-        let mut state = self.state.lock();
+        let state = self.state.lock();
         let now = Instant::now();
 
-        if now.saturating_duration_since(state.window_start) >= self.window {
-            state.count = 0;
-            state.window_start = now;
-        }
-
-        let remaining = self.limit.saturating_sub(state.count);
         let elapsed = now.saturating_duration_since(state.window_start);
-        drop(state);
-        let reset_after = self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+        if elapsed >= self.window {
+            RateLimitState {
+                limit: self.limit,
+                remaining: self.limit,
+                reset_after: Duration::ZERO,
+                is_limited: self.limit == 0,
+            }
+        } else {
+            let remaining = self.limit.saturating_sub(state.count);
+            let reset_after = self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
 
-        RateLimitState {
-            limit: self.limit,
-            remaining,
-            reset_after,
-            is_limited: remaining == 0,
+            RateLimitState {
+                limit: self.limit,
+                remaining,
+                reset_after,
+                is_limited: remaining == 0,
+            }
         }
     }
 }

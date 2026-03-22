@@ -196,7 +196,7 @@ impl SignatureVerifier for Ed25519Verifier {
     fn verify(&self, payload: &[u8], signature: &str) -> WebhookResult<()> {
         use ed25519_dalek::Verifier;
 
-        let sig_bytes = hex::decode(signature)?;
+        let sig_bytes = hex::decode(signature).map_err(|_| WebhookError::InvalidSignature)?;
         let sig_array: [u8; 64] = sig_bytes
             .try_into()
             .map_err(|_| WebhookError::InvalidSignature)?;

@@ -1,5 +1,7 @@
 .claude/
+.codex/
 .codex-targets/
+.beads_recovery_*/
 .beads/
 **/.beads/
 **/.br_recovery/

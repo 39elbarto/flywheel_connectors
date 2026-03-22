@@ -9,7 +9,7 @@
 //! The pipeline comprises 10 concrete checks executed in sequence:
 //! 1. Canonical decode — validates request has required non-empty fields
 //! 2. Zone membership — validates principal is allowed in the zone
-//! 3. Capability verify — validates capability claims cover the operation
+//! 3. Capability verify — validates capability claims include the operation's required capability
 //! 4. Checkpoint freshness — validates checkpoint age is within window
 //! 5. Revocation freshness — validates revocation list age is within window
 //! 6. Taint approval — validates critical taints have approval tokens
@@ -134,6 +134,8 @@ pub struct EnforcementContext {
     pub principal: String,
     /// Capability IDs from the presented token.
     pub capability_claims: Vec<String>,
+    /// Capability ID required by the requested operation, if resolved.
+    pub required_capability: Option<String>,
     /// Active taint flags on the request.
     pub taint_flags: Vec<String>,
     /// Approval scopes presented with the request.
@@ -167,6 +169,7 @@ pub struct EnforcementContextBuilder {
     zone_id: Option<String>,
     principal: Option<String>,
     capability_claims: Vec<String>,
+    required_capability: Option<String>,
     taint_flags: Vec<String>,
     approval_scopes: Vec<String>,
     timestamp_ms: u64,
@@ -226,6 +229,13 @@ impl EnforcementContextBuilder {
     #[must_use]
     pub fn capability_claims(mut self, claims: Vec<String>) -> Self {
         self.capability_claims = claims;
+        self
+    }
+
+    /// Set the capability required by the operation.
+    #[must_use]
+    pub fn required_capability(mut self, capability: impl Into<String>) -> Self {
+        self.required_capability = Some(capability.into());
         self
     }
 
@@ -319,6 +329,7 @@ impl EnforcementContextBuilder {
             zone_id: self.zone_id?,
             principal: self.principal?,
             capability_claims: self.capability_claims,
+            required_capability: self.required_capability,
             taint_flags: self.taint_flags,
             approval_scopes: self.approval_scopes,
             timestamp_ms: self.timestamp_ms,
@@ -560,7 +571,7 @@ impl EnforcementCheck for ZoneMembershipCheck {
     }
 }
 
-/// Validates that capability claims cover the requested operation.
+/// Validates that capability claims include the required capability.
 pub struct CapabilityVerifyCheck;
 
 impl EnforcementCheck for CapabilityVerifyCheck {
@@ -576,25 +587,34 @@ impl EnforcementCheck for CapabilityVerifyCheck {
             };
         }
 
-        // Check for wildcard capability.
-        if ctx.capability_claims.iter().any(|c| c == "*") {
-            return CheckOutcome::Allow;
-        }
+        let Some(required_capability) = ctx
+            .required_capability
+            .as_deref()
+            .filter(|capability| !capability.trim().is_empty())
+        else {
+            return CheckOutcome::Deny {
+                reason_code: "MISSING_REQUIRED_CAPABILITY".into(),
+                explanation: format!(
+                    "required capability is missing for operation '{}'",
+                    ctx.operation
+                ),
+            };
+        };
 
-        // Check if any claim matches the operation directly or as a prefix.
-        let op = &ctx.operation;
-        let has_matching_claim = ctx.capability_claims.iter().any(|claim| {
-            claim == op
-                || op.starts_with(&format!("{claim}."))
-                || op.starts_with(&format!("{claim}/"))
-        });
+        let has_matching_claim = ctx
+            .capability_claims
+            .iter()
+            .any(|claim| claim == "*" || claim == required_capability);
 
         if has_matching_claim {
             CheckOutcome::Allow
         } else {
             CheckOutcome::Deny {
                 reason_code: "CAPABILITY_NOT_GRANTED".into(),
-                explanation: format!("no capability claim covers operation '{op}'"),
+                explanation: format!(
+                    "no capability claim grants required capability '{}' for operation '{}'",
+                    required_capability, ctx.operation
+                ),
             }
         }
     }
@@ -955,7 +975,8 @@ fn test_context() -> EnforcementContext {
         operation: "send_message".into(),
         zone_id: "zone-prod".into(),
         principal: "agent-alpha".into(),
-        capability_claims: vec!["send_message".into()],
+        capability_claims: vec!["messages.write".into()],
+        required_capability: Some("messages.write".into()),
         taint_flags: Vec::new(),
         approval_scopes: Vec::new(),
         timestamp_ms: 1_700_000_000_000,
@@ -1163,6 +1184,20 @@ mod tests {
     }
 
     #[test]
+    fn builder_with_required_capability() {
+        let ctx = EnforcementContextBuilder::new()
+            .request_id("r1")
+            .connector_id("c1")
+            .operation("op1")
+            .zone_id("z1")
+            .principal("p1")
+            .required_capability("messages.write")
+            .build()
+            .unwrap();
+        assert_eq!(ctx.required_capability.as_deref(), Some("messages.write"));
+    }
+
+    #[test]
     fn builder_with_taint_flags() {
         let ctx = EnforcementContextBuilder::new()
             .request_id("r1")
@@ -1312,6 +1347,7 @@ mod tests {
         assert!(ctx.rate_limit.is_none());
         assert!(ctx.manifest_allowed_operations.is_empty());
         assert!(ctx.capability_claims.is_empty());
+        assert!(ctx.required_capability.is_none());
         assert!(ctx.taint_flags.is_empty());
         assert!(ctx.approval_scopes.is_empty());
     }
@@ -1620,35 +1656,12 @@ mod tests {
     }
 
     #[test]
-    fn capability_verify_allow_prefix_dot() {
+    fn capability_verify_deny_operation_named_claim() {
         let mut ctx = test_context();
-        ctx.operation = "messages.send".into();
-        ctx.capability_claims = vec!["messages".into()];
-        let config = EnforcementConfig::default();
-        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
-        assert!(outcome.is_allow());
-    }
-
-    #[test]
-    fn capability_verify_allow_prefix_slash() {
-        let mut ctx = test_context();
-        ctx.operation = "messages/send".into();
-        ctx.capability_claims = vec!["messages".into()];
-        let config = EnforcementConfig::default();
-        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
-        assert!(outcome.is_allow());
-    }
-
-    #[test]
-    fn capability_verify_deny_no_claims() {
-        let mut ctx = test_context();
-        ctx.capability_claims = Vec::new();
+        ctx.capability_claims = vec!["send_message".into()];
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
-        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
-            assert_eq!(reason_code, "NO_CAPABILITY_CLAIMS");
-        }
     }
 
     #[test]
@@ -1664,6 +1677,36 @@ mod tests {
         } = &outcome
         {
             assert_eq!(reason_code, "CAPABILITY_NOT_GRANTED");
+            assert!(explanation.contains("messages.write"));
+            assert!(explanation.contains("send_message"));
+        }
+    }
+
+    #[test]
+    fn capability_verify_deny_no_claims() {
+        let mut ctx = test_context();
+        ctx.capability_claims = Vec::new();
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "NO_CAPABILITY_CLAIMS");
+        }
+    }
+
+    #[test]
+    fn capability_verify_deny_missing_required_capability() {
+        let mut ctx = test_context();
+        ctx.required_capability = None;
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny {
+            reason_code,
+            explanation,
+        } = &outcome
+        {
+            assert_eq!(reason_code, "MISSING_REQUIRED_CAPABILITY");
             assert!(explanation.contains("send_message"));
         }
     }
@@ -1671,19 +1714,18 @@ mod tests {
     #[test]
     fn capability_verify_multiple_claims_one_match() {
         let mut ctx = test_context();
-        ctx.capability_claims = vec!["unrelated".into(), "send_message".into()];
+        ctx.capability_claims = vec!["unrelated".into(), "messages.write".into()];
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
 
     #[test]
-    fn capability_verify_prefix_does_not_partial_match() {
+    fn capability_verify_exact_claim_does_not_authorize_other_capability() {
         let mut ctx = test_context();
-        ctx.operation = "send_message_extended".into();
-        ctx.capability_claims = vec!["send_message".into()];
+        ctx.required_capability = Some("messages.read".into());
+        ctx.capability_claims = vec!["messages.write".into()];
         let config = EnforcementConfig::default();
-        // "send_message" does not prefix-match "send_message_extended" (no . or / separator)
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
     }
@@ -2068,9 +2110,10 @@ mod tests {
     fn connector_manifest_allow_second_op() {
         let mut ctx = test_context();
         ctx.operation = "list_channels".into();
+        ctx.required_capability = Some("channels.read".into());
+        ctx.capability_claims = vec!["channels.read".into()];
         let config = EnforcementConfig::default();
         // test_context has both send_message and list_channels.
-        ctx.capability_claims = vec!["list_channels".into()];
         let outcome = ConnectorManifestCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2327,6 +2370,24 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_evaluate_deny_when_required_capability_missing() {
+        let pipeline = EnforcementPipeline::new();
+        let mut ctx = test_context();
+        ctx.required_capability = None;
+        let decision = pipeline.evaluate(&ctx);
+        assert!(!decision.is_allowed());
+        if let PipelineOutcome::Deny {
+            check_name,
+            reason_code,
+            ..
+        } = &decision.outcome
+        {
+            assert_eq!(check_name, "capability_verify");
+            assert_eq!(reason_code, "MISSING_REQUIRED_CAPABILITY");
+        }
+    }
+
+    #[test]
     fn pipeline_evaluate_deny_at_checkpoint_freshness() {
         let pipeline = EnforcementPipeline::new();
         let mut ctx = test_context();
@@ -2381,7 +2442,6 @@ mod tests {
         let pipeline = EnforcementPipeline::new();
         let mut ctx = test_context();
         ctx.operation = "nonexistent_op".into();
-        ctx.capability_claims = vec!["nonexistent_op".into()];
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
         if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
@@ -2757,8 +2817,7 @@ mod tests {
     fn capability_verify_many_claims() {
         let mut ctx = test_context();
         ctx.capability_claims = (0..50).map(|i| format!("cap_{i}")).collect();
-        ctx.operation = "cap_25".into();
-        ctx.manifest_allowed_operations.push("cap_25".into());
+        ctx.required_capability = Some("cap_25".into());
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
@@ -3039,6 +3098,7 @@ mod tests {
             .zone_id("z1")
             .principal("p1")
             .capability_claims(vec!["cap".into()])
+            .required_capability("cap")
             .taint_flags(vec!["pii".into()])
             .approval_scopes(vec!["pii".into()])
             .timestamp_ms(12345)
@@ -3060,6 +3120,7 @@ mod tests {
         assert_eq!(ctx.budget_limit, Some(500));
         assert_eq!(ctx.rate_count, Some(3));
         assert_eq!(ctx.rate_limit, Some(10));
+        assert_eq!(ctx.required_capability.as_deref(), Some("cap"));
     }
 
     // ── CanonicalDecodeCheck ordering ──
@@ -3115,31 +3176,31 @@ mod tests {
     // ── CapabilityVerifyCheck edge cases ──
 
     #[test]
-    fn capability_verify_nested_prefix_dot() {
+    fn capability_verify_nested_operation_prefix_does_not_authorize_capability() {
         let mut ctx = test_context();
         ctx.operation = "messages.channels.send".into();
         ctx.capability_claims = vec!["messages.channels".into()];
+        ctx.required_capability = Some("messages.channels.write".into());
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
-        assert!(outcome.is_allow());
+        assert!(outcome.is_deny());
     }
 
     #[test]
-    fn capability_verify_nested_prefix_slash() {
+    fn capability_verify_slash_operation_prefix_does_not_authorize_capability() {
         let mut ctx = test_context();
         ctx.operation = "api/v2/list".into();
         ctx.capability_claims = vec!["api/v2".into()];
+        ctx.required_capability = Some("api.v2.read".into());
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
-        assert!(outcome.is_allow());
+        assert!(outcome.is_deny());
     }
 
     #[test]
-    fn capability_verify_no_partial_match_without_separator() {
-        // "send" should NOT match "send_extended" (no dot/slash)
+    fn capability_verify_blank_required_capability_denied() {
         let mut ctx = test_context();
-        ctx.operation = "send_extended".into();
-        ctx.capability_claims = vec!["send".into()];
+        ctx.required_capability = Some("   ".into());
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
@@ -3148,7 +3209,7 @@ mod tests {
     #[test]
     fn capability_verify_exact_match_with_dots() {
         let mut ctx = test_context();
-        ctx.operation = "a.b.c".into();
+        ctx.required_capability = Some("a.b.c".into());
         ctx.capability_claims = vec!["a.b.c".into()];
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
@@ -3160,6 +3221,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.capability_claims = vec!["*".into()];
         ctx.operation = "any.random.operation".into();
+        ctx.required_capability = Some("any.random.capability".into());
         let config = EnforcementConfig::default();
         let outcome = CapabilityVerifyCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
@@ -3586,6 +3648,7 @@ mod tests {
         assert_eq!(ctx.zone_id, cloned.zone_id);
         assert_eq!(ctx.principal, cloned.principal);
         assert_eq!(ctx.capability_claims, cloned.capability_claims);
+        assert_eq!(ctx.required_capability, cloned.required_capability);
         assert_eq!(ctx.taint_flags, cloned.taint_flags);
         assert_eq!(ctx.approval_scopes, cloned.approval_scopes);
         assert_eq!(ctx.timestamp_ms, cloned.timestamp_ms);

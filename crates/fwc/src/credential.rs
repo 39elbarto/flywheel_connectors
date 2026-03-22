@@ -328,14 +328,45 @@ impl CredentialBackend for FileBackend {
         };
         let json = serde_json::to_string_pretty(&disk)?;
         let path = self.credential_path(&entry.connector_id);
-        let mut file = fs::File::create(&path)
-            .with_context(|| format!("writing credential to {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        
+        let mut temp_path = path.as_os_str().to_os_string();
+        temp_path.push(".tmp");
+        let temp_path = std::path::PathBuf::from(temp_path);
+
+        let write_result = (|| -> Result<()> {
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+
+            let mut file = opts.open(&temp_path)
+                .with_context(|| format!("writing credential to {}", temp_path.display()))?;
+                
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+
+            #[cfg(not(windows))]
+            std::fs::rename(&temp_path, &path)?;
+
+            #[cfg(windows)]
+            {
+                if path.exists() {
+                    std::fs::remove_file(&path)?;
+                }
+                std::fs::rename(&temp_path, &path)?;
+            }
+            Ok(())
+        })();
+
+        if write_result.is_err() && temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
         }
-        file.write_all(json.as_bytes())?;
+
+        write_result?;
         Ok(())
     }
 

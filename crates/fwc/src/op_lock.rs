@@ -272,8 +272,36 @@ impl LockStore {
             .map_err(|e| format!("failed to create lock directory: {e}"))?;
         let json = serde_json::to_string_pretty(data)
             .map_err(|e| format!("failed to serialize locks: {e}"))?;
-        std::fs::write(self.data_path(), json)
-            .map_err(|e| format!("failed to write lock store: {e}"))
+            
+        let mut temp_path = self.data_path().into_os_string();
+        temp_path.push(".tmp");
+        let temp_path = PathBuf::from(temp_path);
+        let path = self.data_path();
+
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+
+            #[cfg(not(windows))]
+            std::fs::rename(&temp_path, &path)?;
+
+            #[cfg(windows)]
+            {
+                if path.exists() {
+                    std::fs::remove_file(&path)?;
+                }
+                std::fs::rename(&temp_path, &path)?;
+            }
+            Ok(())
+        })();
+
+        if write_result.is_err() && temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+
+        write_result.map_err(|e| format!("failed to safely write lock store: {e}"))
     }
 
     fn data_path(&self) -> PathBuf {

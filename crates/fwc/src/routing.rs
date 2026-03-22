@@ -419,7 +419,35 @@ impl PreferenceStore {
         }
         let json = serde_json::to_string_pretty(&self.data)
             .map_err(|e| format!("failed to serialize preferences: {e}"))?;
-        fs::write(&self.path, json).map_err(|e| format!("failed to write preferences: {e}"))?;
+        
+        let mut temp_path = self.path.as_os_str().to_os_string();
+        temp_path.push(".tmp");
+        let temp_path = std::path::PathBuf::from(temp_path);
+
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+
+            #[cfg(not(windows))]
+            std::fs::rename(&temp_path, &self.path)?;
+
+            #[cfg(windows)]
+            {
+                if self.path.exists() {
+                    std::fs::remove_file(&self.path)?;
+                }
+                std::fs::rename(&temp_path, &self.path)?;
+            }
+            Ok(())
+        })();
+
+        if write_result.is_err() && temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+
+        write_result.map_err(|e| format!("failed to safely write preferences: {e}"))?;
         Ok(())
     }
 

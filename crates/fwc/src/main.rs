@@ -3811,8 +3811,35 @@ fn save_context_config(path: &PathBuf, config: &ContextConfigFile) -> Result<()>
         })?;
     }
     let raw = toml::to_string_pretty(config)?;
-    std::fs::write(path, raw)
-        .with_context(|| format!("failed to write host context file `{}`", path.display()))
+    
+    let mut temp_path = path.as_os_str().to_os_string();
+    temp_path.push(".tmp");
+    let temp_path = PathBuf::from(temp_path);
+
+    let write_result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temp_path)?;
+        file.write_all(raw.as_bytes())?;
+        file.sync_all()?;
+
+        #[cfg(not(windows))]
+        std::fs::rename(&temp_path, path)?;
+
+        #[cfg(windows)]
+        {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            std::fs::rename(&temp_path, path)?;
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() && temp_path.exists() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result.with_context(|| format!("failed to safely write host context file `{}`", path.display()))
 }
 
 #[cfg(test)]

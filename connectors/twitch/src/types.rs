@@ -24,6 +24,19 @@ impl std::fmt::Debug for TokenResponse {
     }
 }
 
+/// OAuth token validation response from Twitch's /validate endpoint.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ValidatedToken {
+    pub client_id: String,
+    #[serde(default)]
+    pub login: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    pub expires_in: u64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helix API response wrapper
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,6 +235,20 @@ mod tests {
         assert_eq!(stream.id, "123");
         assert_eq!(stream.viewer_count, 1000);
         assert_eq!(stream.stream_type, "live");
+    }
+
+    #[test]
+    fn validated_token_deserialization() {
+        let json = serde_json::json!({
+            "client_id": "test-client",
+            "scopes": ["clips:edit"],
+            "expires_in": 3600
+        });
+        let token: ValidatedToken = serde_json::from_value(json).unwrap();
+        assert_eq!(token.client_id, "test-client");
+        assert_eq!(token.scopes, vec!["clips:edit"]);
+        assert_eq!(token.login, None);
+        assert_eq!(token.user_id, None);
     }
 
     #[test]

@@ -1,8 +1,6 @@
 //! Calendly API client.
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
 use reqwest::{Client, RequestBuilder};
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -156,10 +154,7 @@ impl CalendlyClient {
         page_token: Option<&str>,
     ) -> CalendlyResult<InviteeListResponse> {
         let uuid = sanitize_path_segment(event_uuid)?;
-        let mut url = format!(
-            "{}/scheduled_events/{}/invitees",
-            self.base_url, uuid
-        );
+        let mut url = format!("{}/scheduled_events/{}/invitees", self.base_url, uuid);
         if let Some(c) = count {
             url.push_str(&format!("?count={c}"));
             if let Some(pt) = page_token {
@@ -198,10 +193,7 @@ impl CalendlyClient {
         reason: Option<&str>,
     ) -> CalendlyResult<()> {
         let uuid = sanitize_path_segment(event_uuid)?;
-        let url = format!(
-            "{}/scheduled_events/{}/cancellation",
-            self.base_url, uuid
-        );
+        let url = format!("{}/scheduled_events/{}/cancellation", self.base_url, uuid);
         let body = match reason {
             Some(r) => serde_json::json!({ "reason": r }),
             None => serde_json::json!({}),
@@ -273,9 +265,7 @@ impl CalendlyClient {
                 * 1000;
             Err(CalendlyError::RateLimited { retry_after_ms })
         } else if status == 401 {
-            Err(CalendlyError::Unauthorized(
-                "Invalid access token".into(),
-            ))
+            Err(CalendlyError::Unauthorized("Invalid access token".into()))
         } else {
             Err(CalendlyError::Api {
                 status,
@@ -377,10 +367,7 @@ impl CalendlyClient {
 }
 
 /// Send a request and handle common error statuses.
-async fn send_request(
-    request: RequestBuilder,
-    label: &str,
-) -> CalendlyResult<String> {
+async fn send_request(request: RequestBuilder, label: &str) -> CalendlyResult<String> {
     let resp = request.send().await.map_err(CalendlyError::Http)?;
     let status = resp.status().as_u16();
 
@@ -396,15 +383,11 @@ async fn send_request(
     }
 
     if status == 401 {
-        return Err(CalendlyError::Unauthorized(
-            "Invalid access token".into(),
-        ));
+        return Err(CalendlyError::Unauthorized("Invalid access token".into()));
     }
 
     if status == 404 {
-        return Err(CalendlyError::NotFound(
-            "Resource not found".into(),
-        ));
+        return Err(CalendlyError::NotFound("Resource not found".into()));
     }
 
     if !resp.status().is_success() {
@@ -522,12 +505,9 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = CalendlyClient::new(
-            &mock_server.uri(),
-            "test_tok",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
+        let client =
+            CalendlyClient::new(&mock_server.uri(), "test_tok", HttpRetryConfig::default())
+                .unwrap();
         assert!(client.health_check().await.is_ok());
     }
 
@@ -540,12 +520,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = CalendlyClient::new(
-            &mock_server.uri(),
-            "bad_tok",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
+        let client =
+            CalendlyClient::new(&mock_server.uri(), "bad_tok", HttpRetryConfig::default()).unwrap();
         let result = client.health_check().await;
         assert!(matches!(result, Err(CalendlyError::Unauthorized(_))));
     }
@@ -559,12 +535,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = CalendlyClient::new(
-            &mock_server.uri(),
-            "tok",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
+        let client =
+            CalendlyClient::new(&mock_server.uri(), "tok", HttpRetryConfig::default()).unwrap();
         let result = client.health_check().await;
         assert!(matches!(result, Err(CalendlyError::RateLimited { .. })));
     }

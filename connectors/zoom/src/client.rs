@@ -42,6 +42,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> ZoomResult<&'a str>
 pub struct ZoomClient {
     client: Client,
     base_url: String,
+    oauth_base_url: String,
     account_id: String,
     client_id: String,
     client_secret: String,
@@ -52,6 +53,7 @@ impl std::fmt::Debug for ZoomClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZoomClient")
             .field("base_url", &self.base_url)
+            .field("oauth_base_url", &self.oauth_base_url)
             .field("account_id", &"[REDACTED]")
             .field("client_id", &"[REDACTED]")
             .field("client_secret", &"[REDACTED]")
@@ -68,6 +70,7 @@ impl ZoomClient {
     /// Returns an error if the HTTP client cannot be built.
     pub fn new(
         base_url: &str,
+        oauth_base_url: &str,
         account_id: &str,
         client_id: &str,
         client_secret: &str,
@@ -81,6 +84,7 @@ impl ZoomClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            oauth_base_url: oauth_base_url.trim_end_matches('/').to_string(),
             account_id: account_id.to_string(),
             client_id: client_id.to_string(),
             client_secret: client_secret.to_string(),
@@ -93,29 +97,39 @@ impl ZoomClient {
         &self.base_url
     }
 
+    /// Get the OAuth base URL (for diagnostics).
+    pub fn oauth_base_url(&self) -> &str {
+        &self.oauth_base_url
+    }
+
     /// Check if using secretless mode (credential injection).
     pub fn is_secretless(&self) -> bool {
         self.client_id.is_empty() || self.client_secret.is_empty()
     }
 
+    fn token_url(&self) -> String {
+        format!("{}/oauth/token", self.oauth_base_url)
+    }
+
     /// Obtain an access token via Server-to-Server OAuth.
     async fn get_access_token(&self) -> ZoomResult<String> {
-        let url = "https://zoom.us/oauth/token";
+        let url = self.token_url();
         let resp = self
             .client
-            .post(url)
+            .post(&url)
             .basic_auth(&self.client_id, Some(&self.client_secret))
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(format!("grant_type=account_credentials&account_id={}", self.account_id))
+            .body(format!(
+                "grant_type=account_credentials&account_id={}",
+                self.account_id
+            ))
             .send()
             .await
             .map_err(ZoomError::Http)?;
 
         let status = resp.status().as_u16();
         if status == 401 {
-            return Err(ZoomError::Unauthorized(
-                "Invalid OAuth credentials".into(),
-            ));
+            return Err(ZoomError::Unauthorized("Invalid OAuth credentials".into()));
         }
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -137,11 +151,13 @@ impl ZoomClient {
         query: &[(String, String)],
     ) -> ZoomResult<T> {
         let url = format!("{}{path}", self.base_url);
+        let token_url = self.token_url();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
+            let token_url = token_url.clone();
             let client = self.client.clone();
             let query = query.to_vec();
             let client_id = self.client_id.clone();
@@ -152,10 +168,12 @@ impl ZoomClient {
 
                 // Get fresh token for each attempt
                 let token_resp = client
-                    .post("https://zoom.us/oauth/token")
+                    .post(&token_url)
                     .basic_auth(&client_id, Some(&client_secret))
                     .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(format!("grant_type=account_credentials&account_id={account_id}"))
+                    .body(format!(
+                        "grant_type=account_credentials&account_id={account_id}"
+                    ))
                     .send()
                     .await;
 
@@ -444,12 +462,14 @@ impl ZoomClient {
         body: &serde_json::Value,
     ) -> ZoomResult<T> {
         let url = format!("{}{path}", self.base_url);
+        let token_url = self.token_url();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body_clone = body.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
+            let token_url = token_url.clone();
             let client = self.client.clone();
             let body = body_clone.clone();
             let client_id = self.client_id.clone();
@@ -459,10 +479,12 @@ impl ZoomClient {
                 debug!(attempt, path, "Zoom API POST");
 
                 let token_resp = client
-                    .post("https://zoom.us/oauth/token")
+                    .post(&token_url)
                     .basic_auth(&client_id, Some(&client_secret))
                     .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(format!("grant_type=account_credentials&account_id={account_id}"))
+                    .body(format!(
+                        "grant_type=account_credentials&account_id={account_id}"
+                    ))
                     .send()
                     .await;
 
@@ -575,12 +597,14 @@ impl ZoomClient {
         body: &serde_json::Value,
     ) -> ZoomResult<()> {
         let url = format!("{}{path}", self.base_url);
+        let token_url = self.token_url();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body_clone = body.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
+            let token_url = token_url.clone();
             let client = self.client.clone();
             let body = body_clone.clone();
             let client_id = self.client_id.clone();
@@ -590,10 +614,12 @@ impl ZoomClient {
                 debug!(attempt, path, "Zoom API PATCH");
 
                 let token_resp = client
-                    .post("https://zoom.us/oauth/token")
+                    .post(&token_url)
                     .basic_auth(&client_id, Some(&client_secret))
                     .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(format!("grant_type=account_credentials&account_id={account_id}"))
+                    .body(format!(
+                        "grant_type=account_credentials&account_id={account_id}"
+                    ))
                     .send()
                     .await;
 
@@ -684,17 +710,15 @@ impl ZoomClient {
     }
 
     /// Execute a DELETE request that returns 204 No Content.
-    async fn delete_no_content(
-        &self,
-        runtime: &ConnectorRuntime,
-        path: &str,
-    ) -> ZoomResult<()> {
+    async fn delete_no_content(&self, runtime: &ConnectorRuntime, path: &str) -> ZoomResult<()> {
         let url = format!("{}{path}", self.base_url);
+        let token_url = self.token_url();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
+            let token_url = token_url.clone();
             let client = self.client.clone();
             let client_id = self.client_id.clone();
             let client_secret = self.client_secret.clone();
@@ -703,10 +727,12 @@ impl ZoomClient {
                 debug!(attempt, path, "Zoom API DELETE");
 
                 let token_resp = client
-                    .post("https://zoom.us/oauth/token")
+                    .post(&token_url)
                     .basic_auth(&client_id, Some(&client_secret))
                     .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(format!("grant_type=account_credentials&account_id={account_id}"))
+                    .body(format!(
+                        "grant_type=account_credentials&account_id={account_id}"
+                    ))
                     .send()
                     .await;
 
@@ -799,6 +825,7 @@ mod tests {
     fn client_creation() {
         let client = ZoomClient::new(
             "https://api.zoom.us/v2",
+            "https://zoom.us",
             "acc_123",
             "client_id",
             "client_secret",
@@ -811,6 +838,7 @@ mod tests {
     fn base_url_trimmed() {
         let client = ZoomClient::new(
             "https://api.zoom.us/v2/",
+            "https://zoom.us/",
             "acc_123",
             "cid",
             "csec",
@@ -824,6 +852,7 @@ mod tests {
     fn secretless_detection() {
         let client = ZoomClient::new(
             "https://api.zoom.us/v2",
+            "https://zoom.us",
             "acc_123",
             "",
             "csec",
@@ -834,6 +863,7 @@ mod tests {
 
         let client2 = ZoomClient::new(
             "https://api.zoom.us/v2",
+            "https://zoom.us",
             "acc_123",
             "cid",
             "",
@@ -847,6 +877,7 @@ mod tests {
     fn non_secretless() {
         let client = ZoomClient::new(
             "https://api.zoom.us/v2",
+            "https://zoom.us",
             "acc_123",
             "cid",
             "csec",
@@ -860,6 +891,7 @@ mod tests {
     fn debug_redacts_credentials() {
         let client = ZoomClient::new(
             "https://api.zoom.us/v2",
+            "https://zoom.us",
             "secret_account_id",
             "secret_client_id",
             "secret_client_secret",
@@ -880,6 +912,20 @@ mod tests {
             "Debug output must not contain the raw client_secret"
         );
         assert!(debug_output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn oauth_base_url_trimmed() {
+        let client = ZoomClient::new(
+            "https://api.zoom.us/v2",
+            "https://zoom.us/",
+            "acc_123",
+            "cid",
+            "csec",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(client.oauth_base_url(), "https://zoom.us");
     }
 
     #[test]

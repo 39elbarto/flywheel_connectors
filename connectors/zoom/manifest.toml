@@ -1,115 +1,600 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:bb8f3dc63a53a8b3a94340892904151f7837672e9718929668f8e5998a93e1a2"
 
 [connector]
 id = "fcp.zoom"
 name = "Zoom"
 version = "0.1.0"
-description = "Zoom API connector for meetings, users, recordings, and webinars"
-archetype = "operational"
-homepage = "https://developers.zoom.us/docs/api/"
+description = "Account-scoped Zoom REST connector for meetings, users, recordings, webinar inventory, and health probes"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "One Zoom Server-to-Server OAuth account binding plus retry and timeout settings are injected at runtime; the connector keeps no durable local state."
 
 [zones]
 home = "z:work"
 allowed_sources = ["z:work"]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = ["z:community", "z:public"]
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "network.listen", "system.privileged"]
 
-[provides.operations.meetings_list]
-summary = "List meetings for a user"
+[provides.operations."zoom.meetings.list"]
+description = "List meetings scheduled by a Zoom user."
 capability = "zoom.meetings.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 
-[provides.operations.meetings_list.network_constraints]
-host_allow = ["api.zoom.us"]
+[provides.operations."zoom.meetings.list".input_schema]
+type = "object"
+
+[provides.operations."zoom.meetings.list".input_schema.properties.user_id]
+type = "string"
+description = "User ID or email. Defaults to `me`."
+default = "me"
+
+[provides.operations."zoom.meetings.list".input_schema.properties.page_size]
+type = "integer"
+description = "Number of records per page, up to 300."
+default = 30
+
+[provides.operations."zoom.meetings.list".input_schema.properties.next_page_token]
+type = "string"
+description = "Pagination token from a prior response."
+
+[provides.operations."zoom.meetings.list".output_schema]
+type = "object"
+
+[provides.operations."zoom.meetings.list".output_schema.properties.meetings]
+type = "array"
+
+[provides.operations."zoom.meetings.list".output_schema.properties.total_records]
+type = "integer"
+
+[provides.operations."zoom.meetings.list".output_schema.properties.next_page_token]
+type = "string"
+
+[provides.operations."zoom.meetings.list".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.meetings_list.ai_hints]
-when_to_use = "When listing meetings for a Zoom user"
+[provides.operations."zoom.meetings.list".ai_hints]
+when_to_use = "When listing meetings scheduled by a Zoom user."
+common_mistakes = ["Use `me` for the authenticated user when no explicit user ID is needed."]
+examples = []
+related = ["zoom.meetings.get"]
 
-[provides.operations.meetings_get]
-summary = "Get a meeting by ID"
+[provides.operations."zoom.meetings.get"]
+description = "Fetch one Zoom meeting by ID."
 capability = "zoom.meetings.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 
-[provides.operations.meetings_get.network_constraints]
-host_allow = ["api.zoom.us"]
+[provides.operations."zoom.meetings.get".input_schema]
+type = "object"
+required = ["meeting_id"]
+
+[provides.operations."zoom.meetings.get".input_schema.properties.meeting_id]
+type = "string"
+description = "Zoom meeting ID."
+
+[provides.operations."zoom.meetings.get".output_schema]
+type = "object"
+
+[provides.operations."zoom.meetings.get".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."zoom.meetings.get".output_schema.properties.topic]
+type = "string"
+
+[provides.operations."zoom.meetings.get".output_schema.properties.start_time]
+type = "string"
+
+[provides.operations."zoom.meetings.get".output_schema.properties.duration]
+type = "integer"
+
+[provides.operations."zoom.meetings.get".output_schema.properties.join_url]
+type = "string"
+
+[provides.operations."zoom.meetings.get".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.meetings_get.ai_hints]
-when_to_use = "When retrieving details of a specific meeting"
+[provides.operations."zoom.meetings.get".ai_hints]
+when_to_use = "When retrieving details of a specific Zoom meeting."
+common_mistakes = ["Meeting IDs are numeric strings in the Zoom API."]
+examples = []
+related = ["zoom.meetings.list"]
 
-[provides.operations.meetings_create]
-summary = "Create a new meeting"
+[provides.operations."zoom.meetings.create"]
+description = "Create a new Zoom meeting for a user."
 capability = "zoom.meetings.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.meetings_create.network_constraints]
-host_allow = ["api.zoom.us"]
+[provides.operations."zoom.meetings.create".input_schema]
+type = "object"
+required = ["topic"]
+
+[provides.operations."zoom.meetings.create".input_schema.properties.user_id]
+type = "string"
+default = "me"
+
+[provides.operations."zoom.meetings.create".input_schema.properties.topic]
+type = "string"
+
+[provides.operations."zoom.meetings.create".input_schema.properties.type]
+type = "integer"
+description = "1 = instant, 2 = scheduled, 3 = recurring without fixed time, 8 = recurring fixed time."
+
+[provides.operations."zoom.meetings.create".input_schema.properties.start_time]
+type = "string"
+format = "date-time"
+
+[provides.operations."zoom.meetings.create".input_schema.properties.duration]
+type = "integer"
+description = "Duration in minutes."
+
+[provides.operations."zoom.meetings.create".input_schema.properties.timezone]
+type = "string"
+
+[provides.operations."zoom.meetings.create".input_schema.properties.agenda]
+type = "string"
+
+[provides.operations."zoom.meetings.create".input_schema.properties.password]
+type = "string"
+
+[provides.operations."zoom.meetings.create".output_schema]
+type = "object"
+
+[provides.operations."zoom.meetings.create".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."zoom.meetings.create".output_schema.properties.join_url]
+type = "string"
+
+[provides.operations."zoom.meetings.create".output_schema.properties.start_url]
+type = "string"
+
+[provides.operations."zoom.meetings.create".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.meetings_create.ai_hints]
-when_to_use = "When creating a new Zoom meeting"
+[provides.operations."zoom.meetings.create".ai_hints]
+when_to_use = "When creating a new Zoom meeting."
+common_mistakes = [
+  "Provide `start_time` in ISO 8601 format for scheduled meetings.",
+  "Use `type = 1` for instant meetings and `type = 2` for scheduled meetings."
+]
+examples = []
+related = []
 
-[provides.operations.meetings_update]
-summary = "Update an existing meeting"
+[provides.operations."zoom.meetings.update"]
+description = "Update a scheduled Zoom meeting."
 capability = "zoom.meetings.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.meetings_update.network_constraints]
-host_allow = ["api.zoom.us"]
+[provides.operations."zoom.meetings.update".input_schema]
+type = "object"
+required = ["meeting_id"]
+
+[provides.operations."zoom.meetings.update".input_schema.properties.meeting_id]
+type = "string"
+
+[provides.operations."zoom.meetings.update".input_schema.properties.topic]
+type = "string"
+
+[provides.operations."zoom.meetings.update".input_schema.properties.type]
+type = "integer"
+
+[provides.operations."zoom.meetings.update".input_schema.properties.start_time]
+type = "string"
+format = "date-time"
+
+[provides.operations."zoom.meetings.update".input_schema.properties.duration]
+type = "integer"
+
+[provides.operations."zoom.meetings.update".input_schema.properties.timezone]
+type = "string"
+
+[provides.operations."zoom.meetings.update".input_schema.properties.agenda]
+type = "string"
+
+[provides.operations."zoom.meetings.update".input_schema.properties.password]
+type = "string"
+
+[provides.operations."zoom.meetings.update".output_schema]
+type = "object"
+
+[provides.operations."zoom.meetings.update".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.meetings_update.ai_hints]
-when_to_use = "When updating an existing Zoom meeting"
+[provides.operations."zoom.meetings.update".ai_hints]
+when_to_use = "When updating an existing Zoom meeting."
+common_mistakes = ["Only provided fields are updated; omitted fields retain their current values."]
+examples = []
+related = ["zoom.meetings.get"]
 
-[provides.operations.meetings_delete]
-summary = "Delete a meeting"
+[provides.operations."zoom.meetings.delete"]
+description = "Permanently delete a Zoom meeting."
 capability = "zoom.meetings.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.meetings_delete.network_constraints]
-host_allow = ["api.zoom.us"]
+[provides.operations."zoom.meetings.delete".input_schema]
+type = "object"
+required = ["meeting_id"]
+
+[provides.operations."zoom.meetings.delete".input_schema.properties.meeting_id]
+type = "string"
+description = "Zoom meeting ID to delete."
+
+[provides.operations."zoom.meetings.delete".output_schema]
+type = "object"
+
+[provides.operations."zoom.meetings.delete".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.meetings_delete.ai_hints]
-when_to_use = "When permanently deleting a Zoom meeting"
+[provides.operations."zoom.meetings.delete".ai_hints]
+when_to_use = "When permanently deleting a Zoom meeting."
+common_mistakes = [
+  "This action is irreversible.",
+  "Deleting a recurring meeting removes all occurrences."
+]
+examples = []
+related = []
+
+[provides.operations."zoom.users.list"]
+description = "List users in the connected Zoom account."
+capability = "zoom.users.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."zoom.users.list".input_schema]
+type = "object"
+
+[provides.operations."zoom.users.list".input_schema.properties.page_size]
+type = "integer"
+default = 30
+
+[provides.operations."zoom.users.list".input_schema.properties.next_page_token]
+type = "string"
+
+[provides.operations."zoom.users.list".output_schema]
+type = "object"
+
+[provides.operations."zoom.users.list".output_schema.properties.users]
+type = "array"
+
+[provides.operations."zoom.users.list".output_schema.properties.total_records]
+type = "integer"
+
+[provides.operations."zoom.users.list".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zoom.users.list".ai_hints]
+when_to_use = "When listing users in the connected Zoom account."
+common_mistakes = []
+examples = []
+related = ["zoom.users.get"]
+
+[provides.operations."zoom.users.get"]
+description = "Fetch one Zoom user by ID or email."
+capability = "zoom.users.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."zoom.users.get".input_schema]
+type = "object"
+required = ["user_id"]
+
+[provides.operations."zoom.users.get".input_schema.properties.user_id]
+type = "string"
+description = "Zoom user ID or email."
+
+[provides.operations."zoom.users.get".output_schema]
+type = "object"
+
+[provides.operations."zoom.users.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."zoom.users.get".output_schema.properties.email]
+type = "string"
+
+[provides.operations."zoom.users.get".output_schema.properties.first_name]
+type = "string"
+
+[provides.operations."zoom.users.get".output_schema.properties.last_name]
+type = "string"
+
+[provides.operations."zoom.users.get".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zoom.users.get".ai_hints]
+when_to_use = "When retrieving details for a specific Zoom user."
+common_mistakes = []
+examples = []
+related = ["zoom.users.list"]
+
+[provides.operations."zoom.recordings.list"]
+description = "List cloud recordings for a Zoom user inside a date range."
+capability = "zoom.recordings.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."zoom.recordings.list".input_schema]
+type = "object"
+
+[provides.operations."zoom.recordings.list".input_schema.properties.user_id]
+type = "string"
+default = "me"
+
+[provides.operations."zoom.recordings.list".input_schema.properties.from]
+type = "string"
+format = "date"
+description = "Start date in YYYY-MM-DD format."
+
+[provides.operations."zoom.recordings.list".input_schema.properties.to]
+type = "string"
+format = "date"
+description = "End date in YYYY-MM-DD format."
+
+[provides.operations."zoom.recordings.list".output_schema]
+type = "object"
+
+[provides.operations."zoom.recordings.list".output_schema.properties.meetings]
+type = "array"
+
+[provides.operations."zoom.recordings.list".output_schema.properties.total_records]
+type = "integer"
+
+[provides.operations."zoom.recordings.list".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."zoom.recordings.list".ai_hints]
+when_to_use = "When listing cloud recordings for a Zoom user."
+common_mistakes = ["Zoom limits recording queries to bounded date ranges."]
+examples = []
+related = []
+
+[provides.operations."zoom.webinars.list"]
+description = "List webinars owned by a Zoom user."
+capability = "zoom.webinars.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."zoom.webinars.list".input_schema]
+type = "object"
+
+[provides.operations."zoom.webinars.list".input_schema.properties.user_id]
+type = "string"
+default = "me"
+
+[provides.operations."zoom.webinars.list".input_schema.properties.page_size]
+type = "integer"
+default = 30
+
+[provides.operations."zoom.webinars.list".output_schema]
+type = "object"
+
+[provides.operations."zoom.webinars.list".output_schema.properties.webinars]
+type = "array"
+
+[provides.operations."zoom.webinars.list".output_schema.properties.total_records]
+type = "integer"
+
+[provides.operations."zoom.webinars.list".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zoom.webinars.list".ai_hints]
+when_to_use = "When listing webinars owned by a Zoom user."
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."zoom.health"]
+description = "Probe Zoom API reachability and authentication state."
+capability = "zoom.users.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zoom.health".input_schema]
+type = "object"
+
+[provides.operations."zoom.health".output_schema]
+type = "object"
+
+[provides.operations."zoom.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."zoom.health".network_constraints]
+host_allow = ["api.zoom.us", "zoom.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zoom.health".ai_hints]
+when_to_use = "When checking whether the Zoom API is reachable and the configured credentials are valid."
+common_mistakes = []
+examples = []
+related = []
 
 [sandbox]
 profile = "strict"

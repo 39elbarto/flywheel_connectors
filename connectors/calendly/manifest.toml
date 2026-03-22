@@ -1,135 +1,523 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:6fc0650f7a2b1a061530b9e1a524313cb82431b90f061f24834d369152668256"
 
 [connector]
 id = "fcp.calendly"
-name = "Calendly"
+name = "Calendly Connector"
 version = "0.1.0"
-description = "Calendly scheduling platform connector for managing events, event types, invitees, and scheduling links"
-archetype = "operational"
-homepage = "https://developer.calendly.com/"
+description = "Calendly scheduling connector for user and organization scheduling surfaces"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "One authenticated Calendly principal boundary, optional localhost test override, and retry/timeout settings per connector instance."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work"]
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = []
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "system.privileged",
+]
 
-[provides.operations.events_list]
-summary = "List scheduled events"
-capability = "calendly.events.read"
-risk = "low"
+[provides.operations."calendly.availability.list"]
+description = "List availability schedules for a visible Calendly user."
+capability = "calendly.scheduling.read"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 
-[provides.operations.events_list.network_constraints]
+[provides.operations."calendly.availability.list".input_schema]
+type = "object"
+
+[provides.operations."calendly.availability.list".input_schema.properties.user_uri]
+type = "string"
+
+[provides.operations."calendly.availability.list".output_schema]
+required = ["collection"]
+type = "object"
+
+[provides.operations."calendly.availability.list".output_schema.properties.collection]
+type = "array"
+
+[provides.operations."calendly.availability.list".network_constraints]
 host_allow = ["api.calendly.com"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.events_list.ai_hints]
-when_to_use = "When you need to list scheduled events for a user or organization"
+[provides.operations."calendly.availability.list".ai_hints]
+when_to_use = "When you need to check a user's availability schedules."
+common_mistakes = []
+examples = ['{"user_uri":"https://api.calendly.com/users/test-user"}']
+related = ["calendly.event_types.list"]
 
-[provides.operations.events_get]
-summary = "Get a single event"
+[provides.operations."calendly.event_types.list"]
+description = "List event types visible to the authenticated Calendly principal."
 capability = "calendly.events.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 
-[provides.operations.events_get.network_constraints]
+[provides.operations."calendly.event_types.list".input_schema]
+type = "object"
+
+[provides.operations."calendly.event_types.list".input_schema.properties.count]
+type = "integer"
+
+[provides.operations."calendly.event_types.list".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."calendly.event_types.list".input_schema.properties.user_uri]
+type = "string"
+
+[provides.operations."calendly.event_types.list".output_schema]
+required = [
+    "collection",
+    "pagination",
+]
+type = "object"
+
+[provides.operations."calendly.event_types.list".output_schema.properties.collection]
+type = "array"
+
+[provides.operations."calendly.event_types.list".output_schema.properties.pagination]
+type = "object"
+
+[provides.operations."calendly.event_types.list".network_constraints]
 host_allow = ["api.calendly.com"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
-
-[provides.operations.events_get.ai_hints]
-when_to_use = "When you need details about a specific scheduled event"
-
-[provides.operations.event_types_list]
-summary = "List event types"
-capability = "calendly.events.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.event_types_list.network_constraints]
-host_allow = ["api.calendly.com"]
-port_allow = [443]
-require_tls = true
 require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.event_types_list.ai_hints]
-when_to_use = "When you need to see available event types for scheduling"
+[provides.operations."calendly.event_types.list".ai_hints]
+when_to_use = "When you need to see available event types for scheduling."
+common_mistakes = []
+examples = ['{"user_uri":"https://api.calendly.com/users/test-user","count":10}']
+related = ["calendly.scheduling_links.create"]
 
-[provides.operations.scheduling_links_create]
-summary = "Create a scheduling link"
-capability = "calendly.scheduling.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.scheduling_links_create.network_constraints]
-host_allow = ["api.calendly.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
-
-[provides.operations.scheduling_links_create.ai_hints]
-when_to_use = "When you need to create a shareable scheduling link for an event type"
-
-[provides.operations.events_cancel]
-summary = "Cancel a scheduled event"
+[provides.operations."calendly.events.cancel"]
+description = "Cancel a scheduled event and optionally record a reason."
 capability = "calendly.events.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.events_cancel.network_constraints]
+[provides.operations."calendly.events.cancel".input_schema]
+required = ["event_uuid"]
+type = "object"
+
+[provides.operations."calendly.events.cancel".input_schema.properties.event_uuid]
+type = "string"
+
+[provides.operations."calendly.events.cancel".input_schema.properties.reason]
+type = "string"
+
+[provides.operations."calendly.events.cancel".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."calendly.events.cancel".output_schema.properties.status]
+type = "string"
+
+[provides.operations."calendly.events.cancel".network_constraints]
 host_allow = ["api.calendly.com"]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.events_cancel.ai_hints]
-when_to_use = "When you need to cancel a scheduled event"
+[provides.operations."calendly.events.cancel".ai_hints]
+when_to_use = "When you need to cancel a scheduled event."
+common_mistakes = [
+    "Cancelled events cannot be uncancelled",
+    "This sends cancellation notifications to all invitees",
+]
+examples = ['{"event_uuid":"event-123","reason":"Rescheduled by operator"}']
+related = ["calendly.events.get"]
+
+[provides.operations."calendly.events.get"]
+description = "Get details for one scheduled event UUID."
+capability = "calendly.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."calendly.events.get".input_schema]
+required = ["event_uuid"]
+type = "object"
+
+[provides.operations."calendly.events.get".input_schema.properties.event_uuid]
+type = "string"
+
+[provides.operations."calendly.events.get".output_schema]
+required = ["resource"]
+type = "object"
+
+[provides.operations."calendly.events.get".output_schema.properties.resource]
+type = "object"
+
+[provides.operations."calendly.events.get".network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."calendly.events.get".ai_hints]
+when_to_use = "When you need details about a specific scheduled event."
+common_mistakes = ["Use the event UUID, not the full URI."]
+examples = ['{"event_uuid":"event-123"}']
+related = ["calendly.events.list"]
+
+[provides.operations."calendly.events.list"]
+description = "List scheduled events for the authenticated user or an explicitly visible Calendly user URI."
+capability = "calendly.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."calendly.events.list".input_schema]
+type = "object"
+
+[provides.operations."calendly.events.list".input_schema.properties.count]
+type = "integer"
+
+[provides.operations."calendly.events.list".input_schema.properties.max_start_time]
+type = "string"
+
+[provides.operations."calendly.events.list".input_schema.properties.min_start_time]
+type = "string"
+
+[provides.operations."calendly.events.list".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."calendly.events.list".input_schema.properties.status]
+type = "string"
+
+[provides.operations."calendly.events.list".input_schema.properties.user_uri]
+type = "string"
+
+[provides.operations."calendly.events.list".output_schema]
+required = [
+    "collection",
+    "pagination",
+]
+type = "object"
+
+[provides.operations."calendly.events.list".output_schema.properties.collection]
+type = "array"
+
+[provides.operations."calendly.events.list".output_schema.properties.pagination]
+type = "object"
+
+[provides.operations."calendly.events.list".network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."calendly.events.list".ai_hints]
+when_to_use = "When you need to list scheduled events for a user or organization."
+common_mistakes = [
+    "user_uri must be a full Calendly URI, not just a UUID",
+    "Dates must be in ISO 8601 format",
+]
+examples = ['{"user_uri":"https://api.calendly.com/users/test-user","count":20,"status":"active"}']
+related = ["calendly.events.get"]
+
+[provides.operations."calendly.health"]
+description = "Check Calendly reachability and authentication without mutating scheduling state."
+capability = "calendly.user.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."calendly.health".input_schema]
+type = "object"
+
+[provides.operations."calendly.health".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."calendly.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."calendly.health".network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."calendly.health".ai_hints]
+when_to_use = "When you need to verify that the Calendly API is reachable."
+common_mistakes = []
+examples = ["{}"]
+related = []
+
+[provides.operations."calendly.invitees.list"]
+description = "List invitees for one scheduled event UUID."
+capability = "calendly.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."calendly.invitees.list".input_schema]
+required = ["event_uuid"]
+type = "object"
+
+[provides.operations."calendly.invitees.list".input_schema.properties.count]
+type = "integer"
+
+[provides.operations."calendly.invitees.list".input_schema.properties.event_uuid]
+type = "string"
+
+[provides.operations."calendly.invitees.list".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."calendly.invitees.list".output_schema]
+required = [
+    "collection",
+    "pagination",
+]
+type = "object"
+
+[provides.operations."calendly.invitees.list".output_schema.properties.collection]
+type = "array"
+
+[provides.operations."calendly.invitees.list".output_schema.properties.pagination]
+type = "object"
+
+[provides.operations."calendly.invitees.list".network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."calendly.invitees.list".ai_hints]
+when_to_use = "When you need to see who is invited to a scheduled event."
+common_mistakes = ["Use the event UUID, not the full URI."]
+examples = ['{"event_uuid":"event-123","count":10}']
+related = ["calendly.events.get"]
+
+[provides.operations."calendly.scheduling_links.create"]
+description = "Create a shareable scheduling link for a visible Calendly event type."
+capability = "calendly.scheduling.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."calendly.scheduling_links.create".input_schema]
+required = [
+    "owner_uri",
+    "owner_type",
+]
+type = "object"
+
+[provides.operations."calendly.scheduling_links.create".input_schema.properties.max_event_count]
+type = "integer"
+
+[provides.operations."calendly.scheduling_links.create".input_schema.properties.owner_type]
+type = "string"
+
+[provides.operations."calendly.scheduling_links.create".input_schema.properties.owner_uri]
+type = "string"
+
+[provides.operations."calendly.scheduling_links.create".output_schema]
+required = ["resource"]
+type = "object"
+
+[provides.operations."calendly.scheduling_links.create".output_schema.properties.resource]
+type = "object"
+
+[provides.operations."calendly.scheduling_links.create".network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."calendly.scheduling_links.create".ai_hints]
+when_to_use = "When you need to create a shareable scheduling link for an event type."
+common_mistakes = [
+    "owner_uri must be a full Calendly event type URI",
+    "owner_type must be 'EventType'",
+]
+examples = ['{"owner_uri":"https://api.calendly.com/event_types/evt-type-123","owner_type":"EventType","max_event_count":1}']
+related = ["calendly.event_types.list"]
+
+[provides.operations."calendly.user.get"]
+description = "Get the current authenticated Calendly user profile."
+capability = "calendly.user.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."calendly.user.get".input_schema]
+type = "object"
+
+[provides.operations."calendly.user.get".output_schema]
+required = ["resource"]
+type = "object"
+
+[provides.operations."calendly.user.get".output_schema.properties.resource]
+type = "object"
+
+[provides.operations."calendly.user.get".network_constraints]
+host_allow = ["api.calendly.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."calendly.user.get".ai_hints]
+when_to_use = "When you need the current user's profile, URI, or organization."
+common_mistakes = []
+examples = ["{}"]
+related = []
 
 [sandbox]
 profile = "strict"
 memory_mb = 64
 cpu_percent = 25
 wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
 deny_exec = true
 deny_ptrace = true

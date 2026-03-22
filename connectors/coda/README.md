@@ -1,6 +1,6 @@
 # Coda Connector V3 Contract
 
-> **Status**: planning contract
+> **Status**: implemented first-slice contract
 > **Bead**: `flywheel_connectors-j05nu.5.3.1`
 > **Unblocks**: `flywheel_connectors-j05nu.5.3.2`
 > **Primary upstream**: https://coda.io/developers/apis/v1
@@ -42,6 +42,7 @@ Important implementation truths that this contract must preserve:
 - `allowed_doc_ids` is an optional second narrowing pass on top of workspace scope.
 - Row writes are asynchronous from the provider's perspective: the connector consumes `requestId` and polls `mutationStatus` until completion or timeout.
 - `health` and `self_check` are both grounded in `whoami` reachability plus workspace-boundary validation.
+- `manifest.toml` is expected to declare the same `coda.io` network boundary and first-slice rate-limit pools described below, so the contract is mechanically enforceable instead of being README-only guidance.
 
 ## First-Slice Scope
 

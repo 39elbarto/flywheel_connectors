@@ -1,5 +1,6 @@
 //! Zoom connector implementation.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -45,6 +46,8 @@ const CAP_WEBINARS_READ: &str = "zoom.webinars.read";
 struct ZoomConfig {
     #[serde(default = "default_base_url")]
     base_url: String,
+    #[serde(default = "default_oauth_base_url")]
+    oauth_base_url: String,
     account_id: String,
     client_id: String,
     client_secret: String,
@@ -58,6 +61,7 @@ impl std::fmt::Debug for ZoomConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZoomConfig")
             .field("base_url", &self.base_url)
+            .field("oauth_base_url", &self.oauth_base_url)
             .field("account_id", &"[REDACTED]")
             .field("client_id", &"[REDACTED]")
             .field("client_secret", &"[REDACTED]")
@@ -71,15 +75,73 @@ fn default_base_url() -> String {
     "https://api.zoom.us/v2".into()
 }
 
+fn default_oauth_base_url() -> String {
+    "https://zoom.us".into()
+}
+
 const fn default_request_timeout_ms() -> u64 {
     30_000
 }
 
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/zoom_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/zoom_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 6] = [
+    "scripts/e2e/zoom_connector_verification.sh",
+    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/zoom/manifest.toml --check --json",
+    "rch exec -- cargo check -p fcp-zoom --all-targets",
+    "cargo fmt --manifest-path connectors/zoom/Cargo.toml --check",
+    "rch exec -- cargo test -p fcp-zoom --test integration -- --nocapture",
+    "rch exec -- cargo clippy -p fcp-zoom --all-targets -- -D warnings",
+];
+
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
+struct RetryReadiness {
+    max_retries: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    api_base_url: String,
+    oauth_base_url: String,
+    auth_mode: &'static str,
+    request_timeout_ms: u64,
+    retry: RetryReadiness,
+    account_scoped: bool,
+    webhook_receiver_supported: bool,
+    supported_operations: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -91,10 +153,80 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
         let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
     }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Create a Zoom Server-to-Server OAuth app for the target account and grant account-level scopes for meetings, users, recordings, and webinars before running live verification.",
+            "Use a dedicated Zoom sandbox account or disposable admin-owned users, meetings, and webinars; do not point the verification bundle at production sessions.",
+            "Allow outbound TLS egress to both zoom.us and api.zoom.us because OAuth token exchange and API operations use different hosts.",
+        ],
+        dedicated_environment: "Use a non-production Zoom account with disposable users and meetings. The verification bundle exercises risky meeting mutations and must never target customer-facing or production Zoom sessions.",
+        redaction_rules: vec![
+            "Redact account_id, client_id, client_secret, bearer tokens, and Authorization headers from shared logs.",
+            "Redact meeting IDs, webinar IDs, join_url, start_url, user emails, and recording download URLs before publishing artifacts.",
+            "If artifacts leave the local machine, replace real account identifiers, agenda text, and participant-facing metadata with sanitized fixtures first.",
+        ],
+        limitations: vec![
+            "The first slice is request-response only; there is no webhook receiver, event subscription flow, or streaming support.",
+            "Webinar support is inventory-only in the current implementation; webinar create, update, and delete remain out of scope.",
+            "Recording deletion, recovery, and download mutation flows are intentionally excluded from the current Zoom surface.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "zoom_auth_invalid",
+                symptom: "OAuth token exchange returns 401 or self_check fails with unauthorized",
+                action: "Confirm account_id, client_id, and client_secret belong to the same Zoom Server-to-Server OAuth app, then rerun configure and self_check.",
+            },
+            RemediationHint {
+                code: "zoom_scope_missing",
+                symptom: "Users, meetings, recordings, or webinars calls return 401 or 403",
+                action: "Grant the required account-level Zoom scopes to the app, reinstall or reauthorize it for the account, and rerun the verification bundle.",
+            },
+            RemediationHint {
+                code: "zoom_rate_limited",
+                symptom: "Requests return 429 or self_check degrades with a retryable error",
+                action: "Respect Retry-After, widen retry delays if needed, and rerun the bundle after the backoff window closes.",
+            },
+            RemediationHint {
+                code: "zoom_host_override_invalid",
+                symptom: "doctor reports api_base_url or oauth_base_url outside allowed hosts",
+                action: "Use the default Zoom hosts for live runs or localhost-only overrides for deterministic wiremock verification.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
+fn configured_host(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn host_allowed(url: &str, allowed_hosts: &[&str]) -> bool {
+    let host = configured_host(url);
+    host == "localhost" || host == "127.0.0.1" || allowed_hosts.contains(&host.as_str())
 }
 
 /// Zoom connector state.
@@ -130,8 +262,58 @@ impl ZoomConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| ProvisioningReadiness {
+            api_base_url: config.base_url.clone(),
+            oauth_base_url: config.oauth_base_url.clone(),
+            auth_mode: "server_to_server_oauth",
+            request_timeout_ms: config.request_timeout_ms,
+            retry: RetryReadiness {
+                max_retries: config.retry.max_retries,
+                initial_delay_ms: config.retry.initial_delay_ms,
+                max_delay_ms: config.retry.max_delay_ms,
+                jitter_enabled: config.retry.jitter_enabled,
+            },
+            account_scoped: true,
+            webhook_receiver_supported: false,
+            supported_operations: vec![
+                OP_MEETINGS_LIST,
+                OP_MEETINGS_GET,
+                OP_MEETINGS_CREATE,
+                OP_MEETINGS_UPDATE,
+                OP_MEETINGS_DELETE,
+                OP_USERS_LIST,
+                OP_USERS_GET,
+                OP_RECORDINGS_LIST,
+                OP_WEBINARS_LIST,
+                OP_HEALTH,
+            ],
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        live_probe: Option<&serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self.provisioning_readiness();
         let mut checks = Vec::new();
 
         let configured = self.config.is_some();
@@ -170,41 +352,54 @@ impl ZoomConnector {
             critical: true,
         });
 
-        if let Some(config) = &self.config {
-            let scheme = if config.base_url.starts_with("https://") {
-                "https"
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: Some(if handshaken {
+                "Handshake completed".into()
             } else {
-                "http"
-            };
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
+        if let Some(config) = &self.config {
             checks.push(DoctorCheck {
-                name: "base_url".into(),
+                name: "api_base_url".into(),
                 passed: true,
-                message: Some(format!("Base URL ({scheme}): {}", config.base_url)),
+                message: Some(format!("API base URL: {}", config.base_url)),
                 critical: false,
             });
-
-            let allowed_hosts = ["api.zoom.us"];
-            let host_part = config
-                .base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
             checks.push(DoctorCheck {
-                name: "network_constraints".into(),
-                passed: host_ok,
-                message: Some(if host_ok {
-                    "Base URL matches allowed host (api.zoom.us)".into()
+                name: "oauth_base_url".into(),
+                passed: true,
+                message: Some(format!("OAuth base URL: {}", config.oauth_base_url)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "api_network_constraints".into(),
+                passed: host_allowed(&config.base_url, &["api.zoom.us"]),
+                message: Some(if host_allowed(&config.base_url, &["api.zoom.us"]) {
+                    "API base URL matches allowed host (api.zoom.us)".into()
                 } else {
-                    format!("Base URL {} does not match allowed hosts", config.base_url)
+                    format!(
+                        "API base URL {} does not match allowed hosts",
+                        config.base_url
+                    )
+                }),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "oauth_network_constraints".into(),
+                passed: host_allowed(&config.oauth_base_url, &["zoom.us"]),
+                message: Some(if host_allowed(&config.oauth_base_url, &["zoom.us"]) {
+                    "OAuth base URL matches allowed host (zoom.us)".into()
+                } else {
+                    format!(
+                        "OAuth base URL {} does not match allowed hosts",
+                        config.oauth_base_url
+                    )
                 }),
                 critical: true,
             });
@@ -222,7 +417,7 @@ impl ZoomConnector {
             });
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 }
 
@@ -261,9 +456,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When listing meetings scheduled by a Zoom user".into(),
-                common_mistakes: vec![
-                    "Use 'me' as user_id for the authenticated user".into(),
-                ],
+                common_mistakes: vec!["Use 'me' as user_id for the authenticated user".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_MEETINGS_GET)],
             },
@@ -297,9 +490,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When retrieving details of a specific Zoom meeting".into(),
-                common_mistakes: vec![
-                    "Meeting ID must be a numeric string".into(),
-                ],
+                common_mistakes: vec!["Meeting ID must be a numeric string".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_MEETINGS_LIST)],
             },
@@ -374,7 +565,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             ai_hints: AgentHint {
                 when_to_use: "When updating an existing Zoom meeting".into(),
                 common_mistakes: vec![
-                    "Only provided fields are updated; omitted fields keep their current values".into(),
+                    "Only provided fields are updated; omitted fields keep their current values"
+                        .into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_MEETINGS_GET)],
@@ -499,9 +691,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When listing cloud recordings for a Zoom user".into(),
-                common_mistakes: vec![
-                    "Date range maximum is 30 days".into(),
-                ],
+                common_mistakes: vec!["Date range maximum is 30 days".into()],
                 examples: Vec::new(),
                 related: Vec::new(),
             },
@@ -555,7 +745,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "When checking if the Zoom API is reachable and credentials are valid".into(),
+                when_to_use: "When checking if the Zoom API is reachable and credentials are valid"
+                    .into(),
                 common_mistakes: Vec::new(),
                 examples: Vec::new(),
                 related: Vec::new(),
@@ -587,6 +778,7 @@ impl FcpConnector for ZoomConnector {
 
         let client = ZoomClient::new(
             &config.base_url,
+            &config.oauth_base_url,
             &config.account_id,
             &config.client_id,
             &config.client_secret,
@@ -598,7 +790,9 @@ impl FcpConnector for ZoomConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.verifier = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(())
     }
 
@@ -637,43 +831,76 @@ impl FcpConnector for ZoomConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self.provisioning_readiness();
+        let mut snapshot = match &self.client {
+            None if self.config.is_none() => HealthSnapshot::degraded("not configured"),
+            None => HealthSnapshot::error("Zoom client not initialized"),
+            Some(_) if self.runtime.is_none() => HealthSnapshot::error("runtime not initialized"),
+            Some(client) if client.is_secretless() => {
+                HealthSnapshot::degraded("credential injection required")
+            }
+            Some(_) => HealthSnapshot::ready(),
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+        }));
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+            ));
+        };
+
+        let Some(_runtime) = &self.runtime else {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("runtime_missing", "Connector runtime is not initialized"),
+                None,
             ));
         };
 
         if client.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
-                "credential_injection_required",
-                "Configured with empty credentials; egress proxy injection required",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with empty credentials; egress proxy injection required",
+                ),
+                None,
             ));
         }
 
         match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
+            Ok(()) => Ok(self.attach_self_check_details(
+                SelfCheckReport::ok(),
+                Some(&json!({
+                    "api_reachable": true,
+                    "api_base_url": client.base_url(),
+                    "oauth_base_url": client.oauth_base_url(),
+                })),
+            )),
             Err(err) => {
                 if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
+                    Ok(self.attach_self_check_details(
+                        SelfCheckReport::degraded("self_check_retryable", err.to_string()),
+                        None,
                     ))
                 } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
+                    Ok(self.attach_self_check_details(
+                        SelfCheckReport::failed("self_check_failed", err.to_string()),
+                        None,
                     ))
                 }
             }
@@ -738,9 +965,7 @@ impl ZoomConnector {
             OP_MEETINGS_CREATE | OP_MEETINGS_UPDATE | OP_MEETINGS_DELETE => {
                 CapabilityId::from_static(CAP_MEETINGS_WRITE)
             }
-            OP_USERS_LIST | OP_USERS_GET | OP_HEALTH => {
-                CapabilityId::from_static(CAP_USERS_READ)
-            }
+            OP_USERS_LIST | OP_USERS_GET | OP_HEALTH => CapabilityId::from_static(CAP_USERS_READ),
             OP_RECORDINGS_LIST => CapabilityId::from_static(CAP_RECORDINGS_READ),
             OP_WEBINARS_LIST => CapabilityId::from_static(CAP_WEBINARS_READ),
             _ => {
@@ -771,10 +996,7 @@ impl ZoomConnector {
                     .get("page_size")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
-                let next_page_token = req
-                    .input
-                    .get("next_page_token")
-                    .and_then(|v| v.as_str());
+                let next_page_token = req.input.get("next_page_token").and_then(|v| v.as_str());
 
                 let list = client
                     .list_meetings(runtime, user_id, page_size, next_page_token)
@@ -785,14 +1007,12 @@ impl ZoomConnector {
                 })?
             }
             OP_MEETINGS_GET => {
-                let meeting_id = req
-                    .input
-                    .get("meeting_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let meeting_id = req.input.get("meeting_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'meeting_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let meeting = client
                     .get_meeting(runtime, meeting_id)
                     .await
@@ -807,23 +1027,45 @@ impl ZoomConnector {
                     .get("user_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("me");
-                let topic = req
-                    .input
-                    .get("topic")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let topic = req.input.get("topic").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'topic' field".into(),
-                    })?;
+                    },
+                )?;
 
                 let create_req = CreateMeetingRequest {
                     topic: topic.to_string(),
-                    meeting_type: req.input.get("type").and_then(|v| v.as_u64()).map(|v| v as u8),
-                    start_time: req.input.get("start_time").and_then(|v| v.as_str()).map(String::from),
-                    duration: req.input.get("duration").and_then(|v| v.as_u64()).map(|v| v as u32),
-                    timezone: req.input.get("timezone").and_then(|v| v.as_str()).map(String::from),
-                    agenda: req.input.get("agenda").and_then(|v| v.as_str()).map(String::from),
-                    password: req.input.get("password").and_then(|v| v.as_str()).map(String::from),
+                    meeting_type: req
+                        .input
+                        .get("type")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u8),
+                    start_time: req
+                        .input
+                        .get("start_time")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    duration: req
+                        .input
+                        .get("duration")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                    timezone: req
+                        .input
+                        .get("timezone")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    agenda: req
+                        .input
+                        .get("agenda")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    password: req
+                        .input
+                        .get("password")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                 };
 
                 let meeting = client
@@ -835,23 +1077,49 @@ impl ZoomConnector {
                 })?
             }
             OP_MEETINGS_UPDATE => {
-                let meeting_id = req
-                    .input
-                    .get("meeting_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let meeting_id = req.input.get("meeting_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'meeting_id' field".into(),
-                    })?;
+                    },
+                )?;
 
                 let update_req = UpdateMeetingRequest {
-                    topic: req.input.get("topic").and_then(|v| v.as_str()).map(String::from),
-                    meeting_type: req.input.get("type").and_then(|v| v.as_u64()).map(|v| v as u8),
-                    start_time: req.input.get("start_time").and_then(|v| v.as_str()).map(String::from),
-                    duration: req.input.get("duration").and_then(|v| v.as_u64()).map(|v| v as u32),
-                    timezone: req.input.get("timezone").and_then(|v| v.as_str()).map(String::from),
-                    agenda: req.input.get("agenda").and_then(|v| v.as_str()).map(String::from),
-                    password: req.input.get("password").and_then(|v| v.as_str()).map(String::from),
+                    topic: req
+                        .input
+                        .get("topic")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    meeting_type: req
+                        .input
+                        .get("type")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u8),
+                    start_time: req
+                        .input
+                        .get("start_time")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    duration: req
+                        .input
+                        .get("duration")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                    timezone: req
+                        .input
+                        .get("timezone")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    agenda: req
+                        .input
+                        .get("agenda")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    password: req
+                        .input
+                        .get("password")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                 };
 
                 client
@@ -861,14 +1129,12 @@ impl ZoomConnector {
                 json!({ "status": "updated" })
             }
             OP_MEETINGS_DELETE => {
-                let meeting_id = req
-                    .input
-                    .get("meeting_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let meeting_id = req.input.get("meeting_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'meeting_id' field".into(),
-                    })?;
+                    },
+                )?;
 
                 client
                     .delete_meeting(runtime, meeting_id)
@@ -882,10 +1148,7 @@ impl ZoomConnector {
                     .get("page_size")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
-                let next_page_token = req
-                    .input
-                    .get("next_page_token")
-                    .and_then(|v| v.as_str());
+                let next_page_token = req.input.get("next_page_token").and_then(|v| v.as_str());
 
                 let list = client
                     .list_users(runtime, page_size, next_page_token)
@@ -896,14 +1159,12 @@ impl ZoomConnector {
                 })?
             }
             OP_USERS_GET => {
-                let user_id = req
-                    .input
-                    .get("user_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let user_id = req.input.get("user_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'user_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let user = client
                     .get_user(runtime, user_id)
                     .await
@@ -950,10 +1211,7 @@ impl ZoomConnector {
                 })?
             }
             OP_HEALTH => {
-                client
-                    .health_check()
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                client.health_check().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "status": "ok" })
             }
             _ => {
@@ -1069,6 +1327,7 @@ mod tests {
     fn test_doctor_before_configure() {
         let connector = ZoomConnector::new();
         let report = connector.doctor();
+        assert!(!report.ready);
         assert!(!report.passed);
     }
 
@@ -1077,6 +1336,7 @@ mod tests {
         let mut connector = ZoomConnector::new();
         connector.configure(test_config()).await.unwrap();
         let report = connector.doctor();
+        assert!(report.ready);
         assert!(report.passed);
     }
 
@@ -1106,16 +1366,66 @@ mod tests {
         let connector = ZoomConnector::new();
         let intro = connector.introspect();
         assert_eq!(intro.operations.len(), 10);
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_MEETINGS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_MEETINGS_GET));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_MEETINGS_CREATE));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_MEETINGS_UPDATE));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_MEETINGS_DELETE));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_USERS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_USERS_GET));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_RECORDINGS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_WEBINARS_LIST));
-        assert!(intro.operations.iter().any(|op| op.id.as_str() == OP_HEALTH));
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_MEETINGS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_MEETINGS_GET)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_MEETINGS_CREATE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_MEETINGS_UPDATE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_MEETINGS_DELETE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_USERS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_USERS_GET)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_RECORDINGS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_WEBINARS_LIST)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_HEALTH)
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1140,7 +1450,9 @@ mod tests {
     async fn test_invoke_before_handshake_returns_not_handshaken() {
         let mut connector = ZoomConnector::new();
         connector.configure(test_config()).await.unwrap();
-        let result = connector.invoke(base_invoke(connector.id(), OP_MEETINGS_LIST)).await;
+        let result = connector
+            .invoke(base_invoke(connector.id(), OP_MEETINGS_LIST))
+            .await;
         assert!(matches!(result, Err(FcpError::NotHandshaken)));
     }
 
@@ -1211,7 +1523,10 @@ mod tests {
     #[test]
     fn test_meetings_list_is_safe() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_MEETINGS_LIST).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_MEETINGS_LIST)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
         assert_eq!(op.idempotency, IdempotencyClass::None);
@@ -1220,7 +1535,10 @@ mod tests {
     #[test]
     fn test_meetings_create_is_risky() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_MEETINGS_CREATE).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_MEETINGS_CREATE)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Risky);
         assert_eq!(op.risk_level, RiskLevel::Medium);
         assert_eq!(op.idempotency, IdempotencyClass::Strict);
@@ -1229,7 +1547,10 @@ mod tests {
     #[test]
     fn test_meetings_delete_is_dangerous() {
         let ops = operations_info();
-        let op = ops.iter().find(|op| op.id.as_str() == OP_MEETINGS_DELETE).unwrap();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_MEETINGS_DELETE)
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Dangerous);
         assert_eq!(op.risk_level, RiskLevel::High);
         assert_eq!(op.requires_approval, Some(ApprovalMode::Interactive));
@@ -1254,6 +1575,7 @@ mod tests {
     fn debug_redacts_config_secrets() {
         let config = ZoomConfig {
             base_url: default_base_url(),
+            oauth_base_url: default_oauth_base_url(),
             account_id: "secret_account".into(),
             client_id: "secret_client".into(),
             client_secret: "secret_value".into(),
@@ -1284,19 +1606,34 @@ mod tests {
     #[test]
     fn test_capability_mapping() {
         let ops = operations_info();
-        let meetings_list = ops.iter().find(|op| op.id.as_str() == OP_MEETINGS_LIST).unwrap();
+        let meetings_list = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_MEETINGS_LIST)
+            .unwrap();
         assert_eq!(meetings_list.capability.as_str(), CAP_MEETINGS_READ);
 
-        let meetings_create = ops.iter().find(|op| op.id.as_str() == OP_MEETINGS_CREATE).unwrap();
+        let meetings_create = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_MEETINGS_CREATE)
+            .unwrap();
         assert_eq!(meetings_create.capability.as_str(), CAP_MEETINGS_WRITE);
 
-        let users_list = ops.iter().find(|op| op.id.as_str() == OP_USERS_LIST).unwrap();
+        let users_list = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_USERS_LIST)
+            .unwrap();
         assert_eq!(users_list.capability.as_str(), CAP_USERS_READ);
 
-        let recordings = ops.iter().find(|op| op.id.as_str() == OP_RECORDINGS_LIST).unwrap();
+        let recordings = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_RECORDINGS_LIST)
+            .unwrap();
         assert_eq!(recordings.capability.as_str(), CAP_RECORDINGS_READ);
 
-        let webinars = ops.iter().find(|op| op.id.as_str() == OP_WEBINARS_LIST).unwrap();
+        let webinars = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_WEBINARS_LIST)
+            .unwrap();
         assert_eq!(webinars.capability.as_str(), CAP_WEBINARS_READ);
     }
 }

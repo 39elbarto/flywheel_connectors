@@ -17,7 +17,6 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::TwitchClient;
-use crate::types::ModifyChannelRequest;
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -26,16 +25,12 @@ const OP_STREAMS_LIST: &str = "twitch.streams.list";
 const OP_STREAMS_GET: &str = "twitch.streams.get";
 const OP_USERS_GET: &str = "twitch.users.get";
 const OP_CHANNELS_GET: &str = "twitch.channels.get";
-const OP_CHANNELS_MODIFY: &str = "twitch.channels.modify";
 const OP_CLIPS_LIST: &str = "twitch.clips.list";
-const OP_CLIPS_CREATE: &str = "twitch.clips.create";
-const OP_CHAT_SEND: &str = "twitch.chat.send";
 const OP_GAMES_LIST: &str = "twitch.games.list";
 const OP_HEALTH: &str = "twitch.health";
 
 // Capability IDs
 const CAP_READ: &str = "twitch.read";
-const CAP_WRITE: &str = "twitch.write";
 
 /// Twitch connector configuration.
 #[derive(Clone, Deserialize)]
@@ -46,6 +41,8 @@ struct TwitchConfig {
     base_url: String,
     #[serde(default = "default_token_url")]
     token_url: String,
+    #[serde(default = "default_validate_url")]
+    validate_url: String,
     #[serde(default)]
     retry: HttpRetryConfig,
     #[serde(default = "default_request_timeout_ms")]
@@ -59,6 +56,7 @@ impl std::fmt::Debug for TwitchConfig {
             .field("client_secret", &"[REDACTED]")
             .field("base_url", &self.base_url)
             .field("token_url", &self.token_url)
+            .field("validate_url", &self.validate_url)
             .field("retry", &self.retry)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .finish()
@@ -73,8 +71,29 @@ fn default_token_url() -> String {
     "https://id.twitch.tv/oauth2/token".into()
 }
 
+fn default_validate_url() -> String {
+    "https://id.twitch.tv/oauth2/validate".into()
+}
+
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+fn url_host(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+}
+
+fn allow_twitch_host_or_test(url: &str, allowed_hosts: &[&str]) -> bool {
+    let host = url_host(url);
+    host == "localhost" || host == "127.0.0.1" || allowed_hosts.contains(&host)
 }
 
 // Doctor types
@@ -173,28 +192,30 @@ impl TwitchConnector {
         });
 
         if let Some(config) = &self.config {
-            let allowed_hosts = ["api.twitch.tv"];
-            let host_part = config
-                .base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
+            let api_host_ok = allow_twitch_host_or_test(&config.base_url, &["api.twitch.tv"]);
             checks.push(DoctorCheck {
-                name: "network_constraints".into(),
-                passed: host_ok,
-                message: Some(if host_ok {
+                name: "api_host".into(),
+                passed: api_host_ok,
+                message: Some(if api_host_ok {
                     "Base URL matches allowed host (api.twitch.tv)".into()
                 } else {
                     format!("Base URL {} does not match allowed hosts", config.base_url)
+                }),
+                critical: true,
+            });
+
+            let oauth_host_ok = allow_twitch_host_or_test(&config.token_url, &["id.twitch.tv"])
+                && allow_twitch_host_or_test(&config.validate_url, &["id.twitch.tv"]);
+            checks.push(DoctorCheck {
+                name: "oauth_hosts".into(),
+                passed: oauth_host_ok,
+                message: Some(if oauth_host_ok {
+                    "OAuth token and validate URLs match allowed host (id.twitch.tv)".into()
+                } else {
+                    format!(
+                        "OAuth URLs must target id.twitch.tv (token_url={}, validate_url={})",
+                        config.token_url, config.validate_url
+                    )
                 }),
                 critical: true,
             });
@@ -228,7 +249,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_STREAMS_LIST),
             summary: "List live streams".into(),
-            description: Some("Returns currently live streams, optionally filtered by game or user".into()),
+            description: Some(
+                "Returns currently live streams, optionally filtered by game or user".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -250,9 +273,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need to browse currently live streams".into(),
-                common_mistakes: vec![
-                    "Results only include currently live streams".into(),
-                ],
+                common_mistakes: vec!["Results only include currently live streams".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_STREAMS_GET)],
             },
@@ -262,7 +283,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_STREAMS_GET),
             summary: "Get a specific stream by user login".into(),
-            description: Some("Returns the live stream for a specific user, if they are currently live".into()),
+            description: Some(
+                "Returns the live stream for a specific user, if they are currently live".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["user_login"],
@@ -351,48 +374,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need to look up channel details".into(),
-                common_mistakes: vec![
-                    "Requires broadcaster_id (numeric), not login name".into(),
-                ],
+                common_mistakes: vec!["Requires broadcaster_id (numeric), not login name".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_USERS_GET)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CHANNELS_MODIFY),
-            summary: "Modify channel information".into(),
-            description: Some("Updates channel title, game, language, or tags".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["broadcaster_id"],
-                "properties": {
-                    "broadcaster_id": { "type": "string" },
-                    "title": { "type": "string" },
-                    "game_id": { "type": "string" },
-                    "broadcaster_language": { "type": "string" },
-                    "tags": { "type": "array", "items": { "type": "string" } },
-                    "delay": { "type": "integer" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "updated": { "type": "boolean" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to update a channel's title, game, or language".into(),
-                common_mistakes: vec![
-                    "Requires user token with channel:manage:broadcast scope".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_CHANNELS_GET)],
             },
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
@@ -423,75 +407,6 @@ pub fn operations_info() -> Vec<OperationInfo> {
             ai_hints: AgentHint {
                 when_to_use: "When you need to list clips for a channel".into(),
                 common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_CLIPS_CREATE)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CLIPS_CREATE),
-            summary: "Create a clip".into(),
-            description: Some("Creates a clip of the currently live stream".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["broadcaster_id"],
-                "properties": {
-                    "broadcaster_id": { "type": "string", "description": "Broadcaster ID to clip" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string" },
-                    "edit_url": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to create a clip of a live stream".into(),
-                common_mistakes: vec![
-                    "The broadcaster must be currently live".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_CLIPS_LIST)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT_SEND),
-            summary: "Send a chat message".into(),
-            description: Some("Sends a message to a channel's chat".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["broadcaster_id", "sender_id", "message"],
-                "properties": {
-                    "broadcaster_id": { "type": "string", "description": "Channel to send to" },
-                    "sender_id": { "type": "string", "description": "Sender user ID" },
-                    "message": { "type": "string", "description": "Chat message text (max 500 chars)" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "message_id": { "type": "string" },
-                    "is_sent": { "type": "boolean" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to send a message in Twitch chat".into(),
-                common_mistakes: vec![
-                    "Messages are limited to 500 characters".into(),
-                    "Requires user token with user:write:chat scope".into(),
-                ],
                 examples: Vec::new(),
                 related: Vec::new(),
             },
@@ -538,7 +453,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "properties": {
                     "status": { "type": "string" },
-                    "api_reachable": { "type": "boolean" }
+                    "api_reachable": { "type": "boolean" },
+                    "token_valid": { "type": "boolean" },
+                    "expires_in": { "type": "integer" },
+                    "scopes": { "type": "array", "items": { "type": "string" } }
                 }
             }),
             capability: CapabilityId::from_static(CAP_READ),
@@ -579,6 +497,7 @@ impl FcpConnector for TwitchConnector {
         let mut client = TwitchClient::new(
             &config.base_url,
             &config.token_url,
+            &config.validate_url,
             &config.client_id,
             &config.client_secret,
             config.retry.clone(),
@@ -588,10 +507,13 @@ impl FcpConnector for TwitchConnector {
         })?;
 
         // Acquire OAuth2 token
-        client.acquire_token().await.map_err(|e| FcpError::Unauthorized {
-            code: 2001,
-            message: format!("Failed to acquire OAuth2 token: {e}"),
-        })?;
+        client
+            .acquire_token()
+            .await
+            .map_err(|e| FcpError::Unauthorized {
+                code: 2001,
+                message: format!("Failed to acquire OAuth2 token: {e}"),
+            })?;
 
         self.client = Some(client);
         self.config = Some(config);
@@ -660,7 +582,7 @@ impl FcpConnector for TwitchConnector {
         }
 
         match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
+            Ok(_) => Ok(SelfCheckReport::ok()),
             Err(err) => {
                 if err.is_retryable() {
                     Ok(SelfCheckReport::degraded(
@@ -733,9 +655,6 @@ impl TwitchConnector {
         let required_cap = match operation {
             OP_STREAMS_LIST | OP_STREAMS_GET | OP_USERS_GET | OP_CHANNELS_GET | OP_CLIPS_LIST
             | OP_GAMES_LIST | OP_HEALTH => CapabilityId::from_static(CAP_READ),
-            OP_CHANNELS_MODIFY | OP_CLIPS_CREATE | OP_CHAT_SEND => {
-                CapabilityId::from_static(CAP_WRITE)
-            }
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -769,14 +688,12 @@ impl TwitchConnector {
                 json!({ "streams": resp.data, "count": count })
             }
             OP_STREAMS_GET => {
-                let user_login = req
-                    .input
-                    .get("user_login")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let user_login = req.input.get("user_login").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'user_login' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_stream(runtime, user_login)
                     .await
@@ -786,14 +703,12 @@ impl TwitchConnector {
                 json!({ "stream": stream, "is_live": is_live })
             }
             OP_USERS_GET => {
-                let login = req
-                    .input
-                    .get("login")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let login = req.input.get("login").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'login' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_user(runtime, login)
                     .await
@@ -827,40 +742,6 @@ impl TwitchConnector {
                     None => json!({ "error": "Channel not found" }),
                 }
             }
-            OP_CHANNELS_MODIFY => {
-                let broadcaster_id = req
-                    .input
-                    .get("broadcaster_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'broadcaster_id' field".into(),
-                    })?;
-                let modify_req = ModifyChannelRequest {
-                    title: req.input.get("title").and_then(|v| v.as_str()).map(String::from),
-                    game_id: req.input.get("game_id").and_then(|v| v.as_str()).map(String::from),
-                    broadcaster_language: req
-                        .input
-                        .get("broadcaster_language")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    delay: req.input.get("delay").and_then(|v| v.as_u64()).map(|n| n as u32),
-                    tags: req
-                        .input
-                        .get("tags")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        }),
-                };
-                client
-                    .modify_channel(runtime, broadcaster_id, &modify_req)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                json!({ "updated": true })
-            }
             OP_CLIPS_LIST => {
                 let broadcaster_id = req
                     .input
@@ -882,64 +763,6 @@ impl TwitchConnector {
                 let count = resp.data.len();
                 json!({ "clips": resp.data, "count": count })
             }
-            OP_CLIPS_CREATE => {
-                let broadcaster_id = req
-                    .input
-                    .get("broadcaster_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'broadcaster_id' field".into(),
-                    })?;
-                let resp = client
-                    .create_clip(runtime, broadcaster_id)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                let clip = resp.data.into_iter().next();
-                match clip {
-                    Some(c) => json!({ "id": c.id, "edit_url": c.edit_url }),
-                    None => json!({ "error": "Failed to create clip" }),
-                }
-            }
-            OP_CHAT_SEND => {
-                let broadcaster_id = req
-                    .input
-                    .get("broadcaster_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'broadcaster_id' field".into(),
-                    })?;
-                let sender_id = req
-                    .input
-                    .get("sender_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'sender_id' field".into(),
-                    })?;
-                let message = req
-                    .input
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'message' field".into(),
-                    })?;
-                let resp = client
-                    .send_chat_message(runtime, broadcaster_id, sender_id, message)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                let msg_resp = resp.data.into_iter().next();
-                match msg_resp {
-                    Some(m) => json!({
-                        "message_id": m.message_id,
-                        "is_sent": m.is_sent,
-                        "drop_reason": m.drop_reason
-                    }),
-                    None => json!({ "error": "No response from chat API" }),
-                }
-            }
             OP_GAMES_LIST => {
                 let name = req.input.get("name").and_then(|v| v.as_str());
                 let id = req.input.get("id").and_then(|v| v.as_str());
@@ -950,12 +773,18 @@ impl TwitchConnector {
                 let count = resp.data.len();
                 json!({ "games": resp.data, "count": count })
             }
-            OP_HEALTH => {
-                match client.health_check().await {
-                    Ok(()) => json!({ "status": "ok", "api_reachable": true }),
-                    Err(e) => json!({ "status": "degraded", "api_reachable": false, "error": e.to_string() }),
+            OP_HEALTH => match client.health_check().await {
+                Ok(validated) => json!({
+                    "status": "ok",
+                    "api_reachable": true,
+                    "token_valid": true,
+                    "expires_in": validated.expires_in,
+                    "scopes": validated.scopes,
+                }),
+                Err(e) => {
+                    json!({ "status": "degraded", "api_reachable": false, "error": e.to_string() })
                 }
-            }
+            },
             _ => unreachable!(),
         };
 
@@ -990,50 +819,45 @@ mod tests {
     #[test]
     fn operations_catalog() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 7);
         let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
         assert!(ids.contains(&"twitch.streams.list"));
         assert!(ids.contains(&"twitch.streams.get"));
         assert!(ids.contains(&"twitch.users.get"));
         assert!(ids.contains(&"twitch.channels.get"));
-        assert!(ids.contains(&"twitch.channels.modify"));
         assert!(ids.contains(&"twitch.clips.list"));
-        assert!(ids.contains(&"twitch.clips.create"));
-        assert!(ids.contains(&"twitch.chat.send"));
         assert!(ids.contains(&"twitch.games.list"));
         assert!(ids.contains(&"twitch.health"));
     }
 
     #[test]
-    fn channels_modify_is_risky() {
+    fn no_write_ops_are_exposed() {
         let ops = operations_info();
-        let op = ops.iter().find(|o| o.id.as_str() == "twitch.channels.modify").unwrap();
-        assert_eq!(op.safety_tier, SafetyTier::Risky);
-        assert_eq!(op.risk_level, RiskLevel::Medium);
-        assert_eq!(op.idempotency, IdempotencyClass::Strict);
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
+        assert!(!ids.contains(&"twitch.channels.modify"));
+        assert!(!ids.contains(&"twitch.clips.create"));
+        assert!(!ids.contains(&"twitch.chat.send"));
     }
 
     #[test]
     fn streams_list_is_safe() {
         let ops = operations_info();
-        let op = ops.iter().find(|o| o.id.as_str() == "twitch.streams.list").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o.id.as_str() == "twitch.streams.list")
+            .unwrap();
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
         assert_eq!(op.idempotency, IdempotencyClass::None);
     }
 
     #[test]
-    fn chat_send_is_risky() {
-        let ops = operations_info();
-        let op = ops.iter().find(|o| o.id.as_str() == "twitch.chat.send").unwrap();
-        assert_eq!(op.safety_tier, SafetyTier::Risky);
-        assert_eq!(op.idempotency, IdempotencyClass::None);
-    }
-
-    #[test]
     fn health_is_strict_idempotent() {
         let ops = operations_info();
-        let op = ops.iter().find(|o| o.id.as_str() == "twitch.health").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o.id.as_str() == "twitch.health")
+            .unwrap();
         assert_eq!(op.idempotency, IdempotencyClass::Strict);
     }
 
@@ -1041,7 +865,7 @@ mod tests {
     fn introspect_has_all_operations() {
         let connector = TwitchConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 10);
+        assert_eq!(intro.operations.len(), 7);
     }
 
     #[test]
@@ -1049,14 +873,19 @@ mod tests {
         let connector = TwitchConnector::new();
         let result = connector.doctor();
         assert!(!result.passed);
-        assert!(result.checks.iter().any(|c| c.name == "configuration" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "configuration" && !c.passed)
+        );
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_unconfigured() {
         let connector = TwitchConnector::new();
         let health = connector.health().await;
-        assert!(health.uptime_ms >= 0);
+        assert!(!health.is_ready());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1130,19 +959,23 @@ mod tests {
     }
 
     #[test]
-    fn write_ops_use_write_capability() {
+    fn all_exposed_ops_use_read_capability() {
         let ops = operations_info();
-        let write_ops = [
-            "twitch.channels.modify",
-            "twitch.clips.create",
-            "twitch.chat.send",
+        let exposed_ops = [
+            "twitch.streams.list",
+            "twitch.streams.get",
+            "twitch.users.get",
+            "twitch.channels.get",
+            "twitch.clips.list",
+            "twitch.games.list",
+            "twitch.health",
         ];
-        for op_id in write_ops {
+        for op_id in exposed_ops {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
             assert_eq!(
                 op.capability.as_str(),
-                "twitch.write",
-                "op {op_id} should use write cap"
+                "twitch.read",
+                "op {op_id} should use read cap"
             );
         }
     }

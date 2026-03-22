@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2080b28004713881e4734dc4202a5b7e748c2ce62bcadc343c61cb33bfb2cad8"
+interface_hash = "blake3-256:fcp.interface.v2:67cbc0f7fc72a89c2a1e69e47deb1db28db411f7907e8dbb32ef7f5d64b9a402"
 
 [connector]
 id = "fcp.coda"
@@ -14,7 +14,6 @@ version = "0.1.0"
 description = "Workspace-scoped Coda REST connector for docs, pages, tables, rows, formulas, controls, and mutation tracking"
 archetypes = ["operational"]
 format = "native"
-homepage = "https://coda.io/developers/apis/v1"
 
 [connector.state]
 model = "stateless"
@@ -46,6 +45,24 @@ type = "object"
 [provides.operations."coda.account.whoami".output_schema]
 type = "object"
 
+[provides.operations."coda.account.whoami".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."coda.account.whoami".ai_hints]
 when_to_use = "Use when you need to verify the configured token and workspace boundary."
 common_mistakes = []
@@ -65,6 +82,24 @@ type = "object"
 
 [provides.operations."coda.docs.list".output_schema]
 type = "object"
+
+[provides.operations."coda.docs.list".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."coda.docs.list".ai_hints]
 when_to_use = "Use for workspace-scoped doc discovery."
@@ -87,6 +122,24 @@ required = ["doc_id"]
 [provides.operations."coda.docs.get".output_schema]
 type = "object"
 
+[provides.operations."coda.docs.get".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."coda.docs.get".ai_hints]
 when_to_use = "Use to inspect one doc's metadata and workspace binding."
 common_mistakes = ["doc_id must be a stable Coda doc ID."]
@@ -107,6 +160,24 @@ required = ["doc_id"]
 
 [provides.operations."coda.pages.list".output_schema]
 type = "object"
+
+[provides.operations."coda.pages.list".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."coda.pages.list".ai_hints]
 when_to_use = "Use for structural page discovery."
@@ -129,6 +200,24 @@ required = ["doc_id", "page_id_or_name"]
 [provides.operations."coda.pages.get".output_schema]
 type = "object"
 
+[provides.operations."coda.pages.get".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."coda.pages.get".ai_hints]
 when_to_use = "Use to inspect one page."
 common_mistakes = ["Stable page IDs are preferred over names."]
@@ -149,6 +238,24 @@ required = ["doc_id"]
 
 [provides.operations."coda.tables.list".output_schema]
 type = "object"
+
+[provides.operations."coda.tables.list".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."coda.tables.list".ai_hints]
 when_to_use = "Use to discover tables before row reads or writes."
@@ -171,6 +278,24 @@ required = ["doc_id", "table_id_or_name"]
 [provides.operations."coda.tables.get".output_schema]
 type = "object"
 
+[provides.operations."coda.tables.get".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."coda.tables.get".ai_hints]
 when_to_use = "Use to inspect one table or view."
 common_mistakes = ["Stable table IDs are preferred over names."]
@@ -191,6 +316,24 @@ required = ["doc_id", "table_id_or_name"]
 
 [provides.operations."coda.columns.list".output_schema]
 type = "object"
+
+[provides.operations."coda.columns.list".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."coda.columns.list".ai_hints]
 when_to_use = "Use before row writes to learn stable column IDs."
@@ -213,6 +356,24 @@ required = ["doc_id", "table_id_or_name"]
 [provides.operations."coda.rows.list".output_schema]
 type = "object"
 
+[provides.operations."coda.rows.list".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."coda.rows.list".ai_hints]
 when_to_use = "Use for row enumeration and filtered reads."
 common_mistakes = ["Stable IDs are preferred over names for tables and rows."]
@@ -233,6 +394,24 @@ required = ["doc_id", "table_id_or_name", "row_id_or_name"]
 
 [provides.operations."coda.rows.get".output_schema]
 type = "object"
+
+[provides.operations."coda.rows.get".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."coda.rows.get".ai_hints]
 when_to_use = "Use for point lookup of one row."
@@ -255,6 +434,24 @@ required = ["doc_id", "table_id_or_name", "rows"]
 [provides.operations."coda.rows.upsert".output_schema]
 type = "object"
 
+[provides.operations."coda.rows.upsert".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."coda.rows.upsert".ai_hints]
 when_to_use = "Use to insert or update rows in a base table."
 common_mistakes = ["Coda may update multiple rows when key_columns match more than one record."]
@@ -275,6 +472,24 @@ required = ["doc_id", "table_id_or_name", "row_ids"]
 
 [provides.operations."coda.rows.delete".output_schema]
 type = "object"
+
+[provides.operations."coda.rows.delete".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."coda.rows.delete".ai_hints]
 when_to_use = "Use for destructive row deletion after explicit confirmation."
@@ -297,6 +512,24 @@ required = ["doc_id"]
 [provides.operations."coda.formulas.list".output_schema]
 type = "object"
 
+[provides.operations."coda.formulas.list".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."coda.formulas.list".ai_hints]
 when_to_use = "Use for formula discovery."
 common_mistakes = []
@@ -317,6 +550,24 @@ required = ["doc_id", "formula_id_or_name"]
 
 [provides.operations."coda.formulas.get".output_schema]
 type = "object"
+
+[provides.operations."coda.formulas.get".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."coda.formulas.get".ai_hints]
 when_to_use = "Use for point lookup of one formula."
@@ -339,6 +590,24 @@ required = ["doc_id"]
 [provides.operations."coda.controls.list".output_schema]
 type = "object"
 
+[provides.operations."coda.controls.list".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."coda.controls.list".ai_hints]
 when_to_use = "Use to inspect the doc's exposed controls without executing buttons."
 common_mistakes = []
@@ -359,6 +628,24 @@ required = ["doc_id", "control_id_or_name"]
 
 [provides.operations."coda.controls.get".output_schema]
 type = "object"
+
+[provides.operations."coda.controls.get".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."coda.controls.get".ai_hints]
 when_to_use = "Use to inspect one control's current value and metadata."
@@ -381,6 +668,24 @@ required = ["request_id"]
 [provides.operations."coda.mutations.get_status".output_schema]
 type = "object"
 
+[provides.operations."coda.mutations.get_status".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."coda.mutations.get_status".ai_hints]
 when_to_use = "Use after rows.upsert or rows.delete when you need the terminal mutation outcome."
 common_mistakes = []
@@ -401,6 +706,24 @@ type = "object"
 [provides.operations."coda.health".output_schema]
 type = "object"
 
+[provides.operations."coda.health".network_constraints]
+host_allow = ["coda.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."coda.health".ai_hints]
 when_to_use = "Use before real Coda operations to validate auth and scope."
 common_mistakes = []
@@ -414,3 +737,55 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "coda.read"
+description = "General Coda read budget"
+requests = 100
+window_ms = 6000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "coda.docs.list"
+description = "Coda docs listing budget"
+requests = 4
+window_ms = 6000
+burst = 4
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "coda.write"
+description = "General Coda write budget"
+requests = 10
+window_ms = 6000
+burst = 4
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "coda.doc_content_write"
+description = "Coda document content mutation budget"
+requests = 5
+window_ms = 10000
+burst = 2
+scope = "instance"
+
+[rate_limits.operation_pools]
+"coda.account.whoami" = ["coda.read"]
+"coda.docs.list" = ["coda.read", "coda.docs.list"]
+"coda.docs.get" = ["coda.read"]
+"coda.pages.list" = ["coda.read"]
+"coda.pages.get" = ["coda.read"]
+"coda.tables.list" = ["coda.read"]
+"coda.tables.get" = ["coda.read"]
+"coda.columns.list" = ["coda.read"]
+"coda.rows.list" = ["coda.read"]
+"coda.rows.get" = ["coda.read"]
+"coda.rows.upsert" = ["coda.write", "coda.doc_content_write"]
+"coda.rows.delete" = ["coda.write", "coda.doc_content_write"]
+"coda.formulas.list" = ["coda.read"]
+"coda.formulas.get" = ["coda.read"]
+"coda.controls.list" = ["coda.read"]
+"coda.controls.get" = ["coda.read"]
+"coda.mutations.get_status" = ["coda.read"]
+"coda.health" = ["coda.read"]

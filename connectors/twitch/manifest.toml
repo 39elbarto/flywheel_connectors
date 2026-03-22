@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.twitch"
 name = "Twitch"
 version = "0.1.0"
-description = "Twitch Helix API connector for streams, channels, clips, and chat"
+description = "Read-only Twitch Helix API connector for streams, channels, clips, and games"
 archetype = "operational"
 homepage = "https://dev.twitch.tv/docs/api"
 
@@ -29,7 +29,7 @@ safety_tier = "safe"
 idempotency = "none"
 
 [provides.operations.streams_list.network_constraints]
-host_allow = ["api.twitch.tv", "id.twitch.tv"]
+host_allow = ["api.twitch.tv"]
 port_allow = [443]
 require_tls = true
 require_sni = true
@@ -87,21 +87,6 @@ require_tls = true
 [provides.operations.channels_get.ai_hints]
 when_to_use = "When you need to look up channel details"
 
-[provides.operations.channels_modify]
-summary = "Modify channel information"
-capability = "twitch.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.channels_modify.network_constraints]
-host_allow = ["api.twitch.tv"]
-port_allow = [443]
-require_tls = true
-
-[provides.operations.channels_modify.ai_hints]
-when_to_use = "When you need to update a channel's title, game, or language"
-
 [provides.operations.clips_list]
 summary = "List clips"
 capability = "twitch.read"
@@ -116,36 +101,6 @@ require_tls = true
 
 [provides.operations.clips_list.ai_hints]
 when_to_use = "When you need to list clips for a channel"
-
-[provides.operations.clips_create]
-summary = "Create a clip"
-capability = "twitch.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.clips_create.network_constraints]
-host_allow = ["api.twitch.tv"]
-port_allow = [443]
-require_tls = true
-
-[provides.operations.clips_create.ai_hints]
-when_to_use = "When you need to create a clip of a live stream"
-
-[provides.operations.chat_send]
-summary = "Send a chat message"
-capability = "twitch.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "none"
-
-[provides.operations.chat_send.network_constraints]
-host_allow = ["api.twitch.tv"]
-port_allow = [443]
-require_tls = true
-
-[provides.operations.chat_send.ai_hints]
-when_to_use = "When you need to send a message in Twitch chat"
 
 [provides.operations.games_list]
 summary = "List games/categories"
@@ -170,12 +125,13 @@ safety_tier = "safe"
 idempotency = "strict"
 
 [provides.operations.health.network_constraints]
-host_allow = ["api.twitch.tv"]
+host_allow = ["api.twitch.tv", "id.twitch.tv"]
 port_allow = [443]
 require_tls = true
+require_sni = true
 
 [provides.operations.health.ai_hints]
-when_to_use = "When you need to check if the Twitch API is reachable"
+when_to_use = "When you need to validate the token and confirm the Twitch APIs are reachable"
 
 [sandbox]
 profile = "strict"

@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::{DateTime, FixedOffset, TimeDelta};
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
@@ -102,12 +103,24 @@ impl PayPalConfig {
         if parsed.scheme() != "https" {
             return Err("base_url must use https".into());
         }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err("base_url must not include embedded credentials".into());
+        }
         if parsed.path() != "/" && !parsed.path().is_empty() {
             return Err("base_url must not include an API path".into());
+        }
+        if parsed.query().is_some() {
+            return Err("base_url must not include a query string".into());
+        }
+        if parsed.fragment().is_some() {
+            return Err("base_url must not include a fragment".into());
         }
         let Some(host) = parsed.host_str() else {
             return Err("base_url must include a hostname".into());
         };
+        if parsed.port_or_known_default() != Some(443) {
+            return Err("base_url must use port 443".into());
+        }
         match (self.sandbox, host) {
             (true, "api-m.sandbox.paypal.com") | (false, "api-m.paypal.com") => {}
             (true, _) => {
@@ -358,21 +371,97 @@ impl PayPalConnector {
     }
 
     fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
-        let value =
-            input
-                .get(key)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1005,
-                    message: format!("Missing: {key}"),
-                })?;
-        if value.trim().is_empty() {
+        let value = input
+            .get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Missing: {key}"),
+            })?
+            .trim();
+        if value.is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Field '{key}' must not be empty"),
             });
         }
         Ok(value)
+    }
+
+    fn normalize_order_intent(intent: &str) -> FcpResult<&'static str> {
+        if intent.eq_ignore_ascii_case("CAPTURE") {
+            Ok("CAPTURE")
+        } else if intent.eq_ignore_ascii_case("AUTHORIZE") {
+            Ok("AUTHORIZE")
+        } else {
+            Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "Field 'intent' must be CAPTURE or AUTHORIZE".into(),
+            })
+        }
+    }
+
+    fn validate_transaction_window(start: &str, end: &str) -> FcpResult<()> {
+        let parse = |value: &str, field: &str| -> FcpResult<DateTime<FixedOffset>> {
+            DateTime::parse_from_rfc3339(value).map_err(|error| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{field}' must be an RFC 3339 timestamp: {error}"),
+            })
+        };
+
+        let start = parse(start, "start_date")?;
+        let end = parse(end, "end_date")?;
+        if end < start {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "end_date must be greater than or equal to start_date".into(),
+            });
+        }
+        if end.signed_duration_since(start) > TimeDelta::days(31) {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "PayPal transaction searches must not exceed a 31 day window".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn parse_optional_amount(input: &serde_json::Value, key: &str) -> FcpResult<Option<Amount>> {
+        let Some(amount_value) = input.get(key) else {
+            return Ok(None);
+        };
+        let amount = amount_value
+            .as_object()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be an object"),
+            })?;
+
+        let currency_code = amount
+            .get("currency_code")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!(
+                    "Field '{key}.currency_code' is required when '{key}' is provided"
+                ),
+            })?;
+        let value = amount
+            .get("value")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}.value' is required when '{key}' is provided"),
+            })?;
+
+        Ok(Some(Amount {
+            currency_code: currency_code.to_owned(),
+            value: value.to_owned(),
+        }))
     }
 }
 
@@ -822,7 +911,8 @@ impl PayPalConnector {
 
         let output = match operation {
             OP_ORDERS_CREATE => {
-                let intent = Self::require_str(&req.input, "intent")?;
+                let intent =
+                    Self::normalize_order_intent(Self::require_str(&req.input, "intent")?)?;
                 let currency = Self::require_str(&req.input, "currency_code")?;
                 let value = Self::require_str(&req.input, "value")?;
                 let description = req
@@ -876,6 +966,7 @@ impl PayPalConnector {
             OP_PAYMENTS_LIST => {
                 let start = Self::require_str(&req.input, "start_date")?;
                 let end = Self::require_str(&req.input, "end_date")?;
+                Self::validate_transaction_window(start, end)?;
                 let results = client
                     .list_payments(runtime, start, end)
                     .await
@@ -899,12 +990,7 @@ impl PayPalConnector {
             OP_PAYMENTS_REFUND => {
                 let cid = Self::require_str(&req.input, "capture_id")?;
                 let refund_req = RefundRequest {
-                    amount: req.input.get("amount").and_then(|a| {
-                        Some(Amount {
-                            currency_code: a.get("currency_code")?.as_str()?.into(),
-                            value: a.get("value")?.as_str()?.into(),
-                        })
-                    }),
+                    amount: Self::parse_optional_amount(&req.input, "amount")?,
                     note_to_payer: req
                         .input
                         .get("note_to_payer")
@@ -1214,6 +1300,24 @@ mod tests {
     }
 
     #[test]
+    fn configure_rejects_base_url_with_query() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = PayPalConnector::new();
+                c.configure(json!({
+                    "client_id": "id",
+                    "client_secret": "secret",
+                    "sandbox": true,
+                    "base_url": "https://api-m.sandbox.paypal.com?foo=bar"
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn doctor_unconfigured() {
         assert!(!PayPalConnector::new().doctor().ready);
     }
@@ -1366,6 +1470,12 @@ mod tests {
     }
 
     #[test]
+    fn normalize_order_intent_rejects_invalid_value() {
+        let error = PayPalConnector::normalize_order_intent("SALE").unwrap_err();
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
     fn invoke_payments_list_missing_dates() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
@@ -1377,6 +1487,16 @@ mod tests {
             .unwrap()
             .is_err()
         );
+    }
+
+    #[test]
+    fn validate_transaction_window_rejects_window_over_31_days() {
+        let error = PayPalConnector::validate_transaction_window(
+            "2025-01-01T00:00:00Z",
+            "2025-02-02T00:00:01Z",
+        )
+        .unwrap_err();
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
@@ -1405,6 +1525,18 @@ mod tests {
             .unwrap()
             .is_err()
         );
+    }
+
+    #[test]
+    fn parse_optional_amount_rejects_partial_shape() {
+        let error = PayPalConnector::parse_optional_amount(
+            &json!({
+                "amount": {"currency_code": "USD"}
+            }),
+            "amount",
+        )
+        .unwrap_err();
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
@@ -1481,7 +1613,10 @@ mod tests {
                 .send_invoice(connector.runtime.as_ref().unwrap(), "INV-123")
                 .await
                 .unwrap();
-            assert_eq!(serde_json::to_value(&sent).unwrap(), json!({ "sent": true }));
+            assert_eq!(
+                serde_json::to_value(&sent).unwrap(),
+                json!({ "sent": true })
+            );
         })
         .unwrap();
     }
@@ -1577,6 +1712,14 @@ mod tests {
     fn require_str_ok() {
         assert_eq!(
             PayPalConnector::require_str(&json!({"k": "v"}), "k").unwrap(),
+            "v"
+        );
+    }
+
+    #[test]
+    fn require_str_trims_whitespace() {
+        assert_eq!(
+            PayPalConnector::require_str(&json!({"k": "  v  "}), "k").unwrap(),
             "v"
         );
     }

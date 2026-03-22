@@ -4,6 +4,7 @@
 > **Bead**: `flywheel_connectors-j05nu.5.3.1`
 > **Unblocks**: `flywheel_connectors-j05nu.5.3.2`
 > **Primary upstream**: https://coda.io/developers/apis/v1
+> **Verification script**: `scripts/e2e/coda_connector_verification.sh`
 
 ## Purpose
 
@@ -74,7 +75,7 @@ The connector is `operational` and `stateless`.
 - Base API host: `coda.io`
 - Base path: `/apis/v1`
 - Port: `443`
-- TLS + SNI required
+- TLS + SNI required for live Coda traffic
 - `deny_localhost = true`
 - `deny_private_ranges = true`
 - No redirects to other hosts
@@ -83,6 +84,8 @@ The connector is `operational` and `stateless`.
 - Every mutation path MUST poll `GET /mutationStatus/{requestId}` until completion or timeout.
 - `rows.upsert` is only valid for base tables, not views.
 - `X-Coda-Doc-Version: latest` is optional caller-controlled behavior, not the default, because Coda may return `400` when the latest snapshot is unavailable.
+
+For deterministic connector-local verification, the runtime also allows an explicit `http://localhost` or `http://127.0.0.1` base URL override so integration tests can drive a mock Coda API without live credentials. That override is for test harnesses only; live operator guidance still assumes `https://coda.io/apis/v1`.
 
 ## Capability Families
 
@@ -153,6 +156,33 @@ These are excluded on purpose:
 - Row upsert support should document that multiple rows may be updated when `keyColumns` match more than one record.
 - Tests should cover snapshot-staleness behavior, rate limits, async mutation polling, workspace-boundary rejection, and name-resolution ambiguity rejection.
 
+## Readiness And Verification
+
+The follow-on closeout bead for this connector is `flywheel_connectors-j05nu.5.3.3`. Verification artifacts should be reproducible without reopening planning notes.
+
+- Replayable verification bundle: `scripts/e2e/coda_connector_verification.sh`
+- Artifact root: `artifacts/e2e/coda_connector/<timestamp>`
+- Manifest verification command: `rch exec -- cargo run -q -p fwc -- manifest fix connectors/coda/manifest.toml --check --json`
+- Focused cargo checks:
+  - `rch exec -- cargo check -p fcp-coda --all-targets`
+  - `rch exec -- cargo test -p fcp-coda --test integration -- --nocapture`
+  - `rch exec -- cargo test -p fcp-coda -- --nocapture`
+  - `rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings`
+
+Operator guidance for verification:
+
+- Prefer a disposable Coda workspace and doc set, or a localhost mock server, before exercising write paths.
+- Keep one connector instance bound to one `workspace_id`; if `allowed_doc_ids` is set, every verification doc must be inside that explicit narrowing list.
+- Redact API tokens, Authorization headers, request IDs, login IDs, workspace IDs, doc IDs, row IDs, browser links, and copied request logs before sharing artifacts.
+- Treat `coda.rows.upsert` and `coda.rows.delete` as live mutations unless the verification bundle is pointed at a mock server.
+- Common remediation:
+  - `not_configured`: configure `workspace_id`, `api_token`, timeout, retry, and mutation polling settings, then rerun `self_check`.
+  - `coda_auth_rejected`: replace the API token and confirm `GET /whoami` succeeds.
+  - `workspace_mismatch`: align `workspace_id` with the workspace returned by `GET /whoami` or swap to the correct token.
+  - `doc_allowlist_violation`: add the target doc to `allowed_doc_ids` or verify against an already-allowed doc.
+  - `self_check_retryable`: wait for Coda to recover or increase timeout / retry settings before rerunning the verification bundle.
+  - `network_constraints_invalid`: use `https://coda.io/apis/v1` for live verification or an explicit localhost override for deterministic tests.
+
 ## Source Notes
 
 This contract is grounded in the current connector implementation plus Coda's official API reference:
@@ -166,3 +196,47 @@ This contract is grounded in the current connector implementation plus Coda's of
 - Coda publishes rate limits for reads, writes, doc-content writes, and doc listing.
 - Mutating endpoints return `202` with a `requestId`, and completion is checked through `GET /mutationStatus/{requestId}`.
 - `rows.upsert` supports `keyColumns`, updates multiple matching rows, and only works on base tables.
+
+## Verification Bundle
+
+The readiness closeout for the current connector surface is anchored on `scripts/e2e/coda_connector_verification.sh`.
+It writes replayable artifacts under `artifacts/e2e/coda_connector/<timestamp>` and is intended to be rerun through `rch`-offloaded Cargo commands plus a crate-local `cargo fmt` check.
+
+The verification bundle captures:
+
+- manifest validation for `connectors/coda/manifest.toml`
+- `cargo check -p fcp-coda --all-targets`
+- formatting verification for the Coda crate
+- targeted readiness evidence for `health`, `doctor`, `self_check`, docs pagination/scope filtering, destructive row deletion, and typed introspection compliance
+- the full Coda integration suite and full crate test suite
+- `cargo clippy -p fcp-coda --all-targets -- -D warnings`
+
+## Operator Guidance
+
+Prerequisites:
+- Use a disposable workspace or copied fixture docs with at least one base table and stable row IDs before running verification.
+- Configure a dedicated bearer API token for that workspace and keep `workspace_id` aligned with the workspace returned by `whoami`.
+- Keep `allowed_doc_ids` either empty or pinned to the fixture docs you intend to exercise so pagination and mutation evidence stay deterministic.
+
+Dedicated environment:
+- Never point the verification bundle at a shared production workspace. `coda.rows.delete` is destructive, and both write paths rely on asynchronous mutation completion rather than reversible drafts.
+
+Redaction rules:
+- Redact `api_token`, Authorization headers, workspace IDs, doc IDs, row IDs, browser links, login IDs, and copied request payloads before sharing logs.
+- Treat table names, formula/control values, row contents, and doc metadata as potentially sensitive workspace data.
+- If artifacts leave the local machine, replace live fixture identifiers with sanitized stand-ins first.
+
+Common remediation:
+- If `configure` rejects `base_url`, use `https://coda.io/apis/v1` for live runs or a localhost mock endpoint that preserves the same `/apis/v1` path prefix.
+- If `self_check` reports `workspace_mismatch`, align `workspace_id` with the workspace returned by `whoami` for the chosen token or rotate to the correct token.
+- If docs or row mutations fail due to scope, either add the fixture doc to `allowed_doc_ids` or rerun against a doc in the configured workspace boundary.
+- If verification hits 429s, respect the backoff window, lower concurrency, and rerun once the provider bucket recovers.
+
+Rerun commands:
+- `scripts/e2e/coda_connector_verification.sh`
+- `fwc manifest fix connectors/coda/manifest.toml --check --json`
+- `cargo fmt --manifest-path connectors/coda/Cargo.toml --check`
+- `rch exec -- cargo check -p fcp-coda --all-targets`
+- `rch exec -- cargo test -p fcp-coda --test integration -- --nocapture`
+- `rch exec -- cargo test -p fcp-coda`
+- `rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings`

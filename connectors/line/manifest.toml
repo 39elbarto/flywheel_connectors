@@ -6,9 +6,16 @@ schema_version = "2.1"
 id = "fcp.line"
 name = "LINE Messaging"
 version = "0.1.0"
-description = "LINE Messaging API connector for push/reply messages, profiles, groups, and rich menus"
+description = "One-channel LINE Messaging API connector for outbound messages, profile or group lookups, rich-menu metadata management, and health verification"
 archetype = "operational"
 homepage = "https://developers.line.biz/en/reference/messaging-api/"
+
+# Auth and scope model:
+# - One connector instance is bound to one LINE Messaging API channel.
+# - Authentication is one injected bearer channel access token.
+# - Webhook receipt, signature verification, token issuance, and token rotation are out of scope.
+# - `base_url` may point at localhost or 127.0.0.1 for test harnesses; production traffic is
+#   expected to target `https://api.line.me`.
 
 [zones]
 home = "z:private"
@@ -19,85 +26,184 @@ tailscale_tag = "tag:fcp-private"
 [capabilities]
 required = ["network.dns", "network.outbound"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "system.privileged", "network.listen"]
 
-[provides.operations.push]
-summary = "Push a message to a user"
+[provides.operations."line.messages.push"]
+summary = "Push a message to one LINE recipient ID"
 capability = "line.messages.write"
 risk = "medium"
 safety_tier = "risky"
-idempotency = "none"
+idempotency = "best_effort"
 
-[provides.operations.push.network_constraints]
-host_allow = ["api.line.me"]
-port_allow = [443]
+[provides.operations."line.messages.push".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
 require_tls = true
 require_sni = true
-deny_localhost = true
-deny_private_ranges = true
+deny_localhost = false
+deny_private_ranges = false
 deny_tailnet_ranges = true
-deny_ip_literals = true
+deny_ip_literals = false
 max_redirects = 0
 
-[provides.operations.reply]
-summary = "Reply to a message"
+[provides.operations."line.messages.reply"]
+summary = "Reply to an inbound LINE webhook event using a reply token"
 capability = "line.messages.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 
-[provides.operations.multicast]
-summary = "Send message to multiple users"
+[provides.operations."line.messages.reply".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.messages.multicast"]
+summary = "Send one payload to multiple LINE user IDs"
 capability = "line.messages.write"
 risk = "medium"
 safety_tier = "risky"
-idempotency = "none"
+idempotency = "best_effort"
 
-[provides.operations.profile_get]
-summary = "Get user profile"
+[provides.operations."line.messages.multicast".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.profile.get"]
+summary = "Get a LINE user profile"
 capability = "line.profile.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
-[provides.operations.group_profile]
-summary = "Get group chat profile"
+[provides.operations."line.profile.get".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.group.profile"]
+summary = "Get one LINE group summary"
 capability = "line.profile.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
-[provides.operations.group_members]
-summary = "List group members"
+[provides.operations."line.group.profile".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.group.members"]
+summary = "Enumerate LINE group member IDs"
 capability = "line.profile.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
-[provides.operations.rich_menu_list]
-summary = "List rich menus"
+[provides.operations."line.group.members".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.rich_menu.list"]
+summary = "List LINE rich-menu metadata objects"
 capability = "line.menu.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
 
-[provides.operations.rich_menu_create]
-summary = "Create a rich menu"
+[provides.operations."line.rich_menu.list".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.rich_menu.create"]
+summary = "Create one LINE rich-menu metadata object"
 capability = "line.menu.write"
 risk = "medium"
 safety_tier = "risky"
-idempotency = "strict"
+idempotency = "best_effort"
 
-[provides.operations.rich_menu_delete]
-summary = "Delete a rich menu"
+[provides.operations."line.rich_menu.create".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.rich_menu.delete"]
+summary = "Delete one LINE rich-menu metadata object"
 capability = "line.menu.write"
 risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
 
-[provides.operations.health]
-summary = "Health check"
+[provides.operations."line.rich_menu.delete".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0
+
+[provides.operations."line.health"]
+summary = "Probe LINE bot-info reachability and auth"
 capability = "line.profile.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations."line.health".network_constraints]
+host_allow = ["api.line.me", "localhost", "127.0.0.1"]
+port_allow = [443, 80]
+require_tls = true
+require_sni = true
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+deny_ip_literals = false
+max_redirects = 0

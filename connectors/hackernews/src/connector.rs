@@ -7,8 +7,8 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    OperationInfo, ResourceTypeInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
@@ -33,6 +33,7 @@ const OP_HEALTH: &str = "hackernews.health";
 
 // Capability IDs
 const CAP_READ: &str = "hackernews.read";
+const HN_PUBLIC_API_BOUNDARY: &str = "This connector only exposes public Firebase Hacker News reads; there is no Algolia search, authenticated account action, moderation, or streaming surface in the first slice.";
 
 /// Hacker News connector configuration.
 /// Auth is optional since HN API is entirely public.
@@ -181,13 +182,71 @@ impl Default for HackerNewsConnector {
     }
 }
 
+fn hackernews_resource_types() -> Vec<ResourceTypeInfo> {
+    vec![
+        ResourceTypeInfo {
+            name: "hackernews.item".into(),
+            uri_pattern: "hackernews://items/{item_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["id", "type"],
+                "properties": {
+                    "id": {"type": "integer"},
+                    "type": {"type": "string"},
+                    "by": {"type": "string"},
+                    "time": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "text": {"type": "string"},
+                    "url": {"type": "string"},
+                    "score": {"type": "integer"},
+                    "parent": {"type": "integer"},
+                    "kids": {"type": "array", "items": {"type": "integer"}},
+                    "descendants": {"type": "integer"},
+                    "deleted": {"type": "boolean"},
+                    "dead": {"type": "boolean"}
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "hackernews.user".into(),
+            uri_pattern: "hackernews://users/{username}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "created": {"type": "integer"},
+                    "karma": {"type": "integer"},
+                    "about": {"type": "string"},
+                    "submitted": {"type": "array", "items": {"type": "integer"}}
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "hackernews.feed_snapshot".into(),
+            uri_pattern: "hackernews://feeds/{feed_name}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["feed", "item_ids"],
+                "properties": {
+                    "feed": {
+                        "type": "string",
+                        "enum": ["top", "new", "best", "ask", "show", "job"]
+                    },
+                    "item_ids": {"type": "array", "items": {"type": "integer"}}
+                }
+            }),
+        },
+    ]
+}
+
 /// Build the typed operations catalog.
 pub fn operations_info() -> Vec<OperationInfo> {
     vec![
         OperationInfo {
             id: OperationId::from_static(OP_ITEM_GET),
             summary: "Get an item by ID".into(),
-            description: Some("Retrieves a story, comment, job, poll, or pollopt by ID".into()),
+            description: Some("Retrieves one public Firebase item by numeric ID. Covers stories, comments, jobs, polls, and poll options, but does not recursively expand comment trees or enrich feed snapshots.".into()),
             input_schema: json!({
                 "type": "object",
                 "required": ["id"],
@@ -205,6 +264,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![
                     "Item IDs are numeric, not string usernames".into(),
                     "Deleted or dead items may return partial data".into(),
+                    "Search, batching, and recursive thread expansion are explicit non-goals for this first slice".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_USER_GET)],
@@ -215,7 +275,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_USER_GET),
             summary: "Get a user by username".into(),
-            description: Some("Retrieves a user's profile by their unique username".into()),
+            description: Some("Retrieves one public Hacker News user profile by case-sensitive username. No login, private account state, or authenticated actor context is exposed.".into()),
             input_schema: json!({
                 "type": "object",
                 "required": ["username"],
@@ -241,6 +301,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "When you need to look up a Hacker News user's profile by username".into(),
                 common_mistakes: vec![
                     "Usernames are case-sensitive".into(),
+                    "This connector does not expose authenticated user actions or private profile data".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_ITEM_GET)],
@@ -251,7 +312,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_TOP_STORIES),
             summary: "Get top story IDs".into(),
-            description: Some("Returns up to 500 top story IDs, sorted by rank".into()),
+            description: Some("Returns a top-stories snapshot as numeric item IDs only. Use item.get to expand stories; there is no automatic hydration or search surface.".into()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -270,6 +331,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "When you need the current top/front page stories on HN".into(),
                 common_mistakes: vec![
                     "Returns only IDs - use item.get to fetch full story details".into(),
+                    HN_PUBLIC_API_BOUNDARY.into(),
                 ],
                 examples: Vec::new(),
                 related: vec![
@@ -283,7 +345,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_NEW_STORIES),
             summary: "Get new story IDs".into(),
-            description: Some("Returns up to 500 newest story IDs".into()),
+            description: Some("Returns a newest-stories snapshot as numeric item IDs only. This is a feed snapshot, not a write, search, or live-streaming API.".into()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -300,7 +362,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need the most recently submitted stories".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "Returns only IDs - use item.get to fetch full story details".into(),
+                    "This connector does not expose live subscriptions or polling cursors".into(),
+                ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_TOP_STORIES)],
             },
@@ -310,7 +375,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_BEST_STORIES),
             summary: "Get best story IDs".into(),
-            description: Some("Returns up to 500 best story IDs".into()),
+            description: Some("Returns a best-stories snapshot as numeric item IDs only. Upstream ranking semantics come from Hacker News; the connector does not re-rank or search.".into()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -327,7 +392,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need the highest-ranked stories over time".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "Returns only IDs - use item.get to fetch full story details".into(),
+                    "This is not an Algolia relevance-search endpoint".into(),
+                ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_TOP_STORIES)],
             },
@@ -337,7 +405,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_ASK_STORIES),
             summary: "Get Ask HN story IDs".into(),
-            description: Some("Returns up to 200 Ask HN story IDs".into()),
+            description: Some("Returns an Ask HN feed snapshot as numeric item IDs only. There is no thread expansion or reply/write surface.".into()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -354,7 +422,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need Ask HN discussion threads".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "Returns only IDs - use item.get to fetch full story details".into(),
+                    "The connector does not recursively expand Ask HN comment trees".into(),
+                ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_SHOW_STORIES)],
             },
@@ -364,7 +435,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_SHOW_STORIES),
             summary: "Get Show HN story IDs".into(),
-            description: Some("Returns up to 200 Show HN story IDs".into()),
+            description: Some("Returns a Show HN feed snapshot as numeric item IDs only. The connector does not auto-expand items or scrape extra metadata from news.ycombinator.com.".into()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -381,7 +452,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need Show HN project showcase threads".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "Returns only IDs - use item.get to fetch full story details".into(),
+                    "This connector does not scrape HTML pages for richer project metadata".into(),
+                ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_ASK_STORIES)],
             },
@@ -391,7 +465,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_JOB_STORIES),
             summary: "Get job story IDs".into(),
-            description: Some("Returns up to 200 job posting IDs".into()),
+            description: Some("Returns a Jobs feed snapshot as numeric item IDs only. The connector does not submit jobs, favorite posts, or perform authenticated actions.".into()),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -408,7 +482,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need current YC/HN job postings".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "Returns only IDs - use item.get to fetch full story details".into(),
+                    "There is no authenticated submit or moderation surface in this connector".into(),
+                ],
                 examples: Vec::new(),
                 related: Vec::new(),
             },
@@ -418,7 +495,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check HN API health".into(),
-            description: Some("Verifies the Hacker News API is reachable".into()),
+            description: Some("Verifies the public Firebase Hacker News API is reachable. This does not validate search, writes, or any authenticated surface because those are not in scope.".into()),
             input_schema: json!({ "type": "object" }),
             output_schema: json!({
                 "type": "object",
@@ -460,13 +537,10 @@ impl FcpConnector for HackerNewsConnector {
                 .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
         ));
 
-        let client = HackerNewsClient::new(
-            config.base_url.as_deref(),
-            config.retry.clone(),
-        )
-        .map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HN client: {e}"),
-        })?;
+        let client = HackerNewsClient::new(config.base_url.as_deref(), config.retry.clone())
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HN client: {e}"),
+            })?;
 
         self.client = Some(client);
         self.config = Some(config);
@@ -564,7 +638,7 @@ impl FcpConnector for HackerNewsConnector {
         Introspection {
             operations: operations_info(),
             events: Vec::new(),
-            resource_types: Vec::new(),
+            resource_types: hackernews_resource_types(),
             auth_caps: None,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -630,14 +704,12 @@ impl HackerNewsConnector {
 
         let output = match operation {
             OP_ITEM_GET => {
-                let id = req
-                    .input
-                    .get("id")
-                    .and_then(|v| v.as_u64())
-                    .ok_or(FcpError::InvalidRequest {
+                let id = req.input.get("id").and_then(|v| v.as_u64()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing or invalid 'id' field (must be integer)".into(),
-                    })?;
+                    },
+                )?;
                 let item = client
                     .get_item(runtime, id)
                     .await
@@ -647,13 +719,12 @@ impl HackerNewsConnector {
                 })?
             }
             OP_USER_GET => {
-                let username =
-                    req.input.get("username").and_then(|v| v.as_str()).ok_or(
-                        FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "Missing 'username' field".into(),
-                        },
-                    )?;
+                let username = req.input.get("username").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'username' field".into(),
+                    },
+                )?;
                 let user = client
                     .get_user(runtime, username)
                     .await
@@ -711,10 +782,7 @@ impl HackerNewsConnector {
                 json!(Self::apply_limit(ids, limit))
             }
             OP_HEALTH => {
-                client
-                    .health_check()
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                client.health_check().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "status": "ok" })
             }
             _ => {
@@ -885,6 +953,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_introspection_resource_inventory() {
+        let intro = HackerNewsConnector::new().introspect();
+        let names: Vec<&str> = intro
+            .resource_types
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect();
+        assert!(names.contains(&"hackernews.item"));
+        assert!(names.contains(&"hackernews.user"));
+        assert!(names.contains(&"hackernews.feed_snapshot"));
+    }
+
+    #[test]
+    fn test_introspection_keeps_auth_caps_none() {
+        let intro = HackerNewsConnector::new().introspect();
+        assert!(intro.auth_caps.is_none());
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_invoke_unknown_operation() {
         let mut connector = HackerNewsConnector::new();
@@ -959,20 +1046,14 @@ mod tests {
     #[test]
     fn test_item_get_is_strict_idempotent() {
         let ops = operations_info();
-        let item_get = ops
-            .iter()
-            .find(|op| op.id.as_str() == OP_ITEM_GET)
-            .unwrap();
+        let item_get = ops.iter().find(|op| op.id.as_str() == OP_ITEM_GET).unwrap();
         assert_eq!(item_get.idempotency, IdempotencyClass::Strict);
     }
 
     #[test]
     fn test_user_get_is_strict_idempotent() {
         let ops = operations_info();
-        let user_get = ops
-            .iter()
-            .find(|op| op.id.as_str() == OP_USER_GET)
-            .unwrap();
+        let user_get = ops.iter().find(|op| op.id.as_str() == OP_USER_GET).unwrap();
         assert_eq!(user_get.idempotency, IdempotencyClass::Strict);
     }
 
@@ -1002,10 +1083,7 @@ mod tests {
     #[test]
     fn test_health_is_strict_idempotent() {
         let ops = operations_info();
-        let health = ops
-            .iter()
-            .find(|op| op.id.as_str() == OP_HEALTH)
-            .unwrap();
+        let health = ops.iter().find(|op| op.id.as_str() == OP_HEALTH).unwrap();
         assert_eq!(health.idempotency, IdempotencyClass::Strict);
     }
 
@@ -1022,6 +1100,7 @@ mod tests {
         let connector = HackerNewsConnector::new();
         let intro = connector.introspect();
         assert!(!intro.event_caps.as_ref().unwrap().streaming);
+        assert!(intro.events.is_empty());
     }
 
     #[fcp_async_core::runtime::test]

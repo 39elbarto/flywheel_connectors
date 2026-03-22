@@ -6,9 +6,19 @@ schema_version = "2.1"
 id = "fcp.hackernews"
 name = "Hacker News"
 version = "0.1.0"
-description = "Hacker News API connector for stories, comments, users, and job listings"
+description = "Public read-only Hacker News Firebase connector for item lookup, user lookup, feed snapshots, and health probing"
 archetype = "read-only"
 homepage = "https://github.com/HackerNews/API"
+
+# Auth and scope model:
+# - The first slice is a public Firebase API reader with no external auth flow.
+# - All operations are gated only by the `hackernews.read` capability plus the
+#   public-zone network policy.
+# - `item_get` is the expansion primitive for stories, comments, jobs, polls,
+#   and poll options.
+# - Feed operations return numeric item IDs only; they do not auto-expand items.
+# - Algolia search, HTML scraping, authenticated account actions, moderation,
+#   recursive thread expansion, and streaming delivery are explicit non-goals.
 
 [zones]
 home = "z:public"
@@ -64,12 +74,34 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.top_stories.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
+
 [provides.operations.new_stories]
 summary = "Get new story IDs"
 capability = "hackernews.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.new_stories.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
 
 [provides.operations.best_stories]
 summary = "Get best story IDs"
@@ -78,12 +110,34 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.best_stories.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
+
 [provides.operations.ask_stories]
 summary = "Get Ask HN story IDs"
 capability = "hackernews.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.ask_stories.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
 
 [provides.operations.show_stories]
 summary = "Get Show HN story IDs"
@@ -92,6 +146,17 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.show_stories.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
+
 [provides.operations.job_stories]
 summary = "Get job story IDs"
 capability = "hackernews.read"
@@ -99,12 +164,34 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.job_stories.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
+
 [provides.operations.health]
 summary = "Check HN API health"
 capability = "hackernews.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 2
 
 [sandbox]
 profile = "strict"

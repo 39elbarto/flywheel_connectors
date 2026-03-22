@@ -511,10 +511,10 @@ impl FcpConnector for DockerHubConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let cfg = DockerHubConfig::from_value(config)?;
-        self.runtime = Some(ConnectorRuntime::new(
+        let runtime = ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(cfg.request_timeout_ms)),
-        ));
+        );
         let mut client = DockerHubClient::new(&cfg.base_url, cfg.auth.clone(), cfg.retry.clone())
             .await
             .map_err(|e| FcpError::Internal {
@@ -523,9 +523,10 @@ impl FcpConnector for DockerHubConnector {
 
         // If credentials-based auth, attempt login to get JWT
         if matches!(cfg.auth, DockerHubAuth::Credentials { .. }) && !cfg.auth.is_secretless() {
-            let _ = client.login(self.runtime.as_ref().unwrap()).await; // Best-effort login
+            let _ = client.login(&runtime).await; // Best-effort login
         }
 
+        self.runtime = Some(runtime);
         self.client = Some(client);
         self.config = Some(cfg);
         self.verifier = None;

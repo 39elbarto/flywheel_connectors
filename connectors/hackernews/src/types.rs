@@ -131,7 +131,10 @@ mod tests {
         });
         let item: Item = serde_json::from_value(json).unwrap();
         assert_eq!(item.item_type.as_deref(), Some("job"));
-        assert_eq!(item.title.as_deref(), Some("Justin.tv is looking for a lead architect"));
+        assert_eq!(
+            item.title.as_deref(),
+            Some("Justin.tv is looking for a lead architect")
+        );
     }
 
     #[test]

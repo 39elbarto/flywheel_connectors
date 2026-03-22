@@ -6,9 +6,21 @@ schema_version = "2.1"
 id = "fcp.feishu"
 name = "Feishu/Lark"
 version = "0.1.0"
-description = "Feishu/Lark API connector for messaging, chats, users, docs, sheets, and calendar"
+description = "Tenant-scoped Feishu/Lark connector for first-slice bot messaging, chat discovery, directory reads, docx and sheets reads, calendar reads, and connectivity verification"
 archetype = "operational"
 homepage = "https://open.feishu.cn/document/"
+
+# Auth and scope model:
+# - One connector instance is bound to one installed Feishu/Lark tenant app.
+# - Authentication is `app_id` + `app_secret`, exchanged against
+#   `/open-apis/auth/v3/tenant_access_token/internal`.
+# - The connector acts only as that installed app inside one tenant; it does not
+#   impersonate arbitrary users or cross tenant boundaries.
+# - Mainland China traffic uses `https://open.feishu.cn`; global traffic uses
+#   `https://open.larksuite.com`.
+# - User-delegated OAuth, cross-tenant brokering, webhook ingestion, websocket
+#   event delivery, Drive search/export/write, and calendar mutations are
+#   explicit non-goals for this first slice.
 
 [zones]
 home = "z:private"
@@ -29,7 +41,7 @@ safety_tier = "risky"
 idempotency = "none"
 
 [provides.operations.messages_send.network_constraints]
-host_allow = ["open.feishu.cn"]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
 port_allow = [443]
 require_tls = true
 require_sni = true
@@ -46,54 +58,142 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 
+[provides.operations.messages_reply.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
+
 [provides.operations.messages_get]
 summary = "Get a message"
 capability = "feishu.messages.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
+
+[provides.operations.messages_get.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
 
 [provides.operations.chats_list]
 summary = "List chats"
 capability = "feishu.chats.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
+
+[provides.operations.chats_list.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
 
 [provides.operations.chats_get]
 summary = "Get chat details"
 capability = "feishu.chats.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
+
+[provides.operations.chats_get.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
 
 [provides.operations.users_get]
 summary = "Get user info"
 capability = "feishu.users.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
+
+[provides.operations.users_get.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
 
 [provides.operations.docs_get]
 summary = "Get document content"
 capability = "feishu.docs.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
+
+[provides.operations.docs_get.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
 
 [provides.operations.sheets_get]
 summary = "Get spreadsheet data"
 capability = "feishu.docs.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
+
+[provides.operations.sheets_get.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
 
 [provides.operations.calendar_events]
 summary = "List calendar events"
 capability = "feishu.calendar.read"
 risk = "low"
 safety_tier = "safe"
-idempotency = "none"
+idempotency = "strict"
+
+[provides.operations.calendar_events.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0
 
 [provides.operations.health]
 summary = "Health check"
@@ -101,3 +201,14 @@ capability = "feishu.users.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["open.feishu.cn", "open.larksuite.com"]
+port_allow = [443]
+require_tls = true
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+max_redirects = 0

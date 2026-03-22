@@ -224,11 +224,7 @@ impl HackerNewsClient {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Get an item by ID.
-    pub async fn get_item(
-        &self,
-        runtime: &ConnectorRuntime,
-        id: u64,
-    ) -> HackerNewsResult<Item> {
+    pub async fn get_item(&self, runtime: &ConnectorRuntime, id: u64) -> HackerNewsResult<Item> {
         let url = format!("{}/item/{}.json", self.base_url, id);
         let item = self.get_nullable_item(runtime, &url).await?;
         item.ok_or_else(|| HackerNewsError::NotFound(format!("item {id}")))
@@ -246,55 +242,37 @@ impl HackerNewsClient {
     }
 
     /// Get top story IDs.
-    pub async fn top_stories(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> HackerNewsResult<Vec<u64>> {
+    pub async fn top_stories(&self, runtime: &ConnectorRuntime) -> HackerNewsResult<Vec<u64>> {
         let url = format!("{}/topstories.json", self.base_url);
         self.get_with_retry(runtime, &url).await
     }
 
     /// Get new story IDs.
-    pub async fn new_stories(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> HackerNewsResult<Vec<u64>> {
+    pub async fn new_stories(&self, runtime: &ConnectorRuntime) -> HackerNewsResult<Vec<u64>> {
         let url = format!("{}/newstories.json", self.base_url);
         self.get_with_retry(runtime, &url).await
     }
 
     /// Get best story IDs.
-    pub async fn best_stories(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> HackerNewsResult<Vec<u64>> {
+    pub async fn best_stories(&self, runtime: &ConnectorRuntime) -> HackerNewsResult<Vec<u64>> {
         let url = format!("{}/beststories.json", self.base_url);
         self.get_with_retry(runtime, &url).await
     }
 
     /// Get Ask HN story IDs.
-    pub async fn ask_stories(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> HackerNewsResult<Vec<u64>> {
+    pub async fn ask_stories(&self, runtime: &ConnectorRuntime) -> HackerNewsResult<Vec<u64>> {
         let url = format!("{}/askstories.json", self.base_url);
         self.get_with_retry(runtime, &url).await
     }
 
     /// Get Show HN story IDs.
-    pub async fn show_stories(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> HackerNewsResult<Vec<u64>> {
+    pub async fn show_stories(&self, runtime: &ConnectorRuntime) -> HackerNewsResult<Vec<u64>> {
         let url = format!("{}/showstories.json", self.base_url);
         self.get_with_retry(runtime, &url).await
     }
 
     /// Get job story IDs.
-    pub async fn job_stories(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> HackerNewsResult<Vec<u64>> {
+    pub async fn job_stories(&self, runtime: &ConnectorRuntime) -> HackerNewsResult<Vec<u64>> {
         let url = format!("{}/jobstories.json", self.base_url);
         self.get_with_retry(runtime, &url).await
     }
@@ -346,10 +324,7 @@ mod tests {
     #[test]
     fn default_base_url() {
         let client = HackerNewsClient::new(None, HttpRetryConfig::default()).unwrap();
-        assert_eq!(
-            client.base_url(),
-            "https://hacker-news.firebaseio.com/v0"
-        );
+        assert_eq!(client.base_url(), "https://hacker-news.firebaseio.com/v0");
     }
 
     #[test]
@@ -380,9 +355,7 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v0/topstories.json"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!([1, 2, 3])),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([1, 2, 3])))
             .mount(&mock_server)
             .await;
 

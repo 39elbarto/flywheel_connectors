@@ -4,7 +4,7 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
 use fcp_sdk::retry::RetryDecision;
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, Url};
 use serde_json::json;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -43,9 +43,10 @@ impl LineClient {
         base_url: &str,
         channel_access_token: &str,
         retry_config: HttpRetryConfig,
+        request_timeout: Duration,
     ) -> LineResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(request_timeout)
             .build()
             .map_err(LineError::Http)?;
 
@@ -65,19 +66,37 @@ impl LineClient {
         }
     }
 
+    fn build_url(&self, path_segments: &[&str]) -> LineResult<Url> {
+        let mut url = Url::parse(&self.base_url)
+            .map_err(|err| LineError::Config(format!("invalid LINE base_url: {err}")))?;
+        let mut segments = url.path_segments_mut().map_err(|()| {
+            LineError::Config("LINE base_url cannot be used as a hierarchical URL base".into())
+        })?;
+        segments.pop_if_empty();
+        for segment in path_segments {
+            segments.push(segment);
+        }
+        drop(segments);
+        Ok(url)
+    }
+
     /// Sanitize a path segment to prevent path traversal.
     fn sanitize_path_segment(segment: &str) -> LineResult<&str> {
-        if segment.trim().is_empty()
-            || segment.contains('/')
-            || segment.contains('\\')
-            || segment.contains("..")
-            || segment.contains('\0')
+        let trimmed = segment.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if trimmed.is_empty()
+            || trimmed.contains('/')
+            || trimmed.contains('\\')
+            || trimmed.contains("..")
+            || trimmed.contains('\0')
+            || lower.contains("%2f")
+            || lower.contains("%5c")
         {
             return Err(LineError::InvalidInput(
                 "Invalid path segment: contains forbidden characters".to_string(),
             ));
         }
-        Ok(segment)
+        Ok(trimmed)
     }
 
     /// Push a message to a user.
@@ -87,9 +106,9 @@ impl LineClient {
         to: &str,
         messages: Vec<Message>,
     ) -> LineResult<SentMessageResponse> {
-        let url = format!("{}/v2/bot/message/push", self.base_url);
+        let url = self.build_url(&["v2", "bot", "message", "push"])?;
         let body = json!({ "to": to, "messages": messages });
-        self.post_message(runtime, &url, &body).await
+        self.post_message(runtime, url, &body).await
     }
 
     /// Reply to a message using a reply token.
@@ -99,9 +118,9 @@ impl LineClient {
         reply_token: &str,
         messages: Vec<Message>,
     ) -> LineResult<SentMessageResponse> {
-        let url = format!("{}/v2/bot/message/reply", self.base_url);
+        let url = self.build_url(&["v2", "bot", "message", "reply"])?;
         let body = json!({ "replyToken": reply_token, "messages": messages });
-        self.post_message(runtime, &url, &body).await
+        self.post_message(runtime, url, &body).await
     }
 
     /// Multicast a message to multiple users.
@@ -111,21 +130,21 @@ impl LineClient {
         to: &[String],
         messages: Vec<Message>,
     ) -> LineResult<SentMessageResponse> {
-        let url = format!("{}/v2/bot/message/multicast", self.base_url);
+        let url = self.build_url(&["v2", "bot", "message", "multicast"])?;
         let body = json!({ "to": to, "messages": messages });
-        self.post_message(runtime, &url, &body).await
+        self.post_message(runtime, url, &body).await
     }
 
     /// Common POST for messaging endpoints with retry.
     async fn post_message(
         &self,
         runtime: &ConnectorRuntime,
-        url: &str,
+        url: Url,
         body: &serde_json::Value,
     ) -> LineResult<SentMessageResponse> {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let url = url.to_string();
+        let url = url.clone();
         let body_clone = body.clone();
         let client = self.client.clone();
         let token = self.channel_access_token.clone();
@@ -138,9 +157,9 @@ impl LineClient {
             async move {
                 debug!(attempt, "Sending LINE message");
                 let request = if token.is_empty() {
-                    client.post(&url)
+                    client.post(url.clone())
                 } else {
-                    client.post(&url).bearer_auth(&token)
+                    client.post(url.clone()).bearer_auth(&token)
                 }
                 .json(&body);
 
@@ -216,7 +235,7 @@ impl LineClient {
         user_id: &str,
     ) -> LineResult<UserProfile> {
         let user_id = Self::sanitize_path_segment(user_id)?;
-        let url = format!("{}/v2/bot/profile/{}", self.base_url, user_id);
+        let url = self.build_url(&["v2", "bot", "profile", user_id])?;
         self.get_json(runtime, &url).await
     }
 
@@ -227,7 +246,7 @@ impl LineClient {
         group_id: &str,
     ) -> LineResult<GroupSummary> {
         let group_id = Self::sanitize_path_segment(group_id)?;
-        let url = format!("{}/v2/bot/group/{}/summary", self.base_url, group_id);
+        let url = self.build_url(&["v2", "bot", "group", group_id, "summary"])?;
         self.get_json(runtime, &url).await
     }
 
@@ -239,12 +258,9 @@ impl LineClient {
         start: Option<&str>,
     ) -> LineResult<GroupMembersResponse> {
         let group_id = Self::sanitize_path_segment(group_id)?;
-        let mut url = format!(
-            "{}/v2/bot/group/{}/members/ids",
-            self.base_url, group_id
-        );
+        let mut url = self.build_url(&["v2", "bot", "group", group_id, "members", "ids"])?;
         if let Some(token) = start {
-            url.push_str(&format!("?start={token}"));
+            url.query_pairs_mut().append_pair("start", token);
         }
         self.get_json(runtime, &url).await
     }
@@ -254,7 +270,7 @@ impl LineClient {
         &self,
         runtime: &ConnectorRuntime,
     ) -> LineResult<RichMenuListResponse> {
-        let url = format!("{}/v2/bot/richmenu/list", self.base_url);
+        let url = self.build_url(&["v2", "bot", "richmenu", "list"])?;
         self.get_json(runtime, &url).await
     }
 
@@ -264,7 +280,7 @@ impl LineClient {
         runtime: &ConnectorRuntime,
         menu: &RichMenu,
     ) -> LineResult<RichMenuCreateResponse> {
-        let url = format!("{}/v2/bot/richmenu", self.base_url);
+        let url = self.build_url(&["v2", "bot", "richmenu"])?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = serde_json::to_value(menu).map_err(LineError::Json)?;
@@ -279,9 +295,9 @@ impl LineClient {
             async move {
                 debug!(attempt, "Creating LINE rich menu");
                 let request = if token.is_empty() {
-                    client.post(&url)
+                    client.post(url.clone())
                 } else {
-                    client.post(&url).bearer_auth(&token)
+                    client.post(url.clone()).bearer_auth(&token)
                 }
                 .json(&body);
 
@@ -333,7 +349,7 @@ impl LineClient {
         rich_menu_id: &str,
     ) -> LineResult<()> {
         let rich_menu_id = Self::sanitize_path_segment(rich_menu_id)?;
-        let url = format!("{}/v2/bot/richmenu/{}", self.base_url, rich_menu_id);
+        let url = self.build_url(&["v2", "bot", "richmenu", rich_menu_id])?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let client = self.client.clone();
@@ -346,9 +362,9 @@ impl LineClient {
             async move {
                 debug!(attempt, "Deleting LINE rich menu");
                 let request = if token.is_empty() {
-                    client.delete(&url)
+                    client.delete(url.clone())
                 } else {
-                    client.delete(&url).bearer_auth(&token)
+                    client.delete(url.clone()).bearer_auth(&token)
                 };
 
                 let resp = match request.send().await {
@@ -391,9 +407,9 @@ impl LineClient {
 
     /// Health check: verify the LINE API is reachable.
     pub async fn health_check(&self) -> LineResult<()> {
-        let url = format!("{}/v2/bot/info", self.base_url);
+        let url = self.build_url(&["v2", "bot", "info"])?;
         let resp = self
-            .authenticate(self.client.get(&url))
+            .authenticate(self.client.get(url))
             .send()
             .await
             .map_err(LineError::Http)?;
@@ -436,11 +452,11 @@ impl LineClient {
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         runtime: &ConnectorRuntime,
-        url: &str,
+        url: &Url,
     ) -> LineResult<T> {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let url = url.to_string();
+        let url = url.clone();
         let client = self.client.clone();
         let token = self.channel_access_token.clone();
 
@@ -451,9 +467,9 @@ impl LineClient {
             async move {
                 debug!(attempt, url = %url, "LINE API GET");
                 let request = if token.is_empty() {
-                    client.get(&url)
+                    client.get(url.clone())
                 } else {
-                    client.get(&url).bearer_auth(&token)
+                    client.get(url.clone()).bearer_auth(&token)
                 };
 
                 let resp = match request.send().await {
@@ -529,6 +545,7 @@ mod tests {
             "https://api.line.me",
             "test_token",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         );
         assert!(client.is_ok());
     }
@@ -539,6 +556,7 @@ mod tests {
             "https://api.line.me/",
             "test_token",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         assert!(!client.base_url().ends_with('/'));
@@ -546,8 +564,13 @@ mod tests {
 
     #[test]
     fn secretless_detection() {
-        let client =
-            LineClient::new("https://api.line.me", "", HttpRetryConfig::default()).unwrap();
+        let client = LineClient::new(
+            "https://api.line.me",
+            "",
+            HttpRetryConfig::default(),
+            Duration::from_secs(30),
+        )
+        .unwrap();
         assert!(client.is_secretless());
     }
 
@@ -557,6 +580,7 @@ mod tests {
             "https://api.line.me",
             "real_token",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         assert!(!client.is_secretless());
@@ -568,6 +592,7 @@ mod tests {
             "https://api.line.me",
             "super_secret_channel_token",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         let debug_output = format!("{client:?}");
@@ -584,12 +609,18 @@ mod tests {
         assert!(LineClient::sanitize_path_segment("foo/bar").is_err());
         assert!(LineClient::sanitize_path_segment("").is_err());
         assert!(LineClient::sanitize_path_segment("foo\0bar").is_err());
+        assert!(LineClient::sanitize_path_segment("foo%2fbar").is_err());
+        assert!(LineClient::sanitize_path_segment("foo%5Cbar").is_err());
     }
 
     #[test]
     fn sanitize_path_accepts_valid() {
         assert!(LineClient::sanitize_path_segment("U1234567890abcdef").is_ok());
         assert!(LineClient::sanitize_path_segment("richmenu-abc123").is_ok());
+        assert_eq!(
+            LineClient::sanitize_path_segment("  U1234567890abcdef  ").unwrap(),
+            "U1234567890abcdef"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -602,8 +633,13 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client =
-            LineClient::new(&mock_server.uri(), "test_tok", HttpRetryConfig::default()).unwrap();
+        let client = LineClient::new(
+            &mock_server.uri(),
+            "test_tok",
+            HttpRetryConfig::default(),
+            Duration::from_secs(30),
+        )
+        .unwrap();
         assert!(client.health_check().await.is_ok());
     }
 
@@ -616,8 +652,13 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client =
-            LineClient::new(&mock_server.uri(), "bad_tok", HttpRetryConfig::default()).unwrap();
+        let client = LineClient::new(
+            &mock_server.uri(),
+            "bad_tok",
+            HttpRetryConfig::default(),
+            Duration::from_secs(30),
+        )
+        .unwrap();
         let result = client.health_check().await;
         assert!(matches!(result, Err(LineError::Unauthorized(_))));
     }
@@ -631,12 +672,47 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client =
-            LineClient::new(&mock_server.uri(), "", HttpRetryConfig::default()).unwrap();
+        let client = LineClient::new(
+            &mock_server.uri(),
+            "",
+            HttpRetryConfig::default(),
+            Duration::from_secs(30),
+        )
+        .unwrap();
         assert!(client.health_check().await.is_ok());
 
         let requests = mock_server.received_requests().await.unwrap_or_default();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].headers.get("authorization").is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn group_members_start_query_is_percent_encoded() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/bot/group/C123/members/ids"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "memberIds": [],
+                "next": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = LineClient::new(
+            &mock_server.uri(),
+            "test_tok",
+            HttpRetryConfig::default(),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        client
+            .get_group_members(&runtime, "C123", Some("tok&other=value"))
+            .await
+            .unwrap();
+
+        let requests = mock_server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.query(), Some("start=tok%26other%3Dvalue"));
     }
 }

@@ -1,6 +1,9 @@
 //! LINE connector implementation.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use fcp_core::{
@@ -38,6 +41,7 @@ const CAP_MSG_WRITE: &str = "line.messages.write";
 const CAP_PROFILE_READ: &str = "line.profile.read";
 const CAP_MENU_READ: &str = "line.menu.read";
 const CAP_MENU_WRITE: &str = "line.menu.write";
+const LINE_API_HOST: &str = "api.line.me";
 
 /// LINE connector configuration.
 #[derive(Clone, Deserialize)]
@@ -68,6 +72,93 @@ fn default_base_url() -> String {
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1")
+}
+
+fn parse_base_url(base_url: &str) -> FcpResult<reqwest::Url> {
+    reqwest::Url::parse(base_url).map_err(|err| FcpError::InvalidRequest {
+        code: 1001,
+        message: format!("Invalid base_url `{base_url}`: {err}"),
+    })
+}
+
+fn validate_config(config: &LineConfig) -> FcpResult<()> {
+    if config.channel_access_token.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "channel_access_token must not be empty".into(),
+        });
+    }
+
+    if config.request_timeout_ms == 0 {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "request_timeout_ms must be greater than zero".into(),
+        });
+    }
+
+    let base_url = parse_base_url(&config.base_url)?;
+    let host = base_url.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1001,
+        message: "base_url must include a host".into(),
+    })?;
+    let is_local_host = is_local_test_host(host);
+
+    if !base_url.username().is_empty() || base_url.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "base_url must not include embedded credentials".into(),
+        });
+    }
+
+    if host != LINE_API_HOST && !is_local_host {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!(
+                "base_url host `{host}` is not allowed; use https://{LINE_API_HOST} or localhost/127.0.0.1 for tests"
+            ),
+        });
+    }
+
+    if host == LINE_API_HOST && base_url.scheme() != "https" {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "Production LINE base_url must use https".into(),
+        });
+    }
+
+    if is_local_host && !matches!(base_url.scheme(), "http" | "https") {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "Local test LINE base_url must use http or https".into(),
+        });
+    }
+
+    if !is_local_host && base_url.port_or_known_default() != Some(443) {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "Production LINE base_url must use port 443".into(),
+        });
+    }
+
+    if base_url.path() != "/" && !base_url.path().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "base_url must not include a path segment".into(),
+        });
+    }
+
+    if base_url.query().is_some() || base_url.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "base_url must not include query or fragment components".into(),
+        });
+    }
+
+    Ok(())
 }
 
 // Doctor types
@@ -125,6 +216,42 @@ impl LineConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn self_check_details(&self, live_probe: Option<&str>) -> serde_json::Value {
+        json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "auth_mode": self.config.as_ref().map(|_| "bearer_token"),
+            "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
+            "base_url_validation": self.config.as_ref().map(|config| {
+                match parse_base_url(&config.base_url) {
+                    Ok(url) => json!({
+                        "host": url.host_str(),
+                        "scheme": url.scheme(),
+                        "local_test_host": url.host_str().is_some_and(is_local_test_host),
+                    }),
+                    Err(err) => json!({
+                        "valid": false,
+                        "error": err.to_string(),
+                    }),
+                }
+            }),
+            "request_timeout_ms": self.config.as_ref().map(|config| config.request_timeout_ms),
+            "live_probe": live_probe,
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        live_probe: Option<&str>,
+    ) -> SelfCheckReport {
+        report.details = Some(self.self_check_details(live_probe));
+        report
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
@@ -166,28 +293,33 @@ impl LineConnector {
         });
 
         if let Some(config) = &self.config {
-            let allowed_hosts = ["api.line.me"];
-            let host_part = config
-                .base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                passed: true,
+                message: Some(format!("Base URL: {}", config.base_url)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "credential_mode".into(),
+                passed: !config.channel_access_token.trim().is_empty(),
+                message: Some("Bearer channel access token configured".into()),
+                critical: true,
+            });
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
-                passed: host_ok,
-                message: Some(if host_ok {
-                    "Base URL matches allowed host (api.line.me)".into()
-                } else {
-                    format!("Base URL {} does not match allowed hosts", config.base_url)
+                passed: validate_config(config).is_ok(),
+                message: Some(match parse_base_url(&config.base_url) {
+                    Ok(url) => {
+                        let host = url.host_str().unwrap_or("<missing-host>");
+                        if host == LINE_API_HOST {
+                            "Base URL targets the production LINE API over https".into()
+                        } else if is_local_test_host(host) {
+                            format!("Base URL targets allowed local test host `{host}`")
+                        } else {
+                            format!("Base URL host `{host}` is outside the allowed LINE/test set")
+                        }
+                    }
+                    Err(err) => err.to_string(),
                 }),
                 critical: true,
             });
@@ -231,11 +363,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_MSG_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "When you need to send a message to a LINE user proactively".into(),
+                when_to_use: "When you need to send a message proactively to a LINE user, group, or room ID already known to the caller".into(),
                 common_mistakes: vec![
-                    "User ID must start with 'U' (33 chars total)".into(),
+                    "Push accepts a single recipient ID string; it is not limited to user IDs".into(),
                     "Maximum 5 messages per request".into(),
                 ],
                 examples: Vec::new(),
@@ -311,7 +443,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_MSG_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "When broadcasting a message to multiple users at once".into(),
                 common_mistakes: vec![
@@ -347,7 +479,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PROFILE_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to look up a user's profile information".into(),
                 common_mistakes: Vec::new(),
@@ -379,12 +511,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PROFILE_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need group chat information".into(),
-                common_mistakes: vec![
-                    "Group ID starts with 'C'".into(),
-                ],
+                common_mistakes: vec!["Group ID starts with 'C'".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_GROUP_MEMBERS)],
             },
@@ -413,11 +543,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PROFILE_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to list all members of a group".into(),
                 common_mistakes: vec![
                     "Use pagination token from 'next' field for subsequent pages".into(),
+                    "LINE restricts full group member enumeration to verified or premium official accounts".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_GROUP_PROFILE)],
@@ -439,7 +570,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_MENU_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to see existing rich menus".into(),
                 common_mistakes: Vec::new(),
@@ -473,12 +604,13 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_MENU_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "When creating a new rich menu for users to interact with".into(),
                 common_mistakes: vec![
                     "Size must be 2500x1686 or 2500x843".into(),
                     "Upload the image separately after creating the menu".into(),
+                    "Retries are not wired to LINE retry keys yet, so duplicate creates are still possible after ambiguous failures".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_RICH_MENU_DELETE)],
@@ -553,22 +685,26 @@ impl FcpConnector for LineConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
-        let config: LineConfig =
+        let mut config: LineConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid LINE config: {e}"),
             })?;
+        config.base_url = config.base_url.trim().trim_end_matches('/').to_owned();
+        config.channel_access_token = config.channel_access_token.trim().to_owned();
+        validate_config(&config)?;
 
         self.retry_config = config.retry.clone();
+        let request_timeout = Duration::from_millis(config.request_timeout_ms);
         self.runtime = Some(ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
+            ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
         ));
 
         let client = LineClient::new(
             &config.base_url,
             &config.channel_access_token,
             config.retry.clone(),
+            request_timeout,
         )
         .map_err(|e| FcpError::Internal {
             message: format!("Failed to create LINE client: {e}"),
@@ -576,7 +712,9 @@ impl FcpConnector for LineConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.verifier = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(())
     }
 
@@ -622,40 +760,36 @@ impl FcpConnector for LineConnector {
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "manifest_hash": Self::manifest_hash(),
+            "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
+        }));
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
             ));
         };
 
-        if client.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
-                "credential_injection_required",
-                "Configured with empty token; egress proxy injection required",
-            ));
-        }
-
-        match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
             Err(err) => {
                 if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
-                    ))
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
                 } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
-                    ))
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
                 }
             }
-        }
+        };
+
+        Ok(self.attach_self_check_details(report, Some("GET /v2/bot/info")))
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
@@ -717,9 +851,7 @@ impl LineConnector {
                 CapabilityId::from_static(CAP_PROFILE_READ)
             }
             OP_RICH_MENU_LIST => CapabilityId::from_static(CAP_MENU_READ),
-            OP_RICH_MENU_CREATE | OP_RICH_MENU_DELETE => {
-                CapabilityId::from_static(CAP_MENU_WRITE)
-            }
+            OP_RICH_MENU_CREATE | OP_RICH_MENU_DELETE => CapabilityId::from_static(CAP_MENU_WRITE),
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -834,14 +966,12 @@ impl LineConnector {
                 })?
             }
             OP_PROFILE_GET => {
-                let user_id = req
-                    .input
-                    .get("user_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let user_id = req.input.get("user_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'user_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let profile = client
                     .get_profile(runtime, user_id)
                     .await
@@ -851,14 +981,12 @@ impl LineConnector {
                 })?
             }
             OP_GROUP_PROFILE => {
-                let group_id = req
-                    .input
-                    .get("group_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let group_id = req.input.get("group_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'group_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let summary = client
                     .get_group_summary(runtime, group_id)
                     .await
@@ -868,14 +996,12 @@ impl LineConnector {
                 })?
             }
             OP_GROUP_MEMBERS => {
-                let group_id = req
-                    .input
-                    .get("group_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let group_id = req.input.get("group_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'group_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let start = req.input.get("start").and_then(|v| v.as_str());
                 let members = client
                     .get_group_members(runtime, group_id, start)
@@ -1011,6 +1137,106 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_empty_token() {
+        let mut connector = LineConnector::new();
+        let result = connector
+            .configure(json!({ "channel_access_token": "   " }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_zero_timeout() {
+        let mut connector = LineConnector::new();
+        let result = connector
+            .configure(json!({
+                "channel_access_token": "tok",
+                "request_timeout_ms": 0
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_disallowed_host() {
+        let mut connector = LineConnector::new();
+        let result = connector
+            .configure(json!({
+                "channel_access_token": "tok",
+                "base_url": "https://example.com"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_embedded_credentials() {
+        let mut connector = LineConnector::new();
+        let result = connector
+            .configure(json!({
+                "channel_access_token": "tok",
+                "base_url": "https://user:pass@api.line.me"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_production_non_default_port() {
+        let mut connector = LineConnector::new();
+        let result = connector
+            .configure(json!({
+                "channel_access_token": "tok",
+                "base_url": "https://api.line.me:8443"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_local_non_http_scheme() {
+        let mut connector = LineConnector::new();
+        let result = connector
+            .configure(json!({
+                "channel_access_token": "tok",
+                "base_url": "file://localhost"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_base_url_path_segments() {
+        let mut connector = LineConnector::new();
+        let result = connector
+            .configure(json!({
+                "channel_access_token": "tok",
+                "base_url": "https://api.line.me/v2"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_trims_base_url_and_token() {
+        let mut connector = LineConnector::new();
+        connector
+            .configure(json!({
+                "channel_access_token": "  tok  ",
+                "base_url": " https://api.line.me/ "
+            }))
+            .await
+            .unwrap();
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.base_url, "https://api.line.me");
+        assert_eq!(config.channel_access_token, "tok");
+        assert_eq!(
+            connector.client.as_ref().unwrap().base_url(),
+            "https://api.line.me"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_health_before_configure() {
         let connector = LineConnector::new();
         let health = connector.health().await;
@@ -1051,6 +1277,7 @@ mod tests {
         let connector = LineConnector::new();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert!(report.details.is_some());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1104,7 +1331,7 @@ mod tests {
         let ops = operations_info();
         let push = ops.iter().find(|op| op.id.as_str() == OP_PUSH).unwrap();
         assert_eq!(push.safety_tier, SafetyTier::Risky);
-        assert_eq!(push.idempotency, IdempotencyClass::None);
+        assert_eq!(push.idempotency, IdempotencyClass::BestEffort);
     }
 
     #[test]
@@ -1129,13 +1356,13 @@ mod tests {
     }
 
     #[test]
-    fn test_rich_menu_create_is_strict_idempotency() {
+    fn test_rich_menu_create_is_best_effort() {
         let ops = operations_info();
         let create = ops
             .iter()
             .find(|op| op.id.as_str() == OP_RICH_MENU_CREATE)
             .unwrap();
-        assert_eq!(create.idempotency, IdempotencyClass::Strict);
+        assert_eq!(create.idempotency, IdempotencyClass::BestEffort);
     }
 
     #[test]
@@ -1180,6 +1407,30 @@ mod tests {
         let req = base_invoke(connector.id(), OP_PUSH);
         let result = connector.invoke(req).await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconfigure_resets_handshake_state() {
+        let mut connector = LineConnector::new();
+        connector
+            .configure(json!({ "channel_access_token": "tok_one" }))
+            .await
+            .unwrap();
+        connector.handshake(base_handshake()).await.unwrap();
+        assert!(connector.base.handshaken.load(Ordering::Acquire));
+        assert!(connector.verifier.is_some());
+
+        connector
+            .configure(json!({ "channel_access_token": "tok_two" }))
+            .await
+            .unwrap();
+
+        assert!(!connector.base.handshaken.load(Ordering::Acquire));
+        assert!(connector.verifier.is_none());
+
+        let req = base_invoke(connector.id(), OP_HEALTH);
+        let result = connector.invoke(req).await;
+        assert!(matches!(result, Err(FcpError::NotHandshaken)));
     }
 
     #[fcp_async_core::runtime::test]

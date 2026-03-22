@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use fcp_core::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityGrant, CapabilityId,
+    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    InvokeResponse, OperationId, OperationInfo, ResourceTypeInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
@@ -20,6 +20,12 @@ use crate::client::FeishuClient;
 use crate::types::{ReplyMessageRequest, SendMessageRequest};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const FEISHU_CN_HOST: &str = "open.feishu.cn";
+const FEISHU_GLOBAL_HOST: &str = "open.larksuite.com";
+const FEISHU_TENANT_APP_BOUNDARY: &str = "This connector acts as one installed tenant app; it does not impersonate arbitrary users or cross tenant boundaries.";
+const MAX_CHATS_PAGE_SIZE: u32 = 200;
+const ALLOWED_RECEIVE_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id", "email", "chat_id"];
+const ALLOWED_USER_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id"];
 
 // Operation IDs
 const OP_MESSAGES_SEND: &str = "feishu.messages.send";
@@ -72,6 +78,154 @@ fn default_base_url() -> String {
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1")
+}
+
+fn parse_base_url(base_url: &str) -> FcpResult<reqwest::Url> {
+    reqwest::Url::parse(base_url).map_err(|err| FcpError::InvalidRequest {
+        code: 1001,
+        message: format!("Invalid base_url `{base_url}`: {err}"),
+    })
+}
+
+fn validate_base_url(base_url: &reqwest::Url) -> FcpResult<()> {
+    let host = base_url.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1001,
+        message: "base_url must include a host".into(),
+    })?;
+    let is_local_host = is_local_test_host(host);
+
+    if !base_url.username().is_empty() || base_url.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "base_url must not include embedded credentials".into(),
+        });
+    }
+
+    if host != FEISHU_CN_HOST && host != FEISHU_GLOBAL_HOST && !is_local_host {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!(
+                "base_url host `{host}` is not allowed; use https://{FEISHU_CN_HOST}, https://{FEISHU_GLOBAL_HOST}, or localhost/127.0.0.1 for tests"
+            ),
+        });
+    }
+
+    if !is_local_host && base_url.scheme() != "https" {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "Production Feishu/Lark base_url must use https".into(),
+        });
+    }
+
+    if !is_local_host && base_url.port_or_known_default() != Some(443) {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "Production Feishu/Lark base_url must use port 443".into(),
+        });
+    }
+
+    if base_url.path() != "/" && !base_url.path().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "base_url must not include a path segment".into(),
+        });
+    }
+
+    if base_url.query().is_some() || base_url.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "base_url must not include query or fragment components".into(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_config(config: &FeishuConfig) -> FcpResult<()> {
+    if config.app_id.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "app_id must not be empty".into(),
+        });
+    }
+
+    if config.app_secret.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "app_secret must not be empty".into(),
+        });
+    }
+
+    if config.request_timeout_ms == 0 {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "request_timeout_ms must be greater than zero".into(),
+        });
+    }
+
+    let base_url = parse_base_url(&config.base_url)?;
+    validate_base_url(&base_url)
+}
+
+fn base_url_diagnostic(base_url: &str) -> (bool, String) {
+    match parse_base_url(base_url).and_then(|url| {
+        validate_base_url(&url)?;
+        Ok(url)
+    }) {
+        Ok(url) => {
+            let host = url.host_str().unwrap_or_default();
+            let message = if is_local_test_host(host) {
+                "Base URL uses a localhost test override".into()
+            } else {
+                format!("Base URL matches allowed Feishu/Lark host `{host}`")
+            };
+            (true, message)
+        }
+        Err(FcpError::InvalidRequest { message, .. }) => (false, message),
+        Err(err) => (false, err.to_string()),
+    }
+}
+
+fn validate_receive_id_type(receive_id_type: &str) -> FcpResult<&str> {
+    if ALLOWED_RECEIVE_ID_TYPES.contains(&receive_id_type) {
+        Ok(receive_id_type)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "receive_id_type must be one of: {}",
+                ALLOWED_RECEIVE_ID_TYPES.join(", ")
+            ),
+        })
+    }
+}
+
+fn validate_user_id_type(user_id_type: &str) -> FcpResult<&str> {
+    if ALLOWED_USER_ID_TYPES.contains(&user_id_type) {
+        Ok(user_id_type)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "user_id_type must be one of: {}",
+                ALLOWED_USER_ID_TYPES.join(", ")
+            ),
+        })
+    }
+}
+
+fn validate_chats_page_size(page_size: u64) -> FcpResult<u32> {
+    if !(1..=u64::from(MAX_CHATS_PAGE_SIZE)).contains(&page_size) {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("page_size must be between 1 and {MAX_CHATS_PAGE_SIZE}"),
+        });
+    }
+    Ok(page_size as u32)
 }
 
 // Doctor types
@@ -170,36 +324,15 @@ impl FeishuConnector {
         });
 
         if let Some(config) = &self.config {
-            let allowed_hosts = ["open.feishu.cn", "open.larksuite.com"];
-            let host_part = config
-                .base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
+            let (host_ok, host_message) = base_url_diagnostic(&config.base_url);
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
                 passed: host_ok,
-                message: Some(if host_ok {
-                    "Base URL matches allowed hosts".into()
-                } else {
-                    format!("Base URL {} does not match allowed hosts", config.base_url)
-                }),
+                message: Some(host_message),
                 critical: true,
             });
 
-            let creds_ok = self
-                .client
-                .as_ref()
-                .is_some_and(|c| c.has_credentials());
+            let creds_ok = self.client.as_ref().is_some_and(|c| c.has_credentials());
             checks.push(DoctorCheck {
                 name: "credentials".into(),
                 passed: creds_ok,
@@ -222,13 +355,111 @@ impl Default for FeishuConnector {
     }
 }
 
+fn feishu_auth_caps() -> AuthCaps {
+    AuthCaps {
+        methods: vec![
+            "app_id_secret".to_string(),
+            "tenant_access_token_internal".to_string(),
+        ],
+        oauth: None,
+    }
+}
+
+fn feishu_resource_types() -> Vec<ResourceTypeInfo> {
+    vec![
+        ResourceTypeInfo {
+            name: "feishu.message".into(),
+            uri_pattern: "feishu://messages/{message_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["message_id"],
+                "properties": {
+                    "message_id": { "type": "string" },
+                    "chat_id": { "type": "string" },
+                    "msg_type": { "type": "string" },
+                    "body": { "type": "object" }
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "feishu.chat".into(),
+            uri_pattern: "feishu://chats/{chat_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["chat_id"],
+                "properties": {
+                    "chat_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" }
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "feishu.user".into(),
+            uri_pattern: "feishu://users/{user_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["user_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "email": { "type": "string" }
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "feishu.document".into(),
+            uri_pattern: "feishu://docs/{document_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["document_id"],
+                "properties": {
+                    "document_id": { "type": "string" },
+                    "document": { "type": "object" },
+                    "body": { "type": "object" }
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "feishu.spreadsheet".into(),
+            uri_pattern: "feishu://sheets/{spreadsheet_token}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["spreadsheet_token"],
+                "properties": {
+                    "spreadsheet_token": { "type": "string" },
+                    "title": { "type": "string" },
+                    "sheets": { "type": "array" }
+                }
+            }),
+        },
+        ResourceTypeInfo {
+            name: "feishu.calendar_event".into(),
+            uri_pattern: "feishu://calendars/{calendar_id}/events/{event_id}".into(),
+            schema: json!({
+                "type": "object",
+                "required": ["calendar_id", "event_id"],
+                "properties": {
+                    "calendar_id": { "type": "string" },
+                    "event_id": { "type": "string" },
+                    "summary": { "type": "string" },
+                    "start_time": { "type": "string" },
+                    "end_time": { "type": "string" }
+                }
+            }),
+        },
+    ]
+}
+
 /// Build the typed operations catalog.
 pub fn operations_info() -> Vec<OperationInfo> {
     vec![
         OperationInfo {
             id: OperationId::from_static(OP_MESSAGES_SEND),
             summary: "Send a message via Feishu".into(),
-            description: Some("Sends a message to a user or chat".into()),
+            description: Some(
+                "Sends a bot-authored message through the installed tenant app to one visible user or chat; custom webhook bots, user impersonation, and cross-tenant fan-out are out of scope for this first slice.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["receive_id", "msg_type", "content"],
@@ -250,10 +481,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
-                when_to_use: "When you need to send a message to a Feishu user or group chat".into(),
+                when_to_use: "When you need to send a message to a Feishu user or group chat"
+                    .into(),
                 common_mistakes: vec![
                     "Content must be JSON-encoded string matching msg_type schema".into(),
                     "receive_id_type defaults to open_id if not specified".into(),
+                    FEISHU_TENANT_APP_BOUNDARY.into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_MESSAGES_REPLY)],
@@ -264,7 +497,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_MESSAGES_REPLY),
             summary: "Reply to a Feishu message".into(),
-            description: Some("Sends a reply to an existing message".into()),
+            description: Some(
+                "Replies to an existing message visible to the installed tenant app; this does not provide general thread syncing or inbound event delivery.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["message_id", "msg_type", "content"],
@@ -288,6 +523,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "When replying to an existing message in a thread".into(),
                 common_mistakes: vec![
                     "message_id must be valid and accessible".into(),
+                    FEISHU_TENANT_APP_BOUNDARY.into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_MESSAGES_SEND)],
@@ -298,7 +534,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_MESSAGES_GET),
             summary: "Get a Feishu message by ID".into(),
-            description: Some("Retrieves a single message by its message ID".into()),
+            description: Some(
+                "Retrieves one message visible to the installed tenant app. Webhook and websocket delivery surfaces remain explicit non-goals in this first slice.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["message_id"],
@@ -317,10 +555,13 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_MSG_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to read the content of a specific message".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "This first slice only reads messages already visible to the installed app."
+                        .into(),
+                ],
                 examples: Vec::new(),
                 related: Vec::new(),
             },
@@ -330,7 +571,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_CHATS_LIST),
             summary: "List Feishu chats".into(),
-            description: Some("Lists chats the bot is a member of, with pagination".into()),
+            description: Some(
+                "Lists chats visible to the installed tenant app with pagination. Direct-message discovery and global workspace search beyond bot visibility are out of scope.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -349,11 +592,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_CHATS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to list all chats the bot has access to".into(),
                 common_mistakes: vec![
                     "Use page_token from response for subsequent pages".into(),
+                    "The result set is limited to chats visible to the installed app.".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_CHATS_GET)],
@@ -364,7 +608,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_CHATS_GET),
             summary: "Get Feishu chat details".into(),
-            description: Some("Retrieves details of a specific chat".into()),
+            description: Some(
+                "Retrieves metadata for one chat visible to the installed tenant app.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["chat_id"],
@@ -383,10 +629,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_CHATS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need details about a specific chat".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "chat_id must refer to a conversation visible to the installed app.".into(),
+                ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_CHATS_LIST)],
             },
@@ -396,7 +644,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_USERS_GET),
             summary: "Get Feishu user info".into(),
-            description: Some("Retrieves user information by user ID".into()),
+            description: Some(
+                "Retrieves directory information for one tenant user identifier. Cross-tenant lookup, admin writes, and provisioning flows are out of scope.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["user_id"],
@@ -416,11 +666,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_USERS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to look up user information".into(),
                 common_mistakes: vec![
                     "user_id_type must match the format of user_id provided".into(),
+                    FEISHU_TENANT_APP_BOUNDARY.into(),
                 ],
                 examples: Vec::new(),
                 related: Vec::new(),
@@ -431,7 +682,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_DOCS_GET),
             summary: "Get Feishu document content".into(),
-            description: Some("Retrieves the raw content of a Feishu document".into()),
+            description: Some(
+                "Retrieves the raw content of one known Feishu docx document. Drive search, export, folder traversal, and writes are explicit non-goals for this first slice.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["document_id"],
@@ -449,10 +702,13 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_DOCS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to read a Feishu document's content".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "This operation expects a known docx document token; it does not search Drive."
+                        .into(),
+                ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_SHEETS_GET)],
             },
@@ -462,7 +718,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_SHEETS_GET),
             summary: "Get Feishu spreadsheet info".into(),
-            description: Some("Retrieves spreadsheet metadata and sheet list".into()),
+            description: Some(
+                "Retrieves spreadsheet metadata and sheet inventory for one known token. Cell mutation, formula writes, and bulk export remain out of scope.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["spreadsheet_token"],
@@ -481,10 +739,14 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_DOCS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "When you need to read a Feishu spreadsheet's structure and data".into(),
-                common_mistakes: Vec::new(),
+                when_to_use: "When you need to read a Feishu spreadsheet's structure and data"
+                    .into(),
+                common_mistakes: vec![
+                    "This first slice returns spreadsheet metadata and sheet inventory, not write handles."
+                        .into(),
+                ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_DOCS_GET)],
             },
@@ -494,7 +756,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_CALENDAR_EVENTS),
             summary: "List Feishu calendar events".into(),
-            description: Some("Lists events from a specific calendar".into()),
+            description: Some(
+                "Lists events from one known calendar within the bound tenant app. Calendar mutations and push subscriptions are explicit non-goals for this first slice.".into(),
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["calendar_id"],
@@ -514,11 +778,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_CALENDAR_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When you need to list events from a Feishu calendar".into(),
                 common_mistakes: vec![
                     "calendar_id is required, not the same as user_id".into(),
+                    "Event subscriptions are not part of this first implementation.".into(),
                 ],
                 examples: Vec::new(),
                 related: Vec::new(),
@@ -529,7 +794,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Feishu API health check".into(),
-            description: Some("Verifies connectivity and authentication to Feishu API".into()),
+            description: Some(
+                "Verifies that the configured app_id/app_secret can reach the internal tenant access token endpoint on the Feishu CN or Lark global API host.".into(),
+            ),
             input_schema: json!({ "type": "object" }),
             output_schema: json!({
                 "type": "object",
@@ -543,7 +810,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "When checking if the Feishu API connection is healthy".into(),
-                common_mistakes: Vec::new(),
+                common_mistakes: vec![
+                    "Health proves host reachability and credential validity, not every optional product scope.".into(),
+                ],
                 examples: Vec::new(),
                 related: Vec::new(),
             },
@@ -565,18 +834,20 @@ impl FcpConnector for FeishuConnector {
                 code: 1001,
                 message: format!("Invalid Feishu config: {e}"),
             })?;
+        validate_config(&config)?;
 
         self.retry_config = config.retry.clone();
+        let request_timeout = Duration::from_millis(config.request_timeout_ms);
         self.runtime = Some(ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
+            ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
         ));
 
-        let mut client = FeishuClient::new(
+        let client = FeishuClient::new(
             &config.base_url,
             &config.app_id,
             &config.app_secret,
             config.retry.clone(),
+            request_timeout,
         )
         .map_err(|e| FcpError::Internal {
             message: format!("Failed to create Feishu client: {e}"),
@@ -584,9 +855,14 @@ impl FcpConnector for FeishuConnector {
 
         // Attempt to obtain a tenant access token on configure
         if let Ok(token) = client.obtain_tenant_access_token().await {
-            tracing::info!("Feishu tenant access token obtained (length={})", token.len());
+            tracing::info!(
+                "Feishu tenant access token obtained (length={})",
+                token.len()
+            );
         } else {
-            tracing::warn!("Failed to obtain Feishu tenant access token; will retry on first request");
+            tracing::warn!(
+                "Failed to obtain Feishu tenant access token; will retry on first request"
+            );
         }
 
         self.client = Some(client);
@@ -624,7 +900,7 @@ impl FcpConnector for FeishuConnector {
                 min_buffer_events: 0,
                 requires_ack: false,
             }),
-            auth_caps: None,
+            auth_caps: Some(feishu_auth_caps()),
             op_catalog_hash: None,
         })
     }
@@ -692,8 +968,8 @@ impl FcpConnector for FeishuConnector {
         Introspection {
             operations: operations_info(),
             events: Vec::new(),
-            resource_types: Vec::new(),
-            auth_caps: None,
+            resource_types: feishu_resource_types(),
+            auth_caps: Some(feishu_auth_caps()),
             event_caps: Some(EventCaps {
                 streaming: false,
                 replay: false,
@@ -751,35 +1027,30 @@ impl FeishuConnector {
 
         let output = match operation {
             OP_MESSAGES_SEND => {
-                let receive_id = req
-                    .input
-                    .get("receive_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let receive_id = req.input.get("receive_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'receive_id' field".into(),
-                    })?;
-                let msg_type = req
-                    .input
-                    .get("msg_type")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let msg_type = req.input.get("msg_type").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'msg_type' field".into(),
-                    })?;
-                let content = req
-                    .input
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let content = req.input.get("content").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'content' field".into(),
-                    })?;
+                    },
+                )?;
                 let receive_id_type = req
                     .input
                     .get("receive_id_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("open_id");
+                let receive_id_type = validate_receive_id_type(receive_id_type)?;
 
                 let send_req = SendMessageRequest {
                     receive_id: receive_id.into(),
@@ -795,30 +1066,24 @@ impl FeishuConnector {
                 })?
             }
             OP_MESSAGES_REPLY => {
-                let message_id = req
-                    .input
-                    .get("message_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let message_id = req.input.get("message_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'message_id' field".into(),
-                    })?;
-                let msg_type = req
-                    .input
-                    .get("msg_type")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let msg_type = req.input.get("msg_type").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'msg_type' field".into(),
-                    })?;
-                let content = req
-                    .input
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    },
+                )?;
+                let content = req.input.get("content").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'content' field".into(),
-                    })?;
+                    },
+                )?;
 
                 let reply_req = ReplyMessageRequest {
                     msg_type: msg_type.into(),
@@ -833,14 +1098,12 @@ impl FeishuConnector {
                 })?
             }
             OP_MESSAGES_GET => {
-                let message_id = req
-                    .input
-                    .get("message_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let message_id = req.input.get("message_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'message_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_message(runtime, message_id)
                     .await
@@ -855,7 +1118,8 @@ impl FeishuConnector {
                     .input
                     .get("page_size")
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                    .map(validate_chats_page_size)
+                    .transpose()?;
                 let resp = client
                     .list_chats(runtime, page_token, page_size)
                     .await
@@ -865,14 +1129,12 @@ impl FeishuConnector {
                 })?
             }
             OP_CHATS_GET => {
-                let chat_id = req
-                    .input
-                    .get("chat_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let chat_id = req.input.get("chat_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'chat_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let resp = client
                     .get_chat(runtime, chat_id)
                     .await
@@ -882,19 +1144,18 @@ impl FeishuConnector {
                 })?
             }
             OP_USERS_GET => {
-                let user_id = req
-                    .input
-                    .get("user_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let user_id = req.input.get("user_id").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'user_id' field".into(),
-                    })?;
+                    },
+                )?;
                 let user_id_type = req
                     .input
                     .get("user_id_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("open_id");
+                let user_id_type = validate_user_id_type(user_id_type)?;
                 let resp = client
                     .get_user(runtime, user_id, user_id_type)
                     .await
@@ -1033,6 +1294,45 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_accepts_localhost_http_for_tests() {
+        let mut connector = FeishuConnector::new();
+        let result = connector
+            .configure(json!({
+                "base_url": "http://127.0.0.1:9",
+                "app_id": "cli_test",
+                "app_secret": "secret"
+            }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_zero_timeout() {
+        let mut connector = FeishuConnector::new();
+        let result = connector
+            .configure(json!({
+                "app_id": "cli_test",
+                "app_secret": "secret",
+                "request_timeout_ms": 0
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_base_url_path() {
+        let mut connector = FeishuConnector::new();
+        let result = connector
+            .configure(json!({
+                "base_url": "https://open.feishu.cn/open-apis",
+                "app_id": "cli_test",
+                "app_secret": "secret"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_health_before_configure() {
         let connector = FeishuConnector::new();
         let health = connector.health().await;
@@ -1092,6 +1392,34 @@ mod tests {
     }
 
     #[test]
+    fn test_introspection_advertises_tenant_app_auth() {
+        let intro = FeishuConnector::new().introspect();
+        let auth = intro.auth_caps.expect("auth caps");
+        assert!(auth.methods.contains(&"app_id_secret".to_string()));
+        assert!(
+            auth.methods
+                .contains(&"tenant_access_token_internal".to_string())
+        );
+        assert!(auth.oauth.is_none());
+    }
+
+    #[test]
+    fn test_introspection_exposes_first_slice_resource_inventory() {
+        let intro = FeishuConnector::new().introspect();
+        let names: Vec<&str> = intro
+            .resource_types
+            .iter()
+            .map(|ty| ty.name.as_str())
+            .collect();
+        assert!(names.contains(&"feishu.message"));
+        assert!(names.contains(&"feishu.chat"));
+        assert!(names.contains(&"feishu.user"));
+        assert!(names.contains(&"feishu.document"));
+        assert!(names.contains(&"feishu.spreadsheet"));
+        assert!(names.contains(&"feishu.calendar_event"));
+    }
+
+    #[test]
     fn test_operations_have_ai_hints() {
         let ops = operations_info();
         for op in &ops {
@@ -1141,6 +1469,7 @@ mod tests {
         let connector = FeishuConnector::new();
         let intro = connector.introspect();
         assert!(!intro.event_caps.as_ref().unwrap().streaming);
+        assert!(intro.events.is_empty());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1193,10 +1522,7 @@ mod tests {
     #[test]
     fn test_docs_get_capability() {
         let ops = operations_info();
-        let dg = ops
-            .iter()
-            .find(|op| op.id.as_str() == OP_DOCS_GET)
-            .unwrap();
+        let dg = ops.iter().find(|op| op.id.as_str() == OP_DOCS_GET).unwrap();
         assert_eq!(dg.capability, CapabilityId::from_static(CAP_DOCS_READ));
     }
 
@@ -1235,6 +1561,7 @@ mod tests {
         let mut connector = FeishuConnector::new();
         let result = connector.handshake(base_handshake()).await.unwrap();
         assert_eq!(result.capabilities_granted.len(), 6);
+        assert!(result.auth_caps.is_some());
     }
 
     #[test]
@@ -1260,7 +1587,12 @@ mod tests {
         let ops = operations_info();
         for op in &ops {
             if op.safety_tier == SafetyTier::Safe {
-                assert_eq!(op.risk_level, RiskLevel::Low, "Op {} should be low risk", op.id.as_str());
+                assert_eq!(
+                    op.risk_level,
+                    RiskLevel::Low,
+                    "Op {} should be low risk",
+                    op.id.as_str()
+                );
             }
         }
     }
@@ -1270,8 +1602,86 @@ mod tests {
         let ops = operations_info();
         for op in &ops {
             if op.safety_tier == SafetyTier::Risky {
-                assert_eq!(op.risk_level, RiskLevel::Medium, "Op {} should be medium risk", op.id.as_str());
+                assert_eq!(
+                    op.risk_level,
+                    RiskLevel::Medium,
+                    "Op {} should be medium risk",
+                    op.id.as_str()
+                );
             }
         }
+    }
+
+    #[test]
+    fn test_read_operations_are_strictly_idempotent() {
+        let ops = operations_info();
+        for operation_id in [
+            OP_MESSAGES_GET,
+            OP_CHATS_LIST,
+            OP_CHATS_GET,
+            OP_USERS_GET,
+            OP_DOCS_GET,
+            OP_SHEETS_GET,
+            OP_CALENDAR_EVENTS,
+            OP_HEALTH,
+        ] {
+            let op = ops
+                .iter()
+                .find(|candidate| candidate.id.as_str() == operation_id)
+                .unwrap();
+            assert_eq!(
+                op.idempotency,
+                IdempotencyClass::Strict,
+                "operation {} should be strictly idempotent",
+                op.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_doctor_accepts_larksuite_global_host() {
+        let mut connector = FeishuConnector::new();
+        connector.config = Some(FeishuConfig {
+            base_url: "https://open.larksuite.com".into(),
+            app_id: "app_id".into(),
+            app_secret: "app_secret".into(),
+            retry: HttpRetryConfig::default(),
+            request_timeout_ms: default_request_timeout_ms(),
+        });
+        connector.client = Some(
+            FeishuClient::new(
+                "https://open.larksuite.com",
+                "app_id",
+                "app_secret",
+                HttpRetryConfig::default(),
+                Duration::from_millis(default_request_timeout_ms()),
+            )
+            .expect("client"),
+        );
+        connector.runtime = Some(ConnectorRuntime::new(ConnectorRuntimeConfig::default()));
+        let report = connector.doctor();
+        let host_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "network_constraints")
+            .expect("network check");
+        assert!(host_check.passed);
+    }
+
+    #[test]
+    fn test_validate_receive_id_type_rejects_unknown_value() {
+        assert!(validate_receive_id_type("tenant_key").is_err());
+    }
+
+    #[test]
+    fn test_validate_user_id_type_rejects_unknown_value() {
+        assert!(validate_user_id_type("email").is_err());
+    }
+
+    #[test]
+    fn test_validate_chats_page_size_bounds() {
+        assert!(validate_chats_page_size(0).is_err());
+        assert!(validate_chats_page_size(201).is_err());
+        assert_eq!(validate_chats_page_size(200).unwrap(), 200);
     }
 }

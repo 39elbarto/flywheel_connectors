@@ -220,9 +220,7 @@ mod tests {
     fn push_request_serialization() {
         let req = PushMessageRequest {
             to: "U1234".into(),
-            messages: vec![Message::Text {
-                text: "hi".into(),
-            }],
+            messages: vec![Message::Text { text: "hi".into() }],
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["to"], "U1234");

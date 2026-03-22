@@ -31,6 +31,7 @@ anyhow.workspace = true
 percent-encoding.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
 wiremock.workspace = true

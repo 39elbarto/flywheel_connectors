@@ -1,5 +1,6 @@
 //! Coda connector implementation.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -17,6 +18,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::CodaClient;
+use crate::error::CodaError;
 use crate::types::{Doc, MutationStatus};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -25,6 +27,17 @@ const CODA_HOST: &str = "coda.io";
 const CODA_IMPLEMENTATION_STATUS: &str = "first_slice";
 const CODA_BINDING_MODEL: &str = "single_workspace";
 const CODA_AUTH_MODEL: &str = "bearer_api_token";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/coda_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/coda_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 7] = [
+    "scripts/e2e/coda_connector_verification.sh",
+    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/coda/manifest.toml --check --json",
+    "rch exec -- cargo check -p fcp-coda --all-targets",
+    "rch exec -- cargo fmt --manifest-path connectors/coda/Cargo.toml --check",
+    "rch exec -- cargo test -p fcp-coda --test integration -- --nocapture",
+    "rch exec -- cargo test -p fcp-coda",
+    "rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings",
+];
 
 // Operation IDs
 const OP_ACCOUNT_WHOAMI: &str = "coda.account.whoami";
@@ -106,6 +119,10 @@ const fn default_mutation_deadline_ms() -> u64 {
     30_000
 }
 
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1")
+}
+
 impl CodaConfig {
     fn validate(&self) -> Result<(), String> {
         if self.workspace_id.is_empty() {
@@ -126,13 +143,16 @@ impl CodaConfig {
 
         let parsed = reqwest::Url::parse(&self.base_url)
             .map_err(|err| format!("base_url must be a valid absolute URL: {err}"))?;
-        if parsed.scheme() != "https" {
-            return Err("base_url must use https".into());
-        }
         let Some(host) = parsed.host_str() else {
             return Err("base_url must include a hostname".into());
         };
-        let host_ok = matches!(host, CODA_HOST | "localhost" | "127.0.0.1");
+        let local_test_host = is_local_test_host(host);
+        if parsed.scheme() != "https" && !(parsed.scheme() == "http" && local_test_host) {
+            return Err(
+                "base_url must use https unless targeting a localhost test override".into(),
+            );
+        }
+        let host_ok = host == CODA_HOST || local_test_host;
         if !host_ok {
             return Err(format!(
                 "base_url host must be {CODA_HOST} or localhost for tests"
@@ -182,8 +202,13 @@ impl CodaConfig {
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -195,13 +220,125 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
         let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RetryReadiness {
+    max_retries: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    base_url: String,
+    auth_mode: &'static str,
+    workspace_id: String,
+    allowed_doc_ids: Vec<String>,
+    request_timeout_ms: u64,
+    mutation_poll_interval_ms: u64,
+    mutation_deadline_ms: u64,
+    retry: RetryReadiness,
+    authenticated_identity_probe: &'static str,
+    risky_mutations: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn auth_mode_label(config: &CodaConfig) -> &'static str {
+    if config.api_token.is_empty() {
+        "proxy_injected"
+    } else {
+        "bearer_api_token"
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable Coda workspace and doc set, or a localhost mock server, before running the verification bundle.",
+            "Bind the connector to exactly one workspace_id and make sure every verification doc is either in that workspace or explicitly listed in allowed_doc_ids.",
+            "Treat rows.upsert and rows.delete as live document mutations unless you are running against a localhost mock override.",
+        ],
+        dedicated_environment: "Prefer a disposable Coda workspace or a localhost mock server. Avoid running verification against production docs unless the resulting row edits and deletions are acceptable.",
+        redaction_rules: vec![
+            "Redact API tokens, Authorization headers, request IDs, and copied HTTP logs before sharing evidence.",
+            "Treat login IDs, workspace IDs, doc IDs, row IDs, browser links, and doc names as potentially sensitive operational metadata.",
+            "If verification touches a real workspace, sanitize document titles, table names, formula values, and row contents in archived artifacts.",
+        ],
+        limitations: vec![
+            "One connector instance is bound to one configured workspace boundary; multi-workspace aggregation is intentionally out of scope.",
+            "The current slice supports read-heavy doc/table inspection plus row upsert and deletion with mutation-status polling.",
+            "Doc governance, page content mutation, button execution, publishing, automations, and analytics remain out of scope.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "not_configured",
+                symptom: "health or self_check reports that the connector is not configured",
+                action: "Configure workspace_id, api_token, timeout, retry, and mutation polling settings, then rerun self_check.",
+            },
+            RemediationHint {
+                code: "coda_auth_rejected",
+                symptom: "self_check fails with HTTP 401/403 or an unauthorized error from Coda",
+                action: "Replace the API token, confirm it still resolves GET /whoami, and rerun the verification script.",
+            },
+            RemediationHint {
+                code: "workspace_mismatch",
+                symptom: "self_check reports that the token workspace does not match the configured workspace_id",
+                action: "Update workspace_id to the workspace returned by GET /whoami or switch to a token that belongs to the intended workspace.",
+            },
+            RemediationHint {
+                code: "doc_allowlist_violation",
+                symptom: "doc reads or mutations reject a doc_id as outside the configured allowlist",
+                action: "Add the target doc to allowed_doc_ids or rerun verification against a doc that is already inside the configured allowlist.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "self_check reports a timeout, rate limit, or temporary 5xx from Coda",
+                action: "Wait for the upstream to recover or increase request_timeout_ms and retry settings for the environment before rerunning verification.",
+            },
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "doctor reports that base_url falls outside the live Coda host or localhost test override rules",
+                action: "Use https://coda.io/apis/v1 for live verification or an http://localhost / http://127.0.0.1 override for deterministic mock-server tests.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
 fn contract_details(config: Option<&CodaConfig>) -> serde_json::Value {
+    let credential_mode = config.map_or("unconfigured", auth_mode_label);
+
     json!({
         "implementation": {
             "api": "coda_rest_v1",
@@ -214,8 +351,11 @@ fn contract_details(config: Option<&CodaConfig>) -> serde_json::Value {
         "auth_boundary": {
             "binding": CODA_BINDING_MODEL,
             "token_type": CODA_AUTH_MODEL,
+            "credential_mode": credential_mode,
+            "base_url": config.map(|cfg| cfg.base_url.clone()),
             "workspace_id": config.map(|cfg| cfg.workspace_id.clone()),
             "allowed_doc_ids": config.map(|cfg| cfg.allowed_doc_ids.clone()).unwrap_or_default(),
+            "doc_scope_narrowing_enabled": config.is_some_and(|cfg| !cfg.allowed_doc_ids.is_empty()),
             "multi_workspace_supported": false,
             "credential_id_supported": false,
         },
@@ -235,18 +375,6 @@ fn contract_details(config: Option<&CodaConfig>) -> serde_json::Value {
             "Page content mutation, push-button execution, and multi-workspace aggregation"
         ]
     })
-}
-
-fn with_self_check_details(
-    mut report: SelfCheckReport,
-    config: Option<&CodaConfig>,
-    probe: serde_json::Value,
-) -> SelfCheckReport {
-    report.details = Some(json!({
-        "contract": contract_details(config),
-        "probe": probe,
-    }));
-    report
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, key: &str) -> FcpResult<&'a str> {
@@ -297,9 +425,51 @@ impl CodaConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| ProvisioningReadiness {
+            base_url: config.base_url.clone(),
+            auth_mode: auth_mode_label(config),
+            workspace_id: config.workspace_id.clone(),
+            allowed_doc_ids: config.allowed_doc_ids.clone(),
+            request_timeout_ms: config.request_timeout_ms,
+            mutation_poll_interval_ms: config.mutation_poll_interval_ms,
+            mutation_deadline_ms: config.mutation_deadline_ms,
+            retry: RetryReadiness {
+                max_retries: config.retry.max_retries,
+                initial_delay_ms: config.retry.initial_delay_ms,
+                max_delay_ms: config.retry.max_delay_ms,
+                jitter_enabled: config.retry.jitter_enabled,
+            },
+            authenticated_identity_probe: "GET /whoami",
+            risky_mutations: vec![OP_ROWS_UPSERT, OP_ROWS_DELETE],
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        live_probe: Option<serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "operator_guidance": operator_guidance(),
+            "live_probe": live_probe,
+            "contract": contract_details(self.config.as_ref()),
+        }));
+        report
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
+        let provisioning = self.provisioning_readiness();
 
         let configured = self.config.is_some();
         checks.push(DoctorCheck {
@@ -337,12 +507,56 @@ impl CodaConnector {
             critical: true,
         });
 
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: Some(if handshaken {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
         if let Some(config) = &self.config {
             checks.push(DoctorCheck {
                 name: "base_url".into(),
                 passed: true,
                 message: Some(format!("Base URL: {}", config.base_url)),
                 critical: false,
+            });
+            let (network_ok, network_message) = match reqwest::Url::parse(&config.base_url) {
+                Ok(parsed) => {
+                    let host = parsed.host_str().unwrap_or_default();
+                    let local_test_host = is_local_test_host(host);
+                    let scheme_ok = parsed.scheme() == "https"
+                        || (parsed.scheme() == "http" && local_test_host);
+                    let host_ok = host == CODA_HOST || local_test_host;
+                    let path_ok = host != CODA_HOST || parsed.path() == "/apis/v1";
+                    let passed = scheme_ok && host_ok && path_ok;
+                    let message = if passed {
+                        if local_test_host {
+                            "Base URL uses a localhost test override for deterministic verification"
+                                .into()
+                        } else {
+                            "Base URL matches the live Coda host and /apis/v1 path".into()
+                        }
+                    } else {
+                        format!(
+                            "Base URL {} must resolve to https://coda.io/apis/v1 or an http://localhost test override",
+                            config.base_url
+                        )
+                    };
+                    (passed, message)
+                }
+                Err(err) => (false, format!("Failed to parse base_url: {err}")),
+            };
+            checks.push(DoctorCheck {
+                name: "network_constraints".into(),
+                passed: network_ok,
+                message: Some(network_message),
+                critical: true,
             });
             checks.push(DoctorCheck {
                 name: "workspace_scope".into(),
@@ -352,6 +566,16 @@ impl CodaConnector {
                     config.workspace_id,
                     config.allowed_doc_ids.len()
                 )),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "credential_mode".into(),
+                passed: !config.api_token.is_empty(),
+                message: Some(if config.api_token.is_empty() {
+                    "Credential injection would be required for this configuration".into()
+                } else {
+                    "Bearer API token configured".into()
+                }),
                 critical: true,
             });
             checks.push(DoctorCheck {
@@ -372,9 +596,18 @@ impl CodaConnector {
                 ),
                 critical: false,
             });
+            checks.push(DoctorCheck {
+                name: "mutation_tracking".into(),
+                passed: true,
+                message: Some(format!(
+                    "Asynchronous writes poll mutationStatus every {}ms with a {}ms deadline.",
+                    config.mutation_poll_interval_ms, config.mutation_deadline_ms
+                )),
+                critical: false,
+            });
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 }
 
@@ -723,8 +956,15 @@ impl FcpConnector for CodaConnector {
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snapshot.details = Some(json!({
             "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
             "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
             "workspace_id": self.config.as_ref().map(|config| config.workspace_id.clone()),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "operator_guidance": operator_guidance(),
             "manifest_hash": Self::manifest_hash(),
             "contract": contract_details(self.config.as_ref()),
         }));
@@ -733,79 +973,99 @@ impl FcpConnector for CodaConnector {
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(config) = &self.config else {
-            return Ok(with_self_check_details(
+            return Ok(self.attach_self_check_details(
                 SelfCheckReport::degraded("not_configured", "Connector is not configured"),
-                None,
-                json!({
+                Some(json!({
                     "ready": false,
                     "reason": "configure with workspace_id and api_token before self_check",
-                }),
+                })),
             ));
         };
         let Some(client) = &self.client else {
-            return Ok(with_self_check_details(
+            return Ok(self.attach_self_check_details(
                 SelfCheckReport::failed("client_missing", "Coda client is not initialized"),
-                Some(config),
-                json!({
+                Some(json!({
                     "ready": false,
                     "reason": "client_missing",
-                }),
+                })),
             ));
         };
         let Some(runtime) = &self.runtime else {
-            return Ok(with_self_check_details(
+            return Ok(self.attach_self_check_details(
                 SelfCheckReport::failed("runtime_missing", "Connector runtime is not initialized"),
-                Some(config),
-                json!({
+                Some(json!({
                     "ready": false,
                     "reason": "runtime_missing",
-                }),
+                })),
             ));
         };
 
         match client.whoami(runtime).await {
-            Ok(user) if user.workspace.id != config.workspace_id => Ok(with_self_check_details(
-                SelfCheckReport::failed(
-                    "workspace_mismatch",
-                    format!(
-                        "Configured workspace {} does not match token workspace {}",
-                        config.workspace_id, user.workspace.id
+            Ok(user) if user.workspace.id != config.workspace_id => {
+                let current_workspace_id = user.workspace.id.clone();
+                Ok(self.attach_self_check_details(
+                    SelfCheckReport::failed(
+                        "workspace_mismatch",
+                        format!(
+                            "Configured workspace {} does not match token workspace {}",
+                            config.workspace_id, current_workspace_id
+                        ),
                     ),
-                ),
-                Some(config),
-                json!({
-                    "ready": false,
-                    "whoami": user,
-                }),
-            )),
-            Ok(user) => Ok(with_self_check_details(
-                SelfCheckReport::ok(),
-                Some(config),
-                json!({
-                    "ready": true,
-                    "whoami": user,
-                }),
-            )),
+                    Some(json!({
+                        "ready": false,
+                        "base_url": config.base_url.clone(),
+                        "configured_workspace_id": config.workspace_id.clone(),
+                        "current_workspace_id": current_workspace_id,
+                        "token_scoped": user.scoped,
+                        "whoami": user,
+                    })),
+                ))
+            }
+            Ok(user) => {
+                let current_workspace_id = user.workspace.id.clone();
+                Ok(self.attach_self_check_details(
+                    SelfCheckReport::ok(),
+                    Some(json!({
+                        "ready": true,
+                        "base_url": config.base_url.clone(),
+                        "configured_workspace_id": config.workspace_id.clone(),
+                        "current_workspace_id": current_workspace_id,
+                        "token_scoped": user.scoped,
+                        "whoami": user,
+                    })),
+                ))
+            }
             Err(err) => {
-                if err.is_retryable() {
-                    Ok(with_self_check_details(
-                        SelfCheckReport::degraded("self_check_retryable", err.to_string()),
-                        Some(config),
-                        json!({
-                            "ready": false,
-                            "retryable": true,
-                        }),
-                    ))
+                let retryable = err.is_retryable();
+                let auth_rejected = matches!(
+                    &err,
+                    CodaError::Unauthorized(_)
+                        | CodaError::Api {
+                            status: 401 | 403,
+                            ..
+                        }
+                );
+                let reason_code = if retryable {
+                    "self_check_retryable"
+                } else if auth_rejected {
+                    "coda_auth_rejected"
                 } else {
-                    Ok(with_self_check_details(
-                        SelfCheckReport::failed("self_check_failed", err.to_string()),
-                        Some(config),
-                        json!({
-                            "ready": false,
-                            "retryable": false,
-                        }),
-                    ))
-                }
+                    "self_check_failed"
+                };
+                let report = if retryable {
+                    SelfCheckReport::degraded(reason_code, err.to_string())
+                } else {
+                    SelfCheckReport::failed(reason_code, err.to_string())
+                };
+                Ok(self.attach_self_check_details(
+                    report,
+                    Some(json!({
+                        "ready": false,
+                        "base_url": config.base_url.clone(),
+                        "retryable": retryable,
+                        "error": err.to_string(),
+                    })),
+                ))
             }
         }
     }
@@ -1377,6 +1637,19 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_accepts_localhost_http_for_tests() {
+        let mut connector = CodaConnector::new();
+        let result = connector
+            .configure(json!({
+                "workspace_id": "ws-123",
+                "api_token": "tok",
+                "base_url": "http://127.0.0.1:9999"
+            }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_health_after_configure() {
         let mut connector = CodaConnector::new();
         connector.configure(test_config()).await.unwrap();
@@ -1386,7 +1659,7 @@ mod tests {
             health
                 .details
                 .as_ref()
-                .and_then(|details| details.get("contract"))
+                .and_then(|details| details.get("verification_script"))
                 .is_some()
         );
     }
@@ -1395,7 +1668,9 @@ mod tests {
     fn test_doctor_before_configure() {
         let connector = CodaConnector::new();
         let report = connector.doctor();
+        assert!(!report.ready);
         assert!(!report.passed);
+        assert_eq!(report.verification_script, VERIFICATION_SCRIPT_PATH);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1403,7 +1678,15 @@ mod tests {
         let mut connector = CodaConnector::new();
         connector.configure(test_config()).await.unwrap();
         let report = connector.doctor();
+        assert!(report.ready);
         assert!(report.passed);
+        assert!(report.provisioning.is_some());
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "network_constraints")
+        );
         assert!(
             report
                 .checks
@@ -1427,7 +1710,7 @@ mod tests {
             report
                 .details
                 .as_ref()
-                .and_then(|details| details.get("contract"))
+                .and_then(|details| details.get("verification_script"))
                 .is_some()
         );
     }

@@ -434,7 +434,13 @@ mod tests {
         let result = sanitize_path_segment("my/db", "db_name");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DuckDbError::Api { status_code: 400, .. }));
+        assert!(matches!(
+            err,
+            DuckDbError::Api {
+                status_code: 400,
+                ..
+            }
+        ));
     }
 
     #[test]

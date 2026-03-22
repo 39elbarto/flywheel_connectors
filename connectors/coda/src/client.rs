@@ -716,13 +716,15 @@ mod tests {
             .await;
 
         let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let client = CodaClient::new(
-            &mock_server.uri(),
-            "tok",
-            30_000,
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
+        // Keep the rate-limit test deterministic; the production default policy
+        // intentionally backs off for much longer.
+        let retry_config = HttpRetryConfig {
+            max_retries: 0,
+            initial_delay_ms: 1,
+            max_delay_ms: 1,
+            jitter_enabled: false,
+        };
+        let client = CodaClient::new(&mock_server.uri(), "tok", 30_000, retry_config).unwrap();
         let result = client.health_check(&runtime).await;
         assert!(matches!(result, Err(CodaError::RateLimited { .. })));
     }

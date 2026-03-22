@@ -52,15 +52,12 @@ impl FeishuError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(_) | Self::RateLimited { .. } | Self::Async(_) => true,
-            Self::HttpStatus { status, .. } => {
-                classify_http_status(*status, None).is_retryable()
-            }
+            Self::HttpStatus { status, .. } => classify_http_status(*status, None).is_retryable(),
             // Feishu error codes: 99991400 = request throttled
             Self::Api { code, .. } => *code == 99991400,
-            Self::Json(_)
-            | Self::Unauthorized(_)
-            | Self::InvalidInput(_)
-            | Self::Config(_) => false,
+            Self::Json(_) | Self::Unauthorized(_) | Self::InvalidInput(_) | Self::Config(_) => {
+                false
+            }
         }
     }
 

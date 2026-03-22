@@ -141,6 +141,7 @@ members = [
     "connectors/vercel",
     "connectors/azure",
     "connectors/circleci",
+    "connectors/package-registry",
     "connectors/confluence",
     "connectors/zoom",
     "connectors/square",

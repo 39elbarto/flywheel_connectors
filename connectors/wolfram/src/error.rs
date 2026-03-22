@@ -1,0 +1,259 @@
+//! Wolfram Alpha error types and FCP error mapping.
+
+use fcp_async_core::AsyncError;
+use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
+use thiserror::Error;
+
+/// Wolfram Alpha connector error.
+#[derive(Error, Debug)]
+pub enum WolframError {
+    /// HTTP transport error.
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    /// API returned an error status code.
+    #[error("API error ({status_code}): {message}")]
+    Api { status_code: u16, message: String },
+
+    /// Rate limited by Wolfram Alpha.
+    #[error("Rate limited")]
+    RateLimited { retry_after_ms: u64 },
+
+    /// Invalid input to the API.
+    #[error("Invalid input: {message}")]
+    InvalidInput { message: String },
+
+    /// Serialization/deserialization error.
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    /// Internal connector error.
+    #[error("Internal error: {message}")]
+    Internal { message: String },
+}
+
+impl ConnectorErrorMapping for WolframError {
+    fn from_async_error(error: AsyncError) -> Self
+    where
+        Self: Sized,
+    {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                status_code: 408,
+                message: format!("Request timed out after {timeout_ms}ms"),
+            },
+            AsyncError::Cancelled => Self::Api {
+                status_code: 0,
+                message: "Request cancelled".into(),
+            },
+            AsyncError::ChannelClosed => Self::Internal {
+                message: "Channel closed unexpectedly".into(),
+            },
+            other => Self::Internal {
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        match self {
+            Self::Http(e) => {
+                if e.is_timeout() {
+                    FcpError::Timeout {
+                        timeout_ms: 30_000,
+                    }
+                } else if e.is_connect() {
+                    FcpError::ServiceUnavailable {
+                        message: format!("Connection failed: {e}"),
+                        retry_after_ms: Some(5_000),
+                    }
+                } else {
+                    FcpError::Internal {
+                        message: format!("HTTP error: {e}"),
+                    }
+                }
+            }
+            Self::Api {
+                status_code,
+                message,
+            } => match *status_code {
+                401 | 403 => FcpError::AuthenticationFailed {
+                    message: message.clone(),
+                },
+                404 => FcpError::NotFound {
+                    message: message.clone(),
+                },
+                429 => FcpError::RateLimited {
+                    retry_after_ms: Some(60_000),
+                },
+                500..=599 => FcpError::ServiceUnavailable {
+                    message: message.clone(),
+                    retry_after_ms: Some(5_000),
+                },
+                _ => FcpError::Internal {
+                    message: format!("API error ({status_code}): {message}"),
+                },
+            },
+            Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
+                retry_after_ms: Some(*retry_after_ms),
+            },
+            Self::InvalidInput { message } => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
+            },
+            Self::Serialization(msg) => FcpError::Internal {
+                message: format!("Serialization error: {msg}"),
+            },
+            Self::Internal { message } => FcpError::Internal {
+                message: message.clone(),
+            },
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(e) => e.is_timeout() || e.is_connect(),
+            Self::Api { status_code, .. } => matches!(*status_code, 429 | 500..=599 | 408),
+            Self::RateLimited { .. } => true,
+            Self::InvalidInput { .. } | Self::Serialization(_) | Self::Internal { .. } => false,
+        }
+    }
+
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::RateLimited { retry_after_ms } => {
+                Some(std::time::Duration::from_millis(*retry_after_ms))
+            }
+            Self::Api { status_code: 429, .. } => {
+                Some(std::time::Duration::from_secs(60))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_timeout_is_retryable() {
+        // Simulate a timeout-like error
+        let err = WolframError::Api {
+            status_code: 408,
+            message: "timeout".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_is_retryable() {
+        let err = WolframError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        assert!(err.is_retryable());
+        assert_eq!(
+            err.retry_after(),
+            Some(std::time::Duration::from_millis(5000))
+        );
+    }
+
+    #[test]
+    fn server_error_is_retryable() {
+        let err = WolframError::Api {
+            status_code: 503,
+            message: "Service unavailable".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn client_error_is_not_retryable() {
+        let err = WolframError::Api {
+            status_code: 400,
+            message: "Bad request".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn invalid_input_is_not_retryable() {
+        let err = WolframError::InvalidInput {
+            message: "empty query".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn auth_error_maps_to_authentication_failed() {
+        let err = WolframError::Api {
+            status_code: 401,
+            message: "Invalid AppID".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::AuthenticationFailed { .. } => {}
+            other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_maps_correctly() {
+        let err = WolframError::Api {
+            status_code: 404,
+            message: "Not found".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::NotFound { .. } => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_maps_correctly() {
+        let err = WolframError::RateLimited {
+            retry_after_ms: 10_000,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited { retry_after_ms } => {
+                assert_eq!(retry_after_ms, Some(10_000));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn async_timeout_maps_to_api_error() {
+        let err = WolframError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
+        match err {
+            WolframError::Api { status_code, .. } => assert_eq!(status_code, 408),
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn async_cancelled_maps_to_api_error() {
+        let err = WolframError::from_async_error(AsyncError::Cancelled);
+        match err {
+            WolframError::Api { status_code, .. } => assert_eq!(status_code, 0),
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn async_channel_closed_maps_to_internal() {
+        let err = WolframError::from_async_error(AsyncError::ChannelClosed);
+        match err {
+            WolframError::Internal { .. } => {}
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_formats() {
+        let err = WolframError::InvalidInput {
+            message: "test".into(),
+        };
+        assert!(err.to_string().contains("test"));
+    }
+}

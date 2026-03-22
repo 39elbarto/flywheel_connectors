@@ -1,0 +1,83 @@
+schema_version = "2.1"
+
+[connector]
+id = "fcp.wolfram"
+name = "Wolfram Alpha Computational Knowledge"
+version = "0.1.0"
+description = "Computational knowledge queries via the Wolfram Alpha API"
+archetypes = ["request-response"]
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_limit_mb = 128
+cpu_limit_percent = 25
+deny_exec = true
+
+# ── wolfram.query ─────────────────────────────────────────────
+
+[[provides]]
+id = "wolfram.query"
+summary = "Full computational query with pods, subpods, and assumptions"
+capability = "wolfram.query"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["api.wolframalpha.com"]
+allowed_ports = [443]
+require_tls = true
+
+[provides.rate_limit]
+pool_name = "wolfram.query"
+requests = 2000
+window = "86400s"
+
+# ── wolfram.short_answer ──────────────────────────────────────
+
+[[provides]]
+id = "wolfram.short_answer"
+summary = "Short text answer to a computational query"
+capability = "wolfram.query"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["api.wolframalpha.com"]
+allowed_ports = [443]
+require_tls = true
+
+[provides.rate_limit]
+pool_name = "wolfram.query"
+requests = 2000
+window = "86400s"
+
+# ── wolfram.spoken_result ─────────────────────────────────────
+
+[[provides]]
+id = "wolfram.spoken_result"
+summary = "Natural language spoken-word answer to a query"
+capability = "wolfram.query"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["api.wolframalpha.com"]
+allowed_ports = [443]
+require_tls = true
+
+[provides.rate_limit]
+pool_name = "wolfram.query"
+requests = 2000
+window = "86400s"

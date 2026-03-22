@@ -82,7 +82,11 @@ impl CloudflareError {
             Self::Api { code, message } => FcpError::External {
                 service: "cloudflare".into(),
                 message: format!("Cloudflare API error {code}: {message}"),
-                status_code: u16::try_from(*code).ok(),
+                // Only include status_code if it looks like a valid HTTP status (100-599).
+                // Cloudflare API error codes (e.g. 6003, 10000) are NOT HTTP status codes.
+                status_code: u16::try_from(*code)
+                    .ok()
+                    .filter(|&c| (100..600).contains(&c)),
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },

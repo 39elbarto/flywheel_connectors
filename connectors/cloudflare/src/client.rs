@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder};
 use serde_json::json;
 use tracing::debug;
@@ -30,9 +31,12 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> CloudflareResult<&'
     Ok(value)
 }
 
-/// Sanitize a KV key — allows `/` since KV keys can have hierarchical paths,
-/// but blocks `..` and backslash for path traversal prevention.
-fn sanitize_kv_key<'a>(value: &'a str, field: &str) -> CloudflareResult<&'a str> {
+/// Validate and percent-encode a KV key for use in a URL path.
+///
+/// KV keys can contain `/` and other special characters in their logical name,
+/// but they must be percent-encoded when placed in the URL path so the HTTP
+/// server treats them as a single path segment.
+fn encode_kv_key(value: &str, field: &str) -> CloudflareResult<String> {
     if value.trim().is_empty() {
         return Err(CloudflareError::InvalidInput(format!(
             "{field} must not be empty"
@@ -44,7 +48,7 @@ fn sanitize_kv_key<'a>(value: &'a str, field: &str) -> CloudflareResult<&'a str>
             "{field} contains path traversal characters"
         )));
     }
-    Ok(value)
+    Ok(utf8_percent_encode(value, NON_ALPHANUMERIC).to_string())
 }
 
 /// Cloudflare API client with retry support.
@@ -284,7 +288,7 @@ impl CloudflareClient {
         key: &str,
     ) -> CloudflareResult<String> {
         let namespace_id = sanitize_path_segment(namespace_id, "namespace_id")?;
-        let key = sanitize_kv_key(key, "key")?;
+        let key = encode_kv_key(key, "key")?;
         let url = format!(
             "{}/accounts/{}/storage/kv/namespaces/{namespace_id}/values/{key}",
             self.base_url, self.account_id
@@ -329,7 +333,7 @@ impl CloudflareClient {
         value: &str,
     ) -> CloudflareResult<serde_json::Value> {
         let namespace_id = sanitize_path_segment(namespace_id, "namespace_id")?;
-        let key = sanitize_kv_key(key, "key")?;
+        let key = encode_kv_key(key, "key")?;
         let url = format!(
             "{}/accounts/{}/storage/kv/namespaces/{namespace_id}/values/{key}",
             self.base_url, self.account_id
@@ -359,7 +363,7 @@ impl CloudflareClient {
         key: &str,
     ) -> CloudflareResult<serde_json::Value> {
         let namespace_id = sanitize_path_segment(namespace_id, "namespace_id")?;
-        let key = sanitize_kv_key(key, "key")?;
+        let key = encode_kv_key(key, "key")?;
         let url = format!(
             "{}/accounts/{}/storage/kv/namespaces/{namespace_id}/values/{key}",
             self.base_url, self.account_id

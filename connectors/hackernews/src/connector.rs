@@ -41,16 +41,16 @@ const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/hackernews_connector_verific
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/hackernews_connector/<timestamp>";
 const VERIFY_COMMANDS: [&str; 11] = [
     "scripts/e2e/hackernews_connector_verification.sh",
-    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/hackernews/manifest.toml --check --json",
-    "rch exec -- cargo fmt --manifest-path connectors/hackernews/Cargo.toml --check",
-    "rch exec -- cargo check -p fcp-hackernews --all-targets",
-    "rch exec -- cargo test -p fcp-hackernews --test integration health_unconfigured_includes_guidance -- --nocapture",
-    "rch exec -- cargo test -p fcp-hackernews --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture",
-    "rch exec -- cargo test -p fcp-hackernews --test integration self_check_ready_with_public_probe_and_evidence -- --nocapture",
-    "rch exec -- cargo test -p fcp-hackernews --test integration self_check_retryable_api_failure_reports_degraded -- --nocapture",
-    "rch exec -- cargo test -p fcp-hackernews --test integration invoke_item_get_preserves_public_item_evidence -- --nocapture",
-    "rch exec -- cargo test -p fcp-hackernews --test integration introspection_emits_v3_compliance_evidence -- --nocapture",
-    "rch exec -- cargo clippy -p fcp-hackernews --all-targets -- -D warnings",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo run -q -p fwc -- manifest fix connectors/hackernews/manifest.toml --check --json",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo fmt --manifest-path connectors/hackernews/Cargo.toml --check",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo check -p fcp-hackernews --all-targets",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-hackernews --test integration health_unconfigured_includes_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-hackernews --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-hackernews --test integration self_check_ready_with_public_probe_and_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-hackernews --test integration self_check_retryable_api_failure_reports_degraded -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-hackernews --test integration invoke_item_get_preserves_public_item_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-hackernews --test integration introspection_emits_v3_compliance_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo clippy -p fcp-hackernews --all-targets -- -D warnings",
 ];
 
 /// Hacker News connector configuration.
@@ -334,7 +334,9 @@ impl HackerNewsConnector {
             checks.push(DoctorCheck {
                 name: "search_surface".into(),
                 passed: true,
-                message: Some("Algolia search is intentionally unsupported in the first slice".into()),
+                message: Some(
+                    "Algolia search is intentionally unsupported in the first slice".into(),
+                ),
                 critical: false,
             });
             checks.push(DoctorCheck {
@@ -840,18 +842,13 @@ impl FcpConnector for HackerNewsConnector {
 
         match client.health_check().await {
             Ok(()) => {
-                let live_probe =
-                    Self::health_probe_details(client, false, None, None);
+                let live_probe = Self::health_probe_details(client, false, None, None);
                 Ok(self.attach_self_check_details(SelfCheckReport::ok(), Some(&live_probe)))
             }
             Err(HackerNewsError::RateLimited { retry_after_ms }) => {
                 let message = format!("Rate limited, retry after {retry_after_ms}ms");
-                let live_probe = Self::health_probe_details(
-                    client,
-                    true,
-                    Some(&message),
-                    Some(retry_after_ms),
-                );
+                let live_probe =
+                    Self::health_probe_details(client, true, Some(&message), Some(retry_after_ms));
                 Ok(self.attach_self_check_details(
                     SelfCheckReport::degraded("self_check_retryable", message),
                     Some(&live_probe),
@@ -859,8 +856,7 @@ impl FcpConnector for HackerNewsConnector {
             }
             Err(error) if error.is_retryable() => {
                 let error_text = error.to_string();
-                let live_probe =
-                    Self::health_probe_details(client, true, Some(&error_text), None);
+                let live_probe = Self::health_probe_details(client, true, Some(&error_text), None);
                 Ok(self.attach_self_check_details(
                     SelfCheckReport::degraded("self_check_retryable", error_text),
                     Some(&live_probe),
@@ -868,8 +864,7 @@ impl FcpConnector for HackerNewsConnector {
             }
             Err(error) => {
                 let error_text = error.to_string();
-                let live_probe =
-                    Self::health_probe_details(client, false, Some(&error_text), None);
+                let live_probe = Self::health_probe_details(client, false, Some(&error_text), None);
                 Ok(self.attach_self_check_details(
                     SelfCheckReport::failed("self_check_failed", error_text),
                     Some(&live_probe),

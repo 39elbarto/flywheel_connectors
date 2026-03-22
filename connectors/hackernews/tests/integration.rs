@@ -161,11 +161,11 @@ async fn self_check_ready_with_public_probe_and_evidence() {
         value["details"]["provisioning"]["auth_mode"],
         "anonymous_public_api"
     );
+    assert_eq!(value["details"]["provisioning"]["search_supported"], false);
     assert_eq!(
-        value["details"]["provisioning"]["search_supported"],
-        false
+        value["details"]["live_probe"]["base_url"],
+        format!("{}/v0", server.uri())
     );
-    assert_eq!(value["details"]["live_probe"]["base_url"], format!("{}/v0", server.uri()));
     println!(
         "hackernews_self_check_ready={}",
         serde_json::to_string_pretty(&value).unwrap()
@@ -247,7 +247,11 @@ fn introspection_emits_v3_compliance_evidence() {
     assert_eq!(operations.len(), 9);
     assert_eq!(resource_types.len(), 3);
     assert!(value["auth_caps"].is_null());
-    assert!(value["events"].as_array().is_some_and(|events| events.is_empty()));
+    assert!(
+        value["events"]
+            .as_array()
+            .is_some_and(|events| events.is_empty())
+    );
     assert!(operations.iter().all(|operation| {
         operation["id"]
             .as_str()

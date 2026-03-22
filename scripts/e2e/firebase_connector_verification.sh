@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -7,6 +7,23 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/firebase_connector/${RUN_ID}}"
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
+
+OVERALL_STATUS="ok"
+EXIT_CODE=0
+
+manifest_status="pending"
+manifest_note=""
+cargo_check_status="pending"
+format_check_status="pending"
+health_guidance_status="pending"
+doctor_guidance_status="pending"
+doctor_self_check_status="pending"
+retryable_self_check_status="pending"
+risky_mutation_status="pending"
+compliance_status="pending"
+integration_suite_status="pending"
+clippy_status="pending"
+manifest_check_runner=""
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -40,41 +57,187 @@ run_capture_stdout() {
   ) >"${stdout_path}" 2>"${log_path}"
 }
 
-require_cmd fwc
+promote_overall_status() {
+  local next_status="$1"
+  case "${next_status}" in
+    failed)
+      OVERALL_STATUS="failed"
+      EXIT_CODE=1
+      ;;
+    infra_blocked)
+      if [[ "${OVERALL_STATUS}" == "ok" ]]; then
+        OVERALL_STATUS="infra_blocked"
+        EXIT_CODE=2
+      fi
+      ;;
+  esac
+}
+
+classify_manifest_failure() {
+  local log_path="$1"
+  if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
 require_cmd rch
 
-run_capture_stdout \
+FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
+manifest_check_cmd=()
+if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
+  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
+  manifest_check_cmd=(
+    "${FWC_MANIFEST_BIN}"
+    manifest
+    fix
+    connectors/firebase/manifest.toml
+    --check
+    --json
+  )
+else
+  manifest_check_runner="rch:cargo-run"
+  manifest_check_cmd=(
+    rch
+    exec
+    --
+    cargo
+    run
+    -q
+    -p
+    fwc
+    --
+    manifest
+    fix
+    connectors/firebase/manifest.toml
+    --check
+    --json
+  )
+fi
+
+if run_capture_stdout \
   manifest_check \
   "${OUT_ROOT}/evidence/manifest_check.json" \
-  fwc manifest fix connectors/firebase/manifest.toml --check --json
+  "${manifest_check_cmd[@]}"
+then
+  manifest_status="passed"
+else
+  manifest_status="$(classify_manifest_failure "${OUT_ROOT}/logs/manifest_check.log")"
+  if [[ "${manifest_status}" == "infra_blocked" ]]; then
+    manifest_note="rch worker image missing dbus-1.pc while building fwc for manifest validation"
+  else
+    manifest_note="manifest validation command failed; inspect logs/manifest_check.log"
+  fi
+  cat > "${OUT_ROOT}/evidence/manifest_check.json" <<EOF
+{
+  "status": "${manifest_status}",
+  "note": "${manifest_note}",
+  "log": "${OUT_ROOT}/logs/manifest_check.log"
+}
+EOF
+  promote_overall_status "${manifest_status}"
+fi
 
-run_logged \
+if run_logged \
   cargo_check \
   rch exec -- cargo check -p fcp-firebase --all-targets
+then
+  cargo_check_status="passed"
+else
+  cargo_check_status="failed"
+  promote_overall_status failed
+fi
 
-run_logged \
+if run_logged \
   format_check \
   rch exec -- cargo fmt -p fcp-firebase -- --check
+then
+  format_check_status="passed"
+else
+  format_check_status="failed"
+  promote_overall_status failed
+fi
 
-run_logged \
-  doctor_evidence \
+if run_logged \
+  health_guidance_evidence \
+  rch exec -- cargo test -p fcp-firebase --test integration health_unconfigured_includes_guidance -- --nocapture
+then
+  health_guidance_status="passed"
+else
+  health_guidance_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  doctor_guidance_evidence \
   rch exec -- cargo test -p fcp-firebase --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+then
+  doctor_guidance_status="passed"
+else
+  doctor_guidance_status="failed"
+  promote_overall_status failed
+fi
 
-run_logged \
-  self_check_secretless_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration self_check_secretless_requires_injection_and_evidence -- --nocapture
+if run_logged \
+  doctor_self_check_evidence \
+  rch exec -- cargo test -p fcp-firebase --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
+then
+  doctor_self_check_status="passed"
+else
+  doctor_self_check_status="failed"
+  promote_overall_status failed
+fi
 
-run_logged \
+if run_logged \
+  retryable_self_check_evidence \
+  rch exec -- cargo test -p fcp-firebase --test integration self_check_retryable_firestore_api_failure_reports_degraded -- --nocapture
+then
+  retryable_self_check_status="passed"
+else
+  retryable_self_check_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  risky_mutation_evidence \
+  rch exec -- cargo test -p fcp-firebase --test integration invoke_rtdb_set_preserves_artifact_evidence -- --nocapture
+then
+  risky_mutation_status="passed"
+else
+  risky_mutation_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
   compliance_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration introspection_emits_operation_compliance_evidence -- --nocapture
+  rch exec -- cargo test -p fcp-firebase --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+then
+  compliance_status="passed"
+else
+  compliance_status="failed"
+  promote_overall_status failed
+fi
 
-run_logged \
+if run_logged \
   integration_suite \
   rch exec -- cargo test -p fcp-firebase --test integration -- --nocapture
+then
+  integration_suite_status="passed"
+else
+  integration_suite_status="failed"
+  promote_overall_status failed
+fi
 
-run_logged \
+if run_logged \
   clippy \
   rch exec -- cargo clippy -p fcp-firebase --all-targets -- -D warnings
+then
+  clippy_status="passed"
+else
+  clippy_status="failed"
+  promote_overall_status failed
+fi
 
 cat > "${OUT_ROOT}/environment.json" <<EOF
 {
@@ -82,7 +245,8 @@ cat > "${OUT_ROOT}/environment.json" <<EOF
   "connector": "fcp-firebase",
   "repo_root": "${REPO_ROOT}",
   "verification_script": "scripts/e2e/firebase_connector_verification.sh",
-  "artifact_root": "${OUT_ROOT}"
+  "artifact_root": "${OUT_ROOT}",
+  "manifest_check_runner": "${manifest_check_runner}"
 }
 EOF
 
@@ -90,12 +254,20 @@ cat > "${OUT_ROOT}/replay.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-fwc manifest fix connectors/firebase/manifest.toml --check --json
+FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
+if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
+  "${FWC_MANIFEST_BIN}" manifest fix connectors/firebase/manifest.toml --check --json
+else
+  rch exec -- cargo run -q -p fwc -- manifest fix connectors/firebase/manifest.toml --check --json
+fi
 rch exec -- cargo check -p fcp-firebase --all-targets
 rch exec -- cargo fmt -p fcp-firebase -- --check
+rch exec -- cargo test -p fcp-firebase --test integration health_unconfigured_includes_guidance -- --nocapture
 rch exec -- cargo test -p fcp-firebase --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration self_check_secretless_requires_injection_and_evidence -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration introspection_emits_operation_compliance_evidence -- --nocapture
+rch exec -- cargo test -p fcp-firebase --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
+rch exec -- cargo test -p fcp-firebase --test integration self_check_retryable_firestore_api_failure_reports_degraded -- --nocapture
+rch exec -- cargo test -p fcp-firebase --test integration invoke_rtdb_set_preserves_artifact_evidence -- --nocapture
+rch exec -- cargo test -p fcp-firebase --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 rch exec -- cargo test -p fcp-firebase --test integration -- --nocapture
 rch exec -- cargo clippy -p fcp-firebase --all-targets -- -D warnings
 EOF
@@ -105,13 +277,33 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
 {
   "run_id": "${RUN_ID}",
   "connector": "fcp-firebase",
+  "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
+  "steps": {
+    "manifest_check": {
+      "status": "${manifest_status}",
+      "note": "${manifest_note}"
+    },
+    "cargo_check": "${cargo_check_status}",
+    "format_check": "${format_check_status}",
+    "health_guidance_evidence": "${health_guidance_status}",
+    "doctor_guidance_evidence": "${doctor_guidance_status}",
+    "doctor_self_check_evidence": "${doctor_self_check_status}",
+    "retryable_self_check_evidence": "${retryable_self_check_status}",
+    "risky_mutation_evidence": "${risky_mutation_status}",
+    "compliance_evidence": "${compliance_status}",
+    "integration_suite": "${integration_suite_status}",
+    "clippy": "${clippy_status}"
+  },
   "artifacts": {
     "manifest_check": "${OUT_ROOT}/evidence/manifest_check.json",
     "cargo_check_log": "${OUT_ROOT}/logs/cargo_check.log",
     "format_check_log": "${OUT_ROOT}/logs/format_check.log",
-    "doctor_evidence_log": "${OUT_ROOT}/logs/doctor_evidence.log",
-    "self_check_secretless_evidence_log": "${OUT_ROOT}/logs/self_check_secretless_evidence.log",
+    "health_guidance_evidence_log": "${OUT_ROOT}/logs/health_guidance_evidence.log",
+    "doctor_guidance_evidence_log": "${OUT_ROOT}/logs/doctor_guidance_evidence.log",
+    "doctor_self_check_evidence_log": "${OUT_ROOT}/logs/doctor_self_check_evidence.log",
+    "retryable_self_check_evidence_log": "${OUT_ROOT}/logs/retryable_self_check_evidence.log",
+    "risky_mutation_evidence_log": "${OUT_ROOT}/logs/risky_mutation_evidence.log",
     "compliance_evidence_log": "${OUT_ROOT}/logs/compliance_evidence.log",
     "integration_suite_log": "${OUT_ROOT}/logs/integration_suite.log",
     "clippy_log": "${OUT_ROOT}/logs/clippy.log",
@@ -122,3 +314,4 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
 EOF
 
 echo "Firebase verification artifacts written to ${OUT_ROOT}"
+exit "${EXIT_CODE}"

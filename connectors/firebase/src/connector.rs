@@ -156,7 +156,7 @@ impl FirebaseConfig {
                     firebase_auth_is_secretless(&self.auth),
                 ),
             },
-            host_policy_guidance: "Production verification must target https://firestore.googleapis.com/v1 plus a Firebase-hosted Realtime Database endpoint under *.firebaseio.com or *.firebasedatabase.app.",
+            host_policy_guidance: "Production verification must target https://firestore.googleapis.com/v1 plus a Firebase-hosted Realtime Database endpoint under *.firebaseio.com or *.firebasedatabase.app. Deterministic verification may use localhost override endpoints for both surfaces.",
         }
     }
 }
@@ -279,8 +279,9 @@ fn operator_guidance() -> OperatorGuidance {
             "Use a disposable Firebase project plus a non-production Firestore database and Realtime Database namespace.",
             "Provision a Google credential that can read Firestore database metadata and, if you will test writes, mutate only synthetic staging fixtures.",
             "Seed deterministic Firestore documents and Realtime Database paths before running destructive verification flows.",
+            "Use localhost override endpoints when you need deterministic wiremock-style verification without touching live Firebase infrastructure.",
         ],
-        dedicated_environment: "Run verification only against staging Firebase data. Firestore delete and Realtime Database delete operations are destructive and should never target production documents or JSON subtrees.",
+        dedicated_environment: "Run verification only against staging Firebase data or localhost verification stubs. Firestore delete and Realtime Database delete operations are destructive and should never target production documents or JSON subtrees.",
         redaction_rules: vec![
             "Never print raw bearer tokens, injected credentials, or Authorization headers.",
             "Treat project_id, database_id, and Firebase hostnames as environment metadata; share them only when the environment is disposable or already public.",
@@ -917,6 +918,13 @@ fn default_realtime_database_url(project_id: &str) -> String {
     format!("https://{project_id}.firebaseio.com")
 }
 
+fn host_is_local_verification_stub(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.ends_with(".localhost")
+}
+
 fn host_is_allowed(url: &str, hosts: &[&str]) -> bool {
     Url::parse(url).ok().is_some_and(|parsed| {
         parsed.scheme() == "https" && parsed.host_str().is_some_and(|host| hosts.contains(&host))
@@ -940,6 +948,20 @@ fn firestore_endpoint_policy(url: &str) -> (bool, String) {
             let Some(host) = parsed.host_str() else {
                 return (false, "Firestore base URL must include a host".into());
             };
+            if host_is_local_verification_stub(host) {
+                return match parsed.scheme() {
+                    "http" | "https" => (
+                        true,
+                        format!("Firestore localhost verification endpoint accepted: {url}"),
+                    ),
+                    scheme => (
+                        false,
+                        format!(
+                            "Firestore localhost verification endpoint must use http or https, got {scheme}"
+                        ),
+                    ),
+                };
+            }
             if parsed.scheme() != "https" {
                 return (
                     false,
@@ -952,7 +974,7 @@ fn firestore_endpoint_policy(url: &str) -> (bool, String) {
                 (
                     false,
                     format!(
-                        "Firestore host must be one of {FIRESTORE_ALLOWED_HOSTS:?}, got {host}"
+                        "Firestore host must be one of {FIRESTORE_ALLOWED_HOSTS:?} or a localhost verification stub, got {host}"
                     ),
                 )
             }
@@ -967,6 +989,22 @@ fn realtime_database_endpoint_policy(url: &str) -> (bool, String) {
             let Some(host) = parsed.host_str() else {
                 return (false, "Realtime Database URL must include a host".into());
             };
+            if host_is_local_verification_stub(host) {
+                return match parsed.scheme() {
+                    "http" | "https" => (
+                        true,
+                        format!(
+                            "Realtime Database localhost verification endpoint accepted: {url}"
+                        ),
+                    ),
+                    scheme => (
+                        false,
+                        format!(
+                            "Realtime Database localhost verification endpoint must use http or https, got {scheme}"
+                        ),
+                    ),
+                };
+            }
             if parsed.scheme() != "https" {
                 return (
                     false,
@@ -985,7 +1023,7 @@ fn realtime_database_endpoint_policy(url: &str) -> (bool, String) {
                 (
                     false,
                     format!(
-                        "Realtime Database host must end with one of {REALTIME_DATABASE_ALLOWED_SUFFIXES:?}, got {host}"
+                        "Realtime Database host must end with one of {REALTIME_DATABASE_ALLOWED_SUFFIXES:?} or be a localhost verification stub, got {host}"
                     ),
                 )
             }
@@ -1401,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn host_policy_requires_https_and_firebase_hosts() {
+    fn host_policy_accepts_official_hosts_and_local_verification_overrides() {
         assert!(host_is_allowed(
             "https://firestore.googleapis.com/v1/projects/demo-project",
             &["firestore.googleapis.com"]
@@ -1410,10 +1448,10 @@ mod tests {
             "http://firestore.googleapis.com/v1/projects/demo-project",
             &["firestore.googleapis.com"]
         ));
-        assert!(!host_is_allowed(
-            "https://localhost:8787/v1/projects/demo-project",
-            &["firestore.googleapis.com"]
-        ));
+        let (firestore_local_ok, firestore_local_message) =
+            firestore_endpoint_policy("http://localhost:8787/v1/projects/demo-project");
+        assert!(firestore_local_ok);
+        assert!(firestore_local_message.contains("localhost"));
 
         assert!(host_is_allowed_suffix(
             "https://demo-project.firebaseio.com",
@@ -1423,10 +1461,10 @@ mod tests {
             "http://demo-project.firebaseio.com",
             &["firebaseio.com", "firebasedatabase.app"]
         ));
-        assert!(!host_is_allowed_suffix(
-            "https://localhost",
-            &["firebaseio.com", "firebasedatabase.app"]
-        ));
+        let (realtime_local_ok, realtime_local_message) =
+            realtime_database_endpoint_policy("http://localhost:9000");
+        assert!(realtime_local_ok);
+        assert!(realtime_local_message.contains("localhost"));
     }
 
     #[test]

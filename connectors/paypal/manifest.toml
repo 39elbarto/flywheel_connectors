@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2080b28004713881e4734dc4202a5b7e748c2ce62bcadc343c61cb33bfb2cad8"
+interface_hash = "blake3-256:fcp.interface.v2:d5081a35e1a60426145f7671d7dacaba9e5b3d3e19b642b1b211fa752d3e24ab"
 
 [connector]
 id = "fcp.paypal"
@@ -22,29 +22,26 @@ migration_hint = "No durable connector state; one PayPal client-credential pair 
 
 [zones]
 home = "z:work"
-allowed_sources = [
-    "z:owner",
-    "z:private",
-    "z:work",
-]
+allowed_sources = ["z:owner", "z:private", "z:work"]
 allowed_targets = ["z:work"]
-forbidden = [
-    "z:public",
-    "z:community",
-]
+forbidden = ["z:public", "z:community"]
 
 [capabilities]
-required = [
-    "network.dns",
-    "network.egress",
-    "network.tls.sni",
-]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
-forbidden = [
-    "system.exec",
-    "network.listen",
-    "system.privileged",
-]
+forbidden = ["system.exec", "network.listen", "system.privileged"]
+
+# Auth and scope model:
+# - Each connector instance is bound to one injected PayPal client_id/client_secret pair.
+# - The connector runs in exactly one environment: sandbox or production.
+# - The configured base_url must match the environment and stay on the canonical
+#   `api-m.sandbox.paypal.com` or `api-m.paypal.com` host.
+# - The connector is direct-merchant scoped. Partner delegation, PayPal-Auth-Assertion,
+#   merchant discovery, and cross-merchant fan-out are out of scope for this first slice.
+#
+# First-slice non-goals:
+# - Payouts, subscriptions, disputes, partner onboarding, vault flows, webhook ingest,
+#   event streaming, and any multi-merchant orchestration surface.
 
 [provides.operations."paypal.health"]
 description = "Verify that the configured PayPal client credentials can reach the configured environment."
@@ -66,6 +63,21 @@ type = "boolean"
 [provides.operations."paypal.health".output_schema.properties.sandbox]
 type = "boolean"
 
+[provides.operations."paypal.health".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.health".ai_hints]
 when_to_use = "Use when you need to confirm the configured PayPal credentials and environment are reachable."
 common_mistakes = [
@@ -80,7 +92,7 @@ capability = "paypal.orders.write"
 risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
-idempotency = "strict"
+idempotency = "best_effort"
 
 [provides.operations."paypal.orders.create".input_schema]
 required = ["intent", "currency_code", "value"]
@@ -104,11 +116,27 @@ type = "string"
 [provides.operations."paypal.orders.create".output_schema.properties.status]
 type = "string"
 
+[provides.operations."paypal.orders.create".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.orders.create".ai_hints]
 when_to_use = "Use when you need to create a new PayPal checkout order."
 common_mistakes = [
     "Passing an intent other than CAPTURE or AUTHORIZE.",
     "Expecting this call to capture funds immediately; capture is a separate operation.",
+    "Assuming retries are exact-once; the current connector treats mutating PayPal calls as best_effort.",
 ]
 examples = []
 related = ["paypal.orders.read"]
@@ -137,6 +165,21 @@ type = "string"
 [provides.operations."paypal.orders.get".output_schema.properties.status]
 type = "string"
 
+[provides.operations."paypal.orders.get".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.orders.get".ai_hints]
 when_to_use = "Use when you need the status or details of a specific PayPal order."
 common_mistakes = ["Passing a capture id instead of an order id."]
@@ -149,7 +192,7 @@ capability = "paypal.orders.write"
 risk_level = "critical"
 safety_tier = "risky"
 requires_approval = "interactive"
-idempotency = "strict"
+idempotency = "best_effort"
 
 [provides.operations."paypal.orders.capture".input_schema]
 required = ["order_id"]
@@ -167,11 +210,27 @@ type = "string"
 [provides.operations."paypal.orders.capture".output_schema.properties.status]
 type = "string"
 
+[provides.operations."paypal.orders.capture".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.orders.capture".ai_hints]
 when_to_use = "Use when you need to capture funds for an already approved PayPal order."
 common_mistakes = [
     "Trying to capture an order that is not in APPROVED status.",
     "Treating capture as a dry run; this operation causes a real financial side effect.",
+    "Assuming retries are exact-once; the current connector treats mutating PayPal calls as best_effort.",
 ]
 examples = []
 related = ["paypal.orders.read", "paypal.payments.read"]
@@ -200,10 +259,26 @@ type = "array"
 [provides.operations."paypal.payments.list".output_schema.items]
 type = "object"
 
+[provides.operations."paypal.payments.list".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."paypal.payments.list".ai_hints]
 when_to_use = "Use when you need transaction history from the PayPal reporting API."
 common_mistakes = [
     "Passing non-ISO-8601 date strings.",
+    "PayPal Transaction Search accepts at most a 31-day reporting window and may lag by up to three hours.",
     "Expecting payouts or subscription billing history; those are out of scope for this first slice.",
 ]
 examples = []
@@ -233,6 +308,21 @@ type = "string"
 [provides.operations."paypal.payments.get".output_schema.properties.status]
 type = "string"
 
+[provides.operations."paypal.payments.get".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.payments.get".ai_hints]
 when_to_use = "Use when you need details for a specific captured payment."
 common_mistakes = ["Passing an order id instead of a capture id."]
@@ -245,7 +335,7 @@ capability = "paypal.payments.write"
 risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
-idempotency = "strict"
+idempotency = "best_effort"
 
 [provides.operations."paypal.payments.refund".input_schema]
 required = ["capture_id"]
@@ -266,11 +356,27 @@ type = "string"
 [provides.operations."paypal.payments.refund".output_schema.properties.status]
 type = "string"
 
+[provides.operations."paypal.payments.refund".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.payments.refund".ai_hints]
 when_to_use = "Use when you need to refund a completed PayPal capture."
 common_mistakes = [
     "Passing an order id instead of a capture id.",
     "Assuming refund is harmless; this operation causes a real financial side effect.",
+    "Assuming retries are exact-once; the current connector treats mutating PayPal calls as best_effort.",
 ]
 examples = []
 related = ["paypal.payments.read"]
@@ -281,7 +387,7 @@ capability = "paypal.invoices.write"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "interactive"
-idempotency = "strict"
+idempotency = "best_effort"
 
 [provides.operations."paypal.invoices.create".input_schema]
 required = ["currency_code", "items"]
@@ -302,11 +408,27 @@ type = "string"
 [provides.operations."paypal.invoices.create".output_schema.properties.status]
 type = "string"
 
+[provides.operations."paypal.invoices.create".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.invoices.create".ai_hints]
 when_to_use = "Use when you need to create a draft invoice before it is sent."
 common_mistakes = [
     "Omitting invoice items.",
     "Assuming invoice creation sends email automatically; sending is a separate operation.",
+    "Assuming retries are exact-once; the current connector treats mutating PayPal calls as best_effort.",
 ]
 examples = []
 related = ["paypal.invoices.read", "paypal.invoices.write"]
@@ -328,6 +450,21 @@ type = "array"
 [provides.operations."paypal.invoices.list".output_schema.items]
 type = "object"
 
+[provides.operations."paypal.invoices.list".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
 [provides.operations."paypal.invoices.list".ai_hints]
 when_to_use = "Use when you need invoice inventory from the configured merchant account."
 common_mistakes = [
@@ -342,7 +479,7 @@ capability = "paypal.invoices.write"
 risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
-idempotency = "strict"
+idempotency = "best_effort"
 
 [provides.operations."paypal.invoices.send".input_schema]
 required = ["invoice_id"]
@@ -357,11 +494,27 @@ type = "object"
 [provides.operations."paypal.invoices.send".output_schema.properties.sent]
 type = "boolean"
 
+[provides.operations."paypal.invoices.send".network_constraints]
+host_allow = ["api-m.paypal.com", "api-m.sandbox.paypal.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."paypal.invoices.send".ai_hints]
 when_to_use = "Use when you need to deliver a previously created draft invoice."
 common_mistakes = [
     "Trying to send a non-draft invoice.",
     "Treating this as a read-only operation; it contacts an external recipient.",
+    "Assuming retries are exact-once; the current connector treats mutating PayPal calls as best_effort.",
 ]
 examples = []
 related = ["paypal.invoices.read", "paypal.invoices.write"]
@@ -373,3 +526,39 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "paypal.read"
+description = "Conservative connector-side PayPal read budget"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "paypal.write"
+description = "Conservative connector-side PayPal write budget"
+requests = 12
+window_ms = 60000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "paypal.money_movement"
+description = "Extra guardrail for money-moving PayPal mutations"
+requests = 6
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[rate_limits.operation_pools]
+"paypal.health" = ["paypal.read"]
+"paypal.orders.create" = ["paypal.write"]
+"paypal.orders.get" = ["paypal.read"]
+"paypal.orders.capture" = ["paypal.write", "paypal.money_movement"]
+"paypal.payments.list" = ["paypal.read"]
+"paypal.payments.get" = ["paypal.read"]
+"paypal.payments.refund" = ["paypal.write", "paypal.money_movement"]
+"paypal.invoices.create" = ["paypal.write"]
+"paypal.invoices.list" = ["paypal.read"]
+"paypal.invoices.send" = ["paypal.write"]

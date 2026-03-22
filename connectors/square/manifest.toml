@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:112a4998b16f9fa9de056dc80d9f4a141fd8ceba58104c025042c7b7a11ae0b5"
+interface_hash = "blake3-256:fcp.interface.v2:5d4adf3a13d983e2cd2787c3991f7ce1e62f74da8beb9b9362660a40604bbaac"
 
 [connector]
 id = "fcp.square"
@@ -33,7 +33,11 @@ forbidden = ["system.exec", "network.listen", "system.privileged"]
 
 # Auth and scope model:
 # - Each connector instance is bound to one injected Square bearer token.
-# - The token can be a PAT or an OAuth seller token provisioned out-of-band.
+# - The token can be a production or sandbox PAT, or an OAuth seller token
+#   provisioned out-of-band for the matching environment.
+# - The configured base_url must match the token environment exactly:
+#   `https://connect.squareup.com/v2` for production or
+#   `https://connect.squareupsandbox.com/v2` for sandbox.
 # - The token is merchant-scoped; location-sensitive operations still require explicit
 #   `location_id` or `location_ids` input.
 # - OAuth installation, token refresh, merchant discovery, and cross-merchant fan-out
@@ -62,7 +66,7 @@ type = "object"
 type = "string"
 
 [provides.operations."square.health".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -101,7 +105,7 @@ type = "object"
 type = "array"
 
 [provides.operations."square.locations.list".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -149,7 +153,7 @@ type = "array"
 type = "string"
 
 [provides.operations."square.payments.list".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -192,7 +196,7 @@ type = "object"
 type = "object"
 
 [provides.operations."square.payments.get".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -250,7 +254,7 @@ type = "object"
 type = "object"
 
 [provides.operations."square.payments.create".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -302,7 +306,7 @@ type = "object"
 type = "object"
 
 [provides.operations."square.payments.refund".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -351,7 +355,7 @@ type = "array"
 type = "string"
 
 [provides.operations."square.orders.list".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -394,7 +398,7 @@ type = "object"
 type = "object"
 
 [provides.operations."square.orders.get".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -443,7 +447,7 @@ type = "object"
 type = "object"
 
 [provides.operations."square.orders.create".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -491,7 +495,7 @@ type = "array"
 type = "string"
 
 [provides.operations."square.catalog.list".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true
@@ -536,7 +540,7 @@ type = "array"
 type = "string"
 
 [provides.operations."square.customers.list".network_constraints]
-host_allow = ["connect.squareup.com"]
+host_allow = ["connect.squareup.com", "connect.squareupsandbox.com"]
 port_allow = [443]
 deny_localhost = true
 deny_private_ranges = true

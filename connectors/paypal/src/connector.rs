@@ -194,7 +194,8 @@ fn contract_details(config: Option<&PayPalConfig>) -> serde_json::Value {
             "status": PAYPAL_IMPLEMENTATION_STATUS,
             "notes": [
                 "The connector targets PayPal REST endpoints for checkout orders, reporting transactions, captures, refunds, and invoicing.",
-                "The first slice is deliberately request-response only; there is no webhook or subscription event ingestion yet."
+                "The first slice is deliberately request-response only; there is no webhook or subscription event ingestion yet.",
+                "Mutating operations are currently best-effort for retries because the connector does not yet propagate InvokeRequest.idempotency_key into PayPal-specific request replay headers."
             ],
         },
         "auth_boundary": {
@@ -401,7 +402,7 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_ORDERS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: hint(
                 "Create a PayPal checkout order",
                 vec!["intent must be CAPTURE or AUTHORIZE".into()],
@@ -437,7 +438,7 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_ORDERS_WRITE),
             risk_level: RiskLevel::Critical,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: hint(
                 "Capture funds for an approved order",
                 vec!["Order must be in APPROVED status".into()],
@@ -491,7 +492,7 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_PAYMENTS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: hint(
                 "Refund a captured payment",
                 vec!["Capture must be COMPLETED".into()],
@@ -509,7 +510,7 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_INVOICES_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: hint(
                 "Create a draft PayPal invoice",
                 vec!["Items must include name, quantity, unit_amount".into()],
@@ -541,7 +542,7 @@ fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_INVOICES_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::BestEffort,
             ai_hints: hint(
                 "Send a draft invoice to the recipient",
                 vec!["Invoice must be in DRAFT status".into()],
@@ -1007,10 +1008,13 @@ impl PayPalConnector {
             }
             OP_INVOICES_SEND => {
                 let iid = Self::require_str(&req.input, "invoice_id")?;
-                client
+                let sent = client
                     .send_invoice(runtime, iid)
                     .await
-                    .map_err(|e| e.to_fcp_error())?
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&sent).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
             }
             OP_HEALTH => {
                 let healthy = client
@@ -1034,6 +1038,10 @@ impl PayPalConnector {
 mod tests {
     use super::*;
     use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
 
     fn tc() -> serde_json::Value {
         json!({
@@ -1274,6 +1282,27 @@ mod tests {
     }
 
     #[test]
+    fn mutating_operations_are_best_effort_for_retries() {
+        for operation in operations_info() {
+            if matches!(
+                operation.id.as_str(),
+                OP_ORDERS_CREATE
+                    | OP_ORDERS_CAPTURE
+                    | OP_PAYMENTS_REFUND
+                    | OP_INVOICES_CREATE
+                    | OP_INVOICES_SEND
+            ) {
+                assert_eq!(
+                    operation.idempotency,
+                    IdempotencyClass::BestEffort,
+                    "{}",
+                    operation.id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ops_all_have_hints() {
         for op in operations_info() {
             assert!(!op.ai_hints.when_to_use.is_empty(), "{}", op.id);
@@ -1408,6 +1437,53 @@ mod tests {
             .unwrap()
             .is_err()
         );
+    }
+
+    #[test]
+    fn invoice_send_returns_contract_shape() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/oauth2/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": "fresh-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v2/invoicing/invoices/INV-123/send"))
+                .and(header("authorization", "Bearer fresh-token"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut connector = PayPalConnector::new();
+            connector.configure(tc()).await.unwrap();
+            connector.client = Some(
+                PayPalClient::new(
+                    &server.uri(),
+                    "test_client_id".into(),
+                    "test_client_secret".into(),
+                    30_000,
+                    HttpRetryConfig::default(),
+                )
+                .await
+                .unwrap(),
+            );
+            let sent = connector
+                .client
+                .as_ref()
+                .unwrap()
+                .send_invoice(connector.runtime.as_ref().unwrap(), "INV-123")
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_value(&sent).unwrap(), json!({ "sent": true }));
+        })
+        .unwrap();
     }
 
     #[test]

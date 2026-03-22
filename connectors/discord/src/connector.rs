@@ -359,6 +359,10 @@ impl DiscordConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if self.api_client.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
+
         let zone_dir = req.zone_dir.clone().ok_or(FcpError::InvalidRequest {
             code: 1003,
             message: "zone_dir is required for Discord gateway resume-state and singleton-writer lease persistence".into(),
@@ -371,11 +375,6 @@ impl DiscordConnector {
             ),
         })?;
         self.zone_dir = Some(zone_dir);
-
-        // Verify bot is configured
-        if self.api_client.is_none() {
-            return Err(FcpError::NotConfigured);
-        }
 
         // Set up verifier
         self.verifier = Some(CapabilityVerifier::new(
@@ -1183,11 +1182,13 @@ impl DiscordConnector {
             resource_uris.push(format!("discord:guild:{guild_id}"));
         }
 
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let Some(verifier) = &self.verifier else {
+            self.base.check_ready()?;
+            return Err(FcpError::Internal {
+                message: "connector ready state missing capability verifier".into(),
+            });
+        };
+        verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "discord.send_message" => self.invoke_send_message(input).await,
@@ -2266,6 +2267,29 @@ mod tests {
         assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_before_configure_does_not_create_zone_dir() {
+        let mut connector = DiscordConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let zone_dir = unique_zone_dir("handshake-before-configure");
+
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["discord.read"]
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::NotConfigured)));
+        assert!(connector.zone_dir.is_none());
+        assert!(!Path::new(&zone_dir).exists());
+    }
+
     #[test]
     fn test_gateway_lease_fences_second_holder() {
         let zone_dir = PathBuf::from(unique_zone_dir("lease-fence"));
@@ -2400,6 +2424,40 @@ mod tests {
         if let FcpError::InvalidRequest { message, .. } = err {
             assert!(message.contains("content") || message.contains("embeds"));
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_requires_handshake_once_configured() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let mut connector = DiscordConnector::new();
+        connector
+            .handle_configure(json!({
+                "bot_credential": "test_token",
+                "api_url": mock_server.uri(),
+                "intents": INTENT_GUILDS
+                    | INTENT_GUILD_MESSAGES
+                    | INTENT_DIRECT_MESSAGES
+                    | INTENT_MESSAGE_CONTENT
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_capability(&signing_key, "discord.send", &["discord.send_message"]);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.send_message",
+                "input": {
+                    "channel_id": "123456789",
+                    "content": "hello"
+                },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::NotHandshaken)));
     }
 
     #[test]

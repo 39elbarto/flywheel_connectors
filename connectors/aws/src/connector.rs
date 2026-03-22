@@ -823,6 +823,10 @@ impl FcpConnector for AwsConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if !self.base.configured.load(Ordering::Acquire) {
+            return Err(FcpError::NotConfigured);
+        }
+
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -1595,6 +1599,18 @@ mod tests {
         .unwrap();
         assert_eq!(r.status, "accepted");
         assert_eq!(r.capabilities_granted.len(), 6);
+    }
+
+    #[test]
+    fn handshake_before_configure_fails() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            let result = c.handshake(handshake_req()).await;
+            assert!(!c.base.handshaken.load(Ordering::Acquire));
+            result
+        })
+        .unwrap();
+        assert!(matches!(result, Err(FcpError::NotConfigured)));
     }
 
     #[test]

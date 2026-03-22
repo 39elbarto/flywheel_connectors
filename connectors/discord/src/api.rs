@@ -932,7 +932,9 @@ mod tests {
     #[test]
     fn validate_snowflake_id_rejects_whitespace_only() {
         let err = validate_snowflake_id("   ", "channel_id").unwrap_err();
-        assert!(matches!(err, DiscordError::InvalidInput(ref msg) if msg.contains("must not be empty")));
+        assert!(
+            matches!(err, DiscordError::InvalidInput(ref msg) if msg.contains("must not be empty"))
+        );
     }
 
     #[test]
@@ -945,8 +947,7 @@ mod tests {
 
     #[test]
     fn validate_snowflake_id_rejects_slash_injection() {
-        let err =
-            validate_snowflake_id("123/../../admin/delete", "message_id").unwrap_err();
+        let err = validate_snowflake_id("123/../../admin/delete", "message_id").unwrap_err();
         assert!(matches!(err, DiscordError::InvalidInput(_)));
     }
 
@@ -976,10 +977,7 @@ mod tests {
 
         let result = client.get_channel("../guilds/evil").await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -991,10 +989,7 @@ mod tests {
         let result = client
             .create_message("evil/path", Some("hello"), None, None)
             .await;
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1006,10 +1001,7 @@ mod tests {
         let result = client
             .create_message("123456789", Some("hello"), None, Some("not-a-number"))
             .await;
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1019,10 +1011,7 @@ mod tests {
         let client = DiscordApiClient::new(&config).unwrap();
 
         let result = client.delete_message("123456789", "").await;
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1032,10 +1021,7 @@ mod tests {
         let client = DiscordApiClient::new(&config).unwrap();
 
         let result = client.get_guild("../../etc/passwd").await;
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1045,10 +1031,7 @@ mod tests {
         let client = DiscordApiClient::new(&config).unwrap();
 
         let result = client.get_guild_channels("abc/def").await;
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1058,16 +1041,10 @@ mod tests {
         let client = DiscordApiClient::new(&config).unwrap();
 
         let result = client.add_reaction("bad/id", "123", "👍").await;
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
 
         let result = client.add_reaction("123", "bad/id", "👍").await;
-        assert!(matches!(
-            result.unwrap_err(),
-            DiscordError::InvalidInput(_)
-        ));
+        assert!(matches!(result.unwrap_err(), DiscordError::InvalidInput(_)));
     }
 
     #[test]

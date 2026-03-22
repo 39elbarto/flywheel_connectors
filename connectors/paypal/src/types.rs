@@ -277,6 +277,11 @@ pub struct CreateInvoiceItem {
     pub unit_amount: Amount,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct InvoiceSendResponse {
+    pub sent: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct InvoicesListResponse {
     #[serde(default)]

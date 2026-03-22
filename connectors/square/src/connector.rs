@@ -20,6 +20,10 @@ use crate::client::SquareClient;
 use crate::types::*;
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const SQUARE_PRODUCTION_BASE_URL: &str = "https://connect.squareup.com/v2";
+#[cfg(test)]
+const SQUARE_SANDBOX_BASE_URL: &str = "https://connect.squareupsandbox.com/v2";
+const SQUARE_ALLOWED_HOSTS: [&str; 2] = ["connect.squareup.com", "connect.squareupsandbox.com"];
 
 // Operation IDs
 const OP_PAYMENTS_LIST: &str = "square.payments.list";
@@ -68,11 +72,41 @@ impl std::fmt::Debug for SquareConfig {
 }
 
 fn default_base_url() -> String {
-    "https://connect.squareup.com/v2".into()
+    SQUARE_PRODUCTION_BASE_URL.into()
 }
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+fn normalize_square_base_url(base_url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(base_url)
+        .map_err(|e| format!("Invalid Square base_url: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Square base_url must use https".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Square base_url must include a host".to_string())?;
+    if !SQUARE_ALLOWED_HOSTS.contains(&host) {
+        return Err(format!(
+            "Square base_url host must be connect.squareup.com or connect.squareupsandbox.com, got {host}"
+        ));
+    }
+    if parsed.port_or_known_default() != Some(443) {
+        return Err("Square base_url must use port 443".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Square base_url must not include query parameters or fragments".into());
+    }
+    let path = parsed.path().trim_end_matches('/');
+    if path != "/v2" {
+        return Err(format!(
+            "Square base_url must be https://{host}/v2 for the selected environment"
+        ));
+    }
+
+    Ok(format!("https://{host}/v2"))
 }
 
 // Doctor types
@@ -183,31 +217,14 @@ impl SquareConnector {
                 critical: false,
             });
 
-            let allowed_hosts = ["connect.squareup.com"];
-            let parsed_base_url = reqwest::Url::parse(&config.base_url).ok();
-            let scheme_ok = parsed_base_url
-                .as_ref()
-                .is_some_and(|url| url.scheme() == "https");
-            let host_ok = parsed_base_url
-                .as_ref()
-                .and_then(reqwest::Url::host_str)
-                .is_some_and(|host| allowed_hosts.contains(&host));
-            let port_ok = parsed_base_url
-                .as_ref()
-                .and_then(|url| url.port_or_known_default())
-                == Some(443);
-            let network_ok = scheme_ok && host_ok && port_ok;
+            let normalized_base_url = normalize_square_base_url(&config.base_url);
+            let network_ok = normalized_base_url.is_ok();
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
                 passed: network_ok,
-                message: Some(if network_ok {
-                    "Base URL matches required HTTPS egress constraint (connect.squareup.com:443)"
-                        .into()
-                } else {
-                    format!(
-                        "Base URL {} must use https://connect.squareup.com:443",
-                        config.base_url
-                    )
+                message: Some(match normalized_base_url {
+                    Ok(base_url) => format!("Base URL matches required Square REST base: {base_url}"),
+                    Err(err) => err,
                 }),
                 critical: true,
             });
@@ -646,10 +663,17 @@ impl FcpConnector for SquareConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
-        let config: SquareConfig =
+        let mut config: SquareConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid Square config: {e}"),
+            })?;
+        config.base_url =
+            normalize_square_base_url(&config.base_url).map_err(|message| {
+                FcpError::InvalidRequest {
+                    code: 1001,
+                    message,
+                }
             })?;
 
         self.retry_config = config.retry.clone();
@@ -1225,43 +1249,84 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_doctor_rejects_localhost_base_url() {
+    async fn test_doctor_accepts_sandbox_base_url() {
         let mut connector = SquareConnector::new();
         connector
+            .configure(json!({
+                "base_url": SQUARE_SANDBOX_BASE_URL,
+                "access_token": "test_square_token"
+            }))
+            .await
+            .unwrap();
+        let report = connector.doctor();
+        assert!(report.passed);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "network_constraints" && check.passed)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_localhost_base_url() {
+        let mut connector = SquareConnector::new();
+        let err = connector
             .configure(json!({
                 "base_url": "https://localhost/v2",
                 "access_token": "test_square_token"
             }))
             .await
-            .unwrap();
-        let report = connector.doctor();
-        assert!(!report.passed);
-        let network_check = report
-            .checks
-            .iter()
-            .find(|check| check.name == "network_constraints")
-            .expect("network_constraints check");
-        assert!(!network_check.passed);
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_doctor_rejects_http_base_url() {
+    async fn test_configure_rejects_http_base_url() {
         let mut connector = SquareConnector::new();
-        connector
+        let err = connector
             .configure(json!({
                 "base_url": "http://connect.squareup.com/v2",
                 "access_token": "test_square_token"
             }))
             .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_missing_v2_base_path() {
+        let mut connector = SquareConnector::new();
+        let err = connector
+            .configure(json!({
+                "base_url": "https://connect.squareup.com",
+                "access_token": "test_square_token"
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_normalizes_trailing_slash_on_base_url() {
+        let mut connector = SquareConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://connect.squareupsandbox.com/v2/",
+                "access_token": "test_square_token"
+            }))
+            .await
             .unwrap();
         let report = connector.doctor();
-        assert!(!report.passed);
-        let network_check = report
-            .checks
-            .iter()
-            .find(|check| check.name == "network_constraints")
-            .expect("network_constraints check");
-        assert!(!network_check.passed);
+        assert!(report.passed);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "base_url"
+                    && check.message.as_deref()
+                        == Some("Base URL (https): https://connect.squareupsandbox.com/v2"))
+        );
     }
 
     #[fcp_async_core::runtime::test]

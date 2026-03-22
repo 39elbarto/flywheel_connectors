@@ -153,7 +153,7 @@ async fn lifecycle_configure_handshake_health() {
         .await
         .expect("health should succeed");
     // Health reports "ready" when configured
-    assert_eq!(health["status"], "ok");
+    assert_eq!(health["status"], "ready");
 }
 
 #[fcp_async_core::runtime::test]
@@ -211,7 +211,7 @@ async fn send_message_happy_path() {
     Mock::given(method("POST"))
         .and(path("/channels/111/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "msg_001",
+            "id": "100000000000000001",
             "channel_id": "111",
             "content": "Hello Discord!",
             "timestamp": "2026-03-02T12:00:00.000000+00:00",
@@ -233,7 +233,7 @@ async fn send_message_happy_path() {
         .await
         .expect("send_message should succeed");
 
-    assert_eq!(result["id"], "msg_001");
+    assert_eq!(result["id"], "100000000000000001");
     assert_eq!(result["channel_id"], "111");
     assert_eq!(result["content"], "Hello Discord!");
 }
@@ -290,9 +290,9 @@ async fn edit_message_happy_path() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.edit"]).await;
 
     Mock::given(method("PATCH"))
-        .and(path("/channels/111/messages/msg_001"))
+        .and(path("/channels/111/messages/100000000000000001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "msg_001",
+            "id": "100000000000000001",
             "channel_id": "111",
             "content": "Edited content",
             "timestamp": "2026-03-02T12:00:00.000000+00:00"
@@ -306,7 +306,7 @@ async fn edit_message_happy_path() {
             "operation": "discord.edit_message",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "content": "Edited content"
             },
             "capability_token": token
@@ -314,7 +314,7 @@ async fn edit_message_happy_path() {
         .await
         .expect("edit should succeed");
 
-    assert_eq!(result["id"], "msg_001");
+    assert_eq!(result["id"], "100000000000000001");
     assert_eq!(result["content"], "Edited content");
 }
 
@@ -329,7 +329,7 @@ async fn delete_message_happy_path() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.delete"]).await;
 
     Mock::given(method("DELETE"))
-        .and(path("/channels/111/messages/msg_001"))
+        .and(path("/channels/111/messages/100000000000000001"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&mock_server)
         .await;
@@ -340,7 +340,7 @@ async fn delete_message_happy_path() {
             "operation": "discord.delete_message",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001"
+                "message_id": "100000000000000001"
             },
             "capability_token": token
         }))
@@ -401,7 +401,7 @@ async fn get_guild_happy_path() {
             "id": "999",
             "name": "Test Server",
             "icon": null,
-            "owner_id": "owner_123"
+            "owner_id": "300000000000000001"
         })))
         .mount(&mock_server)
         .await;
@@ -465,7 +465,7 @@ async fn add_reaction_happy_path() {
     // 👍 = U+1F44D = F0 9F 91 8D in UTF-8
     Mock::given(method("PUT"))
         .and(path(
-            "/channels/111/messages/msg_001/reactions/%F0%9F%91%8D/@me",
+            "/channels/111/messages/100000000000000001/reactions/%F0%9F%91%8D/@me",
         ))
         .respond_with(ResponseTemplate::new(204))
         .mount(&mock_server)
@@ -477,7 +477,7 @@ async fn add_reaction_happy_path() {
             "operation": "discord.add_reaction",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "emoji": "👍"
             },
             "capability_token": token
@@ -500,7 +500,7 @@ async fn add_reaction_missing_emoji() {
             "operation": "discord.add_reaction",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001"
+                "message_id": "100000000000000001"
             },
             "capability_token": token
         }))
@@ -555,9 +555,9 @@ async fn create_thread_happy_path() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.threads"]).await;
 
     Mock::given(method("POST"))
-        .and(path("/channels/111/messages/msg_001/threads"))
+        .and(path("/channels/111/messages/100000000000000001/threads"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "thread_001",
+            "id": "100000000000000101",
             "type": 11,
             "name": "Discussion",
             "guild_id": "999"
@@ -571,7 +571,7 @@ async fn create_thread_happy_path() {
             "operation": "discord.create_thread",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "name": "Discussion"
             },
             "capability_token": token
@@ -579,7 +579,7 @@ async fn create_thread_happy_path() {
         .await
         .expect("create_thread should succeed");
 
-    assert_eq!(result["id"], "thread_001");
+    assert_eq!(result["id"], "100000000000000101");
     assert_eq!(result["name"], "Discussion");
 }
 
@@ -596,7 +596,7 @@ async fn create_thread_name_too_long() {
             "operation": "discord.create_thread",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "name": long_name
             },
             "capability_token": token
@@ -622,7 +622,7 @@ async fn create_thread_empty_name() {
             "operation": "discord.create_thread",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "name": ""
             },
             "capability_token": token
@@ -1228,9 +1228,9 @@ async fn create_thread_name_exactly_100_chars_accepted() {
     let name_100 = "t".repeat(discord_limits::THREAD_NAME_MAX_CHARS);
 
     Mock::given(method("POST"))
-        .and(path("/channels/111/messages/msg_001/threads"))
+        .and(path("/channels/111/messages/100000000000000001/threads"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "thread_100",
+            "id": "100000000000000102",
             "type": 11,
             "name": name_100,
             "guild_id": "999"
@@ -1244,7 +1244,7 @@ async fn create_thread_name_exactly_100_chars_accepted() {
             "operation": "discord.create_thread",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "name": name_100
             },
             "capability_token": token
@@ -1256,7 +1256,7 @@ async fn create_thread_name_exactly_100_chars_accepted() {
         "thread name of exactly {} chars should be accepted",
         discord_limits::THREAD_NAME_MAX_CHARS
     );
-    assert_eq!(result.unwrap()["id"], "thread_100");
+    assert_eq!(result.unwrap()["id"], "100000000000000102");
 }
 
 #[fcp_async_core::runtime::test]
@@ -1268,7 +1268,7 @@ async fn add_reaction_custom_emoji_format() {
     // Custom emoji "pepe:123456" → colon is encoded as %3A
     Mock::given(method("PUT"))
         .and(path(
-            "/channels/111/messages/msg_001/reactions/pepe%3A123456/@me",
+            "/channels/111/messages/100000000000000001/reactions/pepe%3A123456/@me",
         ))
         .respond_with(ResponseTemplate::new(204))
         .mount(&mock_server)
@@ -1280,7 +1280,7 @@ async fn add_reaction_custom_emoji_format() {
             "operation": "discord.add_reaction",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "emoji": "pepe:123456"
             },
             "capability_token": token
@@ -1404,9 +1404,9 @@ async fn edit_message_with_embeds_only_no_content() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.edit"]).await;
 
     Mock::given(method("PATCH"))
-        .and(path("/channels/111/messages/msg_001"))
+        .and(path("/channels/111/messages/100000000000000001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "msg_001",
+            "id": "100000000000000001",
             "channel_id": "111",
             "content": "",
             "timestamp": "2026-03-02T12:00:00.000000+00:00",
@@ -1421,7 +1421,7 @@ async fn edit_message_with_embeds_only_no_content() {
             "operation": "discord.edit_message",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "embeds": [{"title": "Updated embed", "description": "New description"}]
             },
             "capability_token": token
@@ -1432,7 +1432,7 @@ async fn edit_message_with_embeds_only_no_content() {
         result.is_ok(),
         "edit with embeds only (no content) should succeed"
     );
-    assert_eq!(result.unwrap()["id"], "msg_001");
+    assert_eq!(result.unwrap()["id"], "100000000000000001");
 }
 
 #[fcp_async_core::runtime::test]
@@ -1444,7 +1444,7 @@ async fn send_message_with_reply_to() {
     Mock::given(method("POST"))
         .and(path("/channels/111/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "msg_reply",
+            "id": "100000000000000011",
             "channel_id": "111",
             "content": "This is a reply",
             "timestamp": "2026-03-02T12:00:00.000000+00:00"
@@ -1459,14 +1459,14 @@ async fn send_message_with_reply_to() {
             "input": {
                 "channel_id": "111",
                 "content": "This is a reply",
-                "reply_to": "msg_original"
+                "reply_to": "100000000000000003"
             },
             "capability_token": token
         }))
         .await;
 
     assert!(result.is_ok(), "send_message with reply_to should succeed");
-    assert_eq!(result.unwrap()["id"], "msg_reply");
+    assert_eq!(result.unwrap()["id"], "100000000000000011");
 }
 
 #[fcp_async_core::runtime::test]
@@ -1476,7 +1476,7 @@ async fn delete_message_returns_deleted_true() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.delete"]).await;
 
     Mock::given(method("DELETE"))
-        .and(path("/channels/222/messages/msg_002"))
+        .and(path("/channels/222/messages/100000000000000002"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&mock_server)
         .await;
@@ -1487,7 +1487,7 @@ async fn delete_message_returns_deleted_true() {
             "operation": "discord.delete_message",
             "input": {
                 "channel_id": "222",
-                "message_id": "msg_002"
+                "message_id": "100000000000000002"
             },
             "capability_token": token
         }))
@@ -1504,7 +1504,7 @@ async fn list_channels_empty_guild() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
 
     Mock::given(method("GET"))
-        .and(path("/guilds/empty_guild/channels"))
+        .and(path("/guilds/200000000000000001/channels"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&mock_server)
         .await;
@@ -1513,7 +1513,7 @@ async fn list_channels_empty_guild() {
     let result = connector
         .handle_invoke(json!({
             "operation": "discord.list_channels",
-            "input": { "guild_id": "empty_guild" },
+            "input": { "guild_id": "200000000000000001" },
             "capability_token": token
         }))
         .await
@@ -1530,12 +1530,12 @@ async fn get_guild_with_detailed_fields() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
 
     Mock::given(method("GET"))
-        .and(path("/guilds/detailed_guild"))
+        .and(path("/guilds/200000000000000002"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "detailed_guild",
+            "id": "200000000000000002",
             "name": "Detailed Server",
             "icon": "abc123icon",
-            "owner_id": "owner_456"
+            "owner_id": "300000000000000002"
         })))
         .mount(&mock_server)
         .await;
@@ -1544,16 +1544,16 @@ async fn get_guild_with_detailed_fields() {
     let result = connector
         .handle_invoke(json!({
             "operation": "discord.get_guild",
-            "input": { "guild_id": "detailed_guild" },
+            "input": { "guild_id": "200000000000000002" },
             "capability_token": token
         }))
         .await
         .expect("get_guild with detailed fields should succeed");
 
-    assert_eq!(result["id"], "detailed_guild");
+    assert_eq!(result["id"], "200000000000000002");
     assert_eq!(result["name"], "Detailed Server");
     assert_eq!(result["icon"], "abc123icon");
-    assert_eq!(result["owner_id"], "owner_456");
+    assert_eq!(result["owner_id"], "300000000000000002");
 }
 
 #[fcp_async_core::runtime::test]
@@ -1583,7 +1583,7 @@ async fn send_message_with_embeds_and_content() {
     Mock::given(method("POST"))
         .and(path("/channels/111/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "msg_combo",
+            "id": "100000000000000012",
             "channel_id": "111",
             "content": "Check this out",
             "timestamp": "2026-03-02T12:00:00.000000+00:00",
@@ -1609,7 +1609,7 @@ async fn send_message_with_embeds_and_content() {
         result.is_ok(),
         "send with both content and embeds should succeed"
     );
-    assert_eq!(result.unwrap()["id"], "msg_combo");
+    assert_eq!(result.unwrap()["id"], "100000000000000012");
 }
 
 // ============================================================================
@@ -1732,7 +1732,7 @@ async fn api_404_on_delete_message() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.delete"]).await;
 
     Mock::given(method("DELETE"))
-        .and(path("/channels/111/messages/deleted_msg"))
+        .and(path("/channels/111/messages/100000000000000004"))
         .respond_with(
             ResponseTemplate::new(404)
                 .set_body_json(json!({"message": "Unknown Message", "code": 10008})),
@@ -1746,7 +1746,7 @@ async fn api_404_on_delete_message() {
             "operation": "discord.delete_message",
             "input": {
                 "channel_id": "111",
-                "message_id": "deleted_msg"
+                "message_id": "100000000000000004"
             },
             "capability_token": token
         }))
@@ -1764,7 +1764,7 @@ async fn api_403_on_add_reaction() {
     // Any PUT to reactions path returns 403
     Mock::given(method("PUT"))
         .and(path(
-            "/channels/111/messages/msg_001/reactions/%F0%9F%91%8D/@me",
+            "/channels/111/messages/100000000000000001/reactions/%F0%9F%91%8D/@me",
         ))
         .respond_with(
             ResponseTemplate::new(403)
@@ -1779,7 +1779,7 @@ async fn api_403_on_add_reaction() {
             "operation": "discord.add_reaction",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "emoji": "\u{1F44D}"
             },
             "capability_token": token
@@ -1897,9 +1897,9 @@ async fn create_thread_with_auto_archive_duration() {
     let signing_key = setup_full(&mut connector, &mock_server, &["discord.threads"]).await;
 
     Mock::given(method("POST"))
-        .and(path("/channels/111/messages/msg_001/threads"))
+        .and(path("/channels/111/messages/100000000000000001/threads"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "thread_archive",
+            "id": "100000000000000103",
             "type": 11,
             "name": "Archivable Thread",
             "guild_id": "999"
@@ -1913,7 +1913,7 @@ async fn create_thread_with_auto_archive_duration() {
             "operation": "discord.create_thread",
             "input": {
                 "channel_id": "111",
-                "message_id": "msg_001",
+                "message_id": "100000000000000001",
                 "name": "Archivable Thread",
                 "auto_archive_duration": 1440
             },

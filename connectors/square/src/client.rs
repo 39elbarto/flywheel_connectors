@@ -402,10 +402,7 @@ impl SquareClient {
     // ─────────────────────────────────────────────────────────────────────
 
     /// List locations.
-    pub async fn list_locations(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> SquareResult<LocationList> {
+    pub async fn list_locations(&self, runtime: &ConnectorRuntime) -> SquareResult<LocationList> {
         self.get_json(runtime, "/locations", &[]).await
     }
 
@@ -474,9 +471,12 @@ mod tests {
 
     #[test]
     fn secretless_detection() {
-        let client =
-            SquareClient::new("https://connect.squareup.com/v2", "", HttpRetryConfig::default())
-                .unwrap();
+        let client = SquareClient::new(
+            "https://connect.squareup.com/v2",
+            "",
+            HttpRetryConfig::default(),
+        )
+        .unwrap();
         assert!(client.is_secretless());
     }
 

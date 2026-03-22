@@ -1,5 +1,6 @@
 //! Azure connector implementation.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -42,6 +43,16 @@ const CAP_STORAGE_READ: &str = "azure.storage.read";
 const CAP_STORAGE_WRITE: &str = "azure.storage.write";
 const CAP_KEYVAULT_READ: &str = "azure.keyvault.read";
 const CAP_KEYVAULT_WRITE: &str = "azure.keyvault.write";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/azure_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/azure_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 6] = [
+    "scripts/e2e/azure_connector_verification.sh",
+    "fwc manifest fix connectors/azure/manifest.toml --check --json",
+    "rch exec -- cargo check -p fcp-azure --all-targets",
+    "rch exec -- cargo fmt -p fcp-azure -- --check",
+    "rch exec -- cargo test -p fcp-azure --test integration -- --nocapture",
+    "rch exec -- cargo clippy -p fcp-azure --all-targets -- -D warnings",
+];
 
 #[derive(Clone, Deserialize)]
 pub struct AzureConfig {
@@ -103,19 +114,41 @@ impl AzureConfig {
 
         Ok(config)
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        ProvisioningReadiness {
+            auth_mode: self.auth.redacted_label(),
+            management_url: self.management_url.clone(),
+            request_timeout_ms: self.request_timeout_ms,
+            credential_injection_required: self.auth.is_secretless(),
+            supported_overrides: SupportedOverrides {
+                blob_base_url: "https://<account>.blob.core.windows.net",
+                vault_base_url: "https://<vault>.vault.azure.net",
+            },
+        }
+    }
 }
 
-fn validate_https_url(url: &str, label: &str) -> Result<Url, String> {
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.ends_with(".localhost")
+}
+
+fn validate_controlled_base_url<F>(
+    url: &str,
+    label: &str,
+    expected_host_description: &str,
+    host_allowed: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&str) -> bool,
+{
     let parsed =
         Url::parse(url).map_err(|error| format!("{label} must be a valid URL: {error}"))?;
-    if parsed.scheme() != "https" {
-        return Err(format!("{label} must use https"));
-    }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!("{label} must not include embedded credentials"));
-    }
-    if parsed.port_or_known_default() != Some(443) {
-        return Err(format!("{label} must resolve to port 443"));
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err(format!(
@@ -125,22 +158,23 @@ fn validate_https_url(url: &str, label: &str) -> Result<Url, String> {
     if parsed.path() != "/" && !parsed.path().is_empty() {
         return Err(format!("{label} must not include a path"));
     }
-    Ok(parsed)
-}
-
-fn validate_allowed_host_url<F>(
-    url: &str,
-    label: &str,
-    expected_host_description: &str,
-    host_allowed: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&str) -> bool,
-{
-    let parsed = validate_https_url(url, label)?;
     let host = parsed
         .host_str()
         .ok_or_else(|| format!("{label} must include a host"))?;
+    if is_local_test_host(host) {
+        if parsed.scheme() != "https" && parsed.scheme() != "http" {
+            return Err(format!(
+                "{label} must use https, or http/https when targeting localhost for verification"
+            ));
+        }
+        return Ok(());
+    }
+    if parsed.scheme() != "https" {
+        return Err(format!("{label} must use https"));
+    }
+    if parsed.port_or_known_default() != Some(443) {
+        return Err(format!("{label} must resolve to port 443"));
+    }
     if !host_allowed(host) {
         return Err(format!(
             "{label} host must match {expected_host_description}"
@@ -153,19 +187,19 @@ fn validate_management_url(url: &str) -> Result<(), String> {
     if url.trim().is_empty() {
         return Err("management_url cannot be empty".into());
     }
-    validate_allowed_host_url(url, "management_url", "management.azure.com", |host| {
+    validate_controlled_base_url(url, "management_url", "management.azure.com", |host| {
         host.eq_ignore_ascii_case("management.azure.com")
     })
 }
 
 fn validate_blob_base_url(url: &str) -> Result<(), String> {
-    validate_allowed_host_url(url, "blob_base_url", "*.blob.core.windows.net", |host| {
+    validate_controlled_base_url(url, "blob_base_url", "*.blob.core.windows.net", |host| {
         host.ends_with(".blob.core.windows.net")
     })
 }
 
 fn validate_vault_base_url(url: &str) -> Result<(), String> {
-    validate_allowed_host_url(url, "vault_base_url", "*.vault.azure.net", |host| {
+    validate_controlled_base_url(url, "vault_base_url", "*.vault.azure.net", |host| {
         host.ends_with(".vault.azure.net")
     })
 }
@@ -185,9 +219,87 @@ fn validate_optional_override(
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+struct SupportedOverrides {
+    blob_base_url: &'static str,
+    vault_base_url: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    management_url: String,
+    request_timeout_ms: u64,
+    credential_injection_required: bool,
+    supported_overrides: SupportedOverrides,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable Azure subscription, resource group, Blob Storage account, and Key Vault for verification.",
+            "Provide either a scoped bearer token or a credential_id backed by a host/egress injector before expecting self_check or invoke to succeed.",
+            "Point management_url, blob_base_url, and vault_base_url at localhost verification stubs when you need deterministic test coverage without touching live Azure resources.",
+        ],
+        dedicated_environment: "Use staging-only subscriptions, storage accounts, blob containers, and Key Vaults. Blob writes and Key Vault secret updates can overwrite live state and must never target production during verification.",
+        redaction_rules: vec![
+            "Never log bearer tokens or credential injection identifiers alongside tenant-specific context.",
+            "Redact Authorization headers, Key Vault secret values, blob payloads, tenant IDs, subscription IDs, storage account names, and vault names from captured artifacts unless they are already public test fixtures.",
+            "Treat resource group names, resource IDs, blob names, and Key Vault secret names as sensitive in operator transcripts.",
+        ],
+        limitations: vec![
+            "Self-check currently proves readiness by calling Azure Resource Manager list_subscriptions.",
+            "Deterministic verification relies on localhost override endpoints for management_url, blob_base_url, and vault_base_url rather than live Azure APIs.",
+            "This connector exposes management, blob, and Key Vault slices but does not currently cover broader Azure resource mutation workflows.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "health or self_check reports credential injection required",
+                action: "Provide a concrete bearer token for direct verification or ensure the host/egress proxy injects the credential_id before rerunning the bundle.",
+            },
+            RemediationHint {
+                code: "auth_failed",
+                symptom: "self_check or invoke returns Unauthorized or Forbidden",
+                action: "Verify the bearer token audience and scope for ARM, Blob Storage, or Key Vault, and confirm the token is not expired.",
+            },
+            RemediationHint {
+                code: "override_host_policy",
+                symptom: "invoke rejects blob_base_url or vault_base_url before making a request",
+                action: "Use https://<account>.blob.core.windows.net, https://<vault>.vault.azure.net, or localhost verification stubs without paths, query strings, fragments, or embedded credentials.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -199,12 +311,19 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
-        let passed = checks
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
+        let ready = checks
             .iter()
             .filter(|check| check.critical)
             .all(|check| check.passed);
-        Self { passed, checks }
+        Self {
+            ready,
+            passed: ready,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
     }
 }
 
@@ -235,7 +354,29 @@ impl AzureConnector {
         format!("sha256:{}", hex::encode(digest.finalize()))
     }
 
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        provisioning: Option<ProvisioningReadiness>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
+    }
+
     pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(AzureConfig::provisioning_readiness);
         let mut checks = Vec::new();
         checks.push(DoctorCheck {
             name: "configuration".into(),
@@ -244,7 +385,9 @@ impl AzureConnector {
                 .config
                 .as_ref()
                 .map(|_| "Configuration loaded".into())
-                .or_else(|| Some("Not configured".into())),
+                .or_else(|| {
+                    Some("Not configured; run configure before handshake or invoke".into())
+                }),
             critical: true,
         });
         checks.push(DoctorCheck {
@@ -254,22 +397,23 @@ impl AzureConnector {
                 .client
                 .as_ref()
                 .map(|_| "Client initialized".into())
-                .or_else(|| Some("Client not initialized".into())),
+                .or_else(|| Some("Client not initialized; re-run configure".into())),
             critical: true,
         });
 
-        if let Some(config) = &self.config {
-            let (management_url_ok, management_message) =
-                match validate_management_url(&config.management_url) {
-                    Ok(()) => (
-                        true,
-                        format!(
-                            "Management URL accepted for Azure Resource Manager: {}",
-                            config.management_url
-                        ),
+        if let (Some(config), Some(readiness)) = (&self.config, &provisioning) {
+            let (management_url_ok, management_message) = match validate_management_url(
+                &config.management_url,
+            ) {
+                Ok(()) => (
+                    true,
+                    format!(
+                        "Management URL accepted for Azure Resource Manager or localhost verification: {}",
+                        config.management_url
                     ),
-                    Err(error) => (false, error),
-                };
+                ),
+                Err(error) => (false, error),
+            };
             checks.push(DoctorCheck {
                 name: "management_url".into(),
                 passed: management_url_ok,
@@ -279,13 +423,22 @@ impl AzureConnector {
             checks.push(DoctorCheck {
                 name: "auth_mode".into(),
                 passed: true,
-                message: Some(format!("Auth: {}", config.auth.redacted_label())),
+                message: Some(format!("Auth: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "request_timeout_ms".into(),
+                passed: readiness.request_timeout_ms > 0,
+                message: Some(format!(
+                    "HTTP timeout configured to {}ms",
+                    readiness.request_timeout_ms
+                )),
                 critical: false,
             });
             checks.push(DoctorCheck {
                 name: "credential_injection".into(),
-                passed: !config.auth.is_secretless(),
-                message: Some(if config.auth.is_secretless() {
+                passed: !readiness.credential_injection_required,
+                message: Some(if readiness.credential_injection_required {
                     "Configured with credential_id; the host or egress proxy must inject a concrete Azure bearer token before self_check or invoke can prove live readiness".into()
                 } else {
                     "Bearer token is configured directly for self_check and invoke".into()
@@ -296,13 +449,13 @@ impl AzureConnector {
                 name: "override_host_policy".into(),
                 passed: true,
                 message: Some(
-                    "blob_base_url must be https://<account>.blob.core.windows.net and vault_base_url must be https://<vault>.vault.azure.net; paths, query strings, fragments, embedded credentials, and non-443 ports are rejected".into(),
+                    "blob_base_url and vault_base_url must target the expected Azure hosts or localhost verification stubs; paths, query strings, fragments, and embedded credentials are rejected".into(),
                 ),
                 critical: false,
             });
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 
     fn capability_for_operation(operation: &str) -> Option<CapabilityId> {
@@ -1124,6 +1277,10 @@ impl FcpConnector for AzureConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(AzureConfig::provisioning_readiness);
         let credential_injection_required =
             self.client.as_ref().is_some_and(AzureClient::is_secretless);
         let mut snapshot = if self.config.is_some() && self.client.is_some() {
@@ -1156,6 +1313,11 @@ impl FcpConnector for AzureConnector {
                 "blob_base_url": "https://<account>.blob.core.windows.net",
                 "vault_base_url": "https://<vault>.vault.azure.net",
             },
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
         }));
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1163,29 +1325,36 @@ impl FcpConnector for AzureConnector {
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(AzureConfig::provisioning_readiness);
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                provisioning,
             ));
         };
 
         if client.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
-                "credential_injection_required",
-                "Configured with credential_id; egress proxy injection is required for health checks",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection is required for health checks",
+                ),
+                provisioning,
             ));
         }
 
         match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
-            Err(error) if error.is_retryable() => Ok(SelfCheckReport::degraded(
-                "self_check_retryable",
-                error.to_string(),
+            Ok(()) => Ok(self.attach_self_check_details(SelfCheckReport::ok(), provisioning)),
+            Err(error) if error.is_retryable() => Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                provisioning,
             )),
-            Err(error) => Ok(SelfCheckReport::failed(
-                "self_check_failed",
-                error.to_string(),
+            Err(error) => Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("self_check_failed", error.to_string()),
+                provisioning,
             )),
         }
     }
@@ -1329,6 +1498,7 @@ mod tests {
         assert!(validate_management_url("https://example.com").is_err());
         assert!(validate_management_url("https://user:pass@management.azure.com").is_err());
         assert!(validate_management_url("https://management.azure.com/subscriptions").is_err());
+        assert!(validate_management_url("http://127.0.0.1:4011").is_ok());
     }
 
     #[test]
@@ -1337,11 +1507,13 @@ mod tests {
         assert!(validate_blob_base_url("http://acct.blob.core.windows.net").is_err());
         assert!(validate_blob_base_url("https://example.com").is_err());
         assert!(validate_blob_base_url("https://user:pass@acct.blob.core.windows.net").is_err());
+        assert!(validate_blob_base_url("http://localhost:4012").is_ok());
 
         assert!(validate_vault_base_url("https://vault-one.vault.azure.net").is_ok());
         assert!(validate_vault_base_url("http://vault-one.vault.azure.net").is_err());
         assert!(validate_vault_base_url("https://example.com").is_err());
         assert!(validate_vault_base_url("https://user:pass@vault-one.vault.azure.net").is_err());
+        assert!(validate_vault_base_url("http://localhost:4013").is_ok());
     }
 
     #[test]

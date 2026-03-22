@@ -731,14 +731,14 @@ impl Sandbox for LinuxSandbox {
 
                     if ruleset_fd >= 0 {
                         // Add rules
-                        let apply_rule = |c_path: &std::ffi::CString, access: u64| {
+                        let apply_rule = |c_path: &std::ffi::CString, access: u64| -> Result<(), std::io::Error> {
                             let fd = libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
                             if fd >= 0 {
                                 let rule_attr = LandlockPathBeneathAttr {
                                     allowed_access: access,
                                     parent_fd: fd,
                                 };
-                                libc::syscall(
+                                let res = libc::syscall(
                                     libc::SYS_landlock_add_rule,
                                     ruleset_fd,
                                     LANDLOCK_RULE_PATH_BENEATH,
@@ -746,18 +746,30 @@ impl Sandbox for LinuxSandbox {
                                     0,
                                 );
                                 libc::close(fd);
+                                if res != 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                            } else {
+                                return Err(std::io::Error::last_os_error());
                             }
+                            Ok(())
                         };
 
                         for c_path in &readonly_cpaths {
-                            apply_rule(c_path, readonly_access);
+                            apply_rule(c_path, readonly_access)?;
                         }
                         for c_path in &writable_cpaths {
-                            apply_rule(c_path, writable_access);
+                            apply_rule(c_path, writable_access)?;
                         }
 
-                        libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, 0);
+                        if libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, 0) != 0 {
+                            let err = std::io::Error::last_os_error();
+                            libc::close(ruleset_fd);
+                            return Err(err);
+                        }
                         libc::close(ruleset_fd);
+                    } else {
+                        return Err(std::io::Error::last_os_error());
                     }
                 }
 
@@ -768,14 +780,19 @@ impl Sandbox for LinuxSandbox {
                     filter: filter.as_ptr(),
                 };
 
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 {
-                    libc::prctl(
-                        libc::PR_SET_SECCOMP,
-                        libc::SECCOMP_MODE_FILTER,
-                        &prog as *const _,
-                        0,
-                        0,
-                    );
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                if libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER,
+                    &prog as *const _,
+                    0,
+                    0,
+                ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
                 }
 
                 Ok(())

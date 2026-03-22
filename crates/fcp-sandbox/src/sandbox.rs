@@ -353,7 +353,19 @@ pub fn normalize_path(path: &std::path::Path) -> PathBuf {
     for comp in path.components() {
         match comp {
             std::path::Component::ParentDir => {
-                out.pop();
+                let last = out.components().next_back();
+                match last {
+                    Some(std::path::Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    Some(std::path::Component::RootDir) => {
+                        // At root, .. does nothing
+                    }
+                    _ => {
+                        // Either empty, prefix, or another ..
+                        out.push(std::path::Component::ParentDir);
+                    }
+                }
             }
             std::path::Component::CurDir => {}
             _ => out.push(comp),

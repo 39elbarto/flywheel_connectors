@@ -26,6 +26,7 @@ risky_mutation_status="pending"
 compliance_status="pending"
 integration_suite_status="pending"
 clippy_status="pending"
+manifest_check_runner=""
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -86,10 +87,42 @@ classify_manifest_failure() {
 
 require_cmd rch
 
+FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
+manifest_check_cmd=()
+if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
+  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
+  manifest_check_cmd=(
+    "${FWC_MANIFEST_BIN}"
+    manifest
+    fix
+    connectors/aws/manifest.toml
+    --check
+    --json
+  )
+else
+  manifest_check_runner="rch:cargo-run"
+  manifest_check_cmd=(
+    rch
+    exec
+    --
+    cargo
+    run
+    -q
+    -p
+    fwc
+    --
+    manifest
+    fix
+    connectors/aws/manifest.toml
+    --check
+    --json
+  )
+fi
+
 if run_capture_stdout \
   manifest_check \
   "${OUT_ROOT}/evidence/manifest_check.json" \
-  rch exec -- cargo run -q -p fwc -- manifest fix connectors/aws/manifest.toml --check --json
+  "${manifest_check_cmd[@]}"
 then
   manifest_status="passed"
 else
@@ -245,7 +278,8 @@ cat > "${OUT_ROOT}/environment.json" <<EOF
   "connector": "fcp-aws",
   "repo_root": "${REPO_ROOT}",
   "verification_script": "scripts/e2e/aws_connector_verification.sh",
-  "artifact_root": "${OUT_ROOT}"
+  "artifact_root": "${OUT_ROOT}",
+  "manifest_check_runner": "${manifest_check_runner}"
 }
 EOF
 
@@ -253,7 +287,12 @@ cat > "${OUT_ROOT}/replay.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-rch exec -- cargo run -q -p fwc -- manifest fix connectors/aws/manifest.toml --check --json
+FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
+if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
+  "${FWC_MANIFEST_BIN}" manifest fix connectors/aws/manifest.toml --check --json
+else
+  rch exec -- cargo run -q -p fwc -- manifest fix connectors/aws/manifest.toml --check --json
+fi
 rch exec -- cargo check -p fcp-aws --all-targets
 rch exec -- cargo fmt -p fcp-aws -- --check
 rch exec -- cargo test -p fcp-aws --test integration lifecycle_health_unconfigured_includes_guidance -- --nocapture

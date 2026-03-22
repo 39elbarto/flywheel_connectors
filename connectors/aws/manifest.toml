@@ -1,266 +1,484 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:b381bd4a256cb16cb481b65312841b7480883d6ca28b6a860481a9127ef0a890"
 
 [connector]
 id = "fcp.aws"
 name = "AWS"
 version = "0.1.0"
 description = "AWS connector for S3, EC2, Lambda, and STS workflows; deterministic verification currently relies on custom endpoint overrides until SigV4 signing is implemented"
-archetype = "cloud-control-plane"
-homepage = "https://docs.aws.amazon.com/"
+archetypes = ["operational", "storage"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; configuration, credentials, and the HTTP runtime live only inside the current connector instance."
 
 [zones]
 home = "z:work"
 allowed_sources = ["z:work", "z:private"]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = ["z:public", "z:community"]
 
 [capabilities]
-required = ["network.outbound"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "network.listen", "system.privileged"]
 
-# ── S3 operations ──
-
-[provides.operations.s3_list_buckets]
-summary = "List all S3 buckets"
+[provides.operations."aws.s3.list_buckets"]
+description = "List all S3 buckets in the current AWS account."
 capability = "aws.s3.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "array" }
 
-[provides.operations.s3_list_buckets.network_constraints]
-host_allow = ["s3.*.amazonaws.com"]
+[provides.operations."aws.s3.list_buckets".network_constraints]
+host_allow = ["*.amazonaws.com", "s3.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.s3_list_buckets.ai_hints]
-when_to_use = "When you need to list all S3 buckets in the account"
+[provides.operations."aws.s3.list_buckets".ai_hints]
+when_to_use = "List all S3 buckets in the account"
+common_mistakes = []
+examples = []
+related = ["aws.s3.read"]
 
-[provides.operations.s3_list_objects]
-summary = "List objects in an S3 bucket"
+[provides.operations."aws.s3.list_objects"]
+description = "List objects and keys in a specific S3 bucket."
 capability = "aws.s3.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["bucket"] }
+output_schema = { type = "array" }
 
-[provides.operations.s3_list_objects.network_constraints]
-host_allow = ["s3.*.amazonaws.com"]
+[provides.operations."aws.s3.list_objects".network_constraints]
+host_allow = ["*.amazonaws.com", "s3.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.s3_list_objects.ai_hints]
-when_to_use = "When you need to list objects/keys in a specific S3 bucket"
+[provides.operations."aws.s3.list_objects".ai_hints]
+when_to_use = "List objects/keys in a specific S3 bucket"
+common_mistakes = ["Use bucket name not ARN"]
+examples = []
+related = ["aws.s3.read"]
 
-[provides.operations.s3_get_object]
-summary = "Get an object from S3"
+[provides.operations."aws.s3.get_object"]
+description = "Download and return an S3 object body and response metadata."
 capability = "aws.s3.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["bucket", "key"] }
+output_schema = { type = "object" }
 
-[provides.operations.s3_get_object.network_constraints]
-host_allow = ["s3.*.amazonaws.com"]
+[provides.operations."aws.s3.get_object".network_constraints]
+host_allow = ["*.amazonaws.com", "s3.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 104857600
 
-[provides.operations.s3_get_object.ai_hints]
-when_to_use = "When you need to download or read an S3 object"
+[provides.operations."aws.s3.get_object".ai_hints]
+when_to_use = "Download/read an S3 object"
+common_mistakes = ["Key is the full path including prefixes"]
+examples = []
+related = ["aws.s3.read"]
 
-[provides.operations.s3_put_object]
-summary = "Upload an object to S3"
+[provides.operations."aws.s3.put_object"]
+description = "Upload or overwrite an object in S3."
 capability = "aws.s3.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["bucket", "key", "body"] }
+output_schema = { type = "object" }
 
-[provides.operations.s3_put_object.network_constraints]
-host_allow = ["s3.*.amazonaws.com"]
+[provides.operations."aws.s3.put_object".network_constraints]
+host_allow = ["*.amazonaws.com", "s3.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.s3_put_object.ai_hints]
-when_to_use = "When you need to upload or create an S3 object"
+[provides.operations."aws.s3.put_object".ai_hints]
+when_to_use = "Upload/create an S3 object"
+common_mistakes = ["Overwrites existing objects with same key"]
+examples = []
+related = ["aws.s3.read"]
 
-[provides.operations.s3_delete_object]
-summary = "Delete an object from S3"
+[provides.operations."aws.s3.delete_object"]
+description = "Delete an S3 object. This is irreversible unless bucket versioning is enabled."
 capability = "aws.s3.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
+input_schema = { type = "object", required = ["bucket", "key"] }
+output_schema = { type = "object" }
 
-[provides.operations.s3_delete_object.network_constraints]
-host_allow = ["s3.*.amazonaws.com"]
+[provides.operations."aws.s3.delete_object".network_constraints]
+host_allow = ["*.amazonaws.com", "s3.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.s3_delete_object.ai_hints]
-when_to_use = "When you need to permanently delete an S3 object"
+[provides.operations."aws.s3.delete_object".ai_hints]
+when_to_use = "Permanently delete an S3 object (irreversible without versioning)"
+common_mistakes = ["Verify key before deleting"]
+examples = []
+related = ["aws.s3.read"]
 
-# ── EC2 operations ──
-
-[provides.operations.ec2_describe_instances]
-summary = "Describe EC2 instances"
+[provides.operations."aws.ec2.describe_instances"]
+description = "List EC2 instances visible to the configured credentials."
 capability = "aws.ec2.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "array" }
 
-[provides.operations.ec2_describe_instances.network_constraints]
-host_allow = ["ec2.*.amazonaws.com"]
+[provides.operations."aws.ec2.describe_instances".network_constraints]
+host_allow = ["*.amazonaws.com", "ec2.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.ec2_describe_instances.ai_hints]
-when_to_use = "When you need to list or inspect EC2 instances"
+[provides.operations."aws.ec2.describe_instances".ai_hints]
+when_to_use = "List all EC2 instances"
+common_mistakes = []
+examples = []
+related = ["aws.ec2.read"]
 
-[provides.operations.ec2_start_instance]
-summary = "Start an EC2 instance"
+[provides.operations."aws.ec2.start_instance"]
+description = "Start a stopped EC2 instance."
 capability = "aws.ec2.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["instance_id"] }
+output_schema = { type = "object" }
 
-[provides.operations.ec2_start_instance.network_constraints]
-host_allow = ["ec2.*.amazonaws.com"]
+[provides.operations."aws.ec2.start_instance".network_constraints]
+host_allow = ["*.amazonaws.com", "ec2.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.ec2_start_instance.ai_hints]
-when_to_use = "When you need to start a stopped EC2 instance"
+[provides.operations."aws.ec2.start_instance".ai_hints]
+when_to_use = "Start a stopped EC2 instance"
+common_mistakes = ["Instance must be in stopped state"]
+examples = []
+related = ["aws.ec2.read"]
 
-[provides.operations.ec2_stop_instance]
-summary = "Stop an EC2 instance"
+[provides.operations."aws.ec2.stop_instance"]
+description = "Stop a running EC2 instance."
 capability = "aws.ec2.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["instance_id"] }
+output_schema = { type = "object" }
 
-[provides.operations.ec2_stop_instance.network_constraints]
-host_allow = ["ec2.*.amazonaws.com"]
+[provides.operations."aws.ec2.stop_instance".network_constraints]
+host_allow = ["*.amazonaws.com", "ec2.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.ec2_stop_instance.ai_hints]
-when_to_use = "When you need to stop a running EC2 instance"
+[provides.operations."aws.ec2.stop_instance".ai_hints]
+when_to_use = "Stop a running EC2 instance"
+common_mistakes = ["May cause downtime"]
+examples = []
+related = ["aws.ec2.read"]
 
-[provides.operations.ec2_terminate_instance]
-summary = "Terminate an EC2 instance"
+[provides.operations."aws.ec2.terminate_instance"]
+description = "Terminate an EC2 instance. This is irreversible and can destroy attached workload state."
 capability = "aws.ec2.write"
-risk = "critical"
+risk_level = "critical"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
+input_schema = { type = "object", required = ["instance_id"] }
+output_schema = { type = "object" }
 
-[provides.operations.ec2_terminate_instance.network_constraints]
-host_allow = ["ec2.*.amazonaws.com"]
+[provides.operations."aws.ec2.terminate_instance".network_constraints]
+host_allow = ["*.amazonaws.com", "ec2.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.ec2_terminate_instance.ai_hints]
-when_to_use = "When you need to permanently terminate an EC2 instance (irreversible)"
+[provides.operations."aws.ec2.terminate_instance".ai_hints]
+when_to_use = "Permanently terminate an EC2 instance (irreversible, data loss)"
+common_mistakes = ["Cannot be undone, all data on instance volumes lost"]
+examples = []
+related = ["aws.ec2.read"]
 
-# ── Lambda operations ──
-
-[provides.operations.lambda_list_functions]
-summary = "List Lambda functions"
+[provides.operations."aws.lambda.list_functions"]
+description = "List Lambda functions available to the configured AWS credentials."
 capability = "aws.lambda.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "array" }
 
-[provides.operations.lambda_list_functions.network_constraints]
-host_allow = ["lambda.*.amazonaws.com"]
+[provides.operations."aws.lambda.list_functions".network_constraints]
+host_allow = ["*.amazonaws.com", "lambda.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.lambda_list_functions.ai_hints]
-when_to_use = "When you need to list all Lambda functions"
+[provides.operations."aws.lambda.list_functions".ai_hints]
+when_to_use = "List all Lambda functions"
+common_mistakes = []
+examples = []
+related = ["aws.lambda.read"]
 
-[provides.operations.lambda_invoke]
-summary = "Invoke a Lambda function"
+[provides.operations."aws.lambda.invoke"]
+description = "Invoke a Lambda function with an optional payload."
 capability = "aws.lambda.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["function_name"] }
+output_schema = { type = "object" }
 
-[provides.operations.lambda_invoke.network_constraints]
-host_allow = ["lambda.*.amazonaws.com"]
+[provides.operations."aws.lambda.invoke".network_constraints]
+host_allow = ["*.amazonaws.com", "lambda.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
-[provides.operations.lambda_invoke.ai_hints]
-when_to_use = "When you need to execute a Lambda function"
+[provides.operations."aws.lambda.invoke".ai_hints]
+when_to_use = "Execute a Lambda function with a payload"
+common_mistakes = ["Function must exist and be in Active state"]
+examples = []
+related = ["aws.lambda.read"]
 
-# ── STS operations ──
-
-[provides.operations.sts_get_caller_identity]
-summary = "Get caller identity"
+[provides.operations."aws.sts.get_caller_identity"]
+description = "Return the AWS identity associated with the current credentials."
 capability = "aws.iam.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
 
-[provides.operations.sts_get_caller_identity.network_constraints]
+[provides.operations."aws.sts.get_caller_identity".network_constraints]
 host_allow = ["sts.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.sts_get_caller_identity.ai_hints]
-when_to_use = "When you need to verify who the current AWS credentials belong to"
+[provides.operations."aws.sts.get_caller_identity".ai_hints]
+when_to_use = "Check who the current credentials belong to"
+common_mistakes = []
+examples = []
+related = []
 
-# ── Health operation ──
-
-[provides.operations.health]
-summary = "Check AWS API health"
+[provides.operations."aws.health"]
+description = "Check AWS credential and API reachability health."
 capability = "aws.iam.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
 
-[provides.operations.health.network_constraints]
+[provides.operations."aws.health".network_constraints]
 host_allow = ["sts.amazonaws.com"]
 port_allow = [443]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.health.ai_hints]
-when_to_use = "When you need to check AWS credentials and API health"
+[provides.operations."aws.health".ai_hints]
+when_to_use = "Check AWS credentials and API health"
+common_mistakes = []
+examples = []
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

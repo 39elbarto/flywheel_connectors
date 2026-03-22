@@ -1,6 +1,11 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:89ac38fc95896332149e7b4d90b2fa8a039e2803caf864fb0be60462388d4b39"
 
 [connector]
 id = "fcp.line"
@@ -8,7 +13,12 @@ name = "LINE Messaging"
 version = "0.1.0"
 description = "One-channel LINE Messaging API connector for outbound messages, profile or group lookups, rich-menu metadata management, and health verification"
 archetypes = ["operational"]
-homepage = "https://developers.line.biz/en/reference/messaging-api/"
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "One channel access token plus retry and timeout settings are injected at runtime; the connector keeps no durable local state."
 
 # Auth and scope model:
 # - One connector instance is bound to one LINE Messaging API channel.
@@ -24,186 +34,266 @@ allowed_targets = ["z:private"]
 tailscale_tag = "tag:fcp-private"
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
 [provides.operations."line.messages.push"]
-summary = "Push a message to one LINE recipient ID"
+description = "Push a message to one LINE recipient ID."
 capability = "line.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "best_effort"
 
 [provides.operations."line.messages.push".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.messages.reply"]
-summary = "Reply to an inbound LINE webhook event using a reply token"
+description = "Reply to an inbound LINE webhook event using a reply token."
 capability = "line.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "none"
 
 [provides.operations."line.messages.reply".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.messages.multicast"]
-summary = "Send one payload to multiple LINE user IDs"
+description = "Send one payload to multiple LINE user IDs."
 capability = "line.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "best_effort"
 
 [provides.operations."line.messages.multicast".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.profile.get"]
-summary = "Get a LINE user profile"
+description = "Get a LINE user profile."
 capability = "line.profile.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
 [provides.operations."line.profile.get".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.group.profile"]
-summary = "Get one LINE group summary"
+description = "Get one LINE group summary."
 capability = "line.profile.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
 [provides.operations."line.group.profile".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.group.members"]
-summary = "Enumerate LINE group member IDs"
+description = "Enumerate LINE group member IDs."
 capability = "line.profile.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
 [provides.operations."line.group.members".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.rich_menu.list"]
-summary = "List LINE rich-menu metadata objects"
+description = "List LINE rich-menu metadata objects."
 capability = "line.menu.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
 [provides.operations."line.rich_menu.list".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.rich_menu.create"]
-summary = "Create one LINE rich-menu metadata object"
+description = "Create one LINE rich-menu metadata object."
 capability = "line.menu.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "best_effort"
 
 [provides.operations."line.rich_menu.create".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.rich_menu.delete"]
-summary = "Delete one LINE rich-menu metadata object"
+description = "Delete one LINE rich-menu metadata object."
 capability = "line.menu.write"
-risk = "high"
+risk_level = "high"
 safety_tier = "dangerous"
+requires_approval = "interactive"
 idempotency = "strict"
 
 [provides.operations."line.rich_menu.delete".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."line.health"]
-summary = "Probe LINE bot-info reachability and auth"
+description = "Probe LINE bot-info reachability and auth."
 capability = "line.profile.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
 [provides.operations."line.health".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
-require_tls = true
+ip_allow = []
+cidr_deny = []
 require_sni = true
+spki_pins = []
 deny_localhost = false
 deny_private_ranges = false
 deny_tailnet_ranges = true
 deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576

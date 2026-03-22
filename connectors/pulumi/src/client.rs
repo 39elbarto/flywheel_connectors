@@ -240,8 +240,7 @@ impl PulumiClient {
         let org = sanitize_path_segment(organization, "organization")?;
         let proj = sanitize_path_segment(project, "project")?;
         let stk = sanitize_path_segment(stack, "stack")?;
-        self.get(&format!("/stacks/{org}/{proj}/{stk}"), None)
-            .await
+        self.get(&format!("/stacks/{org}/{proj}/{stk}"), None).await
     }
 
     /// Create a new stack.
@@ -255,8 +254,7 @@ impl PulumiClient {
         let proj = sanitize_path_segment(project, "project")?;
         let _stk = sanitize_path_segment(stack, "stack")?;
         let body = serde_json::json!({"stackName": stack});
-        self.post(&format!("/stacks/{org}/{proj}"), &body)
-            .await
+        self.post(&format!("/stacks/{org}/{proj}"), &body).await
     }
 
     /// Delete a stack.
@@ -269,8 +267,7 @@ impl PulumiClient {
         let org = sanitize_path_segment(organization, "organization")?;
         let proj = sanitize_path_segment(project, "project")?;
         let stk = sanitize_path_segment(stack, "stack")?;
-        self.delete(&format!("/stacks/{org}/{proj}/{stk}"))
-            .await
+        self.delete(&format!("/stacks/{org}/{proj}/{stk}")).await
     }
 
     /// Export stack state.
@@ -283,11 +280,8 @@ impl PulumiClient {
         let org = sanitize_path_segment(organization, "organization")?;
         let proj = sanitize_path_segment(project, "project")?;
         let stk = sanitize_path_segment(stack, "stack")?;
-        self.get(
-            &format!("/stacks/{org}/{proj}/{stk}/export"),
-            None,
-        )
-        .await
+        self.get(&format!("/stacks/{org}/{proj}/{stk}/export"), None)
+            .await
     }
 
     // -- Deployments --
@@ -302,11 +296,8 @@ impl PulumiClient {
         let org = sanitize_path_segment(organization, "organization")?;
         let proj = sanitize_path_segment(project, "project")?;
         let stk = sanitize_path_segment(stack, "stack")?;
-        self.get(
-            &format!("/stacks/{org}/{proj}/{stk}/updates"),
-            None,
-        )
-        .await
+        self.get(&format!("/stacks/{org}/{proj}/{stk}/updates"), None)
+            .await
     }
 }
 
@@ -494,7 +485,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_valid() {
-        assert_eq!(sanitize_path_segment("my-org", "organization").unwrap(), "my-org");
+        assert_eq!(
+            sanitize_path_segment("my-org", "organization").unwrap(),
+            "my-org"
+        );
     }
 
     #[test]

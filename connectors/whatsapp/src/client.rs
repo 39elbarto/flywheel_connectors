@@ -241,10 +241,7 @@ impl WhatsAppClient {
     /// Returns an error if the API call fails.
     pub async fn get_profile(&self, runtime: &ConnectorRuntime) -> WhatsAppResult<ProfileResponse> {
         let safe_id = sanitize_path_segment(&self.phone_number_id, "phone_number_id")?;
-        let url = format!(
-            "{}/{safe_id}/whatsapp_business_profile",
-            self.base_url
-        );
+        let url = format!("{}/{safe_id}/whatsapp_business_profile", self.base_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
@@ -485,7 +482,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_valid() {
-        assert_eq!(sanitize_path_segment("123456", "phone_number_id").unwrap(), "123456");
+        assert_eq!(
+            sanitize_path_segment("123456", "phone_number_id").unwrap(),
+            "123456"
+        );
     }
 
     #[test]

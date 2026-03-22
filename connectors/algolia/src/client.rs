@@ -207,8 +207,7 @@ impl AlgoliaClient {
     ) -> AlgoliaResult<serde_json::Value> {
         let safe_index = sanitize_path_segment(index_name, "index_name")?;
         let safe_oid = sanitize_path_segment(object_id, "object_id")?;
-        self.get(&format!("/indexes/{safe_index}/{safe_oid}"))
-            .await
+        self.get(&format!("/indexes/{safe_index}/{safe_oid}")).await
     }
 
     /// Delete a record by `objectID`.
@@ -455,7 +454,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("my-index", "index_name").unwrap(), "my-index");
+        assert_eq!(
+            sanitize_path_segment("my-index", "index_name").unwrap(),
+            "my-index"
+        );
     }
 
     #[test]

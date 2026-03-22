@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::json;
 use tracing::{debug, instrument};
@@ -262,7 +262,10 @@ impl PostgresClient {
     #[instrument(skip(self))]
     pub async fn schema_columns(&self, table: &str) -> PostgresResult<serde_json::Value> {
         let encoded_table = utf8_percent_encode(table, NON_ALPHANUMERIC);
-        let url = format!("{}/rest/v1/schema/columns?table={encoded_table}", self.base_url);
+        let url = format!(
+            "{}/rest/v1/schema/columns?table={encoded_table}",
+            self.base_url
+        );
         debug!(url = %url, "GET pg.schema.columns");
         let req = self
             .add_auth(self.client.get(&url))
@@ -275,7 +278,10 @@ impl PostgresClient {
     #[instrument(skip(self))]
     pub async fn schema_indexes(&self, table: &str) -> PostgresResult<serde_json::Value> {
         let encoded_table = utf8_percent_encode(table, NON_ALPHANUMERIC);
-        let url = format!("{}/rest/v1/schema/indexes?table={encoded_table}", self.base_url);
+        let url = format!(
+            "{}/rest/v1/schema/indexes?table={encoded_table}",
+            self.base_url
+        );
         debug!(url = %url, "GET pg.schema.indexes");
         let req = self
             .add_auth(self.client.get(&url))

@@ -44,9 +44,7 @@ impl MastodonError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(_) | Self::RateLimited { .. } | Self::Async(_) => true,
-            Self::Api { status, .. } => {
-                classify_http_status(*status, None).is_retryable()
-            }
+            Self::Api { status, .. } => classify_http_status(*status, None).is_retryable(),
             Self::Json(_) | Self::Unauthorized(_) | Self::Config(_) => false,
         }
     }

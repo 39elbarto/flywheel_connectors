@@ -467,7 +467,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("12345", "project_id").unwrap(), "12345");
+        assert_eq!(
+            sanitize_path_segment("12345", "project_id").unwrap(),
+            "12345"
+        );
     }
 
     #[test]

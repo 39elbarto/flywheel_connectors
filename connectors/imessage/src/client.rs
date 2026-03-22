@@ -35,8 +35,8 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BlueBubblesResult<&
 }
 
 use crate::types::{
-    BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SendMessageRequest, SendMessageResponse,
-    ServerInfo,
+    BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SendMessageRequest,
+    SendMessageResponse, ServerInfo,
 };
 
 fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -51,7 +51,9 @@ fn duration_to_ms(d: Duration) -> u64 {
     d.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
-async fn decode_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, BlueBubblesError> {
+async fn decode_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, BlueBubblesError> {
     resp.json::<T>().await.map_err(BlueBubblesError::Http)
 }
 

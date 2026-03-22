@@ -236,8 +236,7 @@ impl PandaDocClient {
         body: &serde_json::Value,
     ) -> PandaDocResult<serde_json::Value> {
         let safe_id = sanitize_path_segment(document_id, "document_id")?;
-        self.post(&format!("/documents/{safe_id}/send"), body)
-            .await
+        self.post(&format!("/documents/{safe_id}/send"), body).await
     }
 
     /// Delete a document.
@@ -436,7 +435,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("doc_abc123", "document_id").unwrap(), "doc_abc123");
+        assert_eq!(
+            sanitize_path_segment("doc_abc123", "document_id").unwrap(),
+            "doc_abc123"
+        );
     }
 
     #[test]

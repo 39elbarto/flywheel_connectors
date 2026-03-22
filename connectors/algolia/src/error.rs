@@ -678,10 +678,7 @@ mod tests {
 
     #[test]
     fn invalid_input_retry_after_none() {
-        assert_eq!(
-            AlgoliaError::InvalidInput("bad".into()).retry_after(),
-            None
-        );
+        assert_eq!(AlgoliaError::InvalidInput("bad".into()).retry_after(), None);
     }
 
     #[test]

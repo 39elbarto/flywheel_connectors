@@ -370,11 +370,7 @@ impl MastodonClient {
     }
 
     /// Get a single status by ID.
-    pub async fn get_status(
-        &self,
-        runtime: &ConnectorRuntime,
-        id: &str,
-    ) -> MastodonResult<Status> {
+    pub async fn get_status(&self, runtime: &ConnectorRuntime, id: &str) -> MastodonResult<Status> {
         let id = Self::sanitize_path_segment(id)?;
         let url = format!("{}/statuses/{}", self.base_url, id);
         self.get_with_retry(runtime, &url, &[]).await
@@ -456,10 +452,7 @@ impl MastodonClient {
     }
 
     /// Verify the current user's credentials (account info).
-    pub async fn verify_credentials(
-        &self,
-        runtime: &ConnectorRuntime,
-    ) -> MastodonResult<Account> {
+    pub async fn verify_credentials(&self, runtime: &ConnectorRuntime) -> MastodonResult<Account> {
         let url = format!("{}/accounts/verify_credentials", self.base_url);
         self.get_with_retry(runtime, &url, &[]).await
     }
@@ -486,10 +479,7 @@ impl MastodonClient {
         search_type: Option<&str>,
         limit: Option<u32>,
     ) -> MastodonResult<SearchResults> {
-        let url = format!(
-            "{}/search",
-            self.base_url.replace("/api/v1", "/api/v2")
-        );
+        let url = format!("{}/search", self.base_url.replace("/api/v1", "/api/v2"));
         let mut query = vec![("q".into(), q.to_string())];
         if let Some(t) = search_type {
             query.push(("type".into(), t.into()));
@@ -502,10 +492,7 @@ impl MastodonClient {
 
     /// Health check: get instance info.
     pub async fn health_check(&self) -> MastodonResult<Instance> {
-        let url = format!(
-            "{}/instance",
-            self.base_url.replace("/api/v1", "/api/v2")
-        );
+        let url = format!("{}/instance", self.base_url.replace("/api/v1", "/api/v2"));
         let resp = self
             .client
             .get(&url)
@@ -535,7 +522,10 @@ impl MastodonClient {
                 .await
                 .map_err(MastodonError::Http)?;
             if resp_v1.status().is_success() {
-                return resp_v1.json::<Instance>().await.map_err(MastodonError::Http);
+                return resp_v1
+                    .json::<Instance>()
+                    .await
+                    .map_err(MastodonError::Http);
             }
             return Err(MastodonError::Api {
                 status,
@@ -555,8 +545,11 @@ mod tests {
 
     #[test]
     fn client_creation() {
-        let client =
-            MastodonClient::new("https://mastodon.social", "test_token", HttpRetryConfig::default());
+        let client = MastodonClient::new(
+            "https://mastodon.social",
+            "test_token",
+            HttpRetryConfig::default(),
+        );
         assert!(client.is_ok());
     }
 
@@ -617,12 +610,9 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = MastodonClient::new(
-            &mock_server.uri(),
-            "test_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
+        let client =
+            MastodonClient::new(&mock_server.uri(), "test_token", HttpRetryConfig::default())
+                .unwrap();
         let result = client.health_check().await;
         assert!(result.is_ok());
         let instance = result.unwrap();
@@ -647,12 +637,9 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = MastodonClient::new(
-            &mock_server.uri(),
-            "test_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
+        let client =
+            MastodonClient::new(&mock_server.uri(), "test_token", HttpRetryConfig::default())
+                .unwrap();
         let result = client.health_check().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().title, "Test v1 Instance");

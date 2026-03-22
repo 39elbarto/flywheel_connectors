@@ -80,8 +80,8 @@ const fn default_request_timeout_ms() -> u64 {
 }
 
 fn normalize_square_base_url(base_url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(base_url)
-        .map_err(|e| format!("Invalid Square base_url: {e}"))?;
+    let parsed =
+        reqwest::Url::parse(base_url).map_err(|e| format!("Invalid Square base_url: {e}"))?;
     if parsed.scheme() != "https" {
         return Err("Square base_url must use https".into());
     }
@@ -223,7 +223,9 @@ impl SquareConnector {
                 name: "network_constraints".into(),
                 passed: network_ok,
                 message: Some(match normalized_base_url {
-                    Ok(base_url) => format!("Base URL matches required Square REST base: {base_url}"),
+                    Ok(base_url) => {
+                        format!("Base URL matches required Square REST base: {base_url}")
+                    }
                     Err(err) => err,
                 }),
                 critical: true,
@@ -668,13 +670,12 @@ impl FcpConnector for SquareConnector {
                 code: 1001,
                 message: format!("Invalid Square config: {e}"),
             })?;
-        config.base_url =
-            normalize_square_base_url(&config.base_url).map_err(|message| {
-                FcpError::InvalidRequest {
-                    code: 1001,
-                    message,
-                }
-            })?;
+        config.base_url = normalize_square_base_url(&config.base_url).map_err(|message| {
+            FcpError::InvalidRequest {
+                code: 1001,
+                message,
+            }
+        })?;
 
         self.retry_config = config.retry.clone();
         self.runtime = Some(ConnectorRuntime::new(
@@ -1319,14 +1320,9 @@ mod tests {
             .unwrap();
         let report = connector.doctor();
         assert!(report.passed);
-        assert!(
-            report
-                .checks
-                .iter()
-                .any(|check| check.name == "base_url"
-                    && check.message.as_deref()
-                        == Some("Base URL (https): https://connect.squareupsandbox.com/v2"))
-        );
+        assert!(report.checks.iter().any(|check| check.name == "base_url"
+            && check.message.as_deref()
+                == Some("Base URL (https): https://connect.squareupsandbox.com/v2")));
     }
 
     #[fcp_async_core::runtime::test]

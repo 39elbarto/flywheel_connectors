@@ -204,8 +204,7 @@ impl PostHogClient {
     /// List saved insights.
     pub async fn list_insights(&self) -> PostHogResult<serde_json::Value> {
         let safe_pid = sanitize_path_segment(&self.project_id, "project_id")?;
-        self.get(&format!("/projects/{safe_pid}/insights"))
-            .await
+        self.get(&format!("/projects/{safe_pid}/insights")).await
     }
 
     // -- Feature Flags --
@@ -431,7 +430,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_accepts_valid() {
-        assert_eq!(sanitize_path_segment("12345", "project_id").unwrap(), "12345");
+        assert_eq!(
+            sanitize_path_segment("12345", "project_id").unwrap(),
+            "12345"
+        );
     }
 
     #[test]

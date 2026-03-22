@@ -264,11 +264,8 @@ impl SemanticScholarClient {
     ) -> SemanticScholarResult<serde_json::Value> {
         let pid = sanitize_path_segment(paper_id, "paper_id")?;
         let f = fields.unwrap_or(DEFAULT_PAPER_DETAIL_FIELDS);
-        self.get(
-            &format!("/paper/{pid}"),
-            Some(&[("fields", f.to_string())]),
-        )
-        .await
+        self.get(&format!("/paper/{pid}"), Some(&[("fields", f.to_string())]))
+            .await
     }
 
     /// Get citations of a paper.
@@ -284,8 +281,7 @@ impl SemanticScholarClient {
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/paper/{pid}/citations"), Some(&q))
-            .await
+        self.get(&format!("/paper/{pid}/citations"), Some(&q)).await
     }
 
     /// Get references of a paper.
@@ -352,8 +348,7 @@ impl SemanticScholarClient {
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/author/{aid}/papers"), Some(&q))
-            .await
+        self.get(&format!("/author/{aid}/papers"), Some(&q)).await
     }
 }
 
@@ -637,7 +632,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_valid() {
-        assert_eq!(sanitize_path_segment("abc123def", "paper_id").unwrap(), "abc123def");
+        assert_eq!(
+            sanitize_path_segment("abc123def", "paper_id").unwrap(),
+            "abc123def"
+        );
     }
 
     #[test]

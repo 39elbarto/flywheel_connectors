@@ -3184,7 +3184,10 @@ mod tests {
     fn new_mutation_operations_present() {
         let ops = operations_info();
         let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
-        assert!(ids.contains(&"mattermost.update_post"), "missing update_post");
+        assert!(
+            ids.contains(&"mattermost.update_post"),
+            "missing update_post"
+        );
         assert!(ids.contains(&"mattermost.pin_post"), "missing pin_post");
         assert!(ids.contains(&"mattermost.unpin_post"), "missing unpin_post");
         assert!(
@@ -3245,16 +3248,14 @@ mod tests {
     #[test]
     fn create_group_channel_rejects_too_few_users() {
         let input = json!({"user_ids": ["u1", "u2"]});
-        let req: crate::types::CreateGroupChannelRequest =
-            serde_json::from_value(input).unwrap();
+        let req: crate::types::CreateGroupChannelRequest = serde_json::from_value(input).unwrap();
         assert!(req.user_ids.len() < 3);
     }
 
     #[test]
     fn create_group_channel_rejects_duplicates() {
         let input = json!({"user_ids": ["u1", "u2", "u1"]});
-        let req: crate::types::CreateGroupChannelRequest =
-            serde_json::from_value(input).unwrap();
+        let req: crate::types::CreateGroupChannelRequest = serde_json::from_value(input).unwrap();
         let mut seen = HashSet::new();
         let has_dup = req.user_ids.iter().any(|id| !seen.insert(id.as_str()));
         assert!(has_dup);

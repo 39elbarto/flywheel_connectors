@@ -550,14 +550,16 @@ impl M365Client {
     /// Delete a calendar event.
     pub async fn delete_event(&self, user_id: &str, event_id: &str) -> M365Result<()> {
         sanitize_path_segment(event_id, "event_id")?;
-        let url = self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
+        let url =
+            self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
         self.delete_no_content(&url).await
     }
 
     /// Get a single calendar event by ID.
     pub async fn get_event(&self, user_id: &str, event_id: &str) -> M365Result<serde_json::Value> {
         sanitize_path_segment(event_id, "event_id")?;
-        let url = self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
+        let url =
+            self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
         self.get(&url).await
     }
 
@@ -569,7 +571,8 @@ impl M365Client {
         updates: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
         sanitize_path_segment(event_id, "event_id")?;
-        let url = self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
+        let url =
+            self.build_api_url(&format!("{}/events/{event_id}", user_scope_path(user_id)?))?;
         self.patch_json(&url, updates).await
     }
 

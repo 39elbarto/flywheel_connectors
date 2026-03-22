@@ -1384,9 +1384,6 @@ mod tests {
             sanitize_query_value("created_at", "sort_by").unwrap(),
             "created_at"
         );
-        assert_eq!(
-            sanitize_query_value("desc", "sort_order").unwrap(),
-            "desc"
-        );
+        assert_eq!(sanitize_query_value("desc", "sort_order").unwrap(), "desc");
     }
 }

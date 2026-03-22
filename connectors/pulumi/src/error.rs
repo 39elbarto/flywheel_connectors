@@ -52,7 +52,11 @@ impl PulumiError {
         match self {
             Self::Http(_) | Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
-            Self::Json(_) | Self::Unauthorized | Self::Forbidden | Self::NotFound { .. } | Self::InvalidInput(_) => false,
+            Self::Json(_)
+            | Self::Unauthorized
+            | Self::Forbidden
+            | Self::NotFound { .. }
+            | Self::InvalidInput(_) => false,
         }
     }
 

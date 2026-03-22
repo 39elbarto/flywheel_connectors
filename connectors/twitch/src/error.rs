@@ -52,9 +52,7 @@ impl TwitchError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(_) | Self::RateLimited { .. } | Self::Async(_) => true,
-            Self::Api { status, .. } => {
-                classify_http_status(*status, None).is_retryable()
-            }
+            Self::Api { status, .. } => classify_http_status(*status, None).is_retryable(),
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::TokenError(_)
@@ -247,7 +245,10 @@ mod tests {
     fn invalid_input_maps_to_invalid_request() {
         let err = TwitchError::InvalidInput("bad id".into());
         let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
-        assert!(matches!(fcp_err, FcpError::InvalidRequest { code: 1008, .. }));
+        assert!(matches!(
+            fcp_err,
+            FcpError::InvalidRequest { code: 1008, .. }
+        ));
     }
 
     #[test]

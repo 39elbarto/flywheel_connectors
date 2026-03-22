@@ -441,7 +441,13 @@ mod tests {
         let result = sanitize_path_segment("my/project", "project_id");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, BigQueryError::Api { status_code: 400, .. }));
+        assert!(matches!(
+            err,
+            BigQueryError::Api {
+                status_code: 400,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -29,7 +29,9 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
 /// Characters that are dangerous in URLs: path separators, query string
 /// markers, fragment markers, percent signs (double-encoding), ampersands,
 /// equals signs, and whitespace.
-const FORBIDDEN_ID_CHARS: &[char] = &['/', '\\', '?', '#', '&', '=', '%', ' ', '\t', '\n', '\r', '\0'];
+const FORBIDDEN_ID_CHARS: &[char] = &[
+    '/', '\\', '?', '#', '&', '=', '%', ' ', '\t', '\n', '\r', '\0',
+];
 
 /// Validate a Notion object ID. Rejects empty strings and strings containing
 /// URL-active characters (slashes, query markers, fragments, ampersands,
@@ -42,9 +44,7 @@ fn validate_notion_id(id: &str, label: &str) -> NotionResult<()> {
     }
     if id.chars().any(|c| FORBIDDEN_ID_CHARS.contains(&c)) {
         return Err(NotionError::Validation {
-            message: format!(
-                "{label} contains URL-unsafe characters: {id:?}"
-            ),
+            message: format!("{label} contains URL-unsafe characters: {id:?}"),
         });
     }
     Ok(())
@@ -358,8 +358,7 @@ impl NotionClient {
     /// List comments on a block or page.
     pub async fn list_comments(&self, block_id: &str) -> NotionResult<PaginatedResponse> {
         validate_notion_id(block_id, "block_id")?;
-        let encoded_id =
-            utf8_percent_encode(block_id, PATH_SEGMENT_ENCODE_SET).to_string();
+        let encoded_id = utf8_percent_encode(block_id, PATH_SEGMENT_ENCODE_SET).to_string();
         let url = format!("{}/comments?block_id={encoded_id}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -965,14 +964,20 @@ mod tests {
     fn test_validate_notion_id_rejects_empty() {
         let result = validate_notion_id("", "page_id");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
     }
 
     #[test]
     fn test_validate_notion_id_rejects_slashes() {
         let result = validate_notion_id("../../etc/passwd", "block_id");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
     }
 
     #[test]
@@ -1046,7 +1051,10 @@ mod tests {
 
         let result = client.get_page("../../admin").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1057,7 +1065,10 @@ mod tests {
 
         let result = client.get_block("abc?admin=true").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1068,7 +1079,10 @@ mod tests {
 
         let result = client.list_comments("abc&admin=true").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1079,7 +1093,10 @@ mod tests {
 
         let result = client.query_database("", None, None).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::Validation { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
     }
 
     #[test]

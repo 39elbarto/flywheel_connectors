@@ -1174,7 +1174,10 @@ mod tests {
 
     #[test]
     fn validate_numeric_id_accepts_valid_ids() {
-        assert_eq!(validate_numeric_id("123456789", "user_id").unwrap(), "123456789");
+        assert_eq!(
+            validate_numeric_id("123456789", "user_id").unwrap(),
+            "123456789"
+        );
         assert_eq!(validate_numeric_id("0", "tweet_id").unwrap(), "0");
         assert_eq!(
             validate_numeric_id("99999999999999999999", "conversation_id").unwrap(),
@@ -1190,31 +1193,41 @@ mod tests {
     #[test]
     fn validate_numeric_id_rejects_empty() {
         let err = validate_numeric_id("", "user_id").unwrap_err();
-        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must not be empty")));
+        assert!(
+            matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must not be empty"))
+        );
     }
 
     #[test]
     fn validate_numeric_id_rejects_whitespace_only() {
         let err = validate_numeric_id("   ", "tweet_id").unwrap_err();
-        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must not be empty")));
+        assert!(
+            matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must not be empty"))
+        );
     }
 
     #[test]
     fn validate_numeric_id_rejects_path_traversal() {
         let err = validate_numeric_id("../admin", "user_id").unwrap_err();
-        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric")));
+        assert!(
+            matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric"))
+        );
     }
 
     #[test]
     fn validate_numeric_id_rejects_alpha() {
         let err = validate_numeric_id("abc123", "tweet_id").unwrap_err();
-        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric")));
+        assert!(
+            matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric"))
+        );
     }
 
     #[test]
     fn validate_numeric_id_rejects_special_chars() {
         let err = validate_numeric_id("123/456", "list_id").unwrap_err();
-        assert!(matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric")));
+        assert!(
+            matches!(err, TwitterError::InvalidInput(ref msg) if msg.contains("must be numeric"))
+        );
     }
 
     #[test]

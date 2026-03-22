@@ -604,7 +604,10 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_valid() {
-        assert_eq!(sanitize_path_segment("001Abc123", "id").unwrap(), "001Abc123");
+        assert_eq!(
+            sanitize_path_segment("001Abc123", "id").unwrap(),
+            "001Abc123"
+        );
     }
 
     #[test]

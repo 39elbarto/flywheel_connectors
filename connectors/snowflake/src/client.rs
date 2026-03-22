@@ -581,12 +581,18 @@ mod tests {
 
     #[test]
     fn validate_sql_identifier_simple() {
-        assert_eq!(validate_sql_identifier("MY_DB", "database").unwrap(), "MY_DB");
+        assert_eq!(
+            validate_sql_identifier("MY_DB", "database").unwrap(),
+            "MY_DB"
+        );
     }
 
     #[test]
     fn validate_sql_identifier_with_dollar() {
-        assert_eq!(validate_sql_identifier("MY$DB", "database").unwrap(), "MY$DB");
+        assert_eq!(
+            validate_sql_identifier("MY$DB", "database").unwrap(),
+            "MY$DB"
+        );
     }
 
     #[test]

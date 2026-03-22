@@ -207,7 +207,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
-                when_to_use: "When you need to see recent posts from accounts the user follows".into(),
+                when_to_use: "When you need to see recent posts from accounts the user follows"
+                    .into(),
                 common_mistakes: vec![
                     "Requires authentication - cannot use without access token".into(),
                 ],
@@ -373,9 +374,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
                 when_to_use: "When the user wants to reblog/boost a toot".into(),
-                common_mistakes: vec![
-                    "Private statuses cannot be boosted".into(),
-                ],
+                common_mistakes: vec!["Private statuses cannot be boosted".into()],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_STATUSES_FAVOURITE)],
             },
@@ -399,7 +398,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
-                when_to_use: "When you need to look up a specific Mastodon user by their account ID".into(),
+                when_to_use:
+                    "When you need to look up a specific Mastodon user by their account ID".into(),
                 common_mistakes: Vec::new(),
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_ACCOUNTS_VERIFY)],
@@ -504,7 +504,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "When you need to verify the Mastodon instance is reachable and operational".into(),
+                when_to_use:
+                    "When you need to verify the Mastodon instance is reachable and operational"
+                        .into(),
                 common_mistakes: Vec::new(),
                 examples: Vec::new(),
                 related: Vec::new(),
@@ -674,12 +676,17 @@ impl MastodonConnector {
             message: "Capability verifier missing after successful handshake".into(),
         })?;
         let required_cap = match operation {
-            OP_TIMELINE_HOME | OP_TIMELINE_PUBLIC | OP_STATUSES_GET | OP_ACCOUNTS_GET
-            | OP_ACCOUNTS_VERIFY | OP_NOTIFICATIONS_LIST | OP_SEARCH | OP_HEALTH => {
-                CapabilityId::from_static(CAP_READ)
+            OP_TIMELINE_HOME
+            | OP_TIMELINE_PUBLIC
+            | OP_STATUSES_GET
+            | OP_ACCOUNTS_GET
+            | OP_ACCOUNTS_VERIFY
+            | OP_NOTIFICATIONS_LIST
+            | OP_SEARCH
+            | OP_HEALTH => CapabilityId::from_static(CAP_READ),
+            OP_STATUSES_POST | OP_STATUSES_DELETE | OP_STATUSES_FAVOURITE | OP_STATUSES_BOOST => {
+                CapabilityId::from_static(CAP_WRITE)
             }
-            OP_STATUSES_POST | OP_STATUSES_DELETE | OP_STATUSES_FAVOURITE
-            | OP_STATUSES_BOOST => CapabilityId::from_static(CAP_WRITE),
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -698,7 +705,11 @@ impl MastodonConnector {
 
         let output = match operation {
             OP_TIMELINE_HOME => {
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let limit = req
+                    .input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let statuses = client
                     .get_home_timeline(runtime, limit)
                     .await
@@ -713,7 +724,11 @@ impl MastodonConnector {
                     .get("local")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let limit = req
+                    .input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let statuses = client
                     .get_public_timeline(runtime, local, limit)
                     .await
@@ -738,13 +753,12 @@ impl MastodonConnector {
                 })?
             }
             OP_STATUSES_POST => {
-                let status_text =
-                    req.input.get("status").and_then(|v| v.as_str()).ok_or(
-                        FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "Missing 'status' field".into(),
-                        },
-                    )?;
+                let status_text = req.input.get("status").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'status' field".into(),
+                    },
+                )?;
                 let visibility = req.input.get("visibility").and_then(|v| v.as_str());
                 let in_reply_to_id = req.input.get("in_reply_to_id").and_then(|v| v.as_str());
                 let sensitive = req
@@ -838,7 +852,11 @@ impl MastodonConnector {
                 })?
             }
             OP_NOTIFICATIONS_LIST => {
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let limit = req
+                    .input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let notifications = client
                     .get_notifications(runtime, limit)
                     .await
@@ -855,7 +873,11 @@ impl MastodonConnector {
                     },
                 )?;
                 let search_type = req.input.get("type").and_then(|v| v.as_str());
-                let limit = req.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let limit = req
+                    .input
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 let results = client
                     .search(runtime, q, search_type, limit)
                     .await
@@ -865,10 +887,7 @@ impl MastodonConnector {
                 })?
             }
             OP_HEALTH => {
-                let instance = client
-                    .health_check()
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                let instance = client.health_check().await.map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(instance).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize instance info: {e}"),
                 })?
@@ -1155,10 +1174,7 @@ mod tests {
     #[test]
     fn test_health_op_is_strict_idempotent() {
         let ops = operations_info();
-        let health = ops
-            .iter()
-            .find(|op| op.id.as_str() == OP_HEALTH)
-            .unwrap();
+        let health = ops.iter().find(|op| op.id.as_str() == OP_HEALTH).unwrap();
         assert_eq!(health.idempotency, IdempotencyClass::Strict);
     }
 

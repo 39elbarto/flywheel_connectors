@@ -341,7 +341,11 @@ mod tests {
             "abc123"
         );
         assert_eq!(
-            sanitize_path_segment("1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms", "spreadsheet_id").unwrap(),
+            sanitize_path_segment(
+                "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+                "spreadsheet_id"
+            )
+            .unwrap(),
             "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
         );
     }

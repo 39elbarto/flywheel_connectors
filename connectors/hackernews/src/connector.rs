@@ -1,5 +1,6 @@
 //! Hacker News connector implementation.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -17,8 +18,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::HackerNewsClient;
+use crate::error::HackerNewsError;
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const DEFAULT_BASE_URL: &str = "https://hacker-news.firebaseio.com/v0";
 
 // Operation IDs
 const OP_ITEM_GET: &str = "hackernews.item.get";
@@ -34,6 +37,21 @@ const OP_HEALTH: &str = "hackernews.health";
 // Capability IDs
 const CAP_READ: &str = "hackernews.read";
 const HN_PUBLIC_API_BOUNDARY: &str = "This connector only exposes public Firebase Hacker News reads; there is no Algolia search, authenticated account action, moderation, or streaming surface in the first slice.";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/hackernews_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/hackernews_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 11] = [
+    "scripts/e2e/hackernews_connector_verification.sh",
+    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/hackernews/manifest.toml --check --json",
+    "rch exec -- cargo fmt --manifest-path connectors/hackernews/Cargo.toml --check",
+    "rch exec -- cargo check -p fcp-hackernews --all-targets",
+    "rch exec -- cargo test -p fcp-hackernews --test integration health_unconfigured_includes_guidance -- --nocapture",
+    "rch exec -- cargo test -p fcp-hackernews --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture",
+    "rch exec -- cargo test -p fcp-hackernews --test integration self_check_ready_with_public_probe_and_evidence -- --nocapture",
+    "rch exec -- cargo test -p fcp-hackernews --test integration self_check_retryable_api_failure_reports_degraded -- --nocapture",
+    "rch exec -- cargo test -p fcp-hackernews --test integration invoke_item_get_preserves_public_item_evidence -- --nocapture",
+    "rch exec -- cargo test -p fcp-hackernews --test integration introspection_emits_v3_compliance_evidence -- --nocapture",
+    "rch exec -- cargo clippy -p fcp-hackernews --all-targets -- -D warnings",
+];
 
 /// Hacker News connector configuration.
 /// Auth is optional since HN API is entirely public.
@@ -62,11 +80,58 @@ const fn default_request_timeout_ms() -> u64 {
     30_000
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct RetryReadiness {
+    max_retries: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    provider: &'static str,
+    base_url: String,
+    auth_mode: &'static str,
+    request_timeout_ms: u64,
+    retry: RetryReadiness,
+    item_lookup: bool,
+    user_lookup: bool,
+    feed_snapshots: Vec<&'static str>,
+    search_supported: bool,
+    write_supported: bool,
+    streaming_supported: bool,
+    comment_tree_expansion_supported: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -78,9 +143,16 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
         let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
     }
 }
 
@@ -115,8 +187,89 @@ impl HackerNewsConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn resolved_base_url(&self) -> Option<String> {
+        self.client
+            .as_ref()
+            .map(|client| client.base_url().to_string())
+            .or_else(|| {
+                self.config.as_ref().map(|config| {
+                    config
+                        .base_url
+                        .as_deref()
+                        .unwrap_or(DEFAULT_BASE_URL)
+                        .trim_end_matches('/')
+                        .to_string()
+                })
+            })
+    }
+
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| ProvisioningReadiness {
+            provider: "hacker_news_firebase",
+            base_url: self
+                .resolved_base_url()
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            auth_mode: "anonymous_public_api",
+            request_timeout_ms: config.request_timeout_ms,
+            retry: RetryReadiness {
+                max_retries: config.retry.max_retries,
+                initial_delay_ms: config.retry.initial_delay_ms,
+                max_delay_ms: config.retry.max_delay_ms,
+                jitter_enabled: config.retry.jitter_enabled,
+            },
+            item_lookup: true,
+            user_lookup: true,
+            feed_snapshots: vec!["top", "new", "best", "ask", "show", "job"],
+            search_supported: false,
+            write_supported: false,
+            streaming_supported: false,
+            comment_tree_expansion_supported: false,
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        live_probe: Option<&serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
+    }
+
+    fn health_probe_details(
+        client: &HackerNewsClient,
+        retryable: bool,
+        error: Option<&str>,
+        retry_after_ms: Option<u64>,
+    ) -> serde_json::Value {
+        let base_url = client.base_url();
+        json!({
+            "base_url": base_url,
+            "health_endpoint": format!("{base_url}/topstories.json"),
+            "auth_mode": "anonymous_public_api",
+            "surface_mode": "public_read_only",
+            "search_supported": false,
+            "write_supported": false,
+            "retryable": retryable,
+            "error": error,
+            "retry_after_ms": retry_after_ms,
+        })
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self.provisioning_readiness();
         let mut checks = Vec::new();
 
         // Configuration is always "passed" since HN has no required auth
@@ -170,15 +323,80 @@ impl HackerNewsConnector {
                 message: Some(format!("Base URL: {}", client.base_url())),
                 critical: false,
             });
+            checks.push(DoctorCheck {
+                name: "read_only_surface".into(),
+                passed: true,
+                message: Some(
+                    "Public read-only surface: items, users, ranked feeds, and health".into(),
+                ),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "search_surface".into(),
+                passed: true,
+                message: Some("Algolia search is intentionally unsupported in the first slice".into()),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "write_surface".into(),
+                passed: true,
+                message: Some("No authenticated write or moderation surface is exposed".into()),
+                critical: false,
+            });
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 }
 
 impl Default for HackerNewsConnector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use the public Firebase Hacker News API or a localhost mock override for verification.",
+            "Treat this connector as read-only: item reads, user reads, feed snapshots, and health only.",
+            "If you override base_url during verification, capture the override in the evidence bundle and keep it on the Firebase host or localhost.",
+        ],
+        dedicated_environment: "Prefer public HN data or a disposable localhost mock server. No authenticated YC or moderator environment is required.",
+        redaction_rules: vec![
+            "If verification uses a private mirror, redact the override hostname before sharing artifacts.",
+            "Avoid publishing unnecessary raw user `about` fields or copied item text outside the owning team.",
+            "Do not attach unrelated request traces from shared verification environments.",
+        ],
+        limitations: vec![
+            "Algolia search is intentionally unsupported in the first slice.",
+            "No submit, vote, favorite, reply, login, moderation, or admin workflows are exposed.",
+            "Comments are only reachable through item.get; recursive thread expansion and live subscriptions are out of scope.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "not_configured",
+                symptom: "health or self_check reports that the connector is not configured",
+                action: "Configure base_url only if needed, plus timeout and retry settings, then rerun self_check.",
+            },
+            RemediationHint {
+                code: "runtime_missing",
+                symptom: "self_check reports that the connector runtime is not initialized",
+                action: "Re-run configure so ConnectorRuntime and the HTTP client are both initialized before verification.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "public API probe failed with rate limiting, timeout, or transient 5xx",
+                action: "Wait for the upstream to recover or relax retry and timeout settings, then rerun the verification script.",
+            },
+            RemediationHint {
+                code: "self_check_failed",
+                symptom: "self_check reports a non-retryable API or deserialization failure",
+                action: "Verify the base_url still points at a Firebase-compatible Hacker News endpoint and inspect the captured live_probe error details.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
@@ -583,38 +801,79 @@ impl FcpConnector for HackerNewsConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self.provisioning_readiness();
+        let mut snapshot = match &self.client {
+            None if self.config.is_none() => HealthSnapshot::degraded("not configured"),
+            None => HealthSnapshot::error("client not initialized"),
+            Some(_) if self.runtime.is_none() => HealthSnapshot::error("runtime not initialized"),
+            Some(_) => HealthSnapshot::ready(),
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+        }));
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
+            ));
+        };
+        if self.runtime.is_none() {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("runtime_missing", "Connector runtime is not initialized"),
+                None,
             ));
         };
 
         match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
-            Err(err) => {
-                if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
-                    ))
-                } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
-                    ))
-                }
+            Ok(()) => {
+                let live_probe =
+                    Self::health_probe_details(client, false, None, None);
+                Ok(self.attach_self_check_details(SelfCheckReport::ok(), Some(&live_probe)))
+            }
+            Err(HackerNewsError::RateLimited { retry_after_ms }) => {
+                let message = format!("Rate limited, retry after {retry_after_ms}ms");
+                let live_probe = Self::health_probe_details(
+                    client,
+                    true,
+                    Some(&message),
+                    Some(retry_after_ms),
+                );
+                Ok(self.attach_self_check_details(
+                    SelfCheckReport::degraded("self_check_retryable", message),
+                    Some(&live_probe),
+                ))
+            }
+            Err(error) if error.is_retryable() => {
+                let error_text = error.to_string();
+                let live_probe =
+                    Self::health_probe_details(client, true, Some(&error_text), None);
+                Ok(self.attach_self_check_details(
+                    SelfCheckReport::degraded("self_check_retryable", error_text),
+                    Some(&live_probe),
+                ))
+            }
+            Err(error) => {
+                let error_text = error.to_string();
+                let live_probe =
+                    Self::health_probe_details(client, false, Some(&error_text), None);
+                Ok(self.attach_self_check_details(
+                    SelfCheckReport::failed("self_check_failed", error_text),
+                    Some(&live_probe),
+                ))
             }
         }
     }

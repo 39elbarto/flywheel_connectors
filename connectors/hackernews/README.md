@@ -134,6 +134,40 @@ These are excluded on purpose:
 - Revisit the current idempotency split intentionally if needed, but keep manifest and runtime aligned if semantics change.
 - Tests should cover base URL override behavior, `null` item handling, username sanitization, rate-limit classification, feed limiting, and self-check degradation for retryable failures.
 
+## Readiness And Verification
+
+The readiness closeout for `flywheel_connectors-j05nu.8.2.3` treats Hacker News as a lightweight public-data connector. `health`, `doctor`, and `self_check` should therefore all emit the same operator-facing truths:
+
+- verification is replayed through `scripts/e2e/hackernews_connector_verification.sh`
+- evidence artifacts land under `artifacts/e2e/hackernews_connector/<timestamp>`
+- the connector is intentionally read-only and public-scope
+- search, writes, moderation, and streaming remain out of scope even when the upstream product offers adjacent surfaces elsewhere
+
+### Operator Guidance
+
+- Prefer the public Firebase API or a localhost mock override when rerunning verification.
+- If `base_url` is overridden for tests, capture the override in the artifact bundle and keep it on `hacker-news.firebaseio.com` or `localhost`.
+- Treat copied item text and user `about` fields as potentially sensitive when sharing artifacts outside the owning team.
+- If `self_check` reports `self_check_retryable`, wait for upstream recovery or relax retry and timeout settings before rerunning.
+- If `self_check` reports `self_check_failed`, verify that the configured `base_url` still points at a Firebase-compatible Hacker News endpoint.
+
+### Replay Commands
+
+The verification script is the canonical entry point. It replays the same checks a future agent should expect to rerun:
+
+```bash
+scripts/e2e/hackernews_connector_verification.sh
+```
+
+It captures:
+
+- manifest validation evidence
+- readiness and doctor guidance evidence
+- successful and retryable self-check evidence
+- a token-gated `hackernews.item.get` invoke artifact
+- introspection compliance evidence
+- targeted integration, crate, and clippy logs
+
 ## Source Notes
 
 This contract is grounded in the current connector implementation and manifest:

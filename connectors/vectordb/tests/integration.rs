@@ -2682,3 +2682,311 @@ async fn logged_lifecycle_configure_handshake_invoke() -> Result<(), String> {
     );
     Ok(())
 }
+
+// ============================================================================
+// Self-Check Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn self_check_unconfigured_returns_degraded() {
+    let connector = VectorDbConnector::new();
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should not error");
+    assert_eq!(result["status"], "degraded");
+    assert_eq!(result["reason_code"], "not_configured");
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_configured_no_handshake_returns_degraded() {
+    let mut connector = VectorDbConnector::new();
+    connector
+        .handle_configure(json!({
+            "provider": "qdrant",
+            "endpoint": "my-cluster.qdrant.io:6334",
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+            "use_tls": false
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should not error");
+    assert_eq!(result["status"], "degraded");
+    assert_eq!(result["reason_code"], "not_handshaken");
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_ready_returns_ok() {
+    let (connector, _key) = setup_connector(
+        "qdrant",
+        "my-cluster.qdrant.io:6334",
+        &["vectordb.vectors.read"],
+    )
+    .await;
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should not error");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["details"]["runtime_ready"], true);
+    assert_eq!(result["details"]["provider"], "qdrant");
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_pinecone_ready() {
+    let (connector, _key) = setup_connector(
+        "pinecone",
+        "my-index.svc.pinecone.io",
+        &["vectordb.vectors.read"],
+    )
+    .await;
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should not error");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["details"]["provider"], "pinecone");
+    assert_eq!(result["details"]["tls"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_bad_endpoint_returns_failed() {
+    let mut connector = VectorDbConnector::new();
+    // Configure with bad endpoint but valid structure
+    connector
+        .handle_configure(json!({
+            "provider": "pinecone",
+            "endpoint": "evil.example.com",
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+        }))
+        .await
+        .expect("configure should succeed");
+
+    // Handshake to initialise runtime
+    let signing_key = Ed25519SigningKey::generate();
+    let hs = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["vectordb.vectors.read"],
+    );
+    connector
+        .handle_handshake(serde_json::to_value(hs).expect("serialize"))
+        .await
+        .expect("handshake should succeed");
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should not error");
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["reason_code"], "endpoint_mismatch");
+}
+
+// ============================================================================
+// Simulate Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn simulate_known_operation_returns_allowed() {
+    let (connector, signing_key) = setup_connector(
+        "qdrant",
+        "my-cluster.qdrant.io:6334",
+        &["vectordb.vectors.read"],
+    )
+    .await;
+
+    let token = generate_token(
+        &signing_key,
+        "vectordb.vectors.read",
+        &["vectordb.query_vectors"],
+    );
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "sim-001",
+            "connector_id": "vectordb",
+            "operation": "vectordb.query_vectors",
+            "zone_id": "z:work",
+            "input": { "collection": "test", "vector": [0.1, 0.2], "top_k": 5 },
+            "capability_token": token
+        }))
+        .await
+        .expect("simulate should succeed");
+
+    assert_eq!(result["would_succeed"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_unknown_operation_returns_failure() {
+    let (connector, signing_key) = setup_connector(
+        "qdrant",
+        "my-cluster.qdrant.io:6334",
+        &["vectordb.vectors.read"],
+    )
+    .await;
+
+    let token = generate_token(
+        &signing_key,
+        "vectordb.vectors.read",
+        &["vectordb.nonexistent"],
+    );
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "sim-002",
+            "connector_id": "vectordb",
+            "operation": "vectordb.nonexistent",
+            "zone_id": "z:work",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("simulate should succeed");
+
+    assert_eq!(result["would_succeed"], false);
+    assert!(
+        result["failure_reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Unknown operation")
+    );
+    assert_eq!(result["denial_code"], "unknown_operation");
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_unconfigured_returns_not_configured() {
+    let connector = VectorDbConnector::new();
+
+    let signing_key = Ed25519SigningKey::generate();
+    let token = generate_token(
+        &signing_key,
+        "vectordb.vectors.read",
+        &["vectordb.query_vectors"],
+    );
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "sim-003",
+            "connector_id": "vectordb",
+            "operation": "vectordb.query_vectors",
+            "zone_id": "z:work",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("simulate should succeed");
+
+    assert_eq!(result["would_succeed"], false);
+    assert_eq!(result["denial_code"], "not_configured");
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_all_nine_operations_allowed() {
+    let (connector, signing_key) = setup_connector(
+        "pinecone",
+        "my-index.svc.pinecone.io",
+        &[
+            "vectordb.vectors.read",
+            "vectordb.vectors.write",
+            "vectordb.collections.read",
+            "vectordb.collections.write",
+            "vectordb.collections.delete",
+        ],
+    )
+    .await;
+
+    let ops = [
+        "vectordb.list_collections",
+        "vectordb.describe_collection",
+        "vectordb.create_collection",
+        "vectordb.delete_collection",
+        "vectordb.query_vectors",
+        "vectordb.fetch_vectors",
+        "vectordb.upsert_vectors",
+        "vectordb.delete_vectors",
+        "vectordb.update_vector_metadata",
+    ];
+
+    for (i, op) in ops.iter().enumerate() {
+        let token = generate_token(&signing_key, "vectordb.vectors.read", &[op]);
+        let result = connector
+            .handle_simulate(json!({
+                "type": "simulate",
+                "id": format!("sim-all-{i}"),
+                "connector_id": "vectordb",
+                "operation": *op,
+                "zone_id": "z:work",
+                "input": {},
+                "capability_token": token
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("simulate {op} should succeed: {e}"));
+
+        assert_eq!(
+            result["would_succeed"], true,
+            "operation {op} should be allowed in simulation"
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_invalid_request_returns_error() {
+    let (connector, _key) = setup_connector(
+        "qdrant",
+        "my-cluster.qdrant.io:6334",
+        &["vectordb.vectors.read"],
+    )
+    .await;
+
+    // Malformed request — missing required fields
+    let result = connector.handle_simulate(json!({"garbage": true})).await;
+    assert!(result.is_err(), "malformed simulate should return error");
+}
+
+// ============================================================================
+// Main.rs Dispatch Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn main_dispatch_self_check_and_simulate_exist() {
+    // Verify that a new connector responds to self_check and simulate
+    // before configuration (should not error, just report status)
+    let connector = VectorDbConnector::new();
+
+    let self_check = connector
+        .handle_self_check()
+        .await
+        .expect("self_check dispatch must exist");
+    assert!(
+        self_check.get("status").is_some(),
+        "self_check must return a status field"
+    );
+
+    let signing_key = Ed25519SigningKey::generate();
+    let token = generate_token(
+        &signing_key,
+        "vectordb.vectors.read",
+        &["vectordb.query_vectors"],
+    );
+    let simulate = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "dispatch-test",
+            "connector_id": "vectordb",
+            "operation": "vectordb.query_vectors",
+            "zone_id": "z:work",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("simulate dispatch must exist");
+    assert!(
+        simulate.get("would_succeed").is_some(),
+        "simulate must return would_succeed field"
+    );
+}

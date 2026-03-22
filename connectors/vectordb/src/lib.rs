@@ -35,7 +35,8 @@ use chrono::Utc;
 use fcp_core::{
     BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
+    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::json;
@@ -286,6 +287,120 @@ impl VectorDbConnector {
         Ok(DoctorResult::from_checks(checks))
     }
 
+    /// Handle connector self-check.
+    ///
+    /// Validates that the connector is operationally ready: configuration loaded,
+    /// runtime initialised, and provider endpoint format correct.
+    ///
+    /// # Errors
+    /// Returns `FcpError` if the report cannot be serialised.
+    #[allow(clippy::unused_async)]
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(config) = &self.config else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // Check handshake has completed (session established)
+        if self.session_id.is_none() {
+            let report = SelfCheckReport::degraded(
+                "not_handshaken",
+                "Session not established — run handshake first",
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
+
+        // Validate endpoint matches provider pattern
+        if !config.is_endpoint_allowed() {
+            let mut report = SelfCheckReport::failed(
+                "endpoint_mismatch",
+                format!(
+                    "Endpoint '{}' does not match {} allowed hosts",
+                    config.endpoint, config.provider
+                ),
+            );
+            report.details = Some(json!({
+                "provider": config.provider.to_string(),
+                "endpoint": config.endpoint,
+            }));
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
+
+        // Validate TLS requirement
+        if config.provider.requires_tls() && !config.use_tls {
+            let report = SelfCheckReport::failed(
+                "tls_required",
+                format!("{} requires TLS but TLS is disabled", config.provider),
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({
+            "provider": config.provider.to_string(),
+            "endpoint": config.endpoint,
+            "tls": config.use_tls,
+            "runtime_ready": true,
+        }));
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+
+    /// Handle simulate method.
+    ///
+    /// Validates whether an operation *would* succeed without executing it.
+    /// Checks configuration, operation existence, and input structure.
+    ///
+    /// # Errors
+    /// Returns `FcpError` if the request is malformed.
+    #[allow(clippy::unused_async)]
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid simulate request: {e}"),
+            })?;
+
+        // If not configured, the operation would fail
+        if self.config.is_none() {
+            let mut resp = SimulateResponse::allowed(req.id);
+            resp.would_succeed = false;
+            resp.failure_reason = Some("Connector is not configured".into());
+            resp.denial_code = Some("not_configured".into());
+            return serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize simulate response: {e}"),
+            });
+        }
+
+        // Check the operation is known
+        let ops = vectordb_operations();
+        let op_exists = ops.iter().any(|o| o.id.as_ref() == req.operation.as_ref());
+        if !op_exists {
+            let mut resp = SimulateResponse::allowed(req.id);
+            resp.would_succeed = false;
+            resp.failure_reason = Some(format!("Unknown operation: {}", req.operation));
+            resp.denial_code = Some("unknown_operation".into());
+            return serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize simulate response: {e}"),
+            });
+        }
+
+        let response = SimulateResponse::allowed(req.id);
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize simulate response: {e}"),
+        })
+    }
+
     /// Handle invoke method.
     ///
     /// # Errors
@@ -344,7 +459,7 @@ impl VectorDbConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let verifier = self.verifier.as_ref().ok_or(FcpError::NotConfigured)?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         verifier.verify(&token, &required_capability, &op_id, &[])?;
 
         match operation {
@@ -1633,6 +1748,42 @@ mod tests {
         log.check(
             matches!(result, Err(FcpError::NotConfigured)),
             "should require config",
+        )?;
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_requires_handshake_after_configuration() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_invoke_requires_handshake_after_configuration");
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .map_err(|err| format!("configure failed: {err}"))?;
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.collections.read",
+            &["vectordb.list_collections"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.list_collections",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+
+        log.check(
+            matches!(result, Err(FcpError::NotHandshaken)),
+            "configured connector should still require handshake",
         )?;
         Ok(())
     }

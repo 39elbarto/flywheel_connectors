@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use fcp_vectordb::VectorDbConnector;
+use serde::Serialize;
 use std::io::{BufRead, Write};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -77,8 +78,10 @@ async fn handle_message(connector: &mut VectorDbConnector, message: &str) -> ser
         "doctor" => connector
             .handle_doctor()
             .await
-            .map(|d| serde_json::to_value(d).unwrap_or_default()),
-        "introspect" => Ok(serde_json::to_value(connector.handle_introspect()).unwrap_or_default()),
+            .and_then(|doctor| serialize_response_value(doctor, "doctor")),
+        "self_check" => connector.handle_self_check().await,
+        "simulate" => connector.handle_simulate(params).await,
+        "introspect" => serialize_response_value(connector.handle_introspect(), "introspect"),
         "invoke" => connector.handle_invoke(params).await,
         _ => Err(fcp_core::FcpError::InvalidRequest {
             code: 1002,
@@ -108,5 +111,62 @@ async fn handle_message(connector: &mut VectorDbConnector, message: &str) -> ser
             }
             response
         }
+    }
+}
+
+fn serialize_response_value<T: Serialize>(
+    value: T,
+    method: &str,
+) -> std::result::Result<serde_json::Value, fcp_core::FcpError> {
+    serde_json::to_value(value).map_err(|error| fcp_core::FcpError::Internal {
+        message: format!("Failed to serialize {method} response: {error}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serializer;
+    use serde::ser::Error as _;
+
+    struct FailingSerialize;
+
+    impl Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(S::Error::custom("forced failure"))
+        }
+    }
+
+    #[test]
+    fn serialize_response_value_surfaces_internal_error() {
+        let err = serialize_response_value(FailingSerialize, "doctor")
+            .expect_err("serialization failures must be surfaced");
+        match err {
+            fcp_core::FcpError::Internal { message } => {
+                assert!(message.contains("doctor"));
+                assert!(message.contains("forced failure"));
+            }
+            other => panic!("expected internal error, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handle_message_introspect_returns_json_rpc_result() {
+        let mut connector = VectorDbConnector::new();
+        let response = handle_message(
+            &mut connector,
+            r#"{"jsonrpc":"2.0","id":7,"method":"introspect"}"#,
+        )
+        .await;
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        assert!(
+            response["result"]["operations"].is_array(),
+            "introspect must produce a JSON-RPC result payload",
+        );
     }
 }

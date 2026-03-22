@@ -341,19 +341,26 @@ struct ZonePlanInputs {
     candidates: Vec<RepairPlanAction>,
 }
 
+/// Rate limiter state.
+struct RateLimiterState {
+    tokens: u32,
+    last_refill: std::time::Instant,
+}
+
 /// Rate limiter for repairs.
 struct RateLimiter {
-    tokens: RwLock<u32>,
+    state: RwLock<RateLimiterState>,
     max_tokens: u32,
-    last_refill: RwLock<std::time::Instant>,
 }
 
 impl RateLimiter {
     fn new(max_per_minute: u32) -> Self {
         Self {
-            tokens: RwLock::new(max_per_minute),
+            state: RwLock::new(RateLimiterState {
+                tokens: max_per_minute,
+                last_refill: std::time::Instant::now(),
+            }),
             max_tokens: max_per_minute,
-            last_refill: RwLock::new(std::time::Instant::now()),
         }
     }
 
@@ -362,13 +369,11 @@ impl RateLimiter {
             return false;
         }
 
-        // We need to lock both to update atomically
-        let mut last = self.last_refill.write();
-        let mut tokens = self.tokens.write();
-        self.refill_locked(&mut last, &mut tokens);
+        let mut state = self.state.write();
+        self.refill_locked(&mut state);
 
-        if *tokens > 0 {
-            *tokens -= 1;
+        if state.tokens > 0 {
+            state.tokens -= 1;
             true
         } else {
             false
@@ -380,20 +385,19 @@ impl RateLimiter {
             return 0;
         }
 
-        let mut last = self.last_refill.write();
-        let mut tokens = self.tokens.write();
-        self.refill_locked(&mut last, &mut tokens);
-        *tokens
+        let mut state = self.state.write();
+        self.refill_locked(&mut state);
+        state.tokens
     }
 
-    fn refill_locked(&self, last: &mut std::time::Instant, tokens: &mut u32) {
+    fn refill_locked(&self, state: &mut RateLimiterState) {
         let now = std::time::Instant::now();
-        let elapsed = now.saturating_duration_since(*last);
+        let elapsed = now.saturating_duration_since(state.last_refill);
 
         let nanos_per_token = 60_000_000_000u64 / u64::from(self.max_tokens).max(1);
         if nanos_per_token == 0 {
-            *tokens = self.max_tokens;
-            *last = now;
+            state.tokens = self.max_tokens;
+            state.last_refill = now;
             return;
         }
 
@@ -402,30 +406,30 @@ impl RateLimiter {
 
         if new_tokens_u128 > 0 {
             let new_tokens = u32::try_from(new_tokens_u128).unwrap_or(u32::MAX);
-            let updated = tokens.saturating_add(new_tokens);
+            let updated = state.tokens.saturating_add(new_tokens);
 
             if updated >= self.max_tokens {
-                *tokens = self.max_tokens;
+                state.tokens = self.max_tokens;
                 let remainder_nanos = elapsed_nanos % u128::from(nanos_per_token);
                 let rem_secs = u64::try_from(remainder_nanos / 1_000_000_000).unwrap_or(0);
                 let rem_nanos = (remainder_nanos % 1_000_000_000) as u32;
-                *last = now
+                state.last_refill = now
                     .checked_sub(Duration::new(rem_secs, rem_nanos))
                     .unwrap_or(now);
             } else {
-                *tokens = updated;
+                state.tokens = updated;
                 // Advance time by the amount of tokens added to preserve phase
                 let advance_nanos = new_tokens_u128.saturating_mul(u128::from(nanos_per_token));
                 let adv_secs = u64::try_from(advance_nanos / 1_000_000_000).unwrap_or(u64::MAX);
                 let adv_nanos = (advance_nanos % 1_000_000_000) as u32;
                 if adv_secs < u64::MAX {
-                    if let Some(advanced) = last.checked_add(Duration::new(adv_secs, adv_nanos)) {
-                        *last = advanced;
+                    if let Some(advanced) = state.last_refill.checked_add(Duration::new(adv_secs, adv_nanos)) {
+                        state.last_refill = advanced;
                     } else {
-                        *last = now;
+                        state.last_refill = now;
                     }
                 } else {
-                    *last = now;
+                    state.last_refill = now;
                 }
             }
         }

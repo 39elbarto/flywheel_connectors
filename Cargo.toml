@@ -36,6 +36,7 @@ members = [
     "connectors/telegram",
     "connectors/twitter",
     "connectors/vectordb",
+    "connectors/wolfram",
     "connectors/github",
     "connectors/youtube",
     "connectors/linear",

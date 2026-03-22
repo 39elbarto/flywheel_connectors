@@ -39,10 +39,10 @@ Each connector is scored on 10 binary criteria (present = 0, missing = weighted 
 
 | Risk Tier | Count | Connectors |
 |-----------|-------|------------|
-| 0 (Compliant) | 71 | See full table below |
+| 0 (Compliant) | 72 | See full table below (includes vectordb, remediated 2026-03-22) |
 | 1-2 (Minor) | 10 | google-ai, homeassistant, kubernetes, plaid, qdrant, telegram, twitter, postgresql, redis, whisper |
 | 3-5 (Moderate) | 7 | discord, google-chat, google-docs, google-drive, google-sheets, slack, webhook-receiver |
-| 9 (Critical) | 1 | vectordb |
+| 9 (Critical) | 0 | (none) |
 
 ---
 
@@ -96,9 +96,9 @@ youtube, zapier, zendesk, google-admin-reports
 
 | Connector | Manifest | ConnRS | ErrorMap | Runtime | OpInfo | Doctor | SelfChk | Simulate | Tests | LibRS | Gap |
 |-----------|----------|--------|----------|---------|--------|--------|---------|----------|-------|-------|-----|
-| vectordb | Y | N | Y | N | Y | N | N | N | N | Y | 9 |
+| vectordb | Y | Y* | Y | Y | Y | Y | Y | Y | Y | Y | 0 |
 
-vectordb: most significant gaps in workspace (missing connector.rs, doctor, self_check, simulate, runtime, tests).
+vectordb: all V3 methods implemented. *ConnRS in lib.rs (consolidated pattern). Doctor, self_check, simulate, runtime, 316 tests.
 
 ### Test Coverage Gaps (Gap 2, quality risk)
 
@@ -131,7 +131,7 @@ vectordb: most significant gaps in workspace (missing connector.rs, doctor, self
 ## Remediation Priority
 
 ### P0 — Block Expansion (fix before new connectors)
-1. **vectordb**: Add connector.rs, doctor/self_check/simulate, ConnectorRuntime, tests (gap=9)
+1. ~~**vectordb**: Add connector.rs, doctor/self_check/simulate, ConnectorRuntime, tests (gap=9)~~ **CLOSED** — all V3 methods implemented, 316 tests pass
 
 ### P1 — Google Expansion Wave Cleanup
 2. **google-sheets**: Add manifest.toml, ConnectorErrorMapping (gap=5)

@@ -296,12 +296,14 @@ impl CloudflareClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
+        let key_log = key.to_string();
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let key_log = key_log.clone();
             async move {
-                debug!(attempt, key, "KV get");
+                debug!(attempt, key = %key_log, "KV get");
                 let req = authenticate_request(client.get(&url), &auth);
                 let resp = match req.send().await {
                     Ok(r) => r,
@@ -341,14 +343,16 @@ impl CloudflareClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let val = value.to_string();
+        let key_log = key.to_string();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
             let body = val.clone();
+            let key_log = key_log.clone();
             async move {
-                debug!(attempt, key, "KV put");
+                debug!(attempt, key = %key_log, "KV put");
                 let req = authenticate_request(client.put(&url), &auth).body(body);
                 handle_response::<serde_json::Value>(req, attempt).await
             }

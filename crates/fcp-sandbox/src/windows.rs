@@ -115,11 +115,12 @@ impl WindowsSandbox {
         let mut limit_info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
 
         // Memory limits
+        let mem_limit = usize::try_from(policy.memory_limit_bytes).unwrap_or(usize::MAX);
         limit_info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
-        limit_info.JobMemoryLimit = policy.memory_limit_bytes as usize;
+        limit_info.JobMemoryLimit = mem_limit;
 
         limit_info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-        limit_info.ProcessMemoryLimit = policy.memory_limit_bytes as usize;
+        limit_info.ProcessMemoryLimit = mem_limit;
 
         // Process limit (deny_exec)
         if policy.deny_exec {
@@ -128,7 +129,8 @@ impl WindowsSandbox {
         }
 
         // CPU time limit
-        let cpu_limit_100ns = policy.wall_clock_timeout.as_nanos() as i64 / 100;
+        let nanos = policy.wall_clock_timeout.as_nanos();
+        let cpu_limit_100ns = i64::try_from(nanos / 100).unwrap_or(i64::MAX);
         limit_info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
         limit_info.BasicLimitInformation.PerProcessUserTimeLimit = cpu_limit_100ns;
 
@@ -357,7 +359,7 @@ impl Sandbox for WindowsSandbox {
         path: &Path,
         write: bool,
     ) -> Result<(), SandboxError> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = crate::sandbox::resolve_policy_path(path);
 
         if write {
             for writable in &policy.writable_paths {

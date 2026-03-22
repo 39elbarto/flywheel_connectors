@@ -540,9 +540,11 @@ impl LinuxSandbox {
     fn apply_seccomp(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
         let filter = self.build_seccomp_filter(policy);
 
+        let filter_len = u16::try_from(filter.len())
+            .map_err(|_| SandboxError::SyscallFailed("seccomp filter too large".into()))?;
         // Convert to sock_fprog
         let prog = SockFprog {
-            len: filter.len() as u16,
+            len: filter_len,
             filter: filter.as_ptr(),
         };
 
@@ -760,8 +762,9 @@ impl Sandbox for LinuxSandbox {
                 }
 
                 // Apply seccomp filter
+                let filter_len = u16::try_from(filter.len()).unwrap_or_else(|_| libc::abort());
                 let prog = SockFprog {
-                    len: filter.len() as u16,
+                    len: filter_len,
                     filter: filter.as_ptr(),
                 };
 
@@ -797,7 +800,7 @@ impl Sandbox for LinuxSandbox {
         path: &Path,
         write: bool,
     ) -> Result<(), SandboxError> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = crate::sandbox::resolve_policy_path(path);
 
         if write {
             // Check if path is under any writable path

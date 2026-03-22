@@ -401,7 +401,7 @@ impl Sandbox for MacOsSandbox {
         path: &Path,
         write: bool,
     ) -> Result<(), SandboxError> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = crate::sandbox::resolve_policy_path(path);
 
         if write {
             for writable in &policy.writable_paths {

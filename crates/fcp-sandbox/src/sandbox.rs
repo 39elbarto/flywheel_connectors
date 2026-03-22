@@ -345,6 +345,57 @@ pub trait Sandbox: Send + Sync {
     fn verify_network_blocked(&self, policy: &CompiledPolicy) -> Result<(), SandboxError>;
 }
 
+/// Normalize a path lexically without resolving symlinks or checking existence.
+/// Resolves `.` and `..` components.
+#[must_use]
+pub fn normalize_path(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            _ => out.push(comp),
+        }
+    }
+    out
+}
+
+/// Resolve a path for policy checks, even when the leaf path does not exist yet.
+///
+/// This canonicalizes the full path when possible. If the leaf is missing, it
+/// canonicalizes the nearest existing ancestor and then appends the unresolved
+/// suffix. That keeps policy checks aligned with where the kernel will actually
+/// traverse, including symlink-plus-`..` semantics in existing ancestors.
+#[must_use]
+pub fn resolve_policy_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    for ancestor in path.ancestors().skip(1) {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+
+        if let Ok(canonical_ancestor) = ancestor.canonicalize() {
+            let unresolved_suffix = path
+                .strip_prefix(ancestor)
+                .unwrap_or_else(|_| Path::new(""));
+            return normalize_path(&canonical_ancestor.join(unresolved_suffix));
+        }
+    }
+
+    if path.is_relative() {
+        if let Ok(cwd) = std::env::current_dir() {
+            return normalize_path(&cwd.join(path));
+        }
+    }
+
+    normalize_path(path)
+}
+
 // ============================================================================
 // Factory
 // ============================================================================
@@ -412,6 +463,8 @@ impl Sandbox for NoOpSandbox {
         _path: &std::path::Path,
         _write: bool,
     ) -> Result<(), SandboxError> {
+        // NoOp intentionally skips all policy enforcement. Callers that need
+        // path validation must use a real platform backend.
         Ok(())
     }
 
@@ -682,6 +735,93 @@ mod tests {
             sandbox
                 .verify_file_access(&policy, std::path::Path::new("/anything"), false)
                 .is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_policy_path_rejects_symlink_escape_for_missing_leaf() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "fcp-sandbox-path-resolution-{}-{unique}",
+            std::process::id()
+        ));
+        let allowed = base.join("allowed");
+        let escaped = base.join("escaped");
+        let link = allowed.join("link");
+        let pending_write = link.join("future.txt");
+
+        fs::create_dir_all(&allowed).unwrap();
+        fs::create_dir_all(&escaped).unwrap();
+        symlink(&escaped, &link).unwrap();
+
+        assert_eq!(
+            resolve_policy_path(&pending_write),
+            escaped.join("future.txt")
+        );
+
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 256,
+            cpu_percent: 50,
+            wall_clock_timeout_ms: 30_000,
+            fs_readonly_paths: Vec::new(),
+            fs_writable_paths: vec![allowed.display().to_string()],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        let sandbox = create_sandbox().unwrap();
+
+        let result = sandbox.verify_file_access(&policy, &pending_write, true);
+        assert!(
+            result.is_err(),
+            "symlinked existing ancestors must not bypass writable path checks",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_policy_path_preserves_symlink_parent_semantics() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "fcp-sandbox-symlink-parent-{}-{unique}",
+            std::process::id()
+        ));
+        let allowed = base.join("allowed");
+        let escaped = base.join("escaped");
+        let link = allowed.join("link");
+        let sneaky_write = link.join("..").join("future.txt");
+
+        fs::create_dir_all(&allowed).unwrap();
+        fs::create_dir_all(&escaped).unwrap();
+        symlink(&escaped, &link).unwrap();
+
+        let expected = sneaky_write
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .expect("parent with symlink and .. should canonicalize")
+            .join("future.txt");
+
+        assert_eq!(resolve_policy_path(&sneaky_write), expected);
+        assert_ne!(
+            expected,
+            allowed.join("future.txt"),
+            "symlink parent traversal must not collapse lexically inside the allowed tree",
         );
     }
 

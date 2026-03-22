@@ -18,7 +18,7 @@ format = "native"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "One injected bearer access token per connector instance. The first slice does not manage OAuth install, token refresh, multi-merchant brokering, or durable connector state."
+migration_hint = "One injected bearer access token per connector instance. The first slice does not manage OAuth install, token refresh, multi-merchant brokering, or durable connector state, but the runtime accepts localhost /v2 overrides for deterministic verification bundles."
 
 [zones]
 home = "z:work"
@@ -38,6 +38,8 @@ forbidden = ["system.exec", "network.listen", "system.privileged"]
 # - The configured base_url must match the token environment exactly:
 #   `https://connect.squareup.com/v2` for production or
 #   `https://connect.squareupsandbox.com/v2` for sandbox.
+# - Localhost /v2 overrides are reserved for deterministic verification and
+#   wiremock-style testing; live runs should stay on the canonical Square hosts.
 # - The token is merchant-scoped; location-sensitive operations still require explicit
 #   `location_id` or `location_ids` input.
 # - OAuth installation, token refresh, merchant discovery, and cross-merchant fan-out

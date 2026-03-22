@@ -1,13 +1,13 @@
-# Square Connector V3 Contract
+# Square Connector V3 Guide
 
-> **Status**: implementation-reviewed contract
-> **Bead**: `flywheel_connectors-j05nu.6.3.1`
-> **Unblocks**: `flywheel_connectors-j05nu.6.3.2`
+> **Status**: implementation-reviewed and verification-oriented
+> **Beads**: `flywheel_connectors-j05nu.6.3.1`, `flywheel_connectors-j05nu.6.3.2`, `flywheel_connectors-j05nu.6.3.3`
+> **Verification script**: `scripts/e2e/square_connector_verification.sh`
 > **Primary upstream**: https://developer.squareup.com/reference/square
 
 ## Purpose
 
-This document fixes the accepted first V3 slice for `fcp.square` so the existing runtime and manifest can be judged against a stable contract instead of a generic "Square integration" label.
+This guide fixes the accepted first V3 slice for `fcp.square` and records the verification bundle that proves the runtime, manifest, doctor output, and operator guidance stay truthful.
 
 The connector is a merchant-scoped request-response Square REST connector for payments, refunds, orders, catalog reads, customer reads, location discovery, and connectivity verification.
 
@@ -37,6 +37,7 @@ Important truths from `connector.rs`, `client.rs`, and `manifest.toml`:
 - The connector is merchant-scoped, but location-sensitive workflows still matter. `square.orders.list` requires explicit `location_ids`, `square.orders.create` requires one `location_id`, and `square.payments.create` can optionally rely on Square's main-location default if `location_id` is omitted.
 - `square.health` and `self_check()` are tied to the Locations API, which makes location visibility part of the readiness boundary.
 - The current implementation already excludes invoice operations, inventory adjustments, catalog mutation, customer mutation, and OAuth installation flows.
+- `health`, `doctor`, and `self_check` now surface verification script paths, artifact-root hints, provisioning state, operator guidance, manifest hashes, and live probe evidence.
 
 ## Accepted First Slice
 
@@ -70,8 +71,8 @@ This is intentionally narrower than "all of Square commerce". The point of the f
 
 - Production REST base URL: `https://connect.squareup.com/v2`
 - Sandbox REST base URL: `https://connect.squareupsandbox.com/v2`
+- Deterministic verification may use a localhost `/v2` override, but live operator guidance and doctor remediation still treat the two canonical Square hosts as the accepted production and sandbox targets
 - TLS and SNI are required for live traffic
-- No localhost override is part of the accepted contract
 - Runtime is stateless aside from in-memory configuration and HTTP client state
 - No inbound listeners, browser steps, or webhook receivers are part of this slice
 
@@ -117,6 +118,57 @@ The accepted first slice does not include:
 - OAuth install, refresh, revocation, or cross-merchant brokering
 
 Invoices are explicitly out of scope for the first slice even though Square supports them. Square's current Invoices docs require additional OAuth permissions such as `INVOICES_READ`, `INVOICES_WRITE`, `ORDERS_WRITE`, and in some flows `CUSTOMERS_READ` plus `PAYMENTS_WRITE`. That is a coupled surface area we are intentionally not collapsing into the first merchant-token contract.
+
+## Verification Bundle
+
+The readiness closeout is anchored on `scripts/e2e/square_connector_verification.sh`.
+It writes replayable artifacts under `artifacts/e2e/square_connector/<timestamp>`.
+
+The bundle captures:
+
+- manifest validation for `connectors/square/manifest.toml`
+- `cargo fmt --manifest-path connectors/square/Cargo.toml --check` via `rch`
+- `cargo check -p fcp-square --all-targets` via `rch`
+- targeted readiness evidence for `health`, `doctor`, `self_check`, payments pagination, catalog filters, and high-risk payment creation
+- typed introspection compliance evidence
+- the Square integration suite and full crate test suite
+- `cargo clippy -p fcp-square --all-targets -- -D warnings` via `rch`
+
+## Operator Guidance
+
+Prerequisites:
+
+- Use a dedicated Square Sandbox seller account or a localhost wiremock override before running the verification bundle against payment or order mutations.
+- Provision a bearer token that can read locations, payments, orders, catalog objects, and customers for the same seller boundary the connector will operate inside.
+- Confirm the configured production or sandbox host matches the token environment before live verification.
+
+Dedicated environment:
+
+- Prefer a Square Sandbox seller with disposable customers, locations, and catalog fixtures. `square.payments.create`, `square.payments.refund`, and `square.orders.create` mutate real merchant state unless the connector is pointed at a localhost mock server.
+
+Redaction rules:
+
+- Redact bearer tokens, Authorization headers, idempotency keys, and copied request or response bodies before sharing artifacts.
+- Redact payment IDs, refund IDs, order IDs, location IDs, customer IDs, receipt URLs, and business names.
+- If a live sandbox seller is used, sanitize location names, business metadata, and customer-facing notes captured in evidence logs.
+
+Common remediation:
+
+- If `self_check` fails with `square_auth_rejected`, replace the bearer token and verify it matches the configured production or sandbox environment.
+- If `self_check` fails with `square_permission_denied`, grant the missing seller permissions for locations, payments, orders, catalog, and customer reads.
+- If `self_check` degrades with `square_locations_missing`, verify the seller has at least one visible active location and rerun the bundle.
+- If `self_check` degrades with `self_check_retryable`, respect Retry-After or widen the retry and timeout budget before rerunning.
+- If doctor flags invalid network constraints, use the canonical Square REST hosts for live runs or a localhost `/v2` override for deterministic verification.
+
+Rerun commands:
+
+- `scripts/e2e/square_connector_verification.sh`
+- `fwc manifest fix connectors/square/manifest.toml --check --json`
+- `rch exec -- cargo fmt --manifest-path connectors/square/Cargo.toml --check`
+- `rch exec -- cargo check -p fcp-square --all-targets`
+- `rch exec -- cargo test -p fcp-square --test integration -- --nocapture`
+- `rch exec -- cargo test -p fcp-square -- --nocapture`
+- `rch exec -- cargo clippy -p fcp-square --all-targets -- -D warnings`
 
 ## Source Notes
 

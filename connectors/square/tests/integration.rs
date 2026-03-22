@@ -1,0 +1,420 @@
+//! Integration tests for the FCP Square connector.
+
+#![allow(
+    clippy::future_not_send,
+    clippy::missing_errors_doc,
+    clippy::missing_fields_in_debug,
+    clippy::must_use_candidate,
+    clippy::too_many_lines,
+    clippy::unused_async
+)]
+
+use chrono::{Duration, Utc};
+use fcp_core::{
+    ApprovalMode, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HandshakeRequest,
+    IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId, RiskLevel, SafetyTier,
+    ZoneId,
+};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_square::SquareConnector;
+use fcp_testkit::readiness_helpers::{
+    assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
+};
+use serde_json::json;
+use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const OP_PAYMENTS_LIST: &str = "square.payments.list";
+const OP_PAYMENTS_CREATE: &str = "square.payments.create";
+const OP_CATALOG_LIST: &str = "square.catalog.list";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/square_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/square_connector/<timestamp>";
+
+fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
+    HandshakeRequest {
+        protocol_version: "2.0.0".into(),
+        zone: ZoneId::work(),
+        zone_dir: None,
+        host_public_key,
+        nonce: [23u8; 32],
+        capabilities_requested: vec![
+            CapabilityId::from_static("square.payments.read"),
+            CapabilityId::from_static("square.payments.write"),
+            CapabilityId::from_static("square.catalog.read"),
+            CapabilityId::from_static("square.locations.read"),
+        ],
+        host: None,
+        transport_caps: None,
+        requested_instance_id: None,
+    }
+}
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+    let capability = match op {
+        OP_PAYMENTS_LIST => "square.payments.read",
+        OP_PAYMENTS_CREATE => "square.payments.write",
+        OP_CATALOG_LIST => "square.catalog.read",
+        _ => panic!("unsupported Square integration operation: {op}"),
+    };
+    let now = Utc::now();
+    let raw = CapabilityTokenBuilder::new()
+        .capability_id(capability)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&[op])
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .sign(signing_key)
+        .expect("capability token signing should succeed");
+    CapabilityToken { raw }
+}
+
+fn invoke_req(
+    op: &'static str,
+    input: serde_json::Value,
+    capability_token: CapabilityToken,
+) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".into(),
+        id: RequestId::new("square-integration-1"),
+        connector_id: ConnectorId::from_static("fcp.square"),
+        operation: OperationId::from_static(op),
+        zone_id: ZoneId::work(),
+        input,
+        capability_token,
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: vec![],
+    }
+}
+
+async fn setup_connector(
+    server: &MockServer,
+    access_token: &str,
+) -> (SquareConnector, Ed25519SigningKey) {
+    let mut connector = SquareConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    connector
+        .configure(json!({
+            "base_url": format!("{}/v2", server.uri()),
+            "access_token": access_token,
+            "retry": {
+                "max_retries": 0,
+                "initial_delay_ms": 1,
+                "max_delay_ms": 1,
+                "jitter_enabled": false
+            }
+        }))
+        .await
+        .unwrap();
+    connector
+        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .await
+        .unwrap();
+    (connector, signing_key)
+}
+
+#[fcp_async_core::runtime::test]
+async fn health_unconfigured_includes_guidance() {
+    let connector = SquareConnector::new();
+    let health = connector.health().await;
+    assert!(!health.is_ready());
+    let details = health.details.as_ref().expect("health details");
+    assert!(details["operator_guidance"]["prerequisites"].is_array());
+    assert!(details["operator_guidance"]["redaction_rules"].is_array());
+    assert_eq!(details["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert_eq!(details["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    println!(
+        "square_health_evidence={}",
+        serde_json::to_string_pretty(&health).unwrap()
+    );
+}
+
+#[test]
+fn doctor_unconfigured_reports_operator_guidance() {
+    let connector = SquareConnector::new();
+    let doctor = serde_json::to_value(connector.doctor()).unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], false);
+    assert_eq!(doctor["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert!(doctor["operator_guidance"]["common_remediation"].is_array());
+    assert_eq!(
+        doctor["operator_guidance"]["artifact_root_hint"],
+        ARTIFACT_ROOT_HINT
+    );
+    println!(
+        "square_doctor_guidance_evidence={}",
+        serde_json::to_string_pretty(&doctor).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_ready_with_mock_square_api_and_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/locations"))
+        .and(header("authorization", "Bearer sq-ready"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "locations": [{
+                "id": "LOC-1",
+                "name": "Sandbox Main",
+                "status": "ACTIVE",
+                "country": "US",
+                "currency": "USD",
+                "business_name": "Square Sandbox"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, _signing_key) = setup_connector(&server, "sq-ready").await;
+    let doctor = serde_json::to_value(connector.doctor()).unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], true);
+    assert_eq!(doctor["provisioning"]["auth_mode"], "bearer_token");
+    println!(
+        "square_doctor_evidence={}",
+        serde_json::to_string_pretty(&doctor).unwrap()
+    );
+
+    let report = connector.self_check().await.unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+    assert_self_check_ready(&value);
+    assert_eq!(
+        value["details"]["verification_script"],
+        VERIFICATION_SCRIPT_PATH
+    );
+    assert_eq!(value["details"]["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert_eq!(
+        value["details"]["provisioning"]["auth_mode"],
+        "bearer_token"
+    );
+    assert_eq!(value["details"]["live_probe"]["location_count"], 1);
+    assert_eq!(value["details"]["live_probe"]["location_ids"][0], "LOC-1");
+    println!(
+        "square_self_check_evidence={}",
+        serde_json::to_string_pretty(&value).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_retryable_square_failure_reports_degraded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/locations"))
+        .and(header("authorization", "Bearer sq-retry"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("square unavailable"))
+        .mount(&server)
+        .await;
+
+    let (connector, _signing_key) = setup_connector(&server, "sq-retry").await;
+    let report = connector.self_check().await.unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+    assert_self_check_not_ready(&value);
+    assert_eq!(value["status"], "degraded");
+    assert_eq!(value["reason_code"], "self_check_retryable");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_payments_list_preserves_pagination_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/payments"))
+        .and(query_param("cursor", "cursor-1"))
+        .and(query_param("location_id", "LOC-1"))
+        .and(header("authorization", "Bearer sq-list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "payments": [{
+                "id": "pay_123",
+                "status": "COMPLETED",
+                "amount_money": {
+                    "amount": 4200,
+                    "currency": "USD"
+                },
+                "location_id": "LOC-1"
+            }],
+            "cursor": "cursor-2"
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server, "sq-list").await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_PAYMENTS_LIST,
+            json!({
+                "cursor": "cursor-1",
+                "location_id": "LOC-1"
+            }),
+            generate_valid_token(&signing_key, OP_PAYMENTS_LIST),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let result = response.result.expect("payments list result");
+    assert_eq!(result["cursor"], "cursor-2");
+    assert_eq!(result["payments"][0]["id"], "pay_123");
+    println!(
+        "square_payments_pagination_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_catalog_list_preserves_filter_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/catalog/list"))
+        .and(query_param("cursor", "cat-1"))
+        .and(query_param("types", "ITEM,IMAGE"))
+        .and(header("authorization", "Bearer sq-catalog"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "objects": [{
+                "id": "item_123",
+                "type": "ITEM",
+                "version": 12
+            }],
+            "cursor": "cat-2"
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server, "sq-catalog").await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_CATALOG_LIST,
+            json!({
+                "cursor": "cat-1",
+                "types": "ITEM,IMAGE"
+            }),
+            generate_valid_token(&signing_key, OP_CATALOG_LIST),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let result = response.result.expect("catalog list result");
+    assert_eq!(result["cursor"], "cat-2");
+    assert_eq!(result["objects"][0]["type"], "ITEM");
+    println!(
+        "square_catalog_filter_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_payment_create_preserves_mutation_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/payments"))
+        .and(header("authorization", "Bearer sq-create"))
+        .and(body_json(json!({
+            "source_id": "cnon:card-nonce-ok",
+            "idempotency_key": "payment-1",
+            "amount_money": {
+                "amount": 4200,
+                "currency": "USD"
+            },
+            "location_id": "LOC-1",
+            "customer_id": "CUST-1",
+            "note": "sandbox invoice 42"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "payment": {
+                "id": "pay_created",
+                "status": "COMPLETED",
+                "amount_money": {
+                    "amount": 4200,
+                    "currency": "USD"
+                },
+                "location_id": "LOC-1",
+                "receipt_url": "https://squareup.com/receipt/pay_created"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server, "sq-create").await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_PAYMENTS_CREATE,
+            json!({
+                "source_id": "cnon:card-nonce-ok",
+                "idempotency_key": "payment-1",
+                "amount_money": {
+                    "amount": 4200,
+                    "currency": "USD"
+                },
+                "location_id": "LOC-1",
+                "customer_id": "CUST-1",
+                "note": "sandbox invoice 42"
+            }),
+            generate_valid_token(&signing_key, OP_PAYMENTS_CREATE),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let result = response.result.expect("payment create result");
+    assert_eq!(result["payment"]["id"], "pay_created");
+    assert_eq!(
+        result["payment"]["receipt_url"],
+        "https://squareup.com/receipt/pay_created"
+    );
+    println!(
+        "square_payment_create_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[test]
+fn introspection_emits_v3_compliance_evidence() {
+    let connector = SquareConnector::new();
+    let introspection = connector.introspect();
+    let value = serde_json::to_value(&introspection).unwrap();
+    let operations = value["operations"].as_array().expect("operations array");
+
+    assert_eq!(operations.len(), 12);
+    assert!(operations.iter().all(|operation| {
+        operation["ai_hints"]["when_to_use"]
+            .as_str()
+            .is_some_and(|when_to_use| !when_to_use.is_empty())
+    }));
+
+    let payment_create = operations
+        .iter()
+        .find(|operation| operation["id"] == OP_PAYMENTS_CREATE)
+        .expect("payments create operation");
+    assert_eq!(
+        payment_create["safety_tier"],
+        serde_json::to_value(SafetyTier::Risky).unwrap()
+    );
+    assert_eq!(
+        payment_create["requires_approval"],
+        serde_json::to_value(ApprovalMode::Interactive).unwrap()
+    );
+    assert_eq!(
+        payment_create["risk_level"],
+        serde_json::to_value(RiskLevel::High).unwrap()
+    );
+
+    let health = operations
+        .iter()
+        .find(|operation| operation["id"] == "square.health")
+        .expect("health operation");
+    assert_eq!(
+        health["idempotency"],
+        serde_json::to_value(IdempotencyClass::Strict).unwrap()
+    );
+
+    println!(
+        "square_introspection_evidence={}",
+        serde_json::to_string_pretty(&value).unwrap()
+    );
+}

@@ -1,6 +1,9 @@
 //! Square connector implementation.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use fcp_core::{
@@ -16,10 +19,23 @@ use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::client::SquareClient;
-use crate::types::*;
+use crate::{client::SquareClient, error::SquareError, types::*};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const SQUARE_IMPLEMENTATION_STATUS: &str = "first_slice";
+const SQUARE_BINDING_MODEL: &str = "merchant_scoped_seller_token";
+const SQUARE_AUTH_MODEL: &str = "bearer_token_or_proxy_injected";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/square_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/square_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 7] = [
+    "scripts/e2e/square_connector_verification.sh",
+    "fwc manifest fix connectors/square/manifest.toml --check --json",
+    "rch exec -- cargo fmt --manifest-path connectors/square/Cargo.toml --check",
+    "rch exec -- cargo check -p fcp-square --all-targets",
+    "rch exec -- cargo test -p fcp-square --test integration -- --nocapture",
+    "rch exec -- cargo test -p fcp-square -- --nocapture",
+    "rch exec -- cargo clippy -p fcp-square --all-targets -- -D warnings",
+];
 const SQUARE_PRODUCTION_BASE_URL: &str = "https://connect.squareup.com/v2";
 #[cfg(test)]
 const SQUARE_SANDBOX_BASE_URL: &str = "https://connect.squareupsandbox.com/v2";
@@ -79,22 +95,39 @@ const fn default_request_timeout_ms() -> u64 {
     30_000
 }
 
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1") || host.ends_with(".localhost")
+}
+
 fn normalize_square_base_url(base_url: &str) -> Result<String, String> {
     let parsed =
         reqwest::Url::parse(base_url).map_err(|e| format!("Invalid Square base_url: {e}"))?;
-    if parsed.scheme() != "https" {
-        return Err("Square base_url must use https".into());
-    }
     let host = parsed
         .host_str()
         .ok_or_else(|| "Square base_url must include a host".to_string())?;
-    if !SQUARE_ALLOWED_HOSTS.contains(&host) {
+    let local_test_host = is_local_test_host(host);
+
+    if !SQUARE_ALLOWED_HOSTS.contains(&host) && !local_test_host {
         return Err(format!(
-            "Square base_url host must be connect.squareup.com or connect.squareupsandbox.com, got {host}"
+            "Square base_url host must be connect.squareup.com, connect.squareupsandbox.com, or localhost for deterministic tests; got {host}"
         ));
     }
-    if parsed.port_or_known_default() != Some(443) {
-        return Err("Square base_url must use port 443".into());
+    if local_test_host {
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(
+                "Square localhost test overrides must use http or https with a concrete port"
+                    .into(),
+            );
+        }
+    } else {
+        if parsed.scheme() != "https" {
+            return Err(
+                "Square base_url must use https unless targeting a localhost test override".into(),
+            );
+        }
+        if parsed.port_or_known_default() != Some(443) {
+            return Err("Square base_url must use port 443".into());
+        }
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err("Square base_url must not include query parameters or fragments".into());
@@ -106,14 +139,27 @@ fn normalize_square_base_url(base_url: &str) -> Result<String, String> {
         ));
     }
 
-    Ok(format!("https://{host}/v2"))
+    if local_test_host {
+        let authority = match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+        Ok(format!("{}://{authority}/v2", parsed.scheme()))
+    } else {
+        Ok(format!("https://{host}/v2"))
+    }
 }
 
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -125,10 +171,158 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
         let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RetryReadiness {
+    max_retries: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    base_url: String,
+    auth_mode: &'static str,
+    request_timeout_ms: u64,
+    retry: RetryReadiness,
+    merchant_scoped: bool,
+    authenticated_identity_probe: &'static str,
+    risky_mutations: Vec<&'static str>,
+    read_inventory: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn auth_mode_label(config: &SquareConfig) -> &'static str {
+    if config.access_token.is_empty() {
+        "proxy_injected"
+    } else {
+        "bearer_token"
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a dedicated Square Sandbox seller account or a localhost wiremock override before running the verification bundle against payment or order mutations.",
+            "Provision a bearer token that can read locations, payments, orders, catalog objects, and customers for the same seller boundary the connector will operate inside.",
+            "Treat square.payments.create, square.payments.refund, and square.orders.create as real merchant mutations unless you are pointed at a localhost mock server.",
+        ],
+        dedicated_environment: "Prefer a Square Sandbox seller with disposable customers, locations, and catalog fixtures. Use localhost-only overrides for deterministic wiremock verification and never point the closeout bundle at a production seller unless the resulting mutations are explicitly acceptable.",
+        redaction_rules: vec![
+            "Redact bearer tokens, Authorization headers, idempotency keys, and any copied request or response bodies before sharing artifacts.",
+            "Treat payment IDs, refund IDs, order IDs, location IDs, customer IDs, receipt URLs, and business names as sensitive merchant data.",
+            "If a live sandbox seller is used, sanitize location names, business metadata, and any customer-facing notes captured in payment or order artifacts.",
+        ],
+        limitations: vec![
+            "One connector instance is bound to one Square seller token boundary; there is no cross-merchant brokering or automatic OAuth installation in this slice.",
+            "Webhook ingestion, streaming events, invoice workflows, inventory adjustments, and customer mutation flows remain out of scope.",
+            "Location scope still matters inside one seller boundary: order search requires explicit location_ids and many downstream workflows rely on locations returned by the readiness probe.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "not_configured",
+                symptom: "health or self_check reports that the connector is not configured",
+                action: "Configure base_url, token injection mode, timeout, and retry settings, then rerun the verification bundle.",
+            },
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "self_check reports that an egress proxy must inject credentials",
+                action: "Run the connector behind the expected credential-injection path or provide a direct Square bearer token for deterministic verification.",
+            },
+            RemediationHint {
+                code: "square_auth_rejected",
+                symptom: "Square returns HTTP 401 during health or self_check",
+                action: "Replace the bearer token, confirm it matches the configured production or sandbox environment, and rerun self_check.",
+            },
+            RemediationHint {
+                code: "square_permission_denied",
+                symptom: "Square returns HTTP 403 for location or commerce inventory probes",
+                action: "Grant the missing seller permissions for locations, payments, orders, catalog, and customer reads to the token, then rerun the bundle.",
+            },
+            RemediationHint {
+                code: "square_locations_missing",
+                symptom: "self_check succeeds technically but returns zero visible locations",
+                action: "Verify the token is installed for the intended seller, confirm at least one active location exists, and rerun the verification bundle.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "self_check degrades on timeout, rate limit, or temporary 5xx responses",
+                action: "Respect Retry-After when present, widen retry or timeout settings for the environment, then rerun the verification bundle.",
+            },
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "doctor reports that base_url falls outside the accepted Square hosts",
+                action: "Use https://connect.squareup.com/v2 or https://connect.squareupsandbox.com/v2 for live verification, or a localhost /v2 override for deterministic mock tests.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
+fn contract_details(config: Option<&SquareConfig>) -> serde_json::Value {
+    let credential_mode = config.map_or("unconfigured", auth_mode_label);
+
+    json!({
+        "connector_id": "fcp.square",
+        "implementation_status": {
+            "status": SQUARE_IMPLEMENTATION_STATUS,
+            "binding_model": SQUARE_BINDING_MODEL,
+            "auth_model": SQUARE_AUTH_MODEL,
+        },
+        "scope": {
+            "credential_mode": credential_mode,
+            "base_url": config.map(|cfg| cfg.base_url.clone()),
+            "merchant_boundary": "Provider-enforced seller boundary; the connector does not broker multiple merchants from one instance.",
+            "location_boundary": "Locations are discovered through the readiness probe and still gate order and payment workflows inside one seller boundary.",
+            "localhost_test_override_supported": true,
+        },
+        "service_inventory": {
+            "payments": [OP_PAYMENTS_LIST, OP_PAYMENTS_GET, OP_PAYMENTS_CREATE, OP_PAYMENTS_REFUND],
+            "orders": [OP_ORDERS_LIST, OP_ORDERS_GET, OP_ORDERS_CREATE],
+            "catalog": [OP_CATALOG_LIST],
+            "customers": [OP_CUSTOMERS_LIST, OP_CUSTOMERS_GET],
+            "locations": [OP_LOCATIONS_LIST, OP_HEALTH],
+        },
+        "non_goals": [
+            "oauth_install",
+            "token_refresh",
+            "webhook_ingest",
+            "invoice_workflows",
+            "inventory_adjustment",
+            "customer_mutation",
+        ],
+    })
 }
 
 /// Square connector state.
@@ -164,9 +358,55 @@ impl SquareConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| ProvisioningReadiness {
+            base_url: config.base_url.clone(),
+            auth_mode: auth_mode_label(config),
+            request_timeout_ms: config.request_timeout_ms,
+            retry: RetryReadiness {
+                max_retries: config.retry.max_retries,
+                initial_delay_ms: config.retry.initial_delay_ms,
+                max_delay_ms: config.retry.max_delay_ms,
+                jitter_enabled: config.retry.jitter_enabled,
+            },
+            merchant_scoped: true,
+            authenticated_identity_probe: "GET /locations",
+            risky_mutations: vec![OP_PAYMENTS_CREATE, OP_PAYMENTS_REFUND, OP_ORDERS_CREATE],
+            read_inventory: vec![
+                OP_LOCATIONS_LIST,
+                OP_PAYMENTS_LIST,
+                OP_ORDERS_LIST,
+                OP_CATALOG_LIST,
+                OP_CUSTOMERS_LIST,
+            ],
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        live_probe: Option<&serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "operator_guidance": operator_guidance(),
+            "live_probe": live_probe,
+            "contract": contract_details(self.config.as_ref()),
+        }));
+        report
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
+        let provisioning = self.provisioning_readiness();
 
         let configured = self.config.is_some();
         checks.push(DoctorCheck {
@@ -204,6 +444,18 @@ impl SquareConnector {
             critical: true,
         });
 
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: Some(if handshaken {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
         if let Some(config) = &self.config {
             let scheme = if config.base_url.starts_with("https://") {
                 "https"
@@ -224,7 +476,13 @@ impl SquareConnector {
                 passed: network_ok,
                 message: Some(match normalized_base_url {
                     Ok(base_url) => {
-                        format!("Base URL matches required Square REST base: {base_url}")
+                        if is_local_test_host(host_from_base_url(&base_url)) {
+                            format!(
+                                "Base URL matches a localhost test override for deterministic verification: {base_url}"
+                            )
+                        } else {
+                            format!("Base URL matches required Square REST base: {base_url}")
+                        }
                     }
                     Err(err) => err,
                 }),
@@ -242,9 +500,58 @@ impl SquareConnector {
                 }),
                 critical: false,
             });
+
+            checks.push(DoctorCheck {
+                name: "timeout_budget".into(),
+                passed: config.request_timeout_ms > 0,
+                message: Some(format!(
+                    "Request timeout budget set to {}ms",
+                    config.request_timeout_ms
+                )),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "retry_policy".into(),
+                passed: true,
+                message: Some(format!(
+                    "Retry policy: max_retries={}, initial_delay_ms={}, max_delay_ms={}, jitter_enabled={}",
+                    config.retry.max_retries,
+                    config.retry.initial_delay_ms,
+                    config.retry.max_delay_ms,
+                    config.retry.jitter_enabled
+                )),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_boundary".into(),
+                passed: true,
+                message: Some(
+                    "Square access is scoped to one seller token boundary; the connector does not span multiple merchants from one instance."
+                        .into(),
+                ),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "location_scope".into(),
+                passed: true,
+                message: Some(
+                    "Location visibility is part of readiness. Orders require explicit location_ids and payment workflows may still depend on the seller's visible locations."
+                        .into(),
+                ),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "service_inventory".into(),
+                passed: true,
+                message: Some(
+                    "Supported today: payments, refunds, orders, catalog reads, customer reads, location discovery, and readiness probes."
+                        .into(),
+                ),
+                critical: false,
+            });
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 }
 
@@ -670,6 +977,13 @@ impl FcpConnector for SquareConnector {
                 code: 1001,
                 message: format!("Invalid Square config: {e}"),
             })?;
+        if config.request_timeout_ms == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "Square request_timeout_ms must be greater than 0".into(),
+            });
+        }
+        config.access_token = config.access_token.trim().to_owned();
         config.base_url = normalize_square_base_url(&config.base_url).map_err(|message| {
             FcpError::InvalidRequest {
                 code: 1001,
@@ -730,46 +1044,124 @@ impl FcpConnector for SquareConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self.provisioning_readiness();
+        let mut snapshot = match &self.client {
+            None if self.config.is_none() => HealthSnapshot::degraded("not configured"),
+            None => HealthSnapshot::error("Square client not initialized"),
+            Some(_) if self.runtime.is_none() => HealthSnapshot::error("runtime not initialized"),
+            Some(client) if client.is_secretless() => {
+                HealthSnapshot::degraded("credential injection required")
+            }
+            Some(_) => HealthSnapshot::ready(),
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+            "contract": contract_details(self.config.as_ref()),
+        }));
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                Some(&json!({
+                    "configured": false,
+                })),
+            ));
+        };
+
+        let Some(runtime) = &self.runtime else {
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("runtime_missing", "Connector runtime is not initialized"),
+                Some(&json!({
+                    "api_base_url": client.base_url(),
+                })),
             ));
         };
 
         if client.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
-                "credential_injection_required",
-                "Configured with empty token; egress proxy injection required",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with empty token; egress proxy injection required",
+                ),
+                Some(&json!({
+                    "api_base_url": client.base_url(),
+                    "credential_mode": "proxy_injected",
+                })),
             ));
         }
 
-        match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
-            Err(err) => {
-                if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
+        match client.list_locations(runtime).await {
+            Ok(locations) => {
+                let live_probe = json!({
+                    "api_reachable": true,
+                    "api_base_url": client.base_url(),
+                    "location_count": locations.locations.len(),
+                    "location_ids": locations
+                        .locations
+                        .iter()
+                        .filter_map(|location| location.id.clone())
+                        .collect::<Vec<_>>(),
+                    "location_names": locations
+                        .locations
+                        .iter()
+                        .filter_map(|location| location.name.clone())
+                        .collect::<Vec<_>>(),
+                });
+
+                if locations.locations.is_empty() {
+                    Ok(self.attach_self_check_details(
+                        SelfCheckReport::degraded(
+                            "square_locations_missing",
+                            "Square returned zero visible locations for the configured seller token",
+                        ),
+                        Some(&live_probe),
                     ))
                 } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
-                    ))
+                    Ok(self.attach_self_check_details(SelfCheckReport::ok(), Some(&live_probe)))
                 }
             }
+            Err(SquareError::Unauthorized(message)) => Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("square_auth_rejected", message),
+                Some(&json!({
+                    "api_base_url": client.base_url(),
+                    "api_reachable": false,
+                })),
+            )),
+            Err(SquareError::Api { code: 403, message }) => Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("square_permission_denied", message),
+                Some(&json!({
+                    "api_base_url": client.base_url(),
+                    "api_reachable": false,
+                    "status_code": 403,
+                })),
+            )),
+            Err(err) if err.is_retryable() => Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("self_check_retryable", err.to_string()),
+                Some(&json!({
+                    "api_base_url": client.base_url(),
+                    "api_reachable": false,
+                })),
+            )),
+            Err(err) => Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("self_check_failed", err.to_string()),
+                Some(&json!({
+                    "api_base_url": client.base_url(),
+                    "api_reachable": false,
+                })),
+            )),
         }
     }
 
@@ -1128,6 +1520,19 @@ impl SquareConnector {
     }
 }
 
+fn host_from_base_url(base_url: &str) -> &str {
+    base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,6 +1623,9 @@ mod tests {
         let connector = SquareConnector::new();
         let health = connector.health().await;
         assert!(matches!(health.status, HealthState::Degraded { .. }));
+        let details = health.details.expect("health details");
+        assert_eq!(details["verification_script"], VERIFICATION_SCRIPT_PATH);
+        assert_eq!(details["artifact_root_hint"], ARTIFACT_ROOT_HINT);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1232,6 +1640,7 @@ mod tests {
     fn test_doctor_before_configure() {
         let connector = SquareConnector::new();
         let report = connector.doctor();
+        assert!(!report.ready);
         assert!(!report.passed);
     }
 
@@ -1240,6 +1649,7 @@ mod tests {
         let mut connector = SquareConnector::new();
         connector.configure(test_config()).await.unwrap();
         let report = connector.doctor();
+        assert!(report.ready);
         assert!(report.passed);
         assert!(
             report
@@ -1260,6 +1670,7 @@ mod tests {
             .await
             .unwrap();
         let report = connector.doctor();
+        assert!(report.ready);
         assert!(report.passed);
         assert!(
             report
@@ -1270,16 +1681,24 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_configure_rejects_localhost_base_url() {
+    async fn test_configure_accepts_localhost_test_override() {
         let mut connector = SquareConnector::new();
-        let err = connector
+        connector
             .configure(json!({
-                "base_url": "https://localhost/v2",
+                "base_url": "http://127.0.0.1:8080/v2",
                 "access_token": "test_square_token"
             }))
             .await
-            .unwrap_err();
-        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+            .unwrap();
+        let report = connector.doctor();
+        assert!(report.ready);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "network_constraints"
+                && check
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("localhost test override"))
+        }));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1289,6 +1708,19 @@ mod tests {
             .configure(json!({
                 "base_url": "http://connect.squareup.com/v2",
                 "access_token": "test_square_token"
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_zero_timeout() {
+        let mut connector = SquareConnector::new();
+        let err = connector
+            .configure(json!({
+                "access_token": "test_square_token",
+                "request_timeout_ms": 0
             }))
             .await
             .unwrap_err();
@@ -1330,6 +1762,8 @@ mod tests {
         let connector = SquareConnector::new();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
+        let details = report.details.expect("self_check details");
+        assert_eq!(details["verification_script"], VERIFICATION_SCRIPT_PATH);
     }
 
     #[fcp_async_core::runtime::test]

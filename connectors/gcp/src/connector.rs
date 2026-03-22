@@ -206,6 +206,7 @@ pub struct DoctorResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     provisioning: Option<ProvisioningReadiness>,
     operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -235,6 +236,7 @@ impl DoctorResult {
             checks,
             provisioning,
             operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
         }
     }
 

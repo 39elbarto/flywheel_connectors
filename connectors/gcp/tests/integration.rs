@@ -12,8 +12,8 @@
 
 use chrono::{Duration, Utc};
 use fcp_core::{
-    CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HandshakeRequest, InvokeRequest,
-    OperationId, RequestId, ZoneId,
+    ApprovalMode, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HandshakeRequest,
+    IdempotencyClass, InvokeRequest, OperationId, RequestId, SafetyTier, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_gcp::connector::GcpConnector;
@@ -24,6 +24,8 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const OP_COMPUTE_START_INSTANCE: &str = "gcp.compute.start_instance";
+const OP_PROJECTS_GET: &str = "gcp.projects.get";
 const OP_STORAGE_DELETE_OBJECT: &str = "gcp.storage.delete_object";
 
 fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
@@ -118,7 +120,7 @@ async fn lifecycle_health_unconfigured_includes_guidance() {
     let connector = GcpConnector::new();
     let health = connector.health().await;
     assert!(!health.is_ready());
-    let details = health.details.expect("health details");
+    let details = health.details.as_ref().expect("health details");
     assert!(details["operator_guidance"]["prerequisites"].is_array());
     assert_eq!(
         details["verification_script"],
@@ -127,6 +129,10 @@ async fn lifecycle_health_unconfigured_includes_guidance() {
     assert_eq!(
         details["artifact_root_hint"],
         "artifacts/e2e/gcp_connector/<timestamp>"
+    );
+    println!(
+        "gcp_health_evidence={}",
+        serde_json::to_string_pretty(&health).unwrap()
     );
 }
 
@@ -138,8 +144,16 @@ async fn doctor_unconfigured_reports_remediation() {
     assert_eq!(doctor["status"], "unhealthy");
     assert_eq!(doctor["ready"], false);
     assert_eq!(
+        doctor["verification_script"],
+        "scripts/e2e/gcp_connector_verification.sh"
+    );
+    assert_eq!(
         doctor["operator_guidance"]["artifact_root_hint"],
         "artifacts/e2e/gcp_connector/<timestamp>"
+    );
+    println!(
+        "gcp_doctor_guidance_evidence={}",
+        serde_json::to_string_pretty(&doctor).unwrap()
     );
 }
 
@@ -284,5 +298,61 @@ async fn invoke_dangerous_storage_delete_preserves_artifact_evidence() {
     println!(
         "gcp_risky_mutation_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspection_emits_v3_compliance_evidence() {
+    let connector = GcpConnector::new();
+    let operations = connector.introspect().operations;
+    assert_eq!(operations.len(), 14);
+
+    let storage_delete = operations
+        .iter()
+        .find(|operation| operation.id.as_str() == OP_STORAGE_DELETE_OBJECT)
+        .expect("storage delete operation");
+    assert_eq!(storage_delete.safety_tier, SafetyTier::Dangerous);
+    assert_eq!(storage_delete.idempotency, IdempotencyClass::Strict);
+    assert_eq!(
+        storage_delete.requires_approval,
+        Some(ApprovalMode::Interactive)
+    );
+
+    let compute_start = operations
+        .iter()
+        .find(|operation| operation.id.as_str() == OP_COMPUTE_START_INSTANCE)
+        .expect("compute start operation");
+    assert_eq!(compute_start.safety_tier, SafetyTier::Risky);
+    assert_eq!(compute_start.idempotency, IdempotencyClass::Strict);
+
+    let projects_get = operations
+        .iter()
+        .find(|operation| operation.id.as_str() == OP_PROJECTS_GET)
+        .expect("projects get operation");
+    assert_eq!(projects_get.safety_tier, SafetyTier::Safe);
+    assert_eq!(projects_get.idempotency, IdempotencyClass::None);
+
+    let evidence = json!({
+        "operation_ids": operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>(),
+        "dangerous_operations": operations
+            .iter()
+            .filter(|operation| operation.safety_tier == SafetyTier::Dangerous)
+            .map(|operation| {
+                json!({
+                    "id": operation.id.as_str(),
+                    "capability": operation.capability.as_str(),
+                    "idempotency": format!("{:?}", operation.idempotency),
+                    "requires_approval": serde_json::to_value(operation.requires_approval)
+                        .unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+    println!(
+        "gcp_v3_conformance_evidence={}",
+        serde_json::to_string_pretty(&evidence).unwrap()
     );
 }

@@ -15,12 +15,16 @@ manifest_status="pending"
 manifest_note=""
 cargo_check_status="pending"
 format_check_status="pending"
+health_guidance_status="pending"
+doctor_guidance_status="pending"
 doctor_self_check_status="pending"
 retryable_self_check_status="pending"
 risky_mutation_status="pending"
+compliance_status="pending"
 integration_suite_status="pending"
 e2e_suite_status="pending"
 clippy_status="pending"
+manifest_check_runner=""
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -81,10 +85,42 @@ classify_manifest_failure() {
 
 require_cmd rch
 
+FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
+manifest_check_cmd=()
+if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
+  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
+  manifest_check_cmd=(
+    "${FWC_MANIFEST_BIN}"
+    manifest
+    fix
+    connectors/gcp/manifest.toml
+    --check
+    --json
+  )
+else
+  manifest_check_runner="rch:cargo-run"
+  manifest_check_cmd=(
+    rch
+    exec
+    --
+    cargo
+    run
+    -q
+    -p
+    fwc
+    --
+    manifest
+    fix
+    connectors/gcp/manifest.toml
+    --check
+    --json
+  )
+fi
+
 if run_capture_stdout \
   manifest_check \
   "${OUT_ROOT}/evidence/manifest_check.json" \
-  rch exec -- cargo run -q -p fwc -- manifest fix connectors/gcp/manifest.toml --check --json
+  "${manifest_check_cmd[@]}"
 then
   manifest_status="passed"
 else
@@ -106,7 +142,7 @@ fi
 
 if run_logged \
   cargo_check \
-  rch exec -- cargo check -p fcp-gcp
+  rch exec -- cargo check -p fcp-gcp --all-targets
 then
   cargo_check_status="passed"
 else
@@ -116,11 +152,31 @@ fi
 
 if run_logged \
   format_check \
-  rch exec -- cargo fmt --check
+  rch exec -- cargo fmt -p fcp-gcp -- --check
 then
   format_check_status="passed"
 else
   format_check_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  health_guidance_evidence \
+  rch exec -- cargo test -p fcp-gcp --test integration lifecycle_health_unconfigured_includes_guidance -- --nocapture
+then
+  health_guidance_status="passed"
+else
+  health_guidance_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  doctor_guidance_evidence \
+  rch exec -- cargo test -p fcp-gcp --test integration doctor_unconfigured_reports_remediation -- --nocapture
+then
+  doctor_guidance_status="passed"
+else
+  doctor_guidance_status="failed"
   promote_overall_status failed
 fi
 
@@ -155,6 +211,16 @@ else
 fi
 
 if run_logged \
+  compliance_evidence \
+  rch exec -- cargo test -p fcp-gcp --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+then
+  compliance_status="passed"
+else
+  compliance_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
   integration_suite \
   rch exec -- cargo test -p fcp-gcp --test integration -- --nocapture
 then
@@ -184,6 +250,41 @@ else
   promote_overall_status failed
 fi
 
+cat > "${OUT_ROOT}/environment.json" <<EOF
+{
+  "run_id": "${RUN_ID}",
+  "connector": "fcp-gcp",
+  "repo_root": "${REPO_ROOT}",
+  "verification_script": "scripts/e2e/gcp_connector_verification.sh",
+  "artifact_root": "${OUT_ROOT}",
+  "manifest_check_runner": "${manifest_check_runner}"
+}
+EOF
+
+cat > "${OUT_ROOT}/replay.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
+if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
+  "${FWC_MANIFEST_BIN}" manifest fix connectors/gcp/manifest.toml --check --json
+else
+  rch exec -- cargo run -q -p fwc -- manifest fix connectors/gcp/manifest.toml --check --json
+fi
+rch exec -- cargo check -p fcp-gcp --all-targets
+rch exec -- cargo fmt -p fcp-gcp -- --check
+rch exec -- cargo test -p fcp-gcp --test integration lifecycle_health_unconfigured_includes_guidance -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration doctor_unconfigured_reports_remediation -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration self_check_retryable_project_api_failure_reports_degraded -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration invoke_dangerous_storage_delete_preserves_artifact_evidence -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration -- --nocapture
+rch exec -- cargo test -p fcp-e2e --features gcp --test gcp_compliance_e2e -- --nocapture
+rch exec -- cargo clippy -p fcp-gcp --all-targets -- -D warnings
+EOF
+chmod +x "${OUT_ROOT}/replay.sh"
+
 cat > "${OUT_ROOT}/summary.json" <<EOF
 {
   "run_id": "${RUN_ID}",
@@ -197,9 +298,12 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     },
     "cargo_check": "${cargo_check_status}",
     "format_check": "${format_check_status}",
+    "health_guidance_evidence": "${health_guidance_status}",
+    "doctor_guidance_evidence": "${doctor_guidance_status}",
     "doctor_self_check_evidence": "${doctor_self_check_status}",
     "retryable_self_check_evidence": "${retryable_self_check_status}",
     "risky_mutation_evidence": "${risky_mutation_status}",
+    "compliance_evidence": "${compliance_status}",
     "integration_suite": "${integration_suite_status}",
     "e2e_suite": "${e2e_suite_status}",
     "clippy": "${clippy_status}"
@@ -208,12 +312,17 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     "manifest_check": "${OUT_ROOT}/evidence/manifest_check.json",
     "cargo_check_log": "${OUT_ROOT}/logs/cargo_check.log",
     "format_check_log": "${OUT_ROOT}/logs/format_check.log",
+    "health_guidance_evidence_log": "${OUT_ROOT}/logs/health_guidance_evidence.log",
+    "doctor_guidance_evidence_log": "${OUT_ROOT}/logs/doctor_guidance_evidence.log",
     "doctor_self_check_evidence_log": "${OUT_ROOT}/logs/doctor_self_check_evidence.log",
     "retryable_self_check_evidence_log": "${OUT_ROOT}/logs/retryable_self_check_evidence.log",
     "risky_mutation_evidence_log": "${OUT_ROOT}/logs/risky_mutation_evidence.log",
+    "compliance_evidence_log": "${OUT_ROOT}/logs/compliance_evidence.log",
     "integration_suite_log": "${OUT_ROOT}/logs/integration_suite.log",
     "e2e_suite_log": "${OUT_ROOT}/logs/e2e_suite.log",
-    "clippy_log": "${OUT_ROOT}/logs/clippy.log"
+    "clippy_log": "${OUT_ROOT}/logs/clippy.log",
+    "environment": "${OUT_ROOT}/environment.json",
+    "replay": "${OUT_ROOT}/replay.sh"
   }
 }
 EOF

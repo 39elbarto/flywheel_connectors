@@ -99,15 +99,19 @@ impl PackageRegistryClient {
                         "base_url": self.base_url,
                     })
                 }),
-            RegistryProvider::Pypi => self.get_json(runtime, "/pypi/pip/json", &[]).await.map(|_| {
-                json!({
-                    "provider": "pypi",
-                    "probe": "project_metadata",
-                    "path": "/pypi/pip/json",
-                    "anonymous": self.is_anonymous(),
-                    "base_url": self.base_url,
-                })
-            }),
+            RegistryProvider::Pypi => {
+                self.get_json(runtime, "/pypi/pip/json", &[])
+                    .await
+                    .map(|_| {
+                        json!({
+                            "provider": "pypi",
+                            "probe": "project_metadata",
+                            "path": "/pypi/pip/json",
+                            "anonymous": self.is_anonymous(),
+                            "base_url": self.base_url,
+                        })
+                    })
+            }
             RegistryProvider::CratesIo => self
                 .get_json(
                     runtime,
@@ -763,11 +767,7 @@ impl PackageRegistryClient {
         self.get_json(runtime, &path, &[]).await
     }
 
-    async fn crates_owners(
-        &self,
-        runtime: &ConnectorRuntime,
-        name: &str,
-    ) -> Result<Vec<String>> {
+    async fn crates_owners(&self, runtime: &ConnectorRuntime, name: &str) -> Result<Vec<String>> {
         let path = format!("/api/v1/crates/{}/owners", encode_segment(name));
         let payload = self.get_json(runtime, &path, &[]).await?;
         Ok(payload

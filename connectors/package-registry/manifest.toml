@@ -1,178 +1,493 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:c21df258ce24502e59023ecb09be4bff6b4990bf5f9c4dbfc35fae44d14da908"
 
 [connector]
 id = "fcp.package-registry"
 name = "Package Registry"
 version = "0.1.0"
 description = "Provider-bound package registry metadata connector for npm, PyPI, and crates.io"
-archetype = "operational"
-homepage = "https://api-docs.npmjs.com/"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "One configured provider, optional read credential, and retry/timeout settings per connector instance. The first slice does not manage publish, yank, owner mutation, or token lifecycle workflows."
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work", "z:private"]
+allowed_sources = [
+    "z:work",
+    "z:private",
+]
 allowed_targets = ["z:work"]
-tailscale_tag = "tag:fcp-work"
+forbidden = [
+    "z:community",
+    "z:public",
+]
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "system.privileged",
+]
 
-[provides.operations.search]
-summary = "Search packages on the configured registry provider"
-capability = "registry.search"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
-
-[provides.operations.search.network_constraints]
-host_allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
-
-[provides.operations.search.ai_hints]
-when_to_use = "When you need to search npm or crates.io for packages matching a query"
-
-[provides.operations.packages_get]
-summary = "Get package metadata from the configured registry provider"
-capability = "registry.packages.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.packages_get.network_constraints]
-host_allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
-
-[provides.operations.packages_get.ai_hints]
-when_to_use = "When you need package-level metadata, links, release summary, or ownership hints"
-
-[provides.operations.versions_list]
-summary = "List versions or releases for a package"
-capability = "registry.versions.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.versions_list.network_constraints]
-host_allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
-
-[provides.operations.versions_list.ai_hints]
-when_to_use = "When you need release history, tags, yanked state, or version-specific metadata"
-
-[provides.operations.dependencies_get]
-summary = "Get dependency metadata for a package version or release"
-capability = "registry.dependencies.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.dependencies_get.network_constraints]
-host_allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
-
-[provides.operations.dependencies_get.ai_hints]
-when_to_use = "When you need dependency declarations for a selected package version"
-
-[provides.operations.artifacts_list]
-summary = "List release files or artifact metadata for a package version"
+[provides.operations."registry.artifacts.list"]
+description = "List release files or artifact metadata without downloading artifact bodies."
 capability = "registry.artifacts.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.artifacts_list.network_constraints]
-host_allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
+[provides.operations."registry.artifacts.list".input_schema]
+required = ["name"]
+type = "object"
+
+[provides.operations."registry.artifacts.list".input_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.artifacts.list".input_schema.properties.version]
+type = "string"
+
+[provides.operations."registry.artifacts.list".output_schema]
+required = [
+    "provider",
+    "name",
+    "version",
+    "artifacts",
+]
+type = "object"
+
+[provides.operations."registry.artifacts.list".output_schema.properties.artifacts]
+type = "array"
+
+[provides.operations."registry.artifacts.list".output_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.artifacts.list".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."registry.artifacts.list".output_schema.properties.version]
+type = "string"
+
+[provides.operations."registry.artifacts.list".network_constraints]
+host_allow = [
+    "registry.npmjs.org",
+    "pypi.org",
+    "crates.io",
+]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.artifacts_list.ai_hints]
-when_to_use = "When you need tarball, wheel, sdist, or crate artifact metadata without downloading bodies"
+[provides.operations."registry.artifacts.list".ai_hints]
+when_to_use = "Use when you need tarball, wheel, sdist, or crate metadata without downloading the file bodies."
+common_mistakes = ["Artifact metadata does not fetch the artifact body."]
+examples = ['{"name":"sampleproject","version":"4.0.0"}']
+related = ["registry.dependencies.get"]
 
-[provides.operations.downloads_get]
-summary = "Get download statistics from the configured registry provider"
-capability = "registry.downloads.read"
-risk = "low"
+[provides.operations."registry.dependencies.get"]
+description = "Read dependency metadata for a selected package version or release."
+capability = "registry.dependencies.read"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."registry.dependencies.get".input_schema]
+required = ["name"]
+type = "object"
+
+[provides.operations."registry.dependencies.get".input_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.dependencies.get".input_schema.properties.version]
+type = "string"
+
+[provides.operations."registry.dependencies.get".output_schema]
+required = [
+    "provider",
+    "name",
+    "version",
+    "dependencies",
+]
+type = "object"
+
+[provides.operations."registry.dependencies.get".output_schema.properties.dependencies]
+type = "array"
+
+[provides.operations."registry.dependencies.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.dependencies.get".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."registry.dependencies.get".output_schema.properties.version]
+type = "string"
+
+[provides.operations."registry.dependencies.get".network_constraints]
+host_allow = [
+    "registry.npmjs.org",
+    "pypi.org",
+    "crates.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."registry.dependencies.get".ai_hints]
+when_to_use = "Use when you need dependency declarations for a selected package version."
+common_mistakes = ["If version is omitted, the connector falls back to the provider's latest or max version."]
+examples = ['{"name":"requests","version":"2.32.0"}']
+related = [
+    "registry.versions.list",
+    "registry.artifacts.list",
+]
+
+[provides.operations."registry.downloads.get"]
+description = "Read provider-native package download statistics where the configured provider supports them."
+capability = "registry.downloads.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 
-[provides.operations.downloads_get.network_constraints]
-host_allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
+[provides.operations."registry.downloads.get".input_schema]
+required = ["name"]
+type = "object"
+
+[provides.operations."registry.downloads.get".input_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.downloads.get".output_schema]
+required = [
+    "provider",
+    "name",
+    "points",
+]
+type = "object"
+
+[provides.operations."registry.downloads.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.downloads.get".output_schema.properties.points]
+type = "array"
+
+[provides.operations."registry.downloads.get".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."registry.downloads.get".network_constraints]
+host_allow = [
+    "registry.npmjs.org",
+    "pypi.org",
+    "crates.io",
+]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.downloads_get.ai_hints]
-when_to_use = "When you need provider-native package download statistics where the provider supports them"
+[provides.operations."registry.downloads.get".ai_hints]
+when_to_use = "Use when you need provider-native download statistics for crates.io."
+common_mistakes = ["Download statistics are intentionally unsupported for npm and PyPI in the first slice."]
+examples = ['{"name":"serde"}']
+related = ["registry.packages.get"]
 
-[provides.operations.health]
-summary = "Check package registry reachability and basic configuration health"
+[provides.operations."registry.health"]
+description = "Probe provider reachability and configuration sanity without touching any write surfaces."
 capability = "registry.packages.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.health.network_constraints]
-host_allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
+[provides.operations."registry.health".input_schema]
+type = "object"
+
+[provides.operations."registry.health".output_schema]
+required = [
+    "status",
+    "provider",
+]
+type = "object"
+
+[provides.operations."registry.health".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."registry.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."registry.health".network_constraints]
+host_allow = [
+    "registry.npmjs.org",
+    "pypi.org",
+    "crates.io",
+]
 port_allow = [443]
-require_tls = true
-require_sni = true
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
-[provides.operations.health.ai_hints]
-when_to_use = "When you need to verify that the configured registry provider is reachable"
+[provides.operations."registry.health".ai_hints]
+when_to_use = "Use when you need a deterministic provider reachability probe before other registry operations."
+common_mistakes = ["Health is still read-only and does not validate publish, yank, or owner-mutation permissions."]
+examples = ["{}"]
+related = ["registry.packages.get"]
+
+[provides.operations."registry.packages.get"]
+description = "Read package-level metadata from the configured registry provider."
+capability = "registry.packages.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."registry.packages.get".input_schema]
+required = ["name"]
+type = "object"
+
+[provides.operations."registry.packages.get".input_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.packages.get".output_schema]
+required = [
+    "provider",
+    "name",
+]
+type = "object"
+
+[provides.operations."registry.packages.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.packages.get".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."registry.packages.get".network_constraints]
+host_allow = [
+    "registry.npmjs.org",
+    "pypi.org",
+    "crates.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."registry.packages.get".ai_hints]
+when_to_use = "Use when you already know the package name and need canonical metadata, links, or ownership hints."
+common_mistakes = ["Package identity stays provider-native; do not normalize npm scoped names into another registry format."]
+examples = ['{"name":"serde"}']
+related = [
+    "registry.versions.list",
+    "registry.health",
+]
+
+[provides.operations."registry.search"]
+description = "Search packages on the configured registry provider when the provider exposes a first-party catalog search surface."
+capability = "registry.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."registry.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."registry.search".input_schema.properties.limit]
+type = "integer"
+
+[provides.operations."registry.search".input_schema.properties.page]
+type = "integer"
+
+[provides.operations."registry.search".input_schema.properties.query]
+type = "string"
+
+[provides.operations."registry.search".output_schema]
+required = [
+    "provider",
+    "query",
+    "results",
+]
+type = "object"
+
+[provides.operations."registry.search".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."registry.search".output_schema.properties.query]
+type = "string"
+
+[provides.operations."registry.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."registry.search".network_constraints]
+host_allow = [
+    "registry.npmjs.org",
+    "pypi.org",
+    "crates.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."registry.search".ai_hints]
+when_to_use = "Use when you need npm or crates.io package discovery for a text query."
+common_mistakes = ["PyPI search is intentionally unsupported in the first slice."]
+examples = ['{"query":"serde","limit":5,"page":1}']
+related = ["registry.packages.get"]
+
+[provides.operations."registry.versions.list"]
+description = "List versions or releases for the configured package."
+capability = "registry.versions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."registry.versions.list".input_schema]
+required = ["name"]
+type = "object"
+
+[provides.operations."registry.versions.list".input_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.versions.list".output_schema]
+required = [
+    "provider",
+    "name",
+    "versions",
+]
+type = "object"
+
+[provides.operations."registry.versions.list".output_schema.properties.name]
+type = "string"
+
+[provides.operations."registry.versions.list".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."registry.versions.list".output_schema.properties.versions]
+type = "array"
+
+[provides.operations."registry.versions.list".network_constraints]
+host_allow = [
+    "registry.npmjs.org",
+    "pypi.org",
+    "crates.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."registry.versions.list".ai_hints]
+when_to_use = "Use when you need release history, dist-tags, or provider-native version metadata."
+common_mistakes = []
+examples = ['{"name":"tokio"}']
+related = [
+    "registry.packages.get",
+    "registry.dependencies.get",
+]
 
 [sandbox]
 profile = "strict"
 memory_mb = 64
 cpu_percent = 25
 wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
 deny_exec = true
 deny_ptrace = true
-

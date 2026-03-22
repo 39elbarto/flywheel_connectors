@@ -4004,9 +4004,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-sdk",
+ "fcp-testkit",
  "hex",
  "percent-encoding",
  "reqwest 0.13.2",
@@ -4016,6 +4019,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

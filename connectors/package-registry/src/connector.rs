@@ -353,9 +353,13 @@ fn auth_mode_message(config: &PackageRegistryConfig) -> String {
     match (config.provider.as_str(), config.auth_label()) {
         ("npm", "token") => "Auth: token supplied for npm registry access".into(),
         ("npm", _) => "Auth: anonymous npm metadata mode".into(),
-        ("pypi", "token") => "Auth: token supplied for alternate PyPI-compatible registry access".into(),
+        ("pypi", "token") => {
+            "Auth: token supplied for alternate PyPI-compatible registry access".into()
+        }
         ("pypi", _) => "Auth: anonymous PyPI metadata mode".into(),
-        ("crates_io", "token") => "Auth: token supplied for crates.io or registry proxy access".into(),
+        ("crates_io", "token") => {
+            "Auth: token supplied for crates.io or registry proxy access".into()
+        }
         ("crates_io", _) => "Auth: anonymous crates.io metadata mode".into(),
         _ => format!("Auth: {}", config.auth_label()),
     }
@@ -609,12 +613,8 @@ fn operation_examples(id: &str) -> Vec<String> {
             r#"registry.artifacts.list({"name":"sampleproject","version":"4.0.0"})"#.into(),
             r#"registry.artifacts.list({"name":"react","version":"19.2.0"})"#.into(),
         ],
-        OP_DOWNLOADS_GET => vec![
-            r#"registry.downloads.get({"name":"serde"})"#.into(),
-        ],
-        OP_HEALTH => vec![
-            r#"registry.health({})"#.into(),
-        ],
+        OP_DOWNLOADS_GET => vec![r#"registry.downloads.get({"name":"serde"})"#.into()],
+        OP_HEALTH => vec![r#"registry.health({})"#.into()],
         _ => Vec::new(),
     }
 }
@@ -722,10 +722,9 @@ impl FcpConnector for PackageRegistryConnector {
         };
 
         match client.health_check(runtime).await {
-            Ok(live_probe) => Ok(self.attach_self_check_details(
-                SelfCheckReport::ok(),
-                Some(&live_probe),
-            )),
+            Ok(live_probe) => {
+                Ok(self.attach_self_check_details(SelfCheckReport::ok(), Some(&live_probe)))
+            }
             Err(crate::error::Error::Unauthorized(message)) => Ok(self.attach_self_check_details(
                 SelfCheckReport::failed("registry_auth_rejected", message),
                 None,

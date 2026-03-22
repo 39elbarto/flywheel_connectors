@@ -23,9 +23,15 @@ This is not a generic package manager, dependency solver, installer, publisher, 
 
 ## Current Runtime Snapshot
 
-There is no in-tree `package-registry` connector crate yet.
+There is now an in-tree connector crate at `connectors/package-registry/` with:
 
-That means this README is the authoritative `.1` contract artifact for the package-registry feature, and it deliberately tightens the parent feature bead in three important ways:
+- a provider-bound runtime and manifest for `npm`, `pypi`, or `crates_io`
+- typed operations for search, package metadata, versions, dependencies, artifacts, downloads, and health
+- readiness surfaces for `health()`, `doctor()`, and `self_check()`
+- deterministic crate-local tests plus host-backed integration coverage
+- a replayable verification bundle at `scripts/e2e/package_registry_connector_verification.sh`
+
+This README remains the authoritative contract artifact for the package-registry feature, and it deliberately tightens the parent feature bead in three important ways:
 
 - One connector instance binds to exactly one provider: `npm`, `pypi`, or `crates_io`.
 - The first slice is read-only metadata plus readiness and health, not package publishing or registry administration.
@@ -148,6 +154,26 @@ These are excluded on purpose:
 - Keep optional provider-native metadata optional. Maintainers, owners, organization membership, and vulnerability payloads may be surfaced as provider-specific fields, but they must not be promised as universally present.
 - `doctor()` and `self_check()` should report the configured provider, supported operation subset, auth mode shape, and unsupported-surface caveats clearly.
 - Tests should cover scoped npm package names, PyPI project-name normalization, crates.io pagination and version-detail parsing, unsupported-provider search and downloads behavior, and rejection of artifact-body fetching in the first slice.
+
+## Verification And Operator Guidance
+
+The readiness bead adds a replayable verification bundle:
+
+- Entry point: `scripts/e2e/package_registry_connector_verification.sh`
+- Artifact root: `artifacts/e2e/package_registry_connector/<timestamp>`
+- Primary rerun commands:
+  - `rch exec -- cargo run -q -p fwc -- manifest fix connectors/package-registry/manifest.toml --check --json`
+  - `rch exec -- cargo check -p fcp-package-registry --all-targets`
+  - `rch exec -- cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check`
+  - `rch exec -- cargo test -p fcp-package-registry --test integration -- --nocapture`
+  - `rch exec -- cargo clippy -p fcp-package-registry --all-targets -- -D warnings`
+
+Operator constraints for this first slice:
+
+- Prefer public fixture packages or localhost mock registries for verification.
+- Redact bearer tokens, Authorization headers, and private mirror hostnames before sharing evidence.
+- Treat `base_url` overrides as sensitive when they point at internal registries or package mirrors.
+- The first slice is read-only. Verification proves metadata and readiness behavior, not publish, yank, owner mutation, or registry administration flows.
 
 ## Source Notes
 

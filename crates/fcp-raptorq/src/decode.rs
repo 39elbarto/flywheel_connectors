@@ -38,7 +38,8 @@ impl RaptorQDecoder {
     #[must_use]
     pub fn new(oti: ObjectTransmissionInformation, config: &RaptorQConfig) -> Self {
         let size = usize::from(oti.symbol_size()).max(1);
-        let k_usize = (oti.transfer_length() as usize).div_ceil(size);
+        let transfer_len_usize = usize::try_from(oti.transfer_length()).unwrap_or(usize::MAX);
+        let k_usize = transfer_len_usize.div_ceil(size);
         let k = u32::try_from(k_usize).unwrap_or(u32::MAX);
 
         Self {
@@ -105,9 +106,14 @@ impl RaptorQDecoder {
 
     /// Attempt to reconstruct the payload from buffered symbols.
     fn try_reconstruct(&self) -> Result<Vec<u8>, DecodeError> {
-        let k = self.k as usize;
+        let k = usize::try_from(self.k).unwrap_or(usize::MAX);
         let symbol_size = usize::from(self.symbol_size);
-        let transfer_len = self.transfer_length as usize;
+        let transfer_len = usize::try_from(self.transfer_length).map_err(|_| {
+            DecodeError::MemoryLimitExceeded {
+                used: usize::MAX,
+                limit: self.config.max_object_size as usize,
+            }
+        })?;
 
         if transfer_len > self.config.max_object_size as usize {
             return Err(DecodeError::MemoryLimitExceeded {

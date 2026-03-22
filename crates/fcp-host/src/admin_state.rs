@@ -2707,7 +2707,19 @@ impl HostAdminStateStore {
         let _persist_guard = self.persist_lock.lock().await;
         let mut snapshot = self.state.read().await.clone();
         let result = mutate(&mut snapshot)?;
-        persist_admin_state_snapshot(self.state_path.as_deref(), &snapshot)?;
+
+        let path = self.state_path.clone();
+        let snapshot_clone = snapshot.clone();
+        tokio::task::spawn_blocking(move || {
+            persist_admin_state_snapshot(path.as_deref(), &snapshot_clone)
+        })
+        .await
+        .unwrap_or_else(|err| {
+            Err(LifecycleError::Persistence {
+                reason: format!("failed to spawn blocking task: {err}"),
+            })
+        })?;
+
         *self.state.write().await = snapshot;
         Ok(result)
     }

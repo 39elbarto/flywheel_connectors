@@ -419,7 +419,7 @@ impl PreferenceStore {
         }
         let json = serde_json::to_string_pretty(&self.data)
             .map_err(|e| format!("failed to serialize preferences: {e}"))?;
-        
+
         let mut temp_path = self.path.as_os_str().to_os_string();
         temp_path.push(".tmp");
         let temp_path = std::path::PathBuf::from(temp_path);

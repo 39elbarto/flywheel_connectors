@@ -565,7 +565,7 @@ impl WasiHostState {
             deterministic_rng: Mutex::new(DeterministicRng::new(config.deterministic_seed)),
             start_time: Instant::now(),
             timeout: config.wall_clock_timeout,
-            memory_limit_bytes: config.memory_limit_bytes as usize,
+            memory_limit_bytes: usize::try_from(config.memory_limit_bytes).unwrap_or(usize::MAX),
         }
     }
 
@@ -2512,11 +2512,7 @@ mod tests {
                 .validate_tcp_access("db.internal.com", 5432, true)
                 .is_ok()
         );
-        assert!(
-            state
-                .validate_tcp_access("evil.com", 5432, false)
-                .is_err()
-        );
+        assert!(state.validate_tcp_access("evil.com", 5432, false).is_err());
     }
 
     // ── WasiConnectorRunner tests ──

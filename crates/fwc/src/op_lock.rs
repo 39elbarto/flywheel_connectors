@@ -272,7 +272,7 @@ impl LockStore {
             .map_err(|e| format!("failed to create lock directory: {e}"))?;
         let json = serde_json::to_string_pretty(data)
             .map_err(|e| format!("failed to serialize locks: {e}"))?;
-            
+
         let mut temp_path = self.data_path().into_os_string();
         temp_path.push(".tmp");
         let temp_path = PathBuf::from(temp_path);

@@ -1260,8 +1260,11 @@ impl LoadShedder {
             return false;
         }
 
-        let ticket = self.sequence.fetch_add(1, Ordering::Relaxed) % u64::from(MAX_PER_MILLE);
-        ticket < u64::from(final_probability)
+        // Use a simple LCG-like hash on the sequence to avoid bursty drops
+        // (dropping contiguous blocks of traffic), distributing drops smoothly.
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let ticket = (seq.wrapping_mul(2654435761) % u64::from(MAX_PER_MILLE)) as u32;
+        ticket < final_probability
     }
 }
 

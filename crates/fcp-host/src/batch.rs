@@ -305,9 +305,7 @@ fn zone_accessible(agent_zone: &ZoneId, connector_zone: &ZoneId) -> bool {
         _ => {
             // Project zones: accessible if agent is work or higher, or same project.
             if connector.starts_with("z:project:") {
-                agent == "z:owner"
-                    || agent == "z:private"
-                    || agent == "z:work"
+                agent == "z:owner" || agent == "z:private" || agent == "z:work"
             } else if agent.starts_with("z:project:") {
                 connector == "z:community" || connector == "z:public"
             } else {

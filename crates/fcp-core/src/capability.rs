@@ -1113,7 +1113,11 @@ impl CapabilityVerifier {
                     return Err(FcpError::ZoneViolation {
                         source_zone: self.zone_id.0.to_string(),
                         target_zone: self.zone_id.0.to_string(),
-                        message: format!("Token instance mismatch: expected {}, got {}", self.instance_id.as_str(), inst_str),
+                        message: format!(
+                            "Token instance mismatch: expected {}, got {}",
+                            self.instance_id.as_str(),
+                            inst_str
+                        ),
                     });
                 }
             }
@@ -2971,7 +2975,10 @@ mod tests {
     #[test]
     fn id_validation_error_display_invalid_start() {
         let err = IdValidationError::InvalidStartChar { ch: '-' };
-        assert_eq!(err.to_string(), "identifier has invalid start character '-'");
+        assert_eq!(
+            err.to_string(),
+            "identifier has invalid start character '-'"
+        );
     }
 
     #[test]

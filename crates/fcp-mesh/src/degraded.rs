@@ -190,7 +190,7 @@ impl DegradedModeEncoder {
         // Encode with RaptorQ
         let encoder = RaptorQEncoder::new(&wire_payload, &self.config)?;
         let symbols = encoder.encode_all();
-        let k = encoder.source_symbols() as u16;
+        let k = u16::try_from(encoder.source_symbols()).unwrap_or(u16::MAX);
 
         // Build FCPS frames
         let flags = FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE;

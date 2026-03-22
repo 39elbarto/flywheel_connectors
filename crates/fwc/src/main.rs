@@ -3811,7 +3811,7 @@ fn save_context_config(path: &PathBuf, config: &ContextConfigFile) -> Result<()>
         })?;
     }
     let raw = toml::to_string_pretty(config)?;
-    
+
     let mut temp_path = path.as_os_str().to_os_string();
     temp_path.push(".tmp");
     let temp_path = PathBuf::from(temp_path);
@@ -3839,7 +3839,12 @@ fn save_context_config(path: &PathBuf, config: &ContextConfigFile) -> Result<()>
         let _ = std::fs::remove_file(&temp_path);
     }
 
-    write_result.with_context(|| format!("failed to safely write host context file `{}`", path.display()))
+    write_result.with_context(|| {
+        format!(
+            "failed to safely write host context file `{}`",
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]

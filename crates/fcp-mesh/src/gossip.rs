@@ -566,7 +566,7 @@ impl GossipSummary {
         bytes.extend_from_slice(&self.symbol_filter_digest);
         bytes.extend_from_slice(&self.object_count.to_le_bytes());
         bytes.extend_from_slice(&self.symbol_count.to_le_bytes());
-        
+
         bytes.extend_from_slice(
             &u32::try_from(self.iblt.len())
                 .expect("iblt length exceeds u32::MAX")

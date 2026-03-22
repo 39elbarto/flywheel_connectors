@@ -326,7 +326,7 @@ impl ExponentialBackoff {
         let initial_ms = self.initial.as_millis() as f64;
         let max_ms = self.max.as_millis() as f64;
         let delay_ms = (initial_ms * factor).min(max_ms).max(0.0);
-        
+
         if delay_ms.is_nan() {
             return self.max;
         }

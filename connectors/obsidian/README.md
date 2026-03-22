@@ -1,13 +1,15 @@
 # Obsidian Connector V3 Contract
 
-> **Status**: planning contract
+> **Status**: contract defined, implementation-reviewed, and verification-backed
 > **Bead**: `flywheel_connectors-j05nu.5.1.1`
 > **Unblocks**: `flywheel_connectors-j05nu.5.1.2`
 > **Primary upstream**: local Obsidian vault conventions at `https://obsidian.md`
+> **Verification script**: `scripts/e2e/obsidian_connector_verification.sh`
 
 ## Purpose
 
 This document fixes the first implementation slice for `fcp.obsidian` so the follow-on runtime bead can converge on a stable contract instead of treating the connector like a generic filesystem or plugin host.
+It is the authoritative `.1` contract artifact for the current connector surface and has been reviewed against the in-tree manifest, client, and runtime implementation.
 
 The connector is a local, filesystem-scoped knowledge connector for one Obsidian vault root. It is not a remote sync service, plugin runtime, or full fidelity mirror of every Obsidian feature.
 
@@ -145,3 +147,47 @@ This contract is grounded in the current connector implementation and manifest:
 - `connectors/obsidian/src/client.rs` defines the vault-root canonicalization, path sanitization, markdown-only file traversal, tag extraction, backlink scanning, and health probe behavior.
 - `connectors/obsidian/src/connector.rs` defines the config surface, capability boundary, approval semantics, and the runtime `OperationInfo` metadata.
 - `connectors/obsidian/manifest.toml` defines the local-only zone and capability restrictions: `filesystem.read` required, `filesystem.write` optional, and no network or exec permissions.
+
+## Verification Bundle
+
+The readiness closeout for the current connector surface is anchored on `scripts/e2e/obsidian_connector_verification.sh`.
+It writes replayable artifacts under `artifacts/e2e/obsidian_connector/<timestamp>` and is intended to be rerun through `rch`-offloaded Cargo commands plus a local `cargo fmt` check.
+
+The verification bundle captures:
+
+- manifest validation for `connectors/obsidian/manifest.toml`
+- `cargo check -p fcp-obsidian --all-targets`
+- formatting verification for the Obsidian crate
+- targeted readiness evidence for `health`, `doctor`, `self_check`, destructive delete flow, and typed introspection compliance
+- the Obsidian integration suite and full crate test suite
+- `cargo clippy -p fcp-obsidian --all-targets -- -D warnings`
+
+## Operator Guidance
+
+Prerequisites:
+- Use a disposable or copied vault root with sanitized markdown fixtures before running verification.
+- Ensure `vault_path` already exists and is readable; add write permission if you need create, update, delete, or writable-health coverage.
+- Keep fixtures markdown-only for the first slice because non-`.md` artifacts and hidden directories are intentionally excluded from note discovery evidence.
+
+Dedicated environment:
+- Never point the verification bundle at a live personal or work vault. `notes.create`, `notes.update`, and `notes.delete` mutate real files, and `health` performs a temporary `.fcp_write_test` write probe in the vault root.
+
+Redaction rules:
+- Redact absolute vault paths before sharing logs or archived artifacts.
+- Treat note titles, note bodies, search excerpts, tags, backlink contexts, folder names, and fixture filenames as potentially sensitive knowledge-base data.
+- If verification artifacts are stored outside the local machine, replace live notes with sanitized fixtures first.
+
+Common remediation:
+- If `configure` fails with an invalid vault path, point `vault_path` at an existing directory and rerun `configure`, `health`, and `self_check`.
+- If `health` or `doctor` reports `writable=false`, either rerun verification in a writable fixture vault or restrict the run to read-only workflows.
+- If invoke rejects a note path, switch to vault-relative markdown paths such as `daily/2026-03-21.md` and avoid absolute paths, `..`, or null bytes.
+- If `get`, `update`, `delete`, or `backlinks` fails on a missing note, seed the fixture vault with the expected file or start from `notes.list` to confirm the path first.
+
+Rerun commands:
+- `scripts/e2e/obsidian_connector_verification.sh`
+- `fwc manifest fix connectors/obsidian/manifest.toml --check --json`
+- `cargo fmt -p fcp-obsidian -- --check`
+- `rch exec -- cargo check -p fcp-obsidian --all-targets`
+- `rch exec -- cargo test -p fcp-obsidian --test integration -- --nocapture`
+- `rch exec -- cargo test -p fcp-obsidian`
+- `rch exec -- cargo clippy -p fcp-obsidian --all-targets -- -D warnings`

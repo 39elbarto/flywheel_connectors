@@ -59,14 +59,14 @@ impl ObsidianClient {
         // For existing files, canonicalize and check prefix.
         // For new files, canonicalize the parent and check.
         let resolved = if joined.exists() {
-            joined.canonicalize().map_err(|e| {
-                ObsidianError::InvalidInput(format!("failed to resolve path: {e}"))
-            })?
+            joined
+                .canonicalize()
+                .map_err(|e| ObsidianError::InvalidInput(format!("failed to resolve path: {e}")))?
         } else {
             // For new files, check parent
-            let parent = joined.parent().ok_or_else(|| {
-                ObsidianError::InvalidInput("note path has no parent".into())
-            })?;
+            let parent = joined
+                .parent()
+                .ok_or_else(|| ObsidianError::InvalidInput("note path has no parent".into()))?;
             if !parent.exists() {
                 // Create parent directories for nested notes
                 std::fs::create_dir_all(parent)?;
@@ -112,11 +112,7 @@ impl ObsidianClient {
         Ok(entries)
     }
 
-    fn collect_notes(
-        &self,
-        dir: &Path,
-        entries: &mut Vec<NoteEntry>,
-    ) -> ObsidianResult<()> {
+    fn collect_notes(&self, dir: &Path, entries: &mut Vec<NoteEntry>) -> ObsidianResult<()> {
         let read_dir = std::fs::read_dir(dir)?;
         for entry in read_dir {
             let entry = entry?;
@@ -188,11 +184,7 @@ impl ObsidianClient {
     }
 
     /// Create a new note.
-    pub fn create_note(
-        &self,
-        note_path: &str,
-        content: &str,
-    ) -> ObsidianResult<Note> {
+    pub fn create_note(&self, note_path: &str, content: &str) -> ObsidianResult<Note> {
         let full_path = self.safe_note_path(note_path)?;
         if full_path.exists() {
             return Err(ObsidianError::AlreadyExists(note_path.to_string()));
@@ -202,11 +194,7 @@ impl ObsidianClient {
     }
 
     /// Update an existing note.
-    pub fn update_note(
-        &self,
-        note_path: &str,
-        content: &str,
-    ) -> ObsidianResult<Note> {
+    pub fn update_note(&self, note_path: &str, content: &str) -> ObsidianResult<Note> {
         let full_path = self.safe_note_path(note_path)?;
         if !full_path.exists() {
             return Err(ObsidianError::NotFound(note_path.to_string()));
@@ -262,9 +250,7 @@ impl ObsidianClient {
                     }
                 }
                 if !matches.is_empty() {
-                    let relative = path
-                        .strip_prefix(&self.vault_path)
-                        .unwrap_or(&path);
+                    let relative = path.strip_prefix(&self.vault_path).unwrap_or(&path);
                     let title = path
                         .file_stem()
                         .map(|s| s.to_string_lossy().to_string())
@@ -292,11 +278,7 @@ impl ObsidianClient {
         Ok(tags)
     }
 
-    fn collect_tags(
-        &self,
-        dir: &Path,
-        counts: &mut HashMap<String, usize>,
-    ) -> ObsidianResult<()> {
+    fn collect_tags(&self, dir: &Path, counts: &mut HashMap<String, usize>) -> ObsidianResult<()> {
         let read_dir = std::fs::read_dir(dir)?;
         for entry in read_dir {
             let entry = entry?;
@@ -396,12 +378,7 @@ impl ObsidianClient {
         })
     }
 
-    fn count_notes(
-        &self,
-        dir: &Path,
-        count: &mut usize,
-        size: &mut u64,
-    ) -> ObsidianResult<()> {
+    fn count_notes(&self, dir: &Path, count: &mut usize, size: &mut u64) -> ObsidianResult<()> {
         let read_dir = std::fs::read_dir(dir)?;
         for entry in read_dir {
             let entry = entry?;
@@ -555,9 +532,7 @@ fn extract_tags(content: &str) -> Vec<String> {
 fn format_system_time(time: Option<std::time::SystemTime>) -> String {
     match time {
         Some(t) => {
-            let duration = t
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
+            let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
             let dt = chrono::DateTime::from_timestamp(
                 duration.as_secs() as i64,
                 duration.subsec_nanos(),
@@ -590,7 +565,10 @@ mod tests {
     fn new_client_nonexistent_path() {
         let result = ObsidianClient::new("/nonexistent/vault/path");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ObsidianError::InvalidVault(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ObsidianError::InvalidVault(_)
+        ));
     }
 
     #[test]
@@ -619,7 +597,10 @@ mod tests {
         let (_dir, client) = setup_vault();
         client.create_note("test.md", "first").unwrap();
         let result = client.create_note("test.md", "second");
-        assert!(matches!(result.unwrap_err(), ObsidianError::AlreadyExists(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ObsidianError::AlreadyExists(_)
+        ));
     }
 
     #[test]
@@ -685,7 +666,9 @@ mod tests {
     #[test]
     fn search_notes() {
         let (_dir, client) = setup_vault();
-        client.create_note("rust.md", "Rust is great\nI love Rust").unwrap();
+        client
+            .create_note("rust.md", "Rust is great\nI love Rust")
+            .unwrap();
         client.create_note("python.md", "Python is nice").unwrap();
         let results = client.search("rust").unwrap();
         assert_eq!(results.len(), 1);
@@ -750,21 +733,30 @@ mod tests {
     fn path_traversal_rejected_dotdot() {
         let (_dir, client) = setup_vault();
         let result = client.get_note("../../../etc/passwd");
-        assert!(matches!(result.unwrap_err(), ObsidianError::InvalidInput(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ObsidianError::InvalidInput(_)
+        ));
     }
 
     #[test]
     fn path_traversal_rejected_absolute() {
         let (_dir, client) = setup_vault();
         let result = client.get_note("/etc/passwd");
-        assert!(matches!(result.unwrap_err(), ObsidianError::InvalidInput(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ObsidianError::InvalidInput(_)
+        ));
     }
 
     #[test]
     fn path_traversal_rejected_null_byte() {
         let (_dir, client) = setup_vault();
         let result = client.get_note("test\0.md");
-        assert!(matches!(result.unwrap_err(), ObsidianError::InvalidInput(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ObsidianError::InvalidInput(_)
+        ));
     }
 
     #[test]

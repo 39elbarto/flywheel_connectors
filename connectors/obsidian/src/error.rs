@@ -162,21 +162,30 @@ mod tests {
     fn invalid_input_maps_to_invalid_request() {
         let err = ObsidianError::InvalidInput("path traversal detected".into());
         let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
-        assert!(matches!(fcp_err, FcpError::InvalidRequest { code: 1008, .. }));
+        assert!(matches!(
+            fcp_err,
+            FcpError::InvalidRequest { code: 1008, .. }
+        ));
     }
 
     #[test]
     fn not_found_maps_to_invalid_request() {
         let err = ObsidianError::NotFound("test.md".into());
         let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
-        assert!(matches!(fcp_err, FcpError::InvalidRequest { code: 1004, .. }));
+        assert!(matches!(
+            fcp_err,
+            FcpError::InvalidRequest { code: 1004, .. }
+        ));
     }
 
     #[test]
     fn already_exists_maps_to_invalid_request() {
         let err = ObsidianError::AlreadyExists("existing.md".into());
         let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
-        assert!(matches!(fcp_err, FcpError::InvalidRequest { code: 1009, .. }));
+        assert!(matches!(
+            fcp_err,
+            FcpError::InvalidRequest { code: 1009, .. }
+        ));
     }
 
     #[test]

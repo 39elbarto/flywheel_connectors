@@ -1,5 +1,6 @@
 //! Obsidian connector implementation.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -34,6 +35,16 @@ const OP_HEALTH: &str = "obsidian.health";
 // Capability IDs
 const CAP_READ: &str = "obsidian.read";
 const CAP_WRITE: &str = "obsidian.write";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/obsidian_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/obsidian_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 6] = [
+    "scripts/e2e/obsidian_connector_verification.sh",
+    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/obsidian/manifest.toml --check --json",
+    "rch exec -- cargo check -p fcp-obsidian --all-targets",
+    "cargo fmt -p fcp-obsidian -- --check",
+    "rch exec -- cargo test -p fcp-obsidian --test integration -- --nocapture",
+    "rch exec -- cargo clippy -p fcp-obsidian --all-targets -- -D warnings",
+];
 
 /// Obsidian connector configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -47,11 +58,89 @@ const fn default_request_timeout_ms() -> u64 {
     10_000
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    vault_path: String,
+    request_timeout_ms: u64,
+    local_only: bool,
+    markdown_only: bool,
+    hidden_directories_skipped: bool,
+    write_probe_path: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Prepare a disposable Obsidian vault directory or sanitized fixture vault before running verification.",
+            "Ensure the configured vault_path already exists and the connector process has read access; add write access if you need create, update, delete, or writable-health coverage.",
+            "Keep verification fixtures markdown-only for the first slice because non-.md artifacts are intentionally excluded from note discovery and search evidence.",
+        ],
+        dedicated_environment: "Use a disposable or copied vault, never a live personal/work vault. create, update, and delete mutate real files, and health performs a temporary .fcp_write_test probe in the vault root.",
+        redaction_rules: vec![
+            "Redact absolute vault paths before sharing logs or stored evidence bundles outside the local machine.",
+            "Treat note titles, note bodies, search excerpts, tags, backlink contexts, and folder names as potentially sensitive knowledge-base data.",
+            "If artifacts are archived, replace personal or work notes with sanitized fixtures first so no live vault content is preserved in logs.",
+        ],
+        limitations: vec![
+            "This connector is local-only and does not talk to Obsidian Sync, the Local REST API plugin, or any remote service.",
+            "Only markdown files participate in note listing, search, tags, backlinks, and health counts; hidden directories such as .obsidian are skipped.",
+            "Tag extraction and backlink discovery are best-effort text scans rather than full YAML parsing or graph-aware Obsidian semantics.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "invalid_vault_path",
+                symptom: "configure fails because vault_path does not exist or is not a directory",
+                action: "Point vault_path at an existing directory, then rerun configure and self_check.",
+            },
+            RemediationHint {
+                code: "vault_read_only",
+                symptom: "health or doctor reports writable=false and write operations fail",
+                action: "Adjust filesystem permissions or rerun verification in a writable fixture vault before exercising create, update, or delete.",
+            },
+            RemediationHint {
+                code: "path_validation_failed",
+                symptom: "invoke rejects a note path with absolute, .., or null-byte content",
+                action: "Use vault-relative markdown note paths such as daily/2026-03-21.md and keep all writes inside the configured vault root.",
+            },
+            RemediationHint {
+                code: "note_not_found",
+                symptom: "get, update, delete, or backlinks operations fail for a missing note path",
+                action: "List notes first or seed the fixture vault with the expected markdown file before rerunning the operation.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -63,9 +152,16 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
         let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
     }
 }
 
@@ -100,8 +196,44 @@ impl ObsidianConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| ProvisioningReadiness {
+            vault_path: self
+                .client
+                .as_ref()
+                .map(|client| client.vault_path().to_string_lossy().to_string())
+                .unwrap_or_else(|| config.vault_path.clone()),
+            request_timeout_ms: config.request_timeout_ms,
+            local_only: true,
+            markdown_only: true,
+            hidden_directories_skipped: true,
+            write_probe_path: ".fcp_write_test",
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        live_probe: Option<&serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
+        let provisioning = self.provisioning_readiness();
         let mut checks = Vec::new();
 
         let configured = self.config.is_some();
@@ -146,6 +278,18 @@ impl ObsidianConnector {
             critical: true,
         });
 
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: Some(if handshaken {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
         if let Some(client) = &self.client {
             let health = client.vault_health();
             match health {
@@ -181,7 +325,7 @@ impl ObsidianConnector {
             }
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 }
 
@@ -220,7 +364,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![
                     "Folder paths are relative to the vault root".into(),
                 ],
-                examples: Vec::new(),
+                examples: vec![r#"{"folder":"daily"}"#.into()],
                 related: vec![CapabilityId::from_static(OP_NOTES_GET)],
             },
             rate_limit: None,
@@ -257,7 +401,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![
                     "Path must be relative to vault root, e.g. 'daily/2026-03-21.md'".into(),
                 ],
-                examples: Vec::new(),
+                examples: vec![r#"{"path":"daily/2026-03-21.md"}"#.into()],
                 related: vec![CapabilityId::from_static(OP_NOTES_LIST)],
             },
             rate_limit: None,
@@ -293,7 +437,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "Will fail if a note already exists at the given path".into(),
                     "Parent directories are created automatically".into(),
                 ],
-                examples: Vec::new(),
+                examples: vec![
+                    r##"{"path":"inbox/idea.md","content":"# Idea\n\nBuild the Obsidian connector."}"##
+                        .into(),
+                ],
                 related: vec![CapabilityId::from_static(OP_NOTES_UPDATE)],
             },
             rate_limit: None,
@@ -328,7 +475,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![
                     "Will fail if the note does not exist; use create for new notes".into(),
                 ],
-                examples: Vec::new(),
+                examples: vec![
+                    r##"{"path":"daily/2026-03-21.md","content":"# Daily Log\n\nReviewed connector metadata."}"##
+                        .into(),
+                ],
                 related: vec![CapabilityId::from_static(OP_NOTES_CREATE)],
             },
             rate_limit: None,
@@ -362,7 +512,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "This is irreversible - the note is permanently removed from the filesystem"
                         .into(),
                 ],
-                examples: Vec::new(),
+                examples: vec![r#"{"path":"archive/old-note.md"}"#.into()],
                 related: Vec::new(),
             },
             rate_limit: None,
@@ -393,7 +543,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             ai_hints: AgentHint {
                 when_to_use: "When you need to find notes containing specific text".into(),
                 common_mistakes: vec!["Search is case-insensitive".into()],
-                examples: Vec::new(),
+                examples: vec![r#"{"query":"meeting notes"}"#.into()],
                 related: vec![CapabilityId::from_static(OP_TAGS_LIST)],
             },
             rate_limit: None,
@@ -420,7 +570,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             ai_hints: AgentHint {
                 when_to_use: "When you need to see what tags are used in the vault".into(),
                 common_mistakes: Vec::new(),
-                examples: Vec::new(),
+                examples: vec![r#"{}"#.into()],
                 related: vec![CapabilityId::from_static(OP_SEARCH)],
             },
             rate_limit: None,
@@ -455,7 +605,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![
                     "Uses Obsidian [[wikilink]] syntax for detection".into(),
                 ],
-                examples: Vec::new(),
+                examples: vec![r#"{"path":"projects/flywheel.md"}"#.into()],
                 related: vec![CapabilityId::from_static(OP_NOTES_GET)],
             },
             rate_limit: None,
@@ -485,7 +635,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             ai_hints: AgentHint {
                 when_to_use: "When you need to check if the vault is accessible and healthy".into(),
                 common_mistakes: Vec::new(),
-                examples: Vec::new(),
+                examples: vec![r#"{}"#.into()],
                 related: Vec::new(),
             },
             rate_limit: None,
@@ -559,38 +709,66 @@ impl FcpConnector for ObsidianConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
-            HealthSnapshot::ready()
-        } else {
-            HealthSnapshot::degraded("not configured")
+        let provisioning = self.provisioning_readiness();
+        let mut snapshot = match &self.client {
+            None if self.config.is_none() => HealthSnapshot::degraded("not configured"),
+            None => HealthSnapshot::error("vault client not initialized"),
+            Some(_) if self.runtime.is_none() => HealthSnapshot::error("runtime not initialized"),
+            Some(client) => match client.vault_health() {
+                Ok(health) if !health.readable => HealthSnapshot::degraded("vault not readable"),
+                Ok(health) if !health.writable => {
+                    HealthSnapshot::degraded("vault is readable but not writable")
+                }
+                Ok(_) => HealthSnapshot::ready(),
+                Err(error) => HealthSnapshot::error(format!("vault health check failed: {error}")),
+            },
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "operator_guidance": operator_guidance(),
+        }));
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
             ));
         };
 
         match client.vault_health() {
+            Ok(health) if !health.readable => Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("vault_not_readable", "Vault directory is not readable"),
+                Some(&json!(health)),
+            )),
             Ok(health) => {
-                if health.readable {
-                    Ok(SelfCheckReport::ok())
+                let live_probe = json!(health);
+                if health.writable {
+                    Ok(self.attach_self_check_details(SelfCheckReport::ok(), Some(&live_probe)))
                 } else {
-                    Ok(SelfCheckReport::degraded(
-                        "vault_not_readable",
-                        "Vault directory is not readable",
+                    Ok(self.attach_self_check_details(
+                        SelfCheckReport::degraded(
+                            "vault_read_only",
+                            "Vault is readable but not writable; create, update, delete, and writable health probes will fail",
+                        ),
+                        Some(&live_probe),
                     ))
                 }
             }
-            Err(e) => Ok(SelfCheckReport::failed(
-                "vault_check_failed",
-                e.to_string(),
+            Err(e) => Ok(self.attach_self_check_details(
+                SelfCheckReport::failed("vault_check_failed", e.to_string()),
+                None,
             )),
         }
     }
@@ -675,36 +853,30 @@ impl ObsidianConnector {
                 json!({ "notes": notes, "count": count })
             }
             OP_NOTES_GET => {
-                let path =
-                    req.input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or(FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "Missing 'path' field".into(),
-                        })?;
+                let path = req.input.get("path").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'path' field".into(),
+                    },
+                )?;
                 let note = client.get_note(path).map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(note).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize note: {e}"),
                 })?
             }
             OP_NOTES_CREATE => {
-                let path =
-                    req.input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or(FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "Missing 'path' field".into(),
-                        })?;
-                let content = req
-                    .input
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let path = req.input.get("path").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'path' field".into(),
+                    },
+                )?;
+                let content = req.input.get("content").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'content' field".into(),
-                    })?;
+                    },
+                )?;
                 let note = client
                     .create_note(path, content)
                     .map_err(|e| e.to_fcp_error())?;
@@ -713,22 +885,18 @@ impl ObsidianConnector {
                 })?
             }
             OP_NOTES_UPDATE => {
-                let path =
-                    req.input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or(FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "Missing 'path' field".into(),
-                        })?;
-                let content = req
-                    .input
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let path = req.input.get("path").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'path' field".into(),
+                    },
+                )?;
+                let content = req.input.get("content").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'content' field".into(),
-                    })?;
+                    },
+                )?;
                 let note = client
                     .update_note(path, content)
                     .map_err(|e| e.to_fcp_error())?;
@@ -737,26 +905,22 @@ impl ObsidianConnector {
                 })?
             }
             OP_NOTES_DELETE => {
-                let path =
-                    req.input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or(FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "Missing 'path' field".into(),
-                        })?;
+                let path = req.input.get("path").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'path' field".into(),
+                    },
+                )?;
                 client.delete_note(path).map_err(|e| e.to_fcp_error())?;
                 json!({ "deleted": true, "path": path })
             }
             OP_SEARCH => {
-                let query = req
-                    .input
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let query = req.input.get("query").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'query' field".into(),
-                    })?;
+                    },
+                )?;
                 let results = client.search(query).map_err(|e| e.to_fcp_error())?;
                 let count = results.len();
                 json!({ "results": results, "count": count })
@@ -767,14 +931,12 @@ impl ObsidianConnector {
                 json!({ "tags": tags, "count": count })
             }
             OP_BACKLINKS_GET => {
-                let path =
-                    req.input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or(FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "Missing 'path' field".into(),
-                        })?;
+                let path = req.input.get("path").and_then(|v| v.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'path' field".into(),
+                    },
+                )?;
                 let backlinks = client.get_backlinks(path).map_err(|e| e.to_fcp_error())?;
                 let count = backlinks.len();
                 json!({ "backlinks": backlinks, "count": count })
@@ -835,7 +997,10 @@ mod tests {
     #[test]
     fn delete_is_dangerous() {
         let ops = operations_info();
-        let delete = ops.iter().find(|o| o.id.as_str() == "obsidian.notes.delete").unwrap();
+        let delete = ops
+            .iter()
+            .find(|o| o.id.as_str() == "obsidian.notes.delete")
+            .unwrap();
         assert_eq!(delete.safety_tier, SafetyTier::Dangerous);
         assert_eq!(delete.risk_level, RiskLevel::High);
         assert_eq!(delete.requires_approval, Some(ApprovalMode::Interactive));
@@ -844,7 +1009,10 @@ mod tests {
     #[test]
     fn create_is_risky() {
         let ops = operations_info();
-        let create = ops.iter().find(|o| o.id.as_str() == "obsidian.notes.create").unwrap();
+        let create = ops
+            .iter()
+            .find(|o| o.id.as_str() == "obsidian.notes.create")
+            .unwrap();
         assert_eq!(create.safety_tier, SafetyTier::Risky);
         assert_eq!(create.risk_level, RiskLevel::Medium);
     }
@@ -852,7 +1020,10 @@ mod tests {
     #[test]
     fn list_is_safe() {
         let ops = operations_info();
-        let list = ops.iter().find(|o| o.id.as_str() == "obsidian.notes.list").unwrap();
+        let list = ops
+            .iter()
+            .find(|o| o.id.as_str() == "obsidian.notes.list")
+            .unwrap();
         assert_eq!(list.safety_tier, SafetyTier::Safe);
         assert_eq!(list.risk_level, RiskLevel::Low);
         assert_eq!(list.idempotency, IdempotencyClass::Strict);
@@ -861,7 +1032,10 @@ mod tests {
     #[test]
     fn search_has_no_idempotency() {
         let ops = operations_info();
-        let search = ops.iter().find(|o| o.id.as_str() == "obsidian.search").unwrap();
+        let search = ops
+            .iter()
+            .find(|o| o.id.as_str() == "obsidian.search")
+            .unwrap();
         assert_eq!(search.idempotency, IdempotencyClass::None);
     }
 
@@ -877,14 +1051,22 @@ mod tests {
         let connector = ObsidianConnector::new();
         let result = connector.doctor();
         assert!(!result.passed);
-        assert!(result.checks.iter().any(|c| c.name == "configuration" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "configuration" && !c.passed)
+        );
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_unconfigured() {
         let connector = ObsidianConnector::new();
         let health = connector.health().await;
-        assert!(health.uptime_ms > 0 || health.uptime_ms == 0);
+        assert!(matches!(
+            health.status,
+            fcp_core::HealthState::Degraded { .. } | fcp_core::HealthState::Error { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -897,7 +1079,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn simulate_allowed() {
-        use fcp_core::{CapabilityToken, ZoneId, RequestId};
+        use fcp_core::{CapabilityToken, ZoneId};
         let connector = ObsidianConnector::new();
         let req = SimulateRequest::new(
             ConnectorId::from_static("fcp.obsidian"),
@@ -954,21 +1136,65 @@ mod tests {
     #[test]
     fn read_ops_use_read_capability() {
         let ops = operations_info();
-        let read_ops = ["obsidian.notes.list", "obsidian.notes.get", "obsidian.search",
-                        "obsidian.tags.list", "obsidian.backlinks.get", "obsidian.health"];
+        let read_ops = [
+            "obsidian.notes.list",
+            "obsidian.notes.get",
+            "obsidian.search",
+            "obsidian.tags.list",
+            "obsidian.backlinks.get",
+            "obsidian.health",
+        ];
         for op_id in read_ops {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
-            assert_eq!(op.capability.as_str(), "obsidian.read", "op {op_id} should use read cap");
+            assert_eq!(
+                op.capability.as_str(),
+                "obsidian.read",
+                "op {op_id} should use read cap"
+            );
         }
     }
 
     #[test]
     fn write_ops_use_write_capability() {
         let ops = operations_info();
-        let write_ops = ["obsidian.notes.create", "obsidian.notes.update", "obsidian.notes.delete"];
+        let write_ops = [
+            "obsidian.notes.create",
+            "obsidian.notes.update",
+            "obsidian.notes.delete",
+        ];
         for op_id in write_ops {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
-            assert_eq!(op.capability.as_str(), "obsidian.write", "op {op_id} should use write cap");
+            assert_eq!(
+                op.capability.as_str(),
+                "obsidian.write",
+                "op {op_id} should use write cap"
+            );
+        }
+    }
+
+    #[test]
+    fn every_operation_has_valid_examples() {
+        let ops = operations_info();
+        for op in ops {
+            assert!(
+                !op.ai_hints.examples.is_empty(),
+                "operation {} should have at least one example",
+                op.id.as_str()
+            );
+            for example in &op.ai_hints.examples {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(example).unwrap_or_else(|err| {
+                        panic!(
+                            "operation {} has invalid JSON example {example:?}: {err}",
+                            op.id.as_str()
+                        )
+                    });
+                assert!(
+                    parsed.is_object(),
+                    "operation {} example should be a JSON object: {example}",
+                    op.id.as_str()
+                );
+            }
         }
     }
 }

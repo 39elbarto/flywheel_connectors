@@ -1,120 +1,375 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:12251d8502b681df897e17af903244de5ac0dda48b3bcf8fa1f99fb78806fb8e"
 
 [connector]
 id = "fcp.obsidian"
 name = "Obsidian Vault"
 version = "0.1.0"
-description = "Local filesystem connector for Obsidian markdown vaults"
-archetype = "operational"
-homepage = "https://obsidian.md"
+description = "Local filesystem connector for one Obsidian markdown vault"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; configuration lives only in the current connector instance."
 
 [zones]
 home = "z:local"
 allowed_sources = ["z:local"]
 allowed_targets = ["z:local"]
-tailscale_tag = "tag:fcp-local"
+forbidden = [
+    "z:owner",
+    "z:private",
+    "z:work",
+    "z:community",
+    "z:public",
+]
 
 [capabilities]
 required = ["filesystem.read"]
 optional = ["filesystem.write"]
-forbidden = ["network.outbound", "system.exec", "system.privileged"]
+forbidden = [
+    "system.exec",
+    "system.privileged",
+    "network.listen",
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "media.upload",
+    "media.download",
+]
 
-[provides.operations.notes_list]
-summary = "List notes in the vault"
+[provides.operations."obsidian.backlinks.get"]
+description = "Find notes that contain a best-effort [[wikilink]] reference to the target note."
 capability = "obsidian.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.notes_list.ai_hints]
-when_to_use = "When you need to browse or list notes in the vault"
-
-[provides.operations.notes_get]
-summary = "Get a note by path"
-capability = "obsidian.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.notes_get.ai_hints]
-when_to_use = "When you need to read a specific note's content"
-
-[provides.operations.notes_create]
-summary = "Create a new note"
-capability = "obsidian.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.notes_create.ai_hints]
-when_to_use = "When you need to create a new note in the vault"
-
-[provides.operations.notes_update]
-summary = "Update an existing note"
-capability = "obsidian.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "strict"
-
-[provides.operations.notes_update.ai_hints]
-when_to_use = "When you need to modify an existing note"
-
-[provides.operations.notes_delete]
-summary = "Delete a note"
-capability = "obsidian.write"
-risk = "high"
-safety_tier = "dangerous"
-idempotency = "strict"
-
-[provides.operations.notes_delete.ai_hints]
-when_to_use = "When you need to permanently delete a note"
-
-[provides.operations.search]
-summary = "Search notes by text"
-capability = "obsidian.read"
-risk = "low"
-safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 
-[provides.operations.search.ai_hints]
-when_to_use = "When you need to find notes containing specific text"
+[provides.operations."obsidian.backlinks.get".input_schema]
+required = ["path"]
+type = "object"
 
-[provides.operations.tags_list]
-summary = "List all tags in the vault"
-capability = "obsidian.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
+[provides.operations."obsidian.backlinks.get".input_schema.properties.path]
+description = "Relative path to the note to inspect for backlinks"
+type = "string"
 
-[provides.operations.tags_list.ai_hints]
-when_to_use = "When you need to see what tags are used in the vault"
+[provides.operations."obsidian.backlinks.get".output_schema]
+type = "object"
 
-[provides.operations.backlinks_get]
-summary = "Get backlinks for a note"
-capability = "obsidian.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "none"
+[provides.operations."obsidian.backlinks.get".output_schema.properties.backlinks]
+type = "array"
 
-[provides.operations.backlinks_get.ai_hints]
+[provides.operations."obsidian.backlinks.get".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."obsidian.backlinks.get".ai_hints]
 when_to_use = "When you need to find which notes reference a given note"
+common_mistakes = ["Uses Obsidian [[wikilink]] syntax for detection"]
+examples = ['{"path":"projects/flywheel.md"}']
+related = ["obsidian.notes.get"]
 
-[provides.operations.health]
-summary = "Get vault health status"
+[provides.operations."obsidian.health"]
+description = "Report vault readability, writable state, note count, and total size."
 capability = "obsidian.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.health.ai_hints]
+[provides.operations."obsidian.health".input_schema]
+type = "object"
+
+[provides.operations."obsidian.health".output_schema]
+type = "object"
+
+[provides.operations."obsidian.health".output_schema.properties.note_count]
+type = "integer"
+
+[provides.operations."obsidian.health".output_schema.properties.readable]
+type = "boolean"
+
+[provides.operations."obsidian.health".output_schema.properties.total_size_bytes]
+type = "integer"
+
+[provides.operations."obsidian.health".output_schema.properties.vault_path]
+type = "string"
+
+[provides.operations."obsidian.health".output_schema.properties.writable]
+type = "boolean"
+
+[provides.operations."obsidian.health".ai_hints]
 when_to_use = "When you need to check if the vault is accessible and healthy"
+common_mistakes = []
+examples = ["{}"]
+related = []
+
+[provides.operations."obsidian.notes.create"]
+description = "Create a new markdown note inside the configured vault."
+capability = "obsidian.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."obsidian.notes.create".input_schema]
+required = [
+    "path",
+    "content",
+]
+type = "object"
+
+[provides.operations."obsidian.notes.create".input_schema.properties.content]
+description = "Markdown content for the new note"
+type = "string"
+
+[provides.operations."obsidian.notes.create".input_schema.properties.path]
+description = "Relative path for the new note"
+type = "string"
+
+[provides.operations."obsidian.notes.create".output_schema]
+type = "object"
+
+[provides.operations."obsidian.notes.create".output_schema.properties.path]
+type = "string"
+
+[provides.operations."obsidian.notes.create".output_schema.properties.size]
+type = "integer"
+
+[provides.operations."obsidian.notes.create".output_schema.properties.title]
+type = "string"
+
+[provides.operations."obsidian.notes.create".ai_hints]
+when_to_use = "When you need to create a new note in the vault"
+common_mistakes = [
+    "Will fail if a note already exists at the given path",
+    "Parent directories are created automatically",
+]
+examples = ['{"path":"inbox/idea.md","content":"# Idea\n\nBuild the Obsidian connector."}']
+related = ["obsidian.notes.update"]
+
+[provides.operations."obsidian.notes.delete"]
+description = "Permanently delete a markdown note from the configured vault."
+capability = "obsidian.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."obsidian.notes.delete".input_schema]
+required = ["path"]
+type = "object"
+
+[provides.operations."obsidian.notes.delete".input_schema.properties.path]
+description = "Relative path to the note to delete"
+type = "string"
+
+[provides.operations."obsidian.notes.delete".output_schema]
+type = "object"
+
+[provides.operations."obsidian.notes.delete".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."obsidian.notes.delete".output_schema.properties.path]
+type = "string"
+
+[provides.operations."obsidian.notes.delete".ai_hints]
+when_to_use = "When you need to permanently delete a note"
+common_mistakes = ["This is irreversible - the note is permanently removed from the filesystem"]
+examples = ['{"path":"archive/old-note.md"}']
+related = []
+
+[provides.operations."obsidian.notes.get"]
+description = "Retrieve the full content and metadata for a note by relative vault path."
+capability = "obsidian.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."obsidian.notes.get".input_schema]
+required = ["path"]
+type = "object"
+
+[provides.operations."obsidian.notes.get".input_schema.properties.path]
+description = "Relative path to the note, for example daily/2026-03-21.md"
+type = "string"
+
+[provides.operations."obsidian.notes.get".output_schema]
+type = "object"
+
+[provides.operations."obsidian.notes.get".output_schema.properties.content]
+type = "string"
+
+[provides.operations."obsidian.notes.get".output_schema.properties.modified]
+type = "string"
+
+[provides.operations."obsidian.notes.get".output_schema.properties.path]
+type = "string"
+
+[provides.operations."obsidian.notes.get".output_schema.properties.size]
+type = "integer"
+
+[provides.operations."obsidian.notes.get".output_schema.properties.tags]
+type = "array"
+
+[provides.operations."obsidian.notes.get".output_schema.properties.tags.items]
+type = "string"
+
+[provides.operations."obsidian.notes.get".output_schema.properties.title]
+type = "string"
+
+[provides.operations."obsidian.notes.get".ai_hints]
+when_to_use = "When you need to read a specific note's content"
+common_mistakes = ["Path must be relative to vault root, e.g. daily/2026-03-21.md"]
+examples = ['{"path":"daily/2026-03-21.md"}']
+related = ["obsidian.notes.list"]
+
+[provides.operations."obsidian.notes.list"]
+description = "List markdown notes in the configured vault, optionally filtered by folder."
+capability = "obsidian.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."obsidian.notes.list".input_schema]
+type = "object"
+
+[provides.operations."obsidian.notes.list".input_schema.properties.folder]
+description = "Optional folder path relative to the vault root"
+type = "string"
+
+[provides.operations."obsidian.notes.list".output_schema]
+type = "object"
+
+[provides.operations."obsidian.notes.list".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."obsidian.notes.list".output_schema.properties.notes]
+type = "array"
+
+[provides.operations."obsidian.notes.list".ai_hints]
+when_to_use = "When you need to browse or list notes in the vault"
+common_mistakes = ["Folder paths are relative to the vault root"]
+examples = ['{"folder":"daily"}']
+related = ["obsidian.notes.get"]
+
+[provides.operations."obsidian.notes.update"]
+description = "Replace the content of an existing markdown note."
+capability = "obsidian.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."obsidian.notes.update".input_schema]
+required = [
+    "path",
+    "content",
+]
+type = "object"
+
+[provides.operations."obsidian.notes.update".input_schema.properties.content]
+description = "New markdown content"
+type = "string"
+
+[provides.operations."obsidian.notes.update".input_schema.properties.path]
+description = "Relative path to the existing note"
+type = "string"
+
+[provides.operations."obsidian.notes.update".output_schema]
+type = "object"
+
+[provides.operations."obsidian.notes.update".output_schema.properties.path]
+type = "string"
+
+[provides.operations."obsidian.notes.update".output_schema.properties.size]
+type = "integer"
+
+[provides.operations."obsidian.notes.update".output_schema.properties.title]
+type = "string"
+
+[provides.operations."obsidian.notes.update".ai_hints]
+when_to_use = "When you need to modify an existing note"
+common_mistakes = ["Will fail if the note does not exist; use create for new notes"]
+examples = ['{"path":"daily/2026-03-21.md","content":"# Daily Log\n\nReviewed connector metadata."}']
+related = ["obsidian.notes.create"]
+
+[provides.operations."obsidian.search"]
+description = "Run a case-insensitive full-text search across markdown notes in the vault."
+capability = "obsidian.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."obsidian.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."obsidian.search".input_schema.properties.query]
+description = "Text to search for"
+type = "string"
+
+[provides.operations."obsidian.search".output_schema]
+type = "object"
+
+[provides.operations."obsidian.search".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."obsidian.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."obsidian.search".ai_hints]
+when_to_use = "When you need to find notes containing specific text"
+common_mistakes = ["Search is case-insensitive"]
+examples = ['{"query":"meeting notes"}']
+related = ["obsidian.tags.list"]
+
+[provides.operations."obsidian.tags.list"]
+description = "List tags used across markdown notes in the configured vault."
+capability = "obsidian.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."obsidian.tags.list".input_schema]
+type = "object"
+
+[provides.operations."obsidian.tags.list".output_schema]
+type = "object"
+
+[provides.operations."obsidian.tags.list".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."obsidian.tags.list".output_schema.properties.tags]
+type = "array"
+
+[provides.operations."obsidian.tags.list".ai_hints]
+when_to_use = "When you need to see what tags are used in the vault"
+common_mistakes = []
+examples = ["{}"]
+related = ["obsidian.search"]
 
 [sandbox]
 profile = "strict"
 memory_mb = 32
 cpu_percent = 10
 wall_clock_timeout_ms = 10000
+fs_readonly_paths = []
+fs_writable_paths = []
 deny_exec = true
 deny_ptrace = true

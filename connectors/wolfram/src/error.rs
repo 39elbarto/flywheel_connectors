@@ -60,13 +60,16 @@ impl ConnectorErrorMapping for WolframError {
         match self {
             Self::Http(e) => {
                 if e.is_timeout() {
-                    FcpError::Timeout {
-                        timeout_ms: 30_000,
+                    FcpError::UpstreamTimeout {
+                        service: "wolfram_alpha".into(),
                     }
                 } else if e.is_connect() {
-                    FcpError::ServiceUnavailable {
+                    FcpError::External {
+                        service: "wolfram_alpha".into(),
                         message: format!("Connection failed: {e}"),
-                        retry_after_ms: Some(5_000),
+                        status_code: None,
+                        retryable: true,
+                        retry_after: Some(std::time::Duration::from_secs(5)),
                     }
                 } else {
                     FcpError::Internal {
@@ -78,25 +81,31 @@ impl ConnectorErrorMapping for WolframError {
                 status_code,
                 message,
             } => match *status_code {
-                401 | 403 => FcpError::AuthenticationFailed {
+                401 | 403 => FcpError::Unauthorized {
+                    code: *status_code,
                     message: message.clone(),
                 },
-                404 => FcpError::NotFound {
-                    message: message.clone(),
+                404 => FcpError::ResourceNotFound {
+                    resource: message.clone(),
                 },
                 429 => FcpError::RateLimited {
-                    retry_after_ms: Some(60_000),
+                    retry_after_ms: 60_000,
+                    violation: None,
                 },
-                500..=599 => FcpError::ServiceUnavailable {
+                500..=599 => FcpError::External {
+                    service: "wolfram_alpha".into(),
                     message: message.clone(),
-                    retry_after_ms: Some(5_000),
+                    status_code: Some(*status_code),
+                    retryable: true,
+                    retry_after: Some(std::time::Duration::from_secs(5)),
                 },
                 _ => FcpError::Internal {
                     message: format!("API error ({status_code}): {message}"),
                 },
             },
             Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
-                retry_after_ms: Some(*retry_after_ms),
+                retry_after_ms: *retry_after_ms,
+                violation: None,
             },
             Self::InvalidInput { message } => FcpError::InvalidRequest {
                 code: 1003,
@@ -125,9 +134,9 @@ impl ConnectorErrorMapping for WolframError {
             Self::RateLimited { retry_after_ms } => {
                 Some(std::time::Duration::from_millis(*retry_after_ms))
             }
-            Self::Api { status_code: 429, .. } => {
-                Some(std::time::Duration::from_secs(60))
-            }
+            Self::Api {
+                status_code: 429, ..
+            } => Some(std::time::Duration::from_secs(60)),
             _ => None,
         }
     }
@@ -139,7 +148,6 @@ mod tests {
 
     #[test]
     fn http_timeout_is_retryable() {
-        // Simulate a timeout-like error
         let err = WolframError::Api {
             status_code: 408,
             message: "timeout".into(),
@@ -186,14 +194,14 @@ mod tests {
     }
 
     #[test]
-    fn auth_error_maps_to_authentication_failed() {
+    fn auth_error_maps_to_unauthorized() {
         let err = WolframError::Api {
             status_code: 401,
             message: "Invalid AppID".into(),
         };
         match err.to_fcp_error() {
-            FcpError::AuthenticationFailed { .. } => {}
-            other => panic!("expected AuthenticationFailed, got {other:?}"),
+            FcpError::Unauthorized { .. } => {}
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -204,8 +212,8 @@ mod tests {
             message: "Not found".into(),
         };
         match err.to_fcp_error() {
-            FcpError::NotFound { .. } => {}
-            other => panic!("expected NotFound, got {other:?}"),
+            FcpError::ResourceNotFound { .. } => {}
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 
@@ -215,8 +223,10 @@ mod tests {
             retry_after_ms: 10_000,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited { retry_after_ms } => {
-                assert_eq!(retry_after_ms, Some(10_000));
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 10_000);
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }

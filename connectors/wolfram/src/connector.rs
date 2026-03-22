@@ -307,15 +307,32 @@ impl WolframConnector {
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
         // Verify capability token if verifier is set
-        if let Some(verifier) = &self.verifier {
-            if let Some(token) = params.get("capability_token") {
-                let cap_token: CapabilityToken =
-                    serde_json::from_value(token.clone()).map_err(|e| FcpError::InvalidRequest {
-                        code: 1003,
-                        message: format!("Invalid capability token: {e}"),
-                    })?;
-                verifier.verify(&cap_token, operation)?;
-            }
+        if let (Some(verifier), Some(token)) = (&self.verifier, params.get("capability_token")) {
+            let cap_token: CapabilityToken =
+                serde_json::from_value(token.clone()).map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid capability token: {e}"),
+                })?;
+            let required_cap = required_capability_for_operation(operation)
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown operation: {operation}"),
+                })?;
+            let op_id = OperationId::from_static(
+                // The operation string is statically known
+                match operation {
+                    "wolfram.query" => "wolfram.query",
+                    "wolfram.short_answer" => "wolfram.short_answer",
+                    "wolfram.spoken_result" => "wolfram.spoken_result",
+                    _ => {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: format!("Unknown operation: {operation}"),
+                        })
+                    }
+                },
+            );
+            verifier.verify(&cap_token, &required_cap, &op_id, &[])?;
         }
 
         let query = input
@@ -508,6 +525,15 @@ pub fn wolfram_operations() -> Vec<OperationInfo> {
             requires_approval: None,
         },
     ]
+}
+
+fn required_capability_for_operation(operation: &str) -> Option<CapabilityId> {
+    match operation {
+        "wolfram.query" | "wolfram.short_answer" | "wolfram.spoken_result" => {
+            Some(CapabilityId::from_static("wolfram.query"))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

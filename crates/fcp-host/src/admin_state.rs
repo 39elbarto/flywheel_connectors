@@ -2709,16 +2709,10 @@ impl HostAdminStateStore {
         let result = mutate(&mut snapshot)?;
 
         let path = self.state_path.clone();
-        let snapshot_clone = snapshot.clone();
-        tokio::task::spawn_blocking(move || {
-            persist_admin_state_snapshot(path.as_deref(), &snapshot_clone)
-        })
-        .await
-        .unwrap_or_else(|err| {
-            Err(LifecycleError::Persistence {
-                reason: format!("failed to spawn blocking task: {err}"),
-            })
-        })?;
+        // Host admin-state writes are serialized behind `persist_lock` and only
+        // flush one small JSON snapshot, so persisting inline is preferable to
+        // reaching for a Tokio-only blocking shim in the async-core stack.
+        persist_admin_state_snapshot(path.as_deref(), &snapshot)?;
 
         *self.state.write().await = snapshot;
         Ok(result)
@@ -3990,7 +3984,7 @@ impl HostAdminStateStore {
         // this method does not currently resolve — `signature_valid` reflects
         // structural validity only. A future version should verify the token signature
         // against the host keyring.
-        let signature_valid = true;
+        let signature_valid = false;
 
         // 2. Temporal validity
         let temporally_valid = inspection.currently_valid;

@@ -184,27 +184,30 @@ impl SquareConnector {
             });
 
             let allowed_hosts = ["connect.squareup.com"];
-            let host_part = config
-                .base_url
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let host_ok = host_part == "localhost"
-                || host_part == "127.0.0.1"
-                || allowed_hosts.contains(&host_part);
+            let parsed_base_url = reqwest::Url::parse(&config.base_url).ok();
+            let scheme_ok = parsed_base_url
+                .as_ref()
+                .is_some_and(|url| url.scheme() == "https");
+            let host_ok = parsed_base_url
+                .as_ref()
+                .and_then(reqwest::Url::host_str)
+                .is_some_and(|host| allowed_hosts.contains(&host));
+            let port_ok = parsed_base_url
+                .as_ref()
+                .and_then(|url| url.port_or_known_default())
+                == Some(443);
+            let network_ok = scheme_ok && host_ok && port_ok;
             checks.push(DoctorCheck {
                 name: "network_constraints".into(),
-                passed: host_ok,
-                message: Some(if host_ok {
-                    "Base URL matches allowed host (connect.squareup.com)".into()
+                passed: network_ok,
+                message: Some(if network_ok {
+                    "Base URL matches required HTTPS egress constraint (connect.squareup.com:443)"
+                        .into()
                 } else {
-                    format!("Base URL {} does not match allowed hosts", config.base_url)
+                    format!(
+                        "Base URL {} must use https://connect.squareup.com:443",
+                        config.base_url
+                    )
                 }),
                 critical: true,
             });
@@ -1213,6 +1216,52 @@ mod tests {
         connector.configure(test_config()).await.unwrap();
         let report = connector.doctor();
         assert!(report.passed);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "network_constraints" && check.passed)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_rejects_localhost_base_url() {
+        let mut connector = SquareConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://localhost/v2",
+                "access_token": "test_square_token"
+            }))
+            .await
+            .unwrap();
+        let report = connector.doctor();
+        assert!(!report.passed);
+        let network_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "network_constraints")
+            .expect("network_constraints check");
+        assert!(!network_check.passed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_rejects_http_base_url() {
+        let mut connector = SquareConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "http://connect.squareup.com/v2",
+                "access_token": "test_square_token"
+            }))
+            .await
+            .unwrap();
+        let report = connector.doctor();
+        assert!(!report.passed);
+        let network_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "network_constraints")
+            .expect("network_constraints check");
+        assert!(!network_check.passed);
     }
 
     #[fcp_async_core::runtime::test]

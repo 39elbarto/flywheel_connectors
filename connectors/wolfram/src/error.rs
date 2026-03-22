@@ -136,7 +136,7 @@ impl ConnectorErrorMapping for WolframError {
             }
             Self::Api {
                 status_code: 429, ..
-            } => Some(std::time::Duration::from_secs(60)),
+            } => Some(std::time::Duration::from_mins(1)),
             _ => None,
         }
     }
@@ -163,7 +163,7 @@ mod tests {
         assert!(err.is_retryable());
         assert_eq!(
             err.retry_after(),
-            Some(std::time::Duration::from_millis(5000))
+            Some(std::time::Duration::from_secs(5))
         );
     }
 

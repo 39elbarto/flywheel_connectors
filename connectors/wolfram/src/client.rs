@@ -20,8 +20,15 @@ impl WolframClient {
     /// Create a new Wolfram Alpha client.
     #[must_use]
     pub fn new(config: &WolframConfig) -> Self {
+        let base_url = if config.base_url.starts_with("http://")
+            || config.base_url.starts_with("https://")
+        {
+            config.base_url.clone()
+        } else {
+            format!("https://{}", config.base_url)
+        };
         Self {
-            base_url: format!("https://{}", config.base_url),
+            base_url,
             runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
             retry_config: HttpRetryConfig {
                 max_retries: 2,

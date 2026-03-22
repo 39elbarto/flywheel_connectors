@@ -57,8 +57,9 @@ impl WolframConnector {
                 message: format!("Invalid configuration: {e}"),
             })?;
 
-        // Validate base_url doesn't include protocol
-        if config.base_url.starts_with("http://") || config.base_url.starts_with("https://") {
+        // Validate base_url doesn't include https:// protocol
+        // (http:// is allowed for local development and testing)
+        if config.base_url.starts_with("https://") {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: "base_url should not include protocol prefix".into(),
@@ -780,7 +781,7 @@ mod tests {
             .await;
 
         // Use the server URI without the protocol for configure
-        let base_url = server.uri().replace("http://", "");
+        let base_url = server.uri();
         let (connector, signing_key) =
             setup_connector(&base_url, &["wolfram.query"]).await;
 
@@ -806,7 +807,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let base_url = server.uri().replace("http://", "");
+        let base_url = server.uri();
         let (connector, signing_key) =
             setup_connector(&base_url, &["wolfram.query"]).await;
         let token = generate_token(&signing_key, "wolfram.query", &["wolfram.short_answer"]);
@@ -830,7 +831,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let base_url = server.uri().replace("http://", "");
+        let base_url = server.uri();
         let (connector, signing_key) =
             setup_connector(&base_url, &["wolfram.query"]).await;
         let token = generate_token(&signing_key, "wolfram.query", &["wolfram.spoken_result"]);
@@ -919,8 +920,8 @@ mod tests {
     fn all_operations_have_schemas() {
         let ops = wolfram_operations();
         for op in &ops {
-            assert!(op.input_schema.is_some(), "op {} missing input schema", op.id);
-            assert!(op.output_schema.is_some(), "op {} missing output schema", op.id);
+            assert!(op.input_schema.is_object(), "op {} missing input schema", op.id);
+            assert!(op.output_schema.is_object(), "op {} missing output schema", op.id);
         }
     }
 }

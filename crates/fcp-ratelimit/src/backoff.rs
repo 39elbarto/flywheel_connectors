@@ -86,11 +86,15 @@ impl Default for ExponentialBackoff {
 impl BackoffStrategy for ExponentialBackoff {
     fn next_backoff(&mut self, attempt: u32) -> Duration {
         let max_secs = self.max.as_secs_f64();
-
-        // Guard: if initial is zero or max is zero, return max (or zero) immediately.
         let initial_secs = self.initial.as_secs_f64();
-        if initial_secs <= 0.0 || max_secs <= 0.0 {
-            return self.max;
+
+        // Guard: if initial is zero, 0 * 2^n = 0 for any n.
+        if initial_secs <= 0.0 {
+            return Duration::ZERO;
+        }
+        // Guard: if max is zero, everything caps to zero.
+        if max_secs <= 0.0 {
+            return Duration::ZERO;
         }
 
         #[allow(clippy::cast_possible_wrap)]

@@ -12,6 +12,28 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::error::{BlueBubblesError, BlueBubblesResult};
+
+/// Validate a user-supplied path segment to prevent URL path injection.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BlueBubblesResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(BlueBubblesError::Validation(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(BlueBubblesError::Validation(format!(
+            "{field} contains invalid path characters"
+        )));
+    }
+    Ok(value)
+}
+
 use crate::types::{
     BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SendMessageRequest, SendMessageResponse,
     ServerInfo,
@@ -376,6 +398,7 @@ impl BlueBubblesClient {
         runtime: &ConnectorRuntime,
         guid: &str,
     ) -> BlueBubblesResult<Chat> {
+        let guid = sanitize_path_segment(guid, "chat_guid")?;
         let url = format!("{}/api/v1/chat/{guid}", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -460,6 +483,7 @@ impl BlueBubblesClient {
         chat_guid: &str,
         params: &QueryParams,
     ) -> BlueBubblesResult<PaginatedResponse<Message>> {
+        let chat_guid = sanitize_path_segment(chat_guid, "chat_guid")?;
         let url = format!("{}/api/v1/chat/{chat_guid}/message", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -554,6 +578,7 @@ impl BlueBubblesClient {
         runtime: &ConnectorRuntime,
         guid: &str,
     ) -> BlueBubblesResult<Vec<u8>> {
+        let guid = sanitize_path_segment(guid, "attachment_guid")?;
         let url = format!("{}/api/v1/attachment/{guid}/download", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -633,6 +658,7 @@ impl BlueBubblesClient {
         runtime: &ConnectorRuntime,
         chat_guid: &str,
     ) -> BlueBubblesResult<()> {
+        let chat_guid = sanitize_path_segment(chat_guid, "chat_guid")?;
         let url = format!("{}/api/v1/chat/{chat_guid}/read", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();

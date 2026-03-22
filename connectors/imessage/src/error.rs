@@ -54,6 +54,10 @@ pub enum BlueBubblesError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// Input validation error.
+    #[error("Validation error: {0}")]
+    Validation(String),
+
     /// Runtime/async error.
     #[error("Async runtime error: {0}")]
     Async(String),
@@ -73,7 +77,8 @@ impl BlueBubblesError {
             | Self::PrivateApiRequired { .. }
             | Self::AttachmentTooLarge { .. }
             | Self::ChatNotFound { .. }
-            | Self::Config(_) => false,
+            | Self::Config(_)
+            | Self::Validation(_) => false,
             Self::Api { status_code, .. } => is_retryable_status(*status_code),
         }
     }
@@ -148,6 +153,10 @@ impl BlueBubblesError {
             Self::Config(msg) => FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Configuration error: {msg}"),
+            },
+            Self::Validation(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: msg.clone(),
             },
             Self::Async(msg) => FcpError::Internal {
                 message: format!("Async runtime error: {msg}"),

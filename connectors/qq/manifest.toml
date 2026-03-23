@@ -49,6 +49,13 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.events_normalize]
+summary = "Normalize a QQ gateway message event"
+capability = "qq.events.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
 [provides.operations.health]
 summary = "Verify QQ credentials and gateway discovery"
 capability = "qq.health.read"

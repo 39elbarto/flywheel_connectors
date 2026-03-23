@@ -1453,13 +1453,15 @@ mod tests {
         );
 
         // 8. Verify buffer contents
+        // #rust has 2 messages: our JOIN + alice's PRIVMSG
         let rust_msgs: Vec<_> = session.message_buffer().messages_for_channel("#rust").collect();
-        assert_eq!(rust_msgs.len(), 1);
-        assert!(rust_msgs[0].message.raw.contains("hello everyone"));
+        assert_eq!(rust_msgs.len(), 2);
+        assert!(rust_msgs[1].message.raw.contains("hello everyone"));
 
+        // Private messages include the NOTICE to * and the PRIVMSG to mybot_
         let privates: Vec<_> = session.message_buffer().private_messages().collect();
-        assert_eq!(privates.len(), 1);
-        assert!(privates[0].message.raw.contains("hey bot"));
+        assert_eq!(privates.len(), 2);
+        assert!(privates[1].message.raw.contains("hey bot"));
 
         // 9. Get kicked from a channel
         let _ = session.process_line(":op!u@h KICK #python mybot_ :no bots allowed");
@@ -1514,13 +1516,13 @@ mod tests {
             channel: "#rust".into(),
         };
         let json = serde_json::to_value(&channel).unwrap();
-        assert_eq!(json["channel"], "#rust");
+        assert_eq!(json["channel"]["channel"], "#rust");
 
         let private = MessageTarget::Private {
             from: Some("alice".into()),
         };
         let json = serde_json::to_value(&private).unwrap();
-        assert_eq!(json["from"], "alice");
+        assert_eq!(json["private"]["from"], "alice");
     }
 
     #[test]

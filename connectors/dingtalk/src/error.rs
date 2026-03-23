@@ -46,9 +46,8 @@ impl DingTalkError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(error) => error.is_timeout() || error.is_connect(),
-            Self::RateLimited { .. } => true,
+            Self::RateLimited { .. } | Self::Token(_) => true,
             Self::Api { code, .. } => matches!(code, 429 | 500 | 502 | 503 | 504),
-            Self::Token(_) => true,
             Self::Media { .. }
             | Self::Json(_)
             | Self::Unauthorized(_)

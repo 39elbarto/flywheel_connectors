@@ -489,52 +489,65 @@ async fn unknown_operation() {
 async fn simulate_known_dashboards_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(
-        c.handle_simulate(json!({"operation_id": "metabase.dashboards.list"}))
-            .await
-            .unwrap()["allowed"]
-            .as_bool()
-            .unwrap()
-    );
+    let response = c
+        .handle_simulate(json!({
+            "id": "sim-dashboards",
+            "operation_id": "metabase.dashboards.list"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(response["type"], "simulate_response");
+    assert_eq!(response["id"], "sim-dashboards");
+    assert_eq!(response["would_succeed"], true);
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_known_questions_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(
-        c.handle_simulate(json!({"operation_id": "metabase.questions.list"}))
-            .await
-            .unwrap()["allowed"]
-            .as_bool()
-            .unwrap()
-    );
+    let response = c
+        .handle_simulate(json!({
+            "id": "sim-questions-list",
+            "operation_id": "metabase.questions.list"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(response["type"], "simulate_response");
+    assert_eq!(response["id"], "sim-questions-list");
+    assert_eq!(response["would_succeed"], true);
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_known_questions_run() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(
-        c.handle_simulate(json!({"operation_id": "metabase.questions.run"}))
-            .await
-            .unwrap()["allowed"]
-            .as_bool()
-            .unwrap()
-    );
+    let response = c
+        .handle_simulate(json!({
+            "id": "sim-questions-run",
+            "operation_id": "metabase.questions.run"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(response["type"], "simulate_response");
+    assert_eq!(response["id"], "sim-questions-run");
+    assert_eq!(response["would_succeed"], true);
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(
-        !c.handle_simulate(json!({"operation_id": "metabase.nope"}))
-            .await
-            .unwrap()["allowed"]
-            .as_bool()
-            .unwrap()
-    );
+    let response = c
+        .handle_simulate(json!({
+            "id": "sim-unknown",
+            "operation_id": "metabase.nope"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(response["type"], "simulate_response");
+    assert_eq!(response["id"], "sim-unknown");
+    assert_eq!(response["would_succeed"], false);
+    assert_eq!(response["denial_code"], "FCP-1002");
 }
 
 // -- Counters ----------------------------------------------------------------

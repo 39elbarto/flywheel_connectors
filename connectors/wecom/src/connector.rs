@@ -1,6 +1,7 @@
 //! `WeCom` enterprise messaging connector.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -22,6 +23,7 @@ use crate::types::{
     WeComCallbackEnvelope, WeComCallbackIngestRequest, WeComCallbackVerifyRequest, WeComConfig,
     WeComDepartmentListRequest, WeComMediaDownloadRequest, WeComMediaUploadRequest,
     WeComMessageKind, WeComMessageRequest, WeComStateModel, WeComUserLookupRequest,
+    base_url_diagnostic,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -46,6 +48,21 @@ const CAP_DEPARTMENTS_READ: &str = "wecom.departments.read";
 const CAP_EVENTS_READ: &str = "wecom.events.read";
 const CAP_HEALTH_READ: &str = "wecom.health.read";
 
+const WECOM_IMPLEMENTATION_STATUS: &str = "first_slice";
+const WECOM_BINDING_MODEL: &str = "single_enterprise_app";
+const WECOM_AUTH_MODEL: &str = "corp_id_agent_secret";
+const WECOM_TENANT_APP_BOUNDARY: &str = "This connector acts as one installed WeCom enterprise app for one tenant; it does not impersonate arbitrary users or cross tenant boundaries.";
+const WECOM_CALLBACK_DELIVERY_MODEL: &str = "host_forwarded_http_callback";
+const WECOM_TOKEN_PROBE: &str = "GET /cgi-bin/gettoken";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/wecom_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 5] = [
+    "rch exec -- cargo fmt --manifest-path connectors/wecom/Cargo.toml --check",
+    "rch exec -- cargo check --manifest-path connectors/wecom/Cargo.toml --all-targets",
+    "rch exec -- cargo test --manifest-path connectors/wecom/Cargo.toml --lib",
+    "rch exec -- cargo clippy --manifest-path connectors/wecom/Cargo.toml -p fcp-wecom --all-targets --no-deps -- -D warnings",
+    "git diff --check -- connectors/wecom/src/{client,connector,error,types}.rs connectors/wecom/{manifest.toml,README.md}",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WeComConversation {
     kind: &'static str,
@@ -57,6 +74,165 @@ struct WeComConversation {
 #[derive(Debug)]
 struct WeComState {
     client: WeComClient,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorResult {
+    ready: bool,
+    passed: bool,
+    checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DoctorCheck {
+    name: String,
+    passed: bool,
+    message: Option<String>,
+    critical: bool,
+}
+
+impl DoctorResult {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
+        let passed = checks
+            .iter()
+            .filter(|check| check.critical)
+            .all(|check| check.passed);
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    base_url: String,
+    request_timeout_ms: u64,
+    network_ok: bool,
+    network_message: String,
+    callback_configured: bool,
+    callback_receive_id_mode: &'static str,
+    token_issuance_probe: &'static str,
+    inbound_delivery_model: &'static str,
+    risky_mutations: Vec<&'static str>,
+    supported_hosts: Vec<&'static str>,
+    tenant_app_boundary: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn auth_mode_label(config: Option<&WeComConfig>) -> &'static str {
+    config.map_or("unconfigured", |_| WECOM_AUTH_MODEL)
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a sandbox WeCom tenant or a localhost fixture before running readiness verification against live credentials.",
+            "Provision exactly one enterprise app per connector instance and load corp_id, agent_id, and agent_secret before invoking health or self_check.",
+            "If inbound callbacks are required, configure callback_token plus callback_encoding_aes_key and ensure the host owns the public HTTPS endpoint that forwards GET/POST payloads into this connector.",
+        ],
+        dedicated_environment: "Prefer a disposable tenant or localhost harness. Message sends, media upload, and callback validation all involve live tenant-side effects or shared tenant secrets.",
+        redaction_rules: vec![
+            "Never log agent_secret, access tokens, callback_token, callback_encoding_aes_key, Authorization headers, or decrypted callback challenge material.",
+            "Treat corp_id, agent_id, receive IDs, user IDs, party IDs, tag IDs, media IDs, and callback plaintext XML as sensitive tenant metadata.",
+            "If verification captures live callback payloads, redact message content, display names, attachment metadata, and tenant-specific identifiers before sharing artifacts.",
+        ],
+        limitations: vec![
+            "This first slice is bound to one WeCom enterprise app and does not impersonate arbitrary users or cross tenant boundaries.",
+            "The connector does not host its own webhook or websocket listener; the Flywheel host must receive and forward signed HTTP callback traffic.",
+            "Voice, video, news, template-card, task-card, recall flows, conversation history readback, and tenant-admin provisioning remain explicit non-goals.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "not_configured",
+                symptom: "doctor or self_check reports that the connector is not configured",
+                action: "Provide corp_id, agent_id, agent_secret, request_timeout_ms, and an allowed base_url, then rerun self_check.",
+            },
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "doctor reports that base_url violates the WeCom host allowlist",
+                action: "Use https://qyapi.weixin.qq.com for live verification, or localhost / 127.0.0.1 only for deterministic tests.",
+            },
+            RemediationHint {
+                code: "callback_not_configured",
+                symptom: "doctor reports that callback verification secrets are missing",
+                action: "Configure callback_token plus callback_encoding_aes_key before routing host-forwarded callback GET/POST traffic into verify_url or ingest_event.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "self_check reports timeouts, transient transport failures, or temporary WeCom API errors",
+                action: "Respect the upstream retry window, confirm outbound reachability to qyapi.weixin.qq.com:443, and rerun self_check after the transient condition clears.",
+            },
+            RemediationHint {
+                code: "self_check_failed",
+                symptom: "self_check reports a non-retryable credential or API failure",
+                action: "Rotate the app secret if needed, confirm the corp_id/agent_id/app secret belong to the same tenant app, and rerun self_check.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
+fn contract_details(config: Option<&WeComConfig>) -> Value {
+    json!({
+        "implementation": {
+            "api": "wecom_enterprise_api",
+            "status": WECOM_IMPLEMENTATION_STATUS,
+            "notes": [
+                "The connector is bound to one installed enterprise app and verifies outbound reachability by issuing access tokens.",
+                "Inbound events use host-forwarded signed and encrypted HTTP callbacks; the connector verifies, decrypts, and normalizes payloads but does not own the public listener."
+            ],
+        },
+        "auth_boundary": {
+            "binding": WECOM_BINDING_MODEL,
+            "credential_mode": auth_mode_label(config),
+            "base_url": config.map(|cfg| cfg.base_url().to_string()),
+            "callback_configured": config.map(WeComConfig::callback_configured),
+            "callback_receive_id_mode": config.map(WeComConfig::callback_receive_id_mode),
+            "cross_tenant_supported": false,
+            "user_impersonation_supported": false,
+            "callback_hosting_included": false,
+            "websocket_events_included": false,
+        },
+        "service_inventory": {
+            "messages": [OP_SEND_TEXT, OP_SEND_MARKDOWN, OP_SEND_IMAGE, OP_SEND_FILE],
+            "media": [OP_UPLOAD_MEDIA, OP_DOWNLOAD_MEDIA],
+            "directory": [OP_GET_USER, OP_LIST_DEPARTMENTS],
+            "events": [OP_VERIFY_CALLBACK_URL, OP_INGEST_CALLBACK_EVENT],
+            "health": [OP_HEALTH],
+        },
+        "non_goals": [
+            "Webhook hosting or websocket event loops inside the connector",
+            "Cross-tenant brokering or arbitrary user impersonation",
+            "Conversation history readback, receipts, or durable chat-state indexing",
+            "Voice, video, news, template-card, task-card, and recall message families",
+            "Tenant-admin provisioning or enterprise policy management"
+        ]
+    })
 }
 
 #[derive(Debug)]
@@ -82,6 +258,181 @@ impl WeComConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.state.as_ref().map(|state| {
+            let config = state.client.config();
+            let (network_ok, network_message) = base_url_diagnostic(config.base_url());
+            ProvisioningReadiness {
+                base_url: config.base_url().to_string(),
+                request_timeout_ms: config.request_timeout_ms(),
+                network_ok,
+                network_message,
+                callback_configured: config.callback_configured(),
+                callback_receive_id_mode: config.callback_receive_id_mode(),
+                token_issuance_probe: WECOM_TOKEN_PROBE,
+                inbound_delivery_model: WECOM_CALLBACK_DELIVERY_MODEL,
+                risky_mutations: vec![
+                    OP_SEND_TEXT,
+                    OP_SEND_MARKDOWN,
+                    OP_SEND_IMAGE,
+                    OP_SEND_FILE,
+                    OP_UPLOAD_MEDIA,
+                ],
+                supported_hosts: vec!["qyapi.weixin.qq.com", "localhost", "127.0.0.1"],
+                tenant_app_boundary: WECOM_TENANT_APP_BOUNDARY,
+            }
+        })
+    }
+
+    fn health_details(&self, model: &WeComStateModel) -> Value {
+        json!({
+            "base_url": &model.base_url,
+            "agent_id": model.agent_id,
+            "token_cached": model.token_cached,
+            "callback_configured": model.callback_configured,
+            "configured": self.state.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "inbound_delivery_model": WECOM_CALLBACK_DELIVERY_MODEL,
+            "state": model,
+        })
+    }
+
+    fn diagnostic_details(
+        &self,
+        model: Option<&WeComStateModel>,
+        live_probe: Option<&Value>,
+    ) -> Value {
+        json!({
+            "configured": self.state.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "auth_mode": auth_mode_label(self.state.as_ref().map(|state| state.client.config())),
+            "state": model,
+            "provisioning": self.provisioning_readiness(),
+            "operator_guidance": operator_guidance(),
+            "contract": contract_details(self.state.as_ref().map(|state| state.client.config())),
+            "live_probe": live_probe,
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        model: Option<&WeComStateModel>,
+        live_probe: Option<&Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(self.diagnostic_details(model, live_probe));
+        report
+    }
+
+    pub fn doctor(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+        let provisioning = self.provisioning_readiness();
+
+        let configured = self.state.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(self.state.as_ref().map_or_else(
+                || {
+                    "Not configured - provide corp_id, agent_id, agent_secret, and an allowed base_url."
+                        .into()
+                },
+                |state| {
+                    let config = state.client.config();
+                    format!(
+                        "Configuration loaded for agent_id {} against {}.",
+                        config.agent_id(),
+                        config.base_url()
+                    )
+                },
+            )),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: configured,
+            message: Some(if configured {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client missing; re-run configure".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "endpoint_policy".into(),
+            passed: provisioning
+                .as_ref()
+                .is_some_and(|readiness| readiness.network_ok),
+            message: Some(provisioning.as_ref().map_or_else(
+                || "Endpoint policy cannot be evaluated until configure runs".into(),
+                |readiness| readiness.network_message.clone(),
+            )),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "callback_crypto".into(),
+            passed: provisioning
+                .as_ref()
+                .is_some_and(|readiness| readiness.callback_configured),
+            message: Some(provisioning.as_ref().map_or_else(
+                || "Callback verification secrets are unavailable until configure runs".into(),
+                |readiness| {
+                    if readiness.callback_configured {
+                        "Callback token + AES key configured; host-forwarded verify_url and ingest_event are ready for live use.".into()
+                    } else {
+                        "Callback token + AES key not configured; outbound flows work, but verify_url and ingest_event are not ready for live traffic.".into()
+                    }
+                },
+            )),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "tenant_boundary".into(),
+            passed: true,
+            message: Some(WECOM_TENANT_APP_BOUNDARY.into()),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "host_delivery_model".into(),
+            passed: true,
+            message: Some(
+                "The host must receive the public HTTPS callback GET/POST and forward those payloads into wecom.callback.verify_url or wecom.callback.ingest_event."
+                    .into(),
+            ),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "capability_handshake".into(),
+            passed: self.base.handshaken.load(Ordering::Acquire),
+            message: Some(if self.base.handshaken.load(Ordering::Acquire) {
+                "Capability handshake completed".into()
+            } else {
+                "Capability handshake has not been completed yet".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "first_slice_inventory".into(),
+            passed: true,
+            message: Some(
+                "Supported today: outbound text/markdown/image/file sends, temporary media upload/download, one user lookup, department list, and host-forwarded callback verification plus event normalization."
+                    .into(),
+            ),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks, provisioning)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -292,6 +643,7 @@ impl WeComConnector {
         ]
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
@@ -388,11 +740,11 @@ impl WeComConnector {
                         "verified": true,
                         "transport": "callback_http_get",
                         "receive_id": state.client.config().callback_receive_id(),
-                        "challenge": challenge.clone(),
+                        "challenge": &challenge,
                         "http_response": {
                             "status": 200,
                             "content_type": "text/plain; charset=utf-8",
-                            "body": challenge,
+                            "body": &challenge,
                         }
                     }),
                     Vec::new(),
@@ -420,7 +772,7 @@ impl WeComConnector {
                         "msg_signature": request.msg_signature(),
                         "timestamp": request.timestamp(),
                         "nonce": request.nonce(),
-                        "receive_id": callback.receive_id.clone(),
+                        "receive_id": &callback.receive_id,
                     },
                     "callback": {
                         "outer": &callback.wrapper,
@@ -440,12 +792,8 @@ impl WeComConnector {
                 let model = state.client.state_model().await;
                 let output = json!({
                     "status": "ok",
-                    "base_url": model.base_url.clone(),
-                    "agent_id": model.agent_id,
-                    "token_cached": model.token_cached,
-                    "callback_configured": model.callback_configured,
-                    "state": &model,
-                    "manifest_hash": Self::manifest_hash(),
+                    "token_issuance_probe": WECOM_TOKEN_PROBE,
+                    "details": self.health_details(&model),
                 });
                 (output, Vec::new())
             }
@@ -510,16 +858,18 @@ impl FcpConnector for WeComConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let status = if self.state.is_some() {
-            HealthState::Ready
-        } else {
-            HealthState::Starting
-        };
-        let details = if let Some(state) = self.state.as_ref() {
+        let (status, details) = if let Some(state) = self.state.as_ref() {
+            let token_probe = state.client.access_token().await;
             let model = state.client.state_model().await;
-            Some(health_details(&model))
+            let status = match token_probe {
+                Ok(_) => HealthState::Ready,
+                Err(error) => HealthState::Degraded {
+                    reason: format!("token probe failed: {error}"),
+                },
+            };
+            (status, Some(self.health_details(&model)))
         } else {
-            None
+            (HealthState::Starting, None)
         };
         HealthSnapshot {
             status,
@@ -532,21 +882,44 @@ impl FcpConnector for WeComConnector {
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(state) = self.state.as_ref() else {
-            return Ok(SelfCheckReport::failed(
-                "not_configured",
-                "configure must be called before WeCom self_check",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "not_configured",
+                    "configure must be called before WeCom self_check",
+                ),
+                None,
+                None,
             ));
         };
         match state.client.access_token().await {
             Ok(_) => {
                 let model = state.client.state_model().await;
-                let report = SelfCheckReport::ok();
-                Ok(SelfCheckReport {
-                    details: Some(health_details(&model)),
-                    ..report
-                })
+                let live_probe = json!({
+                    "reachable": true,
+                    "retryable": false,
+                    "token_issuance_probe": WECOM_TOKEN_PROBE,
+                    "inbound_delivery_model": WECOM_CALLBACK_DELIVERY_MODEL,
+                    "callback_ready": model.callback_configured,
+                });
+                Ok(self.attach_self_check_details(
+                    SelfCheckReport::ok(),
+                    Some(&model),
+                    Some(&live_probe),
+                ))
             }
-            Err(error) => Ok(SelfCheckReport::from_error(&error.to_fcp_error())),
+            Err(error) => {
+                let report = if error.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", error.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", error.to_string())
+                };
+                let live_probe = json!({
+                    "reachable": false,
+                    "retryable": error.is_retryable(),
+                    "token_issuance_probe": WECOM_TOKEN_PROBE,
+                });
+                Ok(self.attach_self_check_details(report, None, Some(&live_probe)))
+            }
         }
     }
 
@@ -630,16 +1003,6 @@ impl FcpConnector for WeComConnector {
     }
 }
 
-fn health_details(model: &WeComStateModel) -> Value {
-    json!({
-        "base_url": model.base_url.clone(),
-        "agent_id": model.agent_id,
-        "token_cached": model.token_cached,
-        "callback_configured": model.callback_configured,
-        "state": model,
-    })
-}
-
 fn normalize_callback_event(
     callback: &WeComCallbackEnvelope,
     verifier: &CapabilityVerifier,
@@ -664,7 +1027,7 @@ fn normalize_callback_event(
 
     let payload = json!({
         "transport": "callback_http",
-        "delivery_id": delivery_id.clone(),
+        "delivery_id": &delivery_id,
         "receive_id": callback.receive_id,
         "agent_id": agent_id,
         "msg_type": xml_field(&callback.message, "MsgType"),
@@ -709,23 +1072,21 @@ fn normalize_callback_event(
 fn callback_agent_id(callback: &WeComCallbackEnvelope, fallback_agent_id: u64) -> String {
     xml_field(&callback.message, "AgentID")
         .or_else(|| xml_field(&callback.wrapper, "AgentID"))
-        .map(ToString::to_string)
-        .unwrap_or_else(|| fallback_agent_id.to_string())
+        .map_or_else(|| fallback_agent_id.to_string(), ToString::to_string)
 }
 
 fn callback_topic(message: &BTreeMap<String, String>) -> String {
-    let msg_type = xml_field(message, "MsgType")
-        .map(topic_component)
-        .unwrap_or_else(|| "unknown".to_string());
+    let msg_type =
+        xml_field(message, "MsgType").map_or_else(|| "unknown".to_string(), topic_component);
     if msg_type == "event" {
-        let event_type = xml_field(message, "Event")
+        let event_type =
+            xml_field(message, "Event").map_or_else(|| "unknown".to_string(), topic_component);
+        xml_field(message, "ChangeType")
             .map(topic_component)
-            .unwrap_or_else(|| "unknown".to_string());
-        if let Some(change_type) = xml_field(message, "ChangeType").map(topic_component) {
-            format!("wecom.event.{event_type}.{change_type}")
-        } else {
-            format!("wecom.event.{event_type}")
-        }
+            .map_or_else(
+                || format!("wecom.event.{event_type}"),
+                |change_type| format!("wecom.event.{event_type}.{change_type}"),
+            )
     } else {
         format!("wecom.message.{msg_type}")
     }
@@ -926,7 +1287,8 @@ fn callback_sequence(
 
     if has_stream_key && let Some(create_time) = create_time {
         let suffix = hash_u64 % 10_000;
-        let seq = create_time.timestamp().max(0) as u64 * 10_000 + suffix;
+        let timestamp = u64::try_from(create_time.timestamp().max(0)).unwrap_or(0);
+        let seq = timestamp * 10_000 + suffix;
         return (seq, OrderingPolicy::PerKey);
     }
 
@@ -1053,6 +1415,7 @@ fn operation(
 mod tests {
     use std::collections::BTreeMap;
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_core::{CapabilityToken, OrderingPolicy, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -1097,8 +1460,12 @@ mod tests {
         CapabilityToken { raw }
     }
 
+    fn sample_callback_key() -> String {
+        BASE64.encode([7_u8; 32]).trim_end_matches('=').to_string()
+    }
+
     #[fcp_async_core::runtime::test]
-    async fn health_reflects_whether_token_is_cached() {
+    async fn health_performs_token_probe_and_reports_cached_state() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/cgi-bin/gettoken"))
@@ -1124,13 +1491,14 @@ mod tests {
             .expect("configure should succeed");
 
         let health_before = connector.health().await;
+        assert!(matches!(health_before.status, HealthState::Ready));
         assert_eq!(
             health_before
                 .details
                 .as_ref()
                 .and_then(|details| details.get("token_cached"))
                 .and_then(Value::as_bool),
-            Some(false)
+            Some(true)
         );
 
         let report = connector
@@ -1142,8 +1510,26 @@ mod tests {
             fcp_core::SelfCheckStatus::Ok,
             "self_check should populate the token cache"
         );
+        assert_eq!(
+            report
+                .details
+                .as_ref()
+                .and_then(|details| details.get("live_probe"))
+                .and_then(|probe| probe.get("token_issuance_probe"))
+                .and_then(Value::as_str),
+            Some(WECOM_TOKEN_PROBE)
+        );
+        assert!(
+            report
+                .details
+                .as_ref()
+                .and_then(|details| details.get("operator_guidance"))
+                .is_some(),
+            "self_check should attach operator guidance details"
+        );
 
         let health_after = connector.health().await;
+        assert!(matches!(health_after.status, HealthState::Ready));
         assert_eq!(
             health_after
                 .details
@@ -1151,6 +1537,42 @@ mod tests {
                 .and_then(|details| details.get("token_cached"))
                 .and_then(Value::as_bool),
             Some(true)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_degrades_when_token_probe_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cgi-bin/gettoken"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "errcode": 40013,
+                "errmsg": "invalid corpid"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut connector = WeComConnector::new();
+        connector
+            .configure(json!({
+                "base_url": server.uri(),
+                "corp_id": "corp",
+                "agent_id": 1_000_002_u64,
+                "agent_secret": "wrong-secret",
+                "request_timeout_ms": DEFAULT_TIMEOUT_MS
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Degraded { .. }));
+        assert_eq!(
+            health
+                .details
+                .as_ref()
+                .and_then(|details| details.get("token_cached"))
+                .and_then(Value::as_bool),
+            Some(false)
         );
     }
 
@@ -1208,8 +1630,82 @@ mod tests {
 
         assert_eq!(response.result.as_ref().expect("result")["status"], "ok");
         assert_eq!(
-            response.result.as_ref().expect("result")["token_cached"],
+            response.result.as_ref().expect("result")["details"]["token_cached"],
             json!(true)
+        );
+        assert_eq!(
+            response.result.as_ref().expect("result")["details"]["manifest_hash"],
+            json!(WeComConnector::manifest_hash())
+        );
+    }
+
+    #[test]
+    fn doctor_requires_configuration() {
+        let report = WeComConnector::new().doctor();
+
+        assert!(!report.ready);
+        assert!(
+            report
+                .checks
+                .iter()
+                .find(|check| check.name == "configuration")
+                .is_some_and(|check| !check.passed && check.critical),
+            "doctor should fail the critical configuration check when unconfigured"
+        );
+        assert!(
+            report
+                .operator_guidance
+                .rerun_commands
+                .iter()
+                .any(|command| command.contains("cargo clippy")),
+            "doctor guidance should include rerun commands"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_reports_callback_readiness_and_localhost_override() {
+        let server = MockServer::start().await;
+        let mut connector = WeComConnector::new();
+        connector
+            .configure(json!({
+                "base_url": server.uri(),
+                "corp_id": "corp",
+                "agent_id": 1_000_002_u64,
+                "agent_secret": "secret",
+                "request_timeout_ms": DEFAULT_TIMEOUT_MS,
+                "callback_token": "token-123",
+                "callback_encoding_aes_key": sample_callback_key(),
+                "callback_receive_id": "rx-tenant"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let report = connector.doctor();
+
+        assert!(report.ready, "configured doctor report should be ready");
+        assert!(
+            report
+                .checks
+                .iter()
+                .find(|check| check.name == "endpoint_policy")
+                .and_then(|check| check.message.as_deref())
+                .is_some_and(|message| message.contains("localhost")),
+            "doctor should explain the localhost test override"
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .find(|check| check.name == "callback_crypto")
+                .is_some_and(|check| check.passed),
+            "doctor should report callback verification readiness when secrets are configured"
+        );
+        assert_eq!(
+            report
+                .provisioning
+                .as_ref()
+                .map(|readiness| readiness.callback_receive_id_mode),
+            Some("explicit_override")
         );
     }
 

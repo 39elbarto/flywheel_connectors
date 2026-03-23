@@ -9,7 +9,10 @@ use reqwest::{Url, header::HeaderMap};
 use serde_json::{Value, json};
 
 use crate::error::{QqError, QqResult};
-use crate::types::{AccessTokenResponse, QqConfig, TOKEN_REFRESH_SAFETY_MARGIN_SECS};
+use crate::types::{
+    AccessTokenResponse, NormalizedQqEvent, QqConfig, QqGatewayEvent, QqMessageEvent, QqRouting,
+    TOKEN_REFRESH_SAFETY_MARGIN_SECS,
+};
 
 #[derive(Debug, Clone)]
 struct CachedAccessToken {
@@ -43,6 +46,7 @@ impl QqClient {
     /// Returns an error if the config is invalid or the underlying HTTP client
     /// cannot be initialized.
     pub fn new(config: QqConfig) -> QqResult<Self> {
+        let config = config.normalized();
         validate_host(
             &config.base_url,
             &["api.sgroup.qq.com", "localhost", "127.0.0.1"],
@@ -219,6 +223,12 @@ fn validate_host(raw: &str, allowed_hosts: &[&str]) -> QqResult<()> {
     let host = url
         .host_str()
         .ok_or_else(|| QqError::Config(format!("URL `{raw}` must include a host")))?;
+    let is_local = matches!(host, "localhost" | "127.0.0.1");
+    if !is_local && url.scheme() != "https" {
+        return Err(QqError::Config(format!(
+            "URL `{raw}` must use https for non-local hosts"
+        )));
+    }
     if !allowed_hosts.contains(&host) {
         return Err(QqError::Config(format!("URL host `{host}` is not allowed")));
     }
@@ -275,6 +285,82 @@ pub fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> QqResult<&'a st
     Ok(value)
 }
 
+/// Normalize a raw gateway event into a structured `NormalizedQqEvent`.
+///
+/// Detects routing from the event type, extracts quote context from
+/// `message_reference`, and detects whether attachments are present.
+///
+/// # Errors
+///
+/// Returns an error if the event type is missing or is not a recognized
+/// message event, or if the event data cannot be parsed.
+pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqEvent> {
+    let event_type = event
+        .t
+        .as_deref()
+        .ok_or_else(|| QqError::InvalidInput("gateway event missing event type (t)".into()))?;
+
+    let routing = QqRouting::from_event_type(event_type).ok_or_else(|| {
+        QqError::InvalidInput(format!(
+            "event type `{event_type}` is not a normalizable message event"
+        ))
+    })?;
+
+    let raw_data = event.d.clone().unwrap_or_else(|| serde_json::json!({}));
+
+    // Treat null data as empty object for deserialization
+    let effective_data = if raw_data.is_null() {
+        serde_json::json!({})
+    } else {
+        raw_data.clone()
+    };
+
+    let msg: QqMessageEvent = serde_json::from_value(effective_data)
+        .map_err(|e| QqError::InvalidInput(format!("failed to parse message event data: {e}")))?;
+
+    let reply_to = msg
+        .message_reference
+        .as_ref()
+        .and_then(|r| r.message_id.clone());
+    let is_reply = reply_to.is_some();
+
+    let has_attachments = msg.attachments.as_ref().is_some_and(|a| !a.is_empty());
+
+    // Sender ID: for group messages use group_member_openid, for channel/c2c use author.id
+    let sender_id = match routing {
+        QqRouting::Group => msg
+            .group_member_openid
+            .clone()
+            .or_else(|| msg.author.as_ref().and_then(|a| a.id.clone())),
+        _ => msg.author.as_ref().and_then(|a| a.id.clone()),
+    };
+
+    let sender_name = msg.author.as_ref().and_then(|a| a.username.clone());
+
+    // Group ID: for group messages use group_openid
+    let group_id = match routing {
+        QqRouting::Group => msg.group_openid.clone(),
+        _ => None,
+    };
+
+    Ok(NormalizedQqEvent {
+        event_type: event_type.to_string(),
+        message_id: msg.id,
+        channel_id: msg.channel_id,
+        guild_id: msg.guild_id,
+        group_id,
+        sender_id,
+        sender_name,
+        text: msg.content,
+        timestamp: msg.timestamp,
+        is_reply,
+        reply_to,
+        has_attachments,
+        routing,
+        raw: raw_data,
+    })
+}
+
 fn http_status_error(status: u16, headers: &HeaderMap, body: String) -> QqError {
     let message = if body.trim().is_empty() {
         format!("QQ HTTP request failed with status {status}")
@@ -304,6 +390,7 @@ fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::DEFAULT_TIMEOUT_MS;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, header, method, path},
@@ -351,6 +438,22 @@ mod tests {
     }
 
     #[test]
+    fn trims_config_fields() {
+        let config = QqConfig {
+            base_url: " http://localhost:9999 ".into(),
+            token_base_url: " http://localhost:9999 ".into(),
+            app_id: " test-app ".into(),
+            client_secret: " test-secret ".into(),
+            request_timeout_ms: DEFAULT_TIMEOUT_MS,
+        };
+        let client = QqClient::new(config).unwrap();
+        assert_eq!(client.config().base_url, "http://localhost:9999");
+        assert_eq!(client.config().token_base_url, "http://localhost:9999");
+        assert_eq!(client.config().app_id, "test-app");
+        assert_eq!(client.config().client_secret, "test-secret");
+    }
+
+    #[test]
     fn rejects_disallowed_host() {
         let config = QqConfig {
             base_url: "https://evil.example.com".into(),
@@ -367,6 +470,27 @@ mod tests {
         let config = QqConfig {
             base_url: "http://localhost:9999".into(),
             token_base_url: "https://evil.example.com".into(),
+            app_id: "test-app".into(),
+            client_secret: "test-secret".into(),
+            request_timeout_ms: 30_000,
+        };
+        assert!(QqClient::new(config).is_err());
+    }
+
+    #[test]
+    fn rejects_insecure_public_hosts() {
+        let config = QqConfig {
+            base_url: "http://api.sgroup.qq.com".into(),
+            token_base_url: "https://bots.qq.com".into(),
+            app_id: "test-app".into(),
+            client_secret: "test-secret".into(),
+            request_timeout_ms: 30_000,
+        };
+        assert!(QqClient::new(config).is_err());
+
+        let config = QqConfig {
+            base_url: "https://api.sgroup.qq.com".into(),
+            token_base_url: "http://bots.qq.com".into(),
             app_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: 30_000,
@@ -626,5 +750,252 @@ mod tests {
             .api_request(reqwest::Method::GET, "/gateway", None)
             .await
             .unwrap();
+    }
+
+    // ─── Event normalization tests ──────────────────────────────
+
+    #[test]
+    fn normalize_channel_message() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(1),
+            t: Some("AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-1",
+                "channel_id": "ch-1",
+                "guild_id": "guild-1",
+                "content": "hello world",
+                "timestamp": "2026-03-23T12:00:00Z",
+                "author": {"id": "user-1", "username": "Alice", "bot": false}
+            })),
+            id: Some("evt-1".into()),
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.event_type, "AT_MESSAGE_CREATE");
+        assert_eq!(normalized.routing, QqRouting::Channel);
+        assert_eq!(normalized.message_id.as_deref(), Some("msg-1"));
+        assert_eq!(normalized.channel_id.as_deref(), Some("ch-1"));
+        assert_eq!(normalized.guild_id.as_deref(), Some("guild-1"));
+        assert!(normalized.group_id.is_none());
+        assert_eq!(normalized.sender_id.as_deref(), Some("user-1"));
+        assert_eq!(normalized.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(normalized.text.as_deref(), Some("hello world"));
+        assert!(!normalized.is_reply);
+        assert!(normalized.reply_to.is_none());
+        assert!(!normalized.has_attachments);
+    }
+
+    #[test]
+    fn normalize_group_message() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(2),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-2",
+                "content": "group hello",
+                "group_openid": "group-1",
+                "group_member_openid": "member-1",
+                "author": {"id": "user-2", "username": "Bob"}
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.routing, QqRouting::Group);
+        assert_eq!(normalized.group_id.as_deref(), Some("group-1"));
+        assert_eq!(normalized.sender_id.as_deref(), Some("member-1"));
+        assert_eq!(normalized.sender_name.as_deref(), Some("Bob"));
+        assert!(normalized.channel_id.is_none());
+        assert!(normalized.guild_id.is_none());
+    }
+
+    #[test]
+    fn normalize_c2c_message() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(3),
+            t: Some("C2C_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-3",
+                "content": "private hello",
+                "author": {"id": "user-3", "username": "Carol"}
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.routing, QqRouting::C2c);
+        assert_eq!(normalized.sender_id.as_deref(), Some("user-3"));
+        assert!(normalized.group_id.is_none());
+        assert!(normalized.channel_id.is_none());
+    }
+
+    #[test]
+    fn normalize_message_with_reply() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(4),
+            t: Some("MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-4",
+                "channel_id": "ch-1",
+                "content": "replying",
+                "message_reference": {"message_id": "msg-original"},
+                "author": {"id": "user-4"}
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert!(normalized.is_reply);
+        assert_eq!(normalized.reply_to.as_deref(), Some("msg-original"));
+    }
+
+    #[test]
+    fn normalize_message_with_attachments() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(5),
+            t: Some("AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-5",
+                "channel_id": "ch-1",
+                "content": "see attached",
+                "attachments": [
+                    {"url": "https://example.com/a.png", "filename": "a.png", "content_type": "image/png", "size": 4096},
+                    {"url": "https://example.com/b.pdf", "filename": "b.pdf", "content_type": "application/pdf", "size": 8192}
+                ],
+                "author": {"id": "user-5"}
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert!(normalized.has_attachments);
+        assert!(!normalized.is_reply);
+    }
+
+    #[test]
+    fn normalize_message_empty_attachments_not_flagged() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(6),
+            t: Some("MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-6",
+                "channel_id": "ch-1",
+                "content": "no attachments",
+                "attachments": [],
+                "author": {"id": "user-6"}
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert!(!normalized.has_attachments);
+    }
+
+    #[test]
+    fn normalize_rejects_missing_event_type() {
+        let event = QqGatewayEvent {
+            op: 1,
+            s: None,
+            t: None,
+            d: None,
+            id: None,
+        };
+        let err = normalize_message_event(&event).unwrap_err();
+        assert!(matches!(err, QqError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn normalize_rejects_non_message_event_type() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(1),
+            t: Some("GUILD_CREATE".into()),
+            d: Some(json!({})),
+            id: None,
+        };
+        let err = normalize_message_event(&event).unwrap_err();
+        match &err {
+            QqError::InvalidInput(msg) => {
+                assert!(msg.contains("GUILD_CREATE"));
+                assert!(msg.contains("not a normalizable"));
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_handles_null_data() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(1),
+            t: Some("AT_MESSAGE_CREATE".into()),
+            d: None,
+            id: None,
+        };
+        // null data deserializes to QqMessageEvent with all None fields
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.routing, QqRouting::Channel);
+        assert!(normalized.message_id.is_none());
+        assert!(normalized.text.is_none());
+        assert!(normalized.sender_id.is_none());
+    }
+
+    #[test]
+    fn normalize_group_message_create_variant() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(10),
+            t: Some("GROUP_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-10",
+                "content": "group variant",
+                "group_openid": "group-2",
+                "group_member_openid": "member-2"
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.routing, QqRouting::Group);
+        assert_eq!(normalized.group_id.as_deref(), Some("group-2"));
+        assert_eq!(normalized.sender_id.as_deref(), Some("member-2"));
+    }
+
+    #[test]
+    fn normalize_group_falls_back_to_author_id() {
+        // When group_member_openid is missing, fall back to author.id
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(11),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-11",
+                "content": "fallback sender",
+                "group_openid": "group-3",
+                "author": {"id": "user-fallback", "username": "Fallback"}
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.routing, QqRouting::Group);
+        assert_eq!(normalized.sender_id.as_deref(), Some("user-fallback"));
+    }
+
+    #[test]
+    fn normalize_raw_preserves_original_data() {
+        let data = json!({
+            "id": "msg-raw",
+            "content": "raw test",
+            "extra_field": "preserved"
+        });
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(12),
+            t: Some("MESSAGE_CREATE".into()),
+            d: Some(data),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.raw["extra_field"], "preserved");
+        assert_eq!(normalized.raw["id"], "msg-raw");
     }
 }

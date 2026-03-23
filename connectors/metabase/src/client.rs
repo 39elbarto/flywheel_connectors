@@ -97,7 +97,8 @@ impl MetabaseClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             MetabaseAuth::SessionToken(token) => req.header("X-Metabase-Session", token),
-            MetabaseAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
+            // `credential_id` is a host-side reference and must not leak upstream.
+            MetabaseAuth::CredentialId(_) => req,
         }
     }
 
@@ -256,6 +257,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.base_url, "http://localhost:3000/api");
+    }
+
+    #[test]
+    fn add_auth_credential_id_does_not_leak_header() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::CredentialId(CredentialId::new()),
+            "https://metabase.example.com/api",
+        )
+        .unwrap();
+
+        let request = client
+            .add_auth(
+                client
+                    .client
+                    .get("https://metabase.example.com/api/dashboard"),
+            )
+            .build()
+            .unwrap();
+
+        assert!(request.headers().get("X-FCP-Credential-Id").is_none());
+        assert!(request.headers().get("X-Metabase-Session").is_none());
     }
 
     #[test]

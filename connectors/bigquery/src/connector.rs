@@ -8,13 +8,14 @@ use fcp_core::{
     Introspection, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
     ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
-use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
+#[cfg(test)]
+use crate::client::is_local_test_host;
 use crate::{
-    client::{BigQueryAuth, BigQueryClient, DEFAULT_BASE_URL},
+    client::{BigQueryAuth, BigQueryClient, DEFAULT_BASE_URL, normalize_base_url},
     error::BigQueryError,
 };
 
@@ -49,7 +50,9 @@ impl BigQueryConfig {
         let base_url = params
             .get("base_url")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+            .map(|value| normalize_base_url(Some(value)))
+            .transpose()
+            .map_err(|error| error.to_fcp_error())?;
 
         Ok(Self {
             auth: BigQueryAuth { access_token },
@@ -170,9 +173,15 @@ impl BigQueryConnector {
         )
         .map_err(|e| e.to_fcp_error())?;
 
+        if let Some(existing) = self.client.take() {
+            existing.shutdown();
+        }
+
         self.client = Some(Arc::new(client));
         self.config = Some(config);
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(json!({}))
     }
 
@@ -191,7 +200,10 @@ impl BigQueryConnector {
         let session_id = params
             .get("session_id")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| Some("bigquery-local-session".into()));
 
         self.session_id = session_id;
         self.base.set_handshaken(true);
@@ -319,16 +331,17 @@ impl BigQueryConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let project_id_required = self
+            .config
+            .as_ref()
+            .and_then(|config| config.project_id.as_deref())
+            .is_none();
         let introspection = Introspection {
             operations: vec![
                 OperationInfo {
                     id: OperationId::from_static("bigquery.datasets.list"),
                     summary: "List datasets in a project".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["project_id"],
-                        "properties": {"project_id": {"type": "string"}}
-                    }),
+                    input_schema: project_input_schema(project_id_required, json!({})),
                     output_schema: json!({
                         "type": "object",
                         "required": ["datasets"],
@@ -351,14 +364,12 @@ impl BigQueryConnector {
                 OperationInfo {
                     id: OperationId::from_static("bigquery.tables.list"),
                     summary: "List tables in a dataset".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["project_id", "dataset_id"],
-                        "properties": {
-                            "project_id": {"type": "string"},
+                    input_schema: project_input_schema(
+                        project_id_required,
+                        json!({
                             "dataset_id": {"type": "string"}
-                        }
-                    }),
+                        }),
+                    ),
                     output_schema: json!({
                         "type": "object",
                         "required": ["tables"],
@@ -387,11 +398,7 @@ impl BigQueryConnector {
                 OperationInfo {
                     id: OperationId::from_static("bigquery.jobs.list"),
                     summary: "List recent jobs".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["project_id"],
-                        "properties": {"project_id": {"type": "string"}}
-                    }),
+                    input_schema: project_input_schema(project_id_required, json!({})),
                     output_schema: json!({
                         "type": "object",
                         "required": ["jobs"],
@@ -414,15 +421,13 @@ impl BigQueryConnector {
                 OperationInfo {
                     id: OperationId::from_static("bigquery.jobs.query"),
                     summary: "Run a SQL query".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["project_id", "query"],
-                        "properties": {
-                            "project_id": {"type": "string"},
+                    input_schema: project_input_schema(
+                        project_id_required,
+                        json!({
                             "query": {"type": "string", "description": "SQL query string"},
                             "use_legacy_sql": {"type": "boolean"}
-                        }
-                    }),
+                        }),
+                    ),
                     output_schema: json!({
                         "type": "object",
                         "required": ["rows"],
@@ -526,8 +531,11 @@ impl BigQueryConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("BigQuery connector shutting down");
-        self.client = None;
+        if let Some(client) = self.client.take() {
+            client.shutdown();
+        }
         self.config = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -543,6 +551,8 @@ impl BigQueryConnector {
         input
             .get("project_id")
             .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .or_else(|| self.config.as_ref().and_then(|c| c.project_id.as_deref()))
             .ok_or_else(|| BigQueryError::Api {
                 status_code: 400,
@@ -595,42 +605,79 @@ impl BigQueryConnector {
 
 /// Extract a required string field from input.
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, BigQueryError> {
-    input
+    let value = input
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| BigQueryError::Api {
             status_code: 400,
             message: format!("Missing required field: {field}"),
-        })
+        })?;
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(BigQueryError::Api {
+            status_code: 400,
+            message: format!("Missing required field: {field}"),
+        });
+    }
+
+    Ok(trimmed)
+}
+
+fn project_input_schema(
+    project_id_required: bool,
+    mut properties: serde_json::Value,
+) -> serde_json::Value {
+    let properties_obj = properties
+        .as_object_mut()
+        .expect("project_input_schema properties must be an object");
+    properties_obj.insert("project_id".into(), json!({ "type": "string" }));
+
+    let mut required = Vec::new();
+    if project_id_required {
+        required.push("project_id");
+    }
+    if properties_obj.contains_key("dataset_id") {
+        required.push("dataset_id");
+    }
+    if properties_obj.contains_key("query") {
+        required.push("query");
+    }
+
+    json!({
+        "type": "object",
+        "required": required,
+        "properties": properties,
+    })
 }
 
 /// Build the provisioning recipe for the `BigQuery` connector.
 ///
-/// `BigQuery` uses a service account JSON key (or OAuth access token). The recipe
-/// captures: (1) prompt for the service account key, (2) store the secret, and
+/// `BigQuery` uses a bearer access token. The recipe
+/// captures: (1) prompt for the access token, (2) store the secret, and
 /// (3) prompt for a default project ID.
 pub fn provisioning_recipe() -> ProvisioningRecipe {
     ProvisioningRecipe::new(
-        RecipeId::new("bigquery.service_account"),
+        RecipeId::new("bigquery.access_token"),
         "1",
-        "Provision BigQuery connector with a service account key or OAuth token",
+        "Provision BigQuery connector with a bearer access token",
     )
     .with_step(ProvisioningStep::new(
-        StepId::new("enter_service_account_key"),
+        StepId::new("enter_access_token"),
         ProvisioningStepType::PromptSecret {
-            message: "Paste your BigQuery service account JSON key or OAuth access token".into(),
+            message: "Paste your BigQuery bearer access token".into(),
         },
     ))
     .with_step(
         ProvisioningStep::new(
-            StepId::new("store_service_account_key"),
+            StepId::new("store_access_token"),
             ProvisioningStepType::StoreSecret {
                 key: "access_token".into(),
-                value_from: StepId::new("enter_service_account_key"),
+                value_from: StepId::new("enter_access_token"),
                 scope: "connector:fcp.bigquery".into(),
             },
         )
-        .depends_on(StepId::new("enter_service_account_key")),
+        .depends_on(StepId::new("enter_access_token")),
     )
     .with_step(
         ProvisioningStep::new(
@@ -639,7 +686,7 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
                 message: "Enter the default GCP project ID for BigQuery operations".into(),
             },
         )
-        .depends_on(StepId::new("enter_service_account_key")),
+        .depends_on(StepId::new("enter_access_token")),
     )
 }
 
@@ -650,40 +697,13 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
 ///   - `*.googleapis.com` (other Google endpoints)
 ///   - `localhost`, `127.0.0.1`, `::1` (local testing)
 fn base_url_policy(base_url: &str) -> (bool, String) {
-    let parsed = match Url::parse(base_url) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return (false, format!("base_url could not be parsed: {error}"));
-        }
-    };
-
-    let Some(host) = parsed.host_str() else {
-        return (false, "base_url must include a host".into());
-    };
-
-    let local = is_local_test_host(host);
-    let allowed_host = host.eq_ignore_ascii_case("bigquery.googleapis.com")
-        || host.to_ascii_lowercase().ends_with(".googleapis.com")
-        || local;
-    let secure_or_local = parsed.scheme() == "https" || local;
-
-    if allowed_host && secure_or_local {
-        (
+    match normalize_base_url(Some(base_url)) {
+        Ok(normalized) => (
             true,
-            format!("Endpoint accepted by policy checks: {base_url}"),
-        )
-    } else {
-        (
-            false,
-            format!(
-                "Endpoint must use https and googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
-            ),
-        )
+            format!("Endpoint accepted by policy checks: {normalized}"),
+        ),
+        Err(error) => (false, error.to_string()),
     }
-}
-
-fn is_local_test_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Build the operations info for introspection.
@@ -753,13 +773,19 @@ mod tests {
     fn config_with_custom_base_url() {
         let config = BigQueryConfig::from_params(&json!({
             "access_token": "tok",
-            "base_url": "https://test.bq.example.com/v2",
+            "base_url": "http://localhost:8080/v2",
         }))
         .unwrap();
-        assert_eq!(
-            config.base_url,
-            Some("https://test.bq.example.com/v2".into())
-        );
+        assert_eq!(config.base_url, Some("http://localhost:8080/v2".into()));
+    }
+
+    #[test]
+    fn config_rejects_invalid_base_url() {
+        let result = BigQueryConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com",
+        }));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -857,6 +883,14 @@ mod tests {
     fn require_str_missing() {
         let input = json!({});
         assert!(require_str(&input, "project_id").is_err());
+    }
+
+    #[test]
+    fn require_str_rejects_empty_and_whitespace() {
+        let empty = json!({"project_id": ""});
+        let whitespace = json!({"project_id": "   "});
+        assert!(require_str(&empty, "project_id").is_err());
+        assert!(require_str(&whitespace, "project_id").is_err());
     }
 
     #[test]
@@ -1160,15 +1194,12 @@ mod tests {
         let config = BigQueryConfig::from_params(&json!({
             "access_token": "ya29.abc",
             "project_id": "proj-123",
-            "base_url": "https://custom.example.com/bq",
+            "base_url": "http://localhost:8181/bq",
         }))
         .unwrap();
         assert_eq!(config.auth.access_token, "ya29.abc");
         assert_eq!(config.project_id, Some("proj-123".into()));
-        assert_eq!(
-            config.base_url,
-            Some("https://custom.example.com/bq".into())
-        );
+        assert_eq!(config.base_url, Some("http://localhost:8181/bq".into()));
     }
 
     #[test]
@@ -1406,11 +1437,13 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_custom_base_url_rejected() {
-        let config = BigQueryConfig::from_params(&json!({
-            "access_token": "tok",
-            "base_url": "https://evil.example.com",
-        }))
-        .unwrap();
+        let config = BigQueryConfig {
+            auth: BigQueryAuth {
+                access_token: "tok".into(),
+            },
+            project_id: None,
+            base_url: Some("https://evil.example.com".into()),
+        };
         let readiness = config.provisioning_readiness();
         assert!(!readiness.network_ok);
         assert!(readiness.network_message.contains("googleapis.com"));
@@ -1432,7 +1465,7 @@ mod tests {
     #[test]
     fn provisioning_recipe_has_3_steps() {
         let recipe = provisioning_recipe();
-        assert_eq!(recipe.id.as_str(), "bigquery.service_account");
+        assert_eq!(recipe.id.as_str(), "bigquery.access_token");
         assert_eq!(recipe.version, "1");
         assert_eq!(recipe.steps.len(), 3);
     }
@@ -1440,8 +1473,8 @@ mod tests {
     #[test]
     fn provisioning_recipe_step_order() {
         let recipe = provisioning_recipe();
-        assert_eq!(recipe.steps[0].id.as_str(), "enter_service_account_key");
-        assert_eq!(recipe.steps[1].id.as_str(), "store_service_account_key");
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_access_token");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_access_token");
         assert_eq!(recipe.steps[2].id.as_str(), "enter_project_id");
     }
 
@@ -1450,22 +1483,16 @@ mod tests {
         let recipe = provisioning_recipe();
         assert!(recipe.steps[0].depends_on.is_empty());
         assert_eq!(recipe.steps[1].depends_on.len(), 1);
-        assert_eq!(
-            recipe.steps[1].depends_on[0].as_str(),
-            "enter_service_account_key"
-        );
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_access_token");
         assert_eq!(recipe.steps[2].depends_on.len(), 1);
-        assert_eq!(
-            recipe.steps[2].depends_on[0].as_str(),
-            "enter_service_account_key"
-        );
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_access_token");
     }
 
     #[test]
     fn provisioning_recipe_serializes() {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
-        assert_eq!(v["id"], "bigquery.service_account");
+        assert_eq!(v["id"], "bigquery.access_token");
         assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     }
 
@@ -1500,6 +1527,91 @@ mod tests {
             assert_eq!(scope, "connector:fcp.bigquery");
         } else {
             panic!("step 1 should be StoreSecret");
+        }
+    }
+
+    #[test]
+    fn resolve_project_id_ignores_blank_input_and_uses_config_default() {
+        let connector = configured_connector_with_project();
+        let input = json!({ "project_id": "   " });
+        assert_eq!(
+            connector.resolve_project_id(&input).unwrap(),
+            "configured-project"
+        );
+    }
+
+    #[test]
+    fn handshake_without_session_id_reports_healthy() {
+        let mut connector = configured_connector();
+        let rt = runtime();
+        rt.block_on(connector.handle_handshake(json!({}))).unwrap();
+
+        let health = rt.block_on(connector.handle_health()).unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(health["handshaken"], true);
+
+        let doctor = rt.block_on(connector.handle_doctor()).unwrap();
+        assert_eq!(doctor["status"], "healthy");
+    }
+
+    #[test]
+    fn configure_clears_previous_session_state() {
+        let mut connector = configured_connector();
+        let rt = runtime();
+        rt.block_on(connector.handle_handshake(json!({"session_id": "session-1"})))
+            .unwrap();
+
+        rt.block_on(connector.handle_configure(json!({
+            "access_token": "tok-2",
+            "project_id": "reconfigured-project",
+        })))
+        .unwrap();
+
+        let health = rt.block_on(connector.handle_health()).unwrap();
+        assert_eq!(health["status"], "degraded");
+        assert_eq!(health["configured"], true);
+        assert_eq!(health["handshaken"], false);
+        assert!(connector.session_id.is_none());
+    }
+
+    #[test]
+    fn shutdown_clears_session_state() {
+        let mut connector = configured_connector();
+        let rt = runtime();
+        rt.block_on(connector.handle_handshake(json!({"session_id": "session-1"})))
+            .unwrap();
+
+        rt.block_on(connector.handle_shutdown(json!({}))).unwrap();
+
+        let health = rt.block_on(connector.handle_health()).unwrap();
+        assert_eq!(health["status"], "unconfigured");
+        assert_eq!(health["configured"], false);
+        assert_eq!(health["handshaken"], false);
+        assert!(connector.session_id.is_none());
+    }
+
+    #[test]
+    fn introspect_makes_project_id_optional_when_default_configured() {
+        let connector = configured_connector_with_project();
+        let rt = runtime();
+        let introspection = rt.block_on(connector.handle_introspect()).unwrap();
+        let operations = introspection["operations"].as_array().unwrap();
+
+        for operation_id in [
+            "bigquery.datasets.list",
+            "bigquery.jobs.list",
+            "bigquery.tables.list",
+            "bigquery.jobs.query",
+        ] {
+            let operation = operations
+                .iter()
+                .find(|operation| operation["id"] == operation_id)
+                .unwrap();
+            let required = operation["input_schema"]["required"].as_array().unwrap();
+            assert!(
+                !required.iter().any(|value| value == "project_id"),
+                "{operation_id} should not require project_id when a default is configured"
+            );
         }
     }
 
@@ -1571,5 +1683,33 @@ mod tests {
         assert!(!is_local_test_host("example.com"));
         assert!(!is_local_test_host("192.168.1.1"));
         assert!(!is_local_test_host("googleapis.com"));
+    }
+
+    fn runtime() -> fcp_async_core::runtime::Runtime {
+        fcp_async_core::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn configured_connector() -> BigQueryConnector {
+        let mut connector = BigQueryConnector::new();
+        let rt = runtime();
+        rt.block_on(connector.handle_configure(json!({
+            "access_token": "tok",
+        })))
+        .unwrap();
+        connector
+    }
+
+    fn configured_connector_with_project() -> BigQueryConnector {
+        let mut connector = BigQueryConnector::new();
+        let rt = runtime();
+        rt.block_on(connector.handle_configure(json!({
+            "access_token": "tok",
+            "project_id": "configured-project",
+        })))
+        .unwrap();
+        connector
     }
 }

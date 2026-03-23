@@ -8,14 +8,8 @@ use fcp_async_core::{
 use fcp_core::{FcpError, FcpResult};
 
 use crate::error::IrcError;
-use crate::types::IrcConfig;
+use crate::types::{IrcConfig, validate_irc_atom, validate_irc_value};
 use std::time::Duration;
-
-/// Strip `\r` and `\n` from user-controlled strings to prevent
-/// CRLF injection of additional IRC commands.
-fn sanitize_irc_input(s: &str) -> String {
-    s.chars().filter(|&c| c != '\r' && c != '\n').collect()
-}
 
 // ── Stream abstraction ──
 
@@ -140,18 +134,22 @@ impl IrcSession {
     ///
     /// # Errors
     ///
-    /// Returns an error if sending the JOIN command or reading responses fails.
-    pub async fn join(&mut self, channel: &str, channel_key: Option<&str>) -> FcpResult<()> {
-        let safe_channel = sanitize_irc_input(channel);
-        let cmd = channel_key.map_or_else(
-            || format!("JOIN {safe_channel}"),
-            |key| {
-                let safe_key = sanitize_irc_input(key);
-                format!("JOIN {safe_channel} {safe_key}")
-            },
-        );
+    /// Returns an error if sending the JOIN command fails.
+    pub async fn join(
+        &mut self,
+        channel: &str,
+        channel_key: Option<&str>,
+        response_lines: usize,
+    ) -> FcpResult<()> {
+        validate_irc_atom("channel", channel, false)?;
+        let cmd = if let Some(key) = channel_key {
+            validate_irc_atom("channel_key", key, false)?;
+            format!("JOIN {channel} {key}")
+        } else {
+            format!("JOIN {channel}")
+        };
         self.send_line(&cmd).await?;
-        self.read_until(5).await?;
+        self.read_up_to(response_lines).await?;
         Ok(())
     }
 
@@ -161,22 +159,28 @@ impl IrcSession {
     ///
     /// Returns an error if sending the message fails.
     pub async fn send_privmsg(&mut self, target: &str, message: &str) -> FcpResult<()> {
-        let safe_target = sanitize_irc_input(target);
-        let safe_message = sanitize_irc_input(message);
-        self.send_line(&format!("PRIVMSG {safe_target} :{safe_message}"))
+        validate_irc_atom("target", target, false)?;
+        validate_irc_value("message", message)?;
+        self.send_line(&format!("PRIVMSG {target} :{message}"))
             .await
     }
 
-    /// Read an additional bounded number of lines from the server.
+    /// Read up to an additional bounded number of lines from the server.
+    ///
+    /// Quiet channels are common after `JOIN`, so a read timeout ends the
+    /// bounded read instead of surfacing a hard error.
     ///
     /// # Errors
     ///
-    /// Returns an error if reading a line fails.
-    pub async fn read_until(&mut self, sample_lines: usize) -> FcpResult<()> {
+    /// Returns an error if reading a line fails for reasons other than timeout.
+    pub async fn read_up_to(&mut self, sample_lines: usize) -> FcpResult<()> {
         let target_len = self.lines.len().saturating_add(sample_lines);
         while self.lines.len() < target_len {
-            if self.read_line().await?.is_none() {
-                break;
+            match self.read_line().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(FcpError::UpstreamTimeout { .. }) => break,
+                Err(error) => return Err(error),
             }
         }
         Ok(())
@@ -203,6 +207,7 @@ where
     F: FnOnce(IrcSession) -> Fut,
     Fut: std::future::Future<Output = FcpResult<Vec<String>>>,
 {
+    config.validate()?;
     let address = config.address();
     let tcp = fcp_async_core::time::timeout(config.timeout(), TcpStream::connect(address))
         .await
@@ -247,15 +252,15 @@ where
     };
 
     if let Some(password) = config.password.as_deref() {
-        let safe_password = sanitize_irc_input(password);
-        session.send_line(&format!("PASS {safe_password}")).await?;
+        validate_irc_value("password", password)?;
+        session.send_line(&format!("PASS :{password}")).await?;
     }
-    let safe_nick = sanitize_irc_input(&config.nick);
-    let safe_username = sanitize_irc_input(&config.username);
-    let safe_realname = sanitize_irc_input(&config.realname);
-    session.send_line(&format!("NICK {safe_nick}")).await?;
+    session.send_line(&format!("NICK {}", config.nick)).await?;
     session
-        .send_line(&format!("USER {safe_username} 0 * :{safe_realname}"))
+        .send_line(&format!(
+            "USER {} 0 * :{}",
+            config.username, config.realname
+        ))
         .await?;
     session.await_welcome().await?;
     f(session).await
@@ -264,7 +269,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_async_core::io::ReadBuf;
     use serde_json::json;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     fn test_config() -> IrcConfig {
         serde_json::from_value(json!({
@@ -300,21 +309,14 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_strips_cr_lf() {
-        assert_eq!(sanitize_irc_input("hello\r\nworld"), "helloworld");
-        assert_eq!(sanitize_irc_input("no\rnewlines\nhere"), "nonewlineshere");
-        assert_eq!(sanitize_irc_input("clean"), "clean");
-        assert_eq!(sanitize_irc_input(""), "");
-    }
-
-    #[test]
-    fn sanitize_prevents_crlf_injection() {
-        // An attacker might try to inject extra IRC commands via CRLF
-        let malicious = "#channel\r\nPRIVMSG #admin :hacked";
-        let sanitized = sanitize_irc_input(malicious);
-        assert_eq!(sanitized, "#channelPRIVMSG #admin :hacked");
-        assert!(!sanitized.contains('\r'));
-        assert!(!sanitized.contains('\n'));
+    fn config_validation_rejects_bad_command_atoms() {
+        let bad_nick: IrcConfig = serde_json::from_value(json!({
+            "server": "irc.example.com",
+            "nick": "bad nick",
+            "tls": false
+        }))
+        .unwrap();
+        assert!(bad_nick.validate().is_err());
     }
 
     #[fcp_async_core::runtime::test]
@@ -335,5 +337,67 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    struct PendingStream;
+
+    impl AsyncRead for PendingStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for PendingStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn read_up_to_stops_cleanly_on_quiet_timeout() {
+        let mut session = IrcSession {
+            stream: BufReader::new(Box::new(PendingStream)),
+            timeout: Duration::from_millis(10),
+            lines: vec!["existing".into()],
+        };
+
+        session
+            .read_up_to(3)
+            .await
+            .expect("quiet timeout should end sampling cleanly");
+
+        assert_eq!(session.lines, vec!["existing"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_privmsg_rejects_multi_target_fanout() {
+        let mut session = IrcSession {
+            stream: BufReader::new(Box::new(PendingStream)),
+            timeout: Duration::from_millis(10),
+            lines: Vec::new(),
+        };
+
+        let error = session
+            .send_privmsg("#rust,#ops", "hello")
+            .await
+            .expect_err("multiple targets should be rejected");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 }

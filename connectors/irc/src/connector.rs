@@ -257,7 +257,7 @@ impl IrcConnector {
                 let channel = required_string(&req.input, "channel")?;
                 let channel_key = req.input.get("channel_key").and_then(Value::as_str);
                 let transcript = with_irc_session(&state.config, |mut session| async move {
-                    session.join(channel, channel_key).await?;
+                    session.join(channel, channel_key, 5).await?;
                     session.quit().await?;
                     Ok::<_, FcpError>(session.lines)
                 })
@@ -280,10 +280,11 @@ impl IrcConnector {
                     .unwrap_or(DEFAULT_SAMPLE_LINES as u64)
                     .clamp(1, 200) as usize;
                 let transcript = with_irc_session(&state.config, |mut session| async move {
-                    session.join(channel, None).await?;
-                    session.read_until(sample_lines).await?;
+                    session.join(channel, None, 0).await?;
+                    let sample_start = session.lines.len();
+                    session.read_up_to(sample_lines).await?;
                     session.quit().await?;
-                    Ok::<_, FcpError>(session.lines)
+                    Ok::<_, FcpError>(session.lines.into_iter().skip(sample_start).collect())
                 })
                 .await?;
                 let events = parse_irc_lines(&transcript, &state.config.nick);
@@ -376,11 +377,14 @@ impl FcpConnector for IrcConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
+        let handshake_completed = self.verifier.is_some();
         HealthSnapshot {
-            status: if self.state.is_some() {
-                HealthState::Ready
-            } else {
-                HealthState::Starting
+            status: match self.state {
+                Some(_) if handshake_completed => HealthState::Ready,
+                Some(_) => HealthState::Degraded {
+                    reason: "handshake pending".into(),
+                },
+                None => HealthState::Starting,
             },
             uptime_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             load: None,
@@ -390,6 +394,7 @@ impl FcpConnector for IrcConnector {
                     "port": state.config.port(),
                     "tls": state.config.tls,
                     "nick": state.config.nick,
+                    "handshake_completed": handshake_completed,
                 })
             }),
             rate_limit: None,
@@ -649,7 +654,21 @@ fn normalized_event_schema() -> Value {
 mod tests {
     use super::*;
     use crate::types::{DEFAULT_PORT_PLAIN, DEFAULT_PORT_TLS};
-    use fcp_core::SelfCheckStatus;
+    use fcp_core::{SelfCheckStatus, ZoneId};
+
+    fn handshake_request() -> HandshakeRequest {
+        HandshakeRequest {
+            protocol_version: "2.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key: [7u8; 32],
+            nonce: [9u8; 32],
+            capabilities_requested: vec![],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        }
+    }
 
     #[test]
     fn config_requires_server() {
@@ -799,7 +818,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn health_ready_when_configured() {
+    async fn health_degraded_when_handshake_pending() {
         let mut connector = IrcConnector::new();
         connector
             .configure(json!({
@@ -809,9 +828,30 @@ mod tests {
             .await
             .unwrap();
         let health = connector.health().await;
-        assert!(matches!(health.status, HealthState::Ready));
+        assert!(matches!(
+            health.status,
+            HealthState::Degraded { ref reason } if reason == "handshake pending"
+        ));
         let details = health.details.unwrap();
         assert_eq!(details["server"], "irc.libera.chat");
+        assert_eq!(details["handshake_completed"], json!(false));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_ready_after_handshake() {
+        let mut connector = IrcConnector::new();
+        connector
+            .configure(json!({
+                "server": "irc.libera.chat",
+                "nick": "flywheel"
+            }))
+            .await
+            .unwrap();
+        connector.handshake(handshake_request()).await.unwrap();
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Ready));
+        let details = health.details.unwrap();
+        assert_eq!(details["handshake_completed"], json!(true));
     }
 
     #[fcp_async_core::runtime::test]

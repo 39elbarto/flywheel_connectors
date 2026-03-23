@@ -43,9 +43,8 @@ impl WeComError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(error) => error.is_timeout() || error.is_connect(),
-            Self::RateLimited { .. } => true,
+            Self::RateLimited { .. } | Self::Token(_) => true,
             Self::Api { errcode, .. } => matches!(errcode, 429 | 500 | 502 | 503 | 504),
-            Self::Token(_) => true,
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::Async(_)

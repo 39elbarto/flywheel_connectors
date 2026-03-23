@@ -93,6 +93,10 @@ impl CloudflareConfig {
         if self.request_timeout_ms == 0 {
             return Err("request_timeout_ms must be greater than zero".into());
         }
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+        if !network_ok {
+            return Err(network_message);
+        }
         match &self.auth {
             CloudflareAuth::ApiKey { api_key, email }
                 if !api_key.trim().is_empty() && email.trim().is_empty() =>
@@ -1563,18 +1567,21 @@ impl CloudflareConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
     use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
 
     fn tc() -> serde_json::Value {
         json!({"mode": "api_token", "api_token": "t", "account_id": "a"})
     }
 
-    fn handshake_req() -> HandshakeRequest {
+    fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
             zone_dir: None,
-            host_public_key: [0u8; 32],
+            host_public_key,
             nonce: [0u8; 32],
             capabilities_requested: vec![
                 CapabilityId::from_static(CAP_ZONES_READ),
@@ -1587,7 +1594,43 @@ mod tests {
         }
     }
 
-    fn invoke_req(op: &'static str, input: serde_json::Value) -> InvokeRequest {
+    fn capability_for_operation(op: &'static str) -> &'static str {
+        match op {
+            OP_ZONES_LIST | OP_HEALTH => CAP_ZONES_READ,
+            OP_DNS_LIST => CAP_DNS_READ,
+            OP_DNS_CREATE | OP_DNS_UPDATE | OP_DNS_DELETE => CAP_DNS_WRITE,
+            OP_WORKERS_LIST | OP_WORKERS_GET => CAP_WORKERS_READ,
+            OP_WORKERS_DEPLOY | OP_WORKERS_DELETE => CAP_WORKERS_WRITE,
+            OP_PAGES_LIST => CAP_PAGES_READ,
+            OP_PAGES_DEPLOY => CAP_PAGES_WRITE,
+            OP_KV_GET => CAP_KV_READ,
+            OP_KV_PUT | OP_KV_DELETE => CAP_KV_WRITE,
+            _ => CAP_ZONES_READ,
+        }
+    }
+
+    fn signed_capability_token(
+        signing_key: &Ed25519SigningKey,
+        op: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability_for_operation(op))
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[op])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .sign(signing_key)
+            .expect("capability token should sign");
+        CapabilityToken { raw }
+    }
+
+    fn invoke_req(
+        op: &'static str,
+        input: serde_json::Value,
+        capability_token: CapabilityToken,
+    ) -> InvokeRequest {
         InvokeRequest {
             r#type: "invoke".into(),
             id: RequestId::new("r1"),
@@ -1595,7 +1638,7 @@ mod tests {
             operation: OperationId::from_static(op),
             zone_id: ZoneId::work(),
             input,
-            capability_token: CapabilityToken::test_token(),
+            capability_token,
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -1676,12 +1719,13 @@ mod tests {
         let config = configured.config.as_ref().unwrap();
         assert_eq!(config.account_id, "account-123");
         assert_eq!(config.base_url, "https://api.cloudflare.com/client/v4");
-        match &config.auth {
-            CloudflareAuth::ApiKey { api_key, email } => {
-                assert_eq!(api_key, "test-key");
-                assert_eq!(email, "ops@example.com");
-            }
-            CloudflareAuth::ApiToken { .. } => panic!("expected api_key auth"),
+        assert!(
+            matches!(&config.auth, CloudflareAuth::ApiKey { .. }),
+            "expected api_key auth"
+        );
+        if let CloudflareAuth::ApiKey { api_key, email } = &config.auth {
+            assert_eq!(api_key, "test-key");
+            assert_eq!(email, "ops@example.com");
         }
     }
 
@@ -1700,9 +1744,13 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        match &configured.config.as_ref().unwrap().auth {
-            CloudflareAuth::ApiToken { api_token } => assert_eq!(api_token, "token-123"),
-            CloudflareAuth::ApiKey { .. } => panic!("expected api_token auth"),
+        let auth = &configured.config.as_ref().unwrap().auth;
+        assert!(
+            matches!(auth, CloudflareAuth::ApiToken { .. }),
+            "expected api_token auth"
+        );
+        if let CloudflareAuth::ApiToken { api_token } = auth {
+            assert_eq!(api_token, "token-123");
         }
     }
 
@@ -1716,6 +1764,37 @@ mod tests {
                     "api_token":"t",
                     "account_id":"a",
                     "request_timeout_ms":0
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+    #[test]
+    fn configure_rejects_invalid_network_constraints() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = CloudflareConnector::new();
+                c.configure(json!({
+                    "mode":"api_token",
+                    "api_token":"t",
+                    "account_id":"a",
+                    "base_url":"http://api.cloudflare.com/client/v4"
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = CloudflareConnector::new();
+                c.configure(json!({
+                    "mode":"api_token",
+                    "api_token":"t",
+                    "account_id":"a",
+                    "base_url":"https://evil.example.com/client/v4"
                 }))
                 .await
             })
@@ -1826,8 +1905,13 @@ mod tests {
             fcp_async_core::runtime::block_on_sync(async {
                 let mut c = CloudflareConnector::new();
                 c.configure(tc()).await.unwrap();
-                c.handshake(handshake_req()).await.unwrap();
-                c.invoke(invoke_req("cf.nope", json!({}))).await
+                c.handshake(handshake_req([0u8; 32])).await.unwrap();
+                c.invoke(invoke_req(
+                    "cf.nope",
+                    json!({}),
+                    CapabilityToken::test_token(),
+                ))
+                .await
             })
             .unwrap()
             .is_err()
@@ -1835,23 +1919,34 @@ mod tests {
     }
     #[test]
     fn invoke_missing_zone() {
-        assert!(
-            fcp_async_core::runtime::block_on_sync(async {
-                let mut c = CloudflareConnector::new();
-                c.configure(tc()).await.unwrap();
-                c.handshake(handshake_req()).await.unwrap();
-                c.invoke(invoke_req(OP_DNS_LIST, json!({}))).await
-            })
-            .unwrap()
-            .is_err()
-        );
+        let error = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = CloudflareConnector::new();
+            let signing_key = Ed25519SigningKey::generate();
+            c.configure(tc()).await.unwrap();
+            c.handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+                .await
+                .unwrap();
+            c.invoke(invoke_req(
+                OP_DNS_LIST,
+                json!({}),
+                signed_capability_token(&signing_key, OP_DNS_LIST),
+            ))
+            .await
+        })
+        .unwrap()
+        .expect_err("missing zone_id should be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+        assert!(error.to_string().contains("Missing: zone_id"));
     }
     #[test]
     fn invoke_dns_create_rejects_invalid_optional_numeric_field() {
         let error = fcp_async_core::runtime::block_on_sync(async {
             let mut c = CloudflareConnector::new();
+            let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
-            c.handshake(handshake_req()).await.unwrap();
+            c.handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+                .await
+                .unwrap();
             c.invoke(invoke_req(
                 OP_DNS_CREATE,
                 json!({
@@ -1861,6 +1956,7 @@ mod tests {
                     "content": "1.2.3.4",
                     "ttl": -1
                 }),
+                signed_capability_token(&signing_key, OP_DNS_CREATE),
             ))
             .await
         })
@@ -1877,8 +1973,11 @@ mod tests {
     fn invoke_dns_update_rejects_invalid_optional_field_types() {
         let error = fcp_async_core::runtime::block_on_sync(async {
             let mut c = CloudflareConnector::new();
+            let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
-            c.handshake(handshake_req()).await.unwrap();
+            c.handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+                .await
+                .unwrap();
             c.invoke(invoke_req(
                 OP_DNS_UPDATE,
                 json!({
@@ -1889,6 +1988,7 @@ mod tests {
                     "content": "1.2.3.4",
                     "proxied": "true"
                 }),
+                signed_capability_token(&signing_key, OP_DNS_UPDATE),
             ))
             .await
         })
@@ -1960,7 +2060,7 @@ mod tests {
         let r = fcp_async_core::runtime::block_on_sync(async {
             let mut c = CloudflareConnector::new();
             c.configure(tc()).await.unwrap();
-            c.handshake(handshake_req()).await.unwrap()
+            c.handshake(handshake_req([0u8; 32])).await.unwrap()
         })
         .unwrap();
         assert_eq!(r.status, "accepted");

@@ -95,7 +95,7 @@ network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [
 
 [provides.operations."irc.transcript.sample".ai_hints]
 when_to_use = "Use when you need a short bounded sample of IRC traffic from one channel plus normalized IRC event metadata."
-common_mistakes = ["This is a bounded sampling operation, not a subscription or backlog replay API.", "sample_lines is clamped and the connector quits after collecting the sample.", "The raw lines are preserved, but agents should prefer the normalized `events` list for numerics, routing, and source identity."]
+common_mistakes = ["This is a bounded sampling operation, not a subscription or backlog replay API.", "sample_lines is clamped and the connector quits after collecting the sample.", "Quiet channels can legitimately return fewer than sample_lines lines.", "The raw lines are preserved, but agents should prefer the normalized `events` list for numerics, routing, and source identity."]
 examples = []
 related = ["irc.health", "irc.channels.join"]
 

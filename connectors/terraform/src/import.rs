@@ -203,6 +203,8 @@ pub enum ImportValidationError {
     EmptyAddress,
     /// An empty provider resource ID was provided.
     EmptyProviderId,
+    /// Explicit approval is required before this import may proceed.
+    ApprovalRequired,
     /// Too many concurrent imports.
     ConcurrentLimitReached { limit: usize, current: usize },
     /// Invalid characters in a value.
@@ -226,6 +228,7 @@ impl fmt::Display for ImportValidationError {
             }
             Self::EmptyAddress => write!(f, "resource address must not be empty"),
             Self::EmptyProviderId => write!(f, "provider resource ID must not be empty"),
+            Self::ApprovalRequired => write!(f, "approval token is required"),
             Self::ConcurrentLimitReached { limit, current } => {
                 write!(
                     f,
@@ -297,10 +300,10 @@ pub struct ImportRequest {
 impl ImportRequest {
     /// Validate the import request inputs.
     pub fn validate(&self) -> Result<ResourceAddress, ImportValidationError> {
-        if self.resource_address.is_empty() {
+        if self.resource_address.trim().is_empty() {
             return Err(ImportValidationError::EmptyAddress);
         }
-        if self.provider_resource_id.is_empty() {
+        if self.provider_resource_id.trim().is_empty() {
             return Err(ImportValidationError::EmptyProviderId);
         }
 
@@ -312,6 +315,12 @@ impl ImportRequest {
         addr.validate()?;
 
         Ok(addr)
+    }
+
+    fn has_approval_token(&self) -> bool {
+        self.approval_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
     }
 }
 
@@ -436,7 +445,7 @@ impl ImportPolicy {
         }
 
         // Check approval requirement.
-        if self.require_approval && request.approval_token.is_none() {
+        if self.require_approval && !request.has_approval_token() {
             return ImportDecision::NeedsApproval;
         }
 
@@ -478,6 +487,10 @@ impl ImportValidator {
 
         // Basic validation.
         let addr = request.validate()?;
+
+        if self.require_approval && !request.has_approval_token() {
+            return Err(ImportValidationError::ApprovalRequired);
+        }
 
         // Resource type allowlist.
         self.validate_address(&addr)?;
@@ -1119,6 +1132,12 @@ mod tests {
     }
 
     #[test]
+    fn validate_request_whitespace_provider_id() {
+        let req = make_request("aws_instance.web", "   ");
+        assert_eq!(req.validate(), Err(ImportValidationError::EmptyProviderId));
+    }
+
+    #[test]
     fn validate_request_injection_in_provider_id() {
         let req = make_request("aws_instance.web", "i-123; rm -rf /");
         match req.validate() {
@@ -1498,6 +1517,19 @@ mod tests {
     }
 
     #[test]
+    fn policy_blank_approval_token_still_requires_approval() {
+        let policy = ImportPolicy {
+            require_approval: true,
+            allowed_resource_types: vec![],
+            max_per_workspace: 100,
+            allowed_workspaces: vec![],
+        };
+        let mut req = make_request("aws_instance.web", "i-123");
+        req.approval_token = Some("   ".into());
+        assert_eq!(policy.check_request(&req), ImportDecision::NeedsApproval);
+    }
+
+    #[test]
     fn policy_allows_with_approval_token() {
         let policy = ImportPolicy {
             require_approval: true,
@@ -1614,6 +1646,27 @@ mod tests {
     }
 
     #[test]
+    fn validator_rejects_missing_approval_when_required() {
+        let v = restrictive_validator();
+        let req = make_request("aws_instance.web", "i-123");
+        assert_eq!(
+            v.validate_request(&req, 0),
+            Err(ImportValidationError::ApprovalRequired)
+        );
+    }
+
+    #[test]
+    fn validator_rejects_blank_approval_when_required() {
+        let v = restrictive_validator();
+        let mut req = make_request("aws_instance.web", "i-123");
+        req.approval_token = Some("   ".into());
+        assert_eq!(
+            v.validate_request(&req, 0),
+            Err(ImportValidationError::ApprovalRequired)
+        );
+    }
+
+    #[test]
     fn validator_allows_under_concurrent_limit() {
         let v = ImportValidator {
             max_concurrent_imports: 3,
@@ -1624,9 +1677,16 @@ mod tests {
     }
 
     #[test]
+    fn validator_allows_non_blank_approval_when_required() {
+        let v = restrictive_validator();
+        let req = make_approved_request("aws_instance.web", "i-123");
+        assert!(v.validate_request(&req, 0).is_ok());
+    }
+
+    #[test]
     fn validator_rejects_forbidden_resource_type() {
         let v = restrictive_validator();
-        let req = make_request("aws_lambda_function.handler", "fn-123");
+        let req = make_approved_request("aws_lambda_function.handler", "fn-123");
         match v.validate_request(&req, 0) {
             Err(ImportValidationError::ForbiddenResourceType { resource_type }) => {
                 assert_eq!(resource_type, "aws_lambda_function");
@@ -1638,7 +1698,7 @@ mod tests {
     #[test]
     fn validator_allows_listed_resource_type() {
         let v = restrictive_validator();
-        let req = make_request("aws_instance.web", "i-123");
+        let req = make_approved_request("aws_instance.web", "i-123");
         assert!(v.validate_request(&req, 0).is_ok());
     }
 
@@ -1852,6 +1912,14 @@ mod tests {
     }
 
     #[test]
+    fn error_display_approval_required() {
+        assert_eq!(
+            ImportValidationError::ApprovalRequired.to_string(),
+            "approval token is required"
+        );
+    }
+
+    #[test]
     fn error_display_invalid_address() {
         let err = ImportValidationError::InvalidAddress {
             address: "bad".into(),
@@ -1941,6 +2009,7 @@ mod tests {
         let errors = vec![
             ImportValidationError::EmptyAddress,
             ImportValidationError::EmptyProviderId,
+            ImportValidationError::ApprovalRequired,
             ImportValidationError::InvalidAddress {
                 address: "x".into(),
                 reason: "y".into(),

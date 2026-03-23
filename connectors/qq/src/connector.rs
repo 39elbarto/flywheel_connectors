@@ -15,10 +15,14 @@ use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::client::{QqClient, channel_message_body, direct_message_body, sanitize_path_segment};
+use crate::client::{
+    QqClient, channel_message_body, direct_message_body, normalize_message_event,
+    sanitize_path_segment,
+};
 use crate::types::{
-    CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C,
-    OP_SEND_CHANNEL, OP_SEND_GROUP, QqConfig,
+    CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, OP_EVENTS_NORMALIZE,
+    OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL, OP_SEND_GROUP, QqConfig,
+    QqGatewayEvent,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -189,6 +193,33 @@ impl QqConnector {
                 json!({ "type": "object" }),
                 "Use before higher-risk send operations when you need a bounded auth and connectivity check.",
             ),
+            operation(
+                OP_EVENTS_NORMALIZE,
+                "Normalize a raw QQ gateway event into a structured event with routing",
+                CAP_EVENTS_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                json!({
+                    "type": "object",
+                    "required": ["event"],
+                    "properties": {
+                        "event": {
+                            "type": "object",
+                            "description": "Raw QQ gateway event payload",
+                            "required": ["op"],
+                            "properties": {
+                                "op": { "type": "integer" },
+                                "s": { "type": "integer" },
+                                "t": { "type": "string" },
+                                "d": { "type": "object" },
+                                "id": { "type": "string" }
+                            }
+                        }
+                    }
+                }),
+                "Use to normalize raw QQ Bot WebSocket gateway events into structured events with routing classification (channel/group/c2c), quote context, and attachment detection.",
+            ),
         ]
     }
 
@@ -202,14 +233,13 @@ impl QqConnector {
         let output = match req.operation.as_str() {
             OP_SEND_CHANNEL => {
                 let channel_id = required_string(&req.input, "channel_id")?;
-                let _safe_id = sanitize_path_segment(channel_id, "channel_id")
-                    .map_err(|e| e.to_fcp_error())?;
+                let path = message_path("/channels/", channel_id, "channel_id")?;
                 let content = required_string(&req.input, "content")?;
-                let msg_id = req.input.get("msg_id").and_then(Value::as_str);
+                let msg_id = optional_string(&req.input, "msg_id")?;
                 client
                     .api_request(
                         reqwest::Method::POST,
-                        &format!("/channels/{channel_id}/messages"),
+                        &path,
                         Some(channel_message_body(content, msg_id)),
                     )
                     .await
@@ -217,14 +247,13 @@ impl QqConnector {
             }
             OP_SEND_GROUP => {
                 let group_openid = required_string(&req.input, "group_openid")?;
-                let _safe_id = sanitize_path_segment(group_openid, "group_openid")
-                    .map_err(|e| e.to_fcp_error())?;
+                let path = message_path("/v2/groups/", group_openid, "group_openid")?;
                 let content = required_string(&req.input, "content")?;
-                let msg_id = req.input.get("msg_id").and_then(Value::as_str);
+                let msg_id = optional_string(&req.input, "msg_id")?;
                 client
                     .api_request(
                         reqwest::Method::POST,
-                        &format!("/v2/groups/{group_openid}/messages"),
+                        &path,
                         Some(direct_message_body(content, msg_id)),
                     )
                     .await
@@ -232,14 +261,13 @@ impl QqConnector {
             }
             OP_SEND_C2C => {
                 let openid = required_string(&req.input, "openid")?;
-                let _safe_id =
-                    sanitize_path_segment(openid, "openid").map_err(|e| e.to_fcp_error())?;
+                let path = message_path("/v2/users/", openid, "openid")?;
                 let content = required_string(&req.input, "content")?;
-                let msg_id = req.input.get("msg_id").and_then(Value::as_str);
+                let msg_id = optional_string(&req.input, "msg_id")?;
                 client
                     .api_request(
                         reqwest::Method::POST,
-                        &format!("/v2/users/{openid}/messages"),
+                        &path,
                         Some(direct_message_body(content, msg_id)),
                     )
                     .await
@@ -261,6 +289,25 @@ impl QqConnector {
                     "gateway": gateway.get("url").cloned().unwrap_or(Value::Null),
                     "manifest_hash": Self::manifest_hash(),
                 })
+            }
+            OP_EVENTS_NORMALIZE => {
+                let event_value =
+                    req.input
+                        .get("event")
+                        .ok_or_else(|| FcpError::InvalidRequest {
+                            code: 1005,
+                            message: "event is required".into(),
+                        })?;
+                let gateway_event: QqGatewayEvent = serde_json::from_value(event_value.clone())
+                    .map_err(|e| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("invalid gateway event: {e}"),
+                    })?;
+                let normalized =
+                    normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&normalized).map_err(|e| FcpError::Internal {
+                    message: format!("failed to serialize normalized event: {e}"),
+                })?
             }
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -447,6 +494,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         OP_SEND_CHANNEL | OP_SEND_GROUP | OP_SEND_C2C => CAP_MESSAGES_WRITE,
         OP_GET_GATEWAY => CAP_GATEWAY_READ,
         OP_HEALTH => CAP_HEALTH_READ,
+        OP_EVENTS_NORMALIZE => CAP_EVENTS_READ,
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -463,7 +511,7 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
         .filter(|capability| {
             matches!(
                 capability.as_str(),
-                CAP_MESSAGES_WRITE | CAP_GATEWAY_READ | CAP_HEALTH_READ
+                CAP_MESSAGES_WRITE | CAP_GATEWAY_READ | CAP_HEALTH_READ | CAP_EVENTS_READ
             )
         })
         .map(|capability| CapabilityGrant {
@@ -482,6 +530,29 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
             code: 1005,
             message: format!("{field} is required"),
         })
+}
+
+fn optional_string<'a>(value: &'a Value, field: &str) -> FcpResult<Option<&'a str>> {
+    match value.get(field) {
+        None => Ok(None),
+        Some(Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        Some(_) => Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be a string"),
+        }),
+    }
+}
+
+fn message_path(prefix: &str, target_id: &str, field: &str) -> FcpResult<String> {
+    let safe_id = sanitize_path_segment(target_id, field).map_err(|e| e.to_fcp_error())?;
+    Ok(format!("{prefix}{safe_id}/messages"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -530,10 +601,10 @@ mod tests {
     }
 
     #[test]
-    fn introspect_returns_five_operations() {
+    fn introspect_returns_six_operations() {
         let connector = QqConnector::new();
         let introspection = connector.introspect();
-        assert_eq!(introspection.operations.len(), 5);
+        assert_eq!(introspection.operations.len(), 6);
     }
 
     #[test]
@@ -550,6 +621,7 @@ mod tests {
         assert!(ids.contains(&"qq.messages.send_c2c"));
         assert!(ids.contains(&"qq.gateway.get"));
         assert!(ids.contains(&"qq.health"));
+        assert!(ids.contains(&"qq.events.normalize"));
     }
 
     #[test]
@@ -680,6 +752,7 @@ mod tests {
         assert!(required_capability(OP_SEND_C2C).is_ok());
         assert!(required_capability(OP_GET_GATEWAY).is_ok());
         assert!(required_capability(OP_HEALTH).is_ok());
+        assert!(required_capability(OP_EVENTS_NORMALIZE).is_ok());
     }
 
     #[test]
@@ -693,10 +766,11 @@ mod tests {
         let requested = vec![
             CapabilityId::from_static(CAP_MESSAGES_WRITE),
             CapabilityId::from_static(CAP_GATEWAY_READ),
+            CapabilityId::from_static(CAP_EVENTS_READ),
             CapabilityId::from_static("qq.unknown.cap"),
         ];
         let granted = granted_capabilities(requested);
-        assert_eq!(granted.len(), 2);
+        assert_eq!(granted.len(), 3);
     }
 
     #[test]
@@ -721,6 +795,48 @@ mod tests {
     fn required_string_rejects_whitespace_only() {
         let val = serde_json::json!({"key": "   "});
         assert!(required_string(&val, "key").is_err());
+    }
+
+    #[test]
+    fn message_path_uses_validated_target_id() {
+        assert_eq!(
+            message_path("/channels/", "channel-42", "channel_id").unwrap(),
+            "/channels/channel-42/messages"
+        );
+        assert_eq!(
+            message_path("/v2/groups/", "group-42", "group_openid").unwrap(),
+            "/v2/groups/group-42/messages"
+        );
+        assert_eq!(
+            message_path("/v2/users/", "user-42", "openid").unwrap(),
+            "/v2/users/user-42/messages"
+        );
+    }
+
+    #[test]
+    fn message_path_rejects_traversal_targets() {
+        assert!(message_path("/channels/", "../admin", "channel_id").is_err());
+        assert!(message_path("/v2/groups/", "group/other", "group_openid").is_err());
+        assert!(message_path("/v2/users/", "user%2Fother", "openid").is_err());
+    }
+
+    #[test]
+    fn optional_string_rejects_non_string_values() {
+        let err = optional_string(&serde_json::json!({"msg_id": 7}), "msg_id").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("msg_id must be a string"));
+    }
+
+    #[test]
+    fn optional_string_trims_blank_values_to_none() {
+        assert_eq!(
+            optional_string(&serde_json::json!({"msg_id": "   "}), "msg_id").unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_string(&serde_json::json!({"msg_id": " abc-123 "}), "msg_id").unwrap(),
+            Some("abc-123")
+        );
     }
 
     #[test]
@@ -784,5 +900,25 @@ mod tests {
         let metrics = connector.metrics();
         assert_eq!(metrics.requests_total, 0);
         assert_eq!(metrics.requests_error, 0);
+    }
+
+    #[test]
+    fn events_normalize_operation_has_correct_properties() {
+        let ops = QqConnector::operations();
+        let normalize_op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_EVENTS_NORMALIZE)
+            .expect("events.normalize operation should exist");
+        assert_eq!(normalize_op.capability.as_str(), CAP_EVENTS_READ);
+        assert_eq!(normalize_op.safety_tier, SafetyTier::Safe);
+        assert_eq!(normalize_op.risk_level, RiskLevel::Low);
+        assert_eq!(normalize_op.idempotency, IdempotencyClass::Strict);
+        assert!(!normalize_op.ai_hints.when_to_use.is_empty());
+    }
+
+    #[test]
+    fn events_normalize_capability_maps_correctly() {
+        let cap = required_capability(OP_EVENTS_NORMALIZE).unwrap();
+        assert_eq!(cap.as_str(), CAP_EVENTS_READ);
     }
 }

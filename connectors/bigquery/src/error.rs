@@ -40,6 +40,10 @@ pub enum BigQueryError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Connector configuration is invalid
+    #[error("Configuration error: {0}")]
+    Config(String),
 }
 
 impl BigQueryError {
@@ -110,6 +114,10 @@ impl BigQueryError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::Config(message) => FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Configuration error: {message}"),
             },
         }
     }
@@ -382,6 +390,17 @@ mod tests {
         match BigQueryError::Json(bad.unwrap_err()).to_fcp_error() {
             FcpError::Internal { message } => assert!(message.starts_with("JSON error:")),
             other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_to_invalid_request() {
+        match BigQueryError::Config("bad base_url".into()).to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1001);
+                assert!(message.contains("bad base_url"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
         }
     }
 

@@ -49,6 +49,13 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
 
+[provides.operations.events_normalize]
+summary = "Normalize a DingTalk robot callback event"
+capability = "dingtalk.messages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
 [provides.operations.health]
 summary = "Verify DingTalk credentials and token issuance"
 capability = "dingtalk.health.read"

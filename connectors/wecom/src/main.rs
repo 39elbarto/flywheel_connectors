@@ -99,6 +99,7 @@ async fn handle_message(connector: &mut WeComConnector, message: &str) -> serde_
                 encode(&connector.handshake(req).await?)
             }
             "health" => encode(&connector.health().await),
+            "doctor" => encode(&connector.doctor()),
             "self_check" => encode(&connector.self_check().await?),
             "introspect" => encode(&connector.introspect()),
             "invoke" => {

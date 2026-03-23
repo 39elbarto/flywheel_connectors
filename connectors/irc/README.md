@@ -15,6 +15,7 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 - TLS is supported and defaults to port `6697`; plaintext defaults to `6667`.
 - The connector keeps no durable local state.
 - `irc.channels.join`, `irc.transcript.sample`, and `irc.health` expose both raw transcript lines and normalized event records for IRC numerics and message routing.
+- `irc.transcript.sample` returns at most the requested post-join lines and may legitimately return fewer when the channel is quiet.
 
 ## Auth Boundary
 

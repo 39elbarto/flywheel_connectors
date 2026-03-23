@@ -10,7 +10,10 @@ use reqwest::{Url, header::HeaderMap, multipart};
 use serde_json::{Value, json};
 
 use crate::error::{DingTalkError, DingTalkResult};
-use crate::types::{AccessTokenResponse, DingTalkConfig, TOKEN_REFRESH_SAFETY_MARGIN_SECS};
+use crate::types::{
+    AccessTokenResponse, ConversationIdentity, DingTalkCallbackEvent, DingTalkConfig,
+    NormalizedDingTalkEvent, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
+};
 
 #[derive(Debug, Clone)]
 struct CachedAccessToken {
@@ -44,6 +47,7 @@ impl DingTalkClient {
     /// Returns an error if the config is invalid or the underlying HTTP client
     /// cannot be initialized.
     pub fn new(config: DingTalkConfig) -> DingTalkResult<Self> {
+        let config = config.normalized();
         validate_host(
             &config.base_url,
             &["api.dingtalk.com", "localhost", "127.0.0.1"],
@@ -259,6 +263,12 @@ fn validate_host(raw: &str, allowed_hosts: &[&str]) -> DingTalkResult<()> {
     let host = url
         .host_str()
         .ok_or_else(|| DingTalkError::Config(format!("URL `{raw}` must include a host")))?;
+    let is_local = matches!(host, "localhost" | "127.0.0.1");
+    if !is_local && url.scheme() != "https" {
+        return Err(DingTalkError::Config(format!(
+            "URL `{raw}` must use https for non-local hosts"
+        )));
+    }
     if !allowed_hosts.contains(&host) {
         return Err(DingTalkError::Config(format!(
             "URL host `{host}` is not allowed"
@@ -317,6 +327,89 @@ pub fn default_mime_type(media_type: &str) -> &'static str {
     }
 }
 
+/// Map `DingTalk` conversation type codes to human-readable labels.
+///
+/// * `"1"` -> `"private"`
+/// * `"2"` -> `"group"`
+/// * anything else -> `"unknown"`
+#[must_use]
+pub fn normalize_conversation_type(raw: Option<&str>) -> String {
+    match raw.map(str::trim) {
+        Some("1") => "private".into(),
+        Some("2") => "group".into(),
+        _ => "unknown".into(),
+    }
+}
+
+/// Normalize a raw `DingTalk` robot callback event into an [`NormalizedDingTalkEvent`].
+///
+/// This converts the camelCase callback payload into a uniform structure
+/// suitable for downstream processing.
+///
+/// # Errors
+///
+/// Returns an error if `raw_json` cannot be deserialized as a callback event.
+pub fn normalize_callback_event(raw_json: &Value) -> DingTalkResult<NormalizedDingTalkEvent> {
+    let event: DingTalkCallbackEvent =
+        serde_json::from_value(raw_json.clone()).map_err(DingTalkError::Json)?;
+
+    let conversation_type = normalize_conversation_type(event.conversation_type.as_deref());
+
+    let text = event.text.as_ref().and_then(|t| t.content.clone());
+
+    let at_bot = detect_at_bot(&event);
+
+    Ok(NormalizedDingTalkEvent {
+        event_type: "message".into(),
+        message_id: event.msg_id.clone(),
+        conversation_id: event.conversation_id.clone(),
+        conversation_type,
+        sender_id: event.sender_id.clone(),
+        sender_name: event.sender_nick.clone(),
+        text,
+        timestamp_ms: event.create_at,
+        at_bot,
+        raw: raw_json.clone(),
+    })
+}
+
+/// Detect whether the bot was @-mentioned in a callback event.
+///
+/// Returns `true` only when an explicit @-mention entry matches the
+/// `chatbot_user_id` field. If the callback does not identify the bot, we do
+/// not guess from unrelated mentions.
+#[must_use]
+pub fn detect_at_bot(event: &DingTalkCallbackEvent) -> bool {
+    let Some(at_users) = event.at_users.as_ref() else {
+        return false;
+    };
+    if at_users.is_empty() {
+        return false;
+    }
+    let Some(bot_id) = event.chatbot_user_id.as_deref() else {
+        return false;
+    };
+    at_users
+        .iter()
+        .any(|u| u.dingtalk_id.as_deref() == Some(bot_id))
+}
+
+/// Extract a [`ConversationIdentity`] from a callback event.
+///
+/// Returns `None` if the event has no conversation id.
+#[must_use]
+pub fn extract_conversation_identity(
+    event: &DingTalkCallbackEvent,
+) -> Option<ConversationIdentity> {
+    let id = event.conversation_id.as_ref()?.clone();
+    let conversation_type = normalize_conversation_type(event.conversation_type.as_deref());
+    Some(ConversationIdentity {
+        id,
+        conversation_type,
+        title: event.conversation_title.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,8 +461,36 @@ mod tests {
     }
 
     #[test]
+    fn trims_config_fields() {
+        let config = DingTalkConfig {
+            base_url: " http://localhost:9999 ".into(),
+            media_base_url: " http://localhost:9999 ".into(),
+            client_id: " test-app ".into(),
+            client_secret: " test-secret ".into(),
+            request_timeout_ms: DEFAULT_TIMEOUT_MS,
+        };
+        let client = DingTalkClient::new(config).unwrap();
+        assert_eq!(client.config().base_url, "http://localhost:9999");
+        assert_eq!(client.config().media_base_url, "http://localhost:9999");
+        assert_eq!(client.config().client_id, "test-app");
+        assert_eq!(client.config().client_secret, "test-secret");
+    }
+
+    #[test]
     fn rejects_disallowed_host() {
         let config = test_config("https://evil.example.com");
+        assert!(DingTalkClient::new(config).is_err());
+    }
+
+    #[test]
+    fn rejects_insecure_public_host() {
+        let config = DingTalkConfig {
+            base_url: "http://api.dingtalk.com".into(),
+            media_base_url: "http://oapi.dingtalk.com".into(),
+            client_id: "test-app".into(),
+            client_secret: "test-secret".into(),
+            request_timeout_ms: DEFAULT_TIMEOUT_MS,
+        };
         assert!(DingTalkClient::new(config).is_err());
     }
 
@@ -586,5 +707,297 @@ mod tests {
         assert_eq!(default_mime_type("video"), "video/mp4");
         assert_eq!(default_mime_type("file"), "application/octet-stream");
         assert_eq!(default_mime_type("unknown"), "application/octet-stream");
+    }
+
+    // ── Normalization tests ──────────────────────────────────────
+
+    #[test]
+    fn normalize_conversation_type_private() {
+        assert_eq!(normalize_conversation_type(Some("1")), "private");
+    }
+
+    #[test]
+    fn normalize_conversation_type_group() {
+        assert_eq!(normalize_conversation_type(Some("2")), "group");
+    }
+
+    #[test]
+    fn normalize_conversation_type_unknown() {
+        assert_eq!(normalize_conversation_type(None), "unknown");
+        assert_eq!(normalize_conversation_type(Some("99")), "unknown");
+        assert_eq!(normalize_conversation_type(Some(" 2 ")), "group");
+    }
+
+    #[test]
+    fn normalize_callback_full_group_event() {
+        let raw = json!({
+            "msgType": "text",
+            "text": { "content": "hello bot" },
+            "senderId": "user-001",
+            "senderNick": "Alice",
+            "conversationId": "conv-123",
+            "conversationType": "2",
+            "conversationTitle": "Dev Team",
+            "atUsers": [
+                { "dingtalkId": "bot-999", "staffId": "staff-bot" }
+            ],
+            "chatbotUserId": "bot-999",
+            "createAt": 1_700_000_000_000_i64,
+            "msgId": "msg-abc"
+        });
+        let normalized = normalize_callback_event(&raw).unwrap();
+        assert_eq!(normalized.event_type, "message");
+        assert_eq!(normalized.message_id.as_deref(), Some("msg-abc"));
+        assert_eq!(normalized.conversation_id.as_deref(), Some("conv-123"));
+        assert_eq!(normalized.conversation_type, "group");
+        assert_eq!(normalized.sender_id.as_deref(), Some("user-001"));
+        assert_eq!(normalized.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(normalized.text.as_deref(), Some("hello bot"));
+        assert_eq!(normalized.timestamp_ms, Some(1_700_000_000_000));
+        assert!(normalized.at_bot);
+    }
+
+    #[test]
+    fn normalize_callback_private_event() {
+        let raw = json!({
+            "msgType": "text",
+            "text": { "content": "dm from user" },
+            "senderId": "user-002",
+            "senderNick": "Bob",
+            "conversationId": "priv-1",
+            "conversationType": "1",
+            "chatbotUserId": "bot-999",
+            "msgId": "msg-priv-1"
+        });
+        let normalized = normalize_callback_event(&raw).unwrap();
+        assert_eq!(normalized.conversation_type, "private");
+        assert!(!normalized.at_bot);
+        assert_eq!(normalized.text.as_deref(), Some("dm from user"));
+    }
+
+    #[test]
+    fn normalize_callback_minimal_event() {
+        let raw = json!({});
+        let normalized = normalize_callback_event(&raw).unwrap();
+        assert_eq!(normalized.event_type, "message");
+        assert!(normalized.message_id.is_none());
+        assert!(normalized.conversation_id.is_none());
+        assert_eq!(normalized.conversation_type, "unknown");
+        assert!(normalized.sender_id.is_none());
+        assert!(normalized.text.is_none());
+        assert!(!normalized.at_bot);
+    }
+
+    #[test]
+    fn normalize_callback_no_text_content() {
+        let raw = json!({
+            "msgType": "picture",
+            "conversationType": "2",
+            "conversationId": "conv-pic"
+        });
+        let normalized = normalize_callback_event(&raw).unwrap();
+        assert!(normalized.text.is_none());
+        assert_eq!(normalized.conversation_type, "group");
+    }
+
+    #[test]
+    fn normalize_callback_text_content_null() {
+        let raw = json!({
+            "msgType": "text",
+            "text": { "content": null },
+            "conversationType": "1"
+        });
+        let normalized = normalize_callback_event(&raw).unwrap();
+        assert!(normalized.text.is_none());
+    }
+
+    #[test]
+    fn normalize_callback_preserves_raw() {
+        let raw = json!({
+            "msgType": "text",
+            "text": { "content": "test" },
+            "customField": "extra-data"
+        });
+        let normalized = normalize_callback_event(&raw).unwrap();
+        assert_eq!(normalized.raw["customField"], "extra-data");
+    }
+
+    // ── detect_at_bot tests ──────────────────────────────────────
+
+    #[test]
+    fn detect_at_bot_matches_chatbot_user_id() {
+        use crate::types::{AtUser, DingTalkCallbackEvent};
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: None,
+            conversation_type: None,
+            conversation_title: None,
+            at_users: Some(vec![AtUser {
+                dingtalk_id: Some("bot-1".into()),
+                staff_id: None,
+            }]),
+            chatbot_user_id: Some("bot-1".into()),
+            create_at: None,
+            msg_id: None,
+        };
+        assert!(detect_at_bot(&event));
+    }
+
+    #[test]
+    fn detect_at_bot_no_match() {
+        use crate::types::{AtUser, DingTalkCallbackEvent};
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: None,
+            conversation_type: None,
+            conversation_title: None,
+            at_users: Some(vec![AtUser {
+                dingtalk_id: Some("other-user".into()),
+                staff_id: None,
+            }]),
+            chatbot_user_id: Some("bot-1".into()),
+            create_at: None,
+            msg_id: None,
+        };
+        assert!(!detect_at_bot(&event));
+    }
+
+    #[test]
+    fn detect_at_bot_empty_at_users() {
+        use crate::types::DingTalkCallbackEvent;
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: None,
+            conversation_type: None,
+            conversation_title: None,
+            at_users: Some(vec![]),
+            chatbot_user_id: Some("bot-1".into()),
+            create_at: None,
+            msg_id: None,
+        };
+        assert!(!detect_at_bot(&event));
+    }
+
+    #[test]
+    fn detect_at_bot_no_chatbot_id_with_mentions() {
+        use crate::types::{AtUser, DingTalkCallbackEvent};
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: None,
+            conversation_type: None,
+            conversation_title: None,
+            at_users: Some(vec![AtUser {
+                dingtalk_id: Some("someone".into()),
+                staff_id: None,
+            }]),
+            chatbot_user_id: None,
+            create_at: None,
+            msg_id: None,
+        };
+        assert!(!detect_at_bot(&event));
+    }
+
+    #[test]
+    fn detect_at_bot_no_at_users() {
+        use crate::types::DingTalkCallbackEvent;
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: None,
+            conversation_type: None,
+            conversation_title: None,
+            at_users: None,
+            chatbot_user_id: Some("bot-1".into()),
+            create_at: None,
+            msg_id: None,
+        };
+        assert!(!detect_at_bot(&event));
+    }
+
+    // ── extract_conversation_identity tests ──────────────────────
+
+    #[test]
+    fn extract_conversation_identity_group() {
+        use crate::types::DingTalkCallbackEvent;
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: Some("conv-42".into()),
+            conversation_type: Some("2".into()),
+            conversation_title: Some("Team Chat".into()),
+            at_users: None,
+            chatbot_user_id: None,
+            create_at: None,
+            msg_id: None,
+        };
+        let ci = extract_conversation_identity(&event).unwrap();
+        assert_eq!(ci.id, "conv-42");
+        assert_eq!(ci.conversation_type, "group");
+        assert_eq!(ci.title.as_deref(), Some("Team Chat"));
+    }
+
+    #[test]
+    fn extract_conversation_identity_private() {
+        use crate::types::DingTalkCallbackEvent;
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: Some("priv-7".into()),
+            conversation_type: Some("1".into()),
+            conversation_title: None,
+            at_users: None,
+            chatbot_user_id: None,
+            create_at: None,
+            msg_id: None,
+        };
+        let ci = extract_conversation_identity(&event).unwrap();
+        assert_eq!(ci.id, "priv-7");
+        assert_eq!(ci.conversation_type, "private");
+        assert!(ci.title.is_none());
+    }
+
+    #[test]
+    fn extract_conversation_identity_none_when_no_id() {
+        use crate::types::DingTalkCallbackEvent;
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: None,
+            conversation_type: Some("2".into()),
+            conversation_title: None,
+            at_users: None,
+            chatbot_user_id: None,
+            create_at: None,
+            msg_id: None,
+        };
+        assert!(extract_conversation_identity(&event).is_none());
     }
 }

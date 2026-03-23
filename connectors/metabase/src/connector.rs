@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
     IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
-    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
-    StepId,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RequestId, RiskLevel, SafetyTier,
+    SelfCheckReport, SimulateResponse, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{info, instrument};
 
 use crate::{
@@ -194,7 +194,9 @@ impl MetabaseConnector {
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(json!({}))
     }
 
@@ -232,9 +234,13 @@ impl MetabaseConnector {
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.base.handshaken.load(Ordering::Relaxed);
+        let live_requests_supported = self
+            .config
+            .as_ref()
+            .is_some_and(|config| !config.auth.is_secretless());
 
-        let status = if configured && handshaken {
+        let status = if configured && handshaken && live_requests_supported {
             "healthy"
         } else if configured {
             "degraded"
@@ -246,6 +252,7 @@ impl MetabaseConnector {
             "status": status,
             "configured": configured,
             "handshaken": handshaken,
+            "live_requests_supported": live_requests_supported,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
         }))
@@ -277,7 +284,7 @@ impl MetabaseConnector {
             critical: true,
         });
 
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.base.handshaken.load(Ordering::Relaxed);
         checks.push(DoctorCheck {
             name: "handshake".into(),
             passed: handshaken,
@@ -288,6 +295,20 @@ impl MetabaseConnector {
             },
             critical: false,
         });
+
+        if let Some(config) = &self.config {
+            let live_requests_supported = !config.auth.is_secretless();
+            checks.push(DoctorCheck {
+                name: "host_credential_injection".into(),
+                passed: live_requests_supported,
+                message: if live_requests_supported {
+                    None
+                } else {
+                    Some("credential_id mode requires host-side credential injection".into())
+                },
+                critical: false,
+            });
+        }
 
         let result = DoctorResult::from_checks(checks);
         Ok(serde_json::to_value(result).unwrap_or(json!({"status": "error"})))
@@ -434,14 +455,21 @@ impl MetabaseConnector {
     #[instrument(skip(self, params))]
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.base.check_ready()?;
-
-        let operation = params
-            .get("operation_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| FcpError::InvalidRequest {
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.auth.is_secretless())
+        {
+            return Err(FcpError::InvalidRequest {
                 code: 1003,
-                message: "Missing operation_id".into(),
-            })?;
+                message: "credential_id mode requires host-side credential injection, which this connector slice does not implement".into(),
+            });
+        }
+
+        let operation = operation_name(&params).ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing operation_id or operation".into(),
+        })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
@@ -471,20 +499,32 @@ impl MetabaseConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
-            .get("operation_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        let request_id = simulate_request_id(&params)?;
+        let operation = operation_name(&params).unwrap_or("");
+        let supported = supported_operation(operation);
+        let response = if !supported {
+            SimulateResponse::denied(request_id, "Unknown operation.", "FCP-1002")
+        } else if self.config.is_none() {
+            SimulateResponse::denied(request_id, "Connector not configured.", "FCP-1004")
+        } else if !self.base.handshaken.load(Ordering::Relaxed) {
+            SimulateResponse::denied(request_id, "Handshake not completed.", "FCP-1004")
+        } else if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.auth.is_secretless())
+        {
+            SimulateResponse::denied(
+                request_id,
+                "credential_id mode requires host-side credential injection, which this connector slice does not implement.",
+                "FCP-1003",
+            )
+        } else {
+            SimulateResponse::allowed(request_id)
+        };
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
-
-        Ok(json!({
-            "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
-        }))
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize simulate response: {e}"),
+        })
     }
 
     /// Handle the `shutdown` method.
@@ -498,6 +538,7 @@ impl MetabaseConnector {
         }
         self.client = None;
         self.config = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -572,6 +613,33 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn operation_name(params: &Value) -> Option<&str> {
+    params
+        .get("operation_id")
+        .or_else(|| params.get("operation"))
+        .and_then(Value::as_str)
+}
+
+fn simulate_request_id(params: &Value) -> FcpResult<RequestId> {
+    params
+        .get("id")
+        .cloned()
+        .map(serde_json::from_value::<RequestId>)
+        .transpose()
+        .map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid simulate request id: {e}"),
+        })
+        .map(|id| id.unwrap_or_else(RequestId::random))
+}
+
+fn supported_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "metabase.dashboards.list" | "metabase.questions.list" | "metabase.questions.run"
+    )
 }
 
 /// Build the provisioning recipe for the `Metabase` connector.
@@ -1095,6 +1163,149 @@ mod tests {
         let c = MetabaseConnector::new();
         assert!(c.config.is_none());
         assert!(c.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_resets_prior_handshake_state() {
+        let mut connector = MetabaseConnector::new();
+        let config = json!({
+            "session_token": "tok",
+            "base_url": "https://metabase.example.com/api",
+        });
+
+        connector.handle_configure(config.clone()).await.unwrap();
+        connector
+            .handle_handshake(json!({"session_id": "sess-1"}))
+            .await
+            .unwrap();
+        assert!(connector.base.handshaken.load(Ordering::Relaxed));
+        assert_eq!(connector.session_id.as_deref(), Some("sess-1"));
+
+        connector.handle_configure(config).await.unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        assert!(!connector.base.handshaken.load(Ordering::Relaxed));
+        assert!(connector.session_id.is_none());
+        assert_eq!(health["handshaken"], false);
+        assert_eq!(health["status"], "degraded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_without_session_id_still_marks_connector_handshaken() {
+        let mut connector = MetabaseConnector::new();
+        connector
+            .handle_configure(json!({
+                "session_token": "tok",
+                "base_url": "https://metabase.example.com/api",
+            }))
+            .await
+            .unwrap();
+
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        assert!(connector.base.handshaken.load(Ordering::Relaxed));
+        assert!(connector.session_id.is_none());
+        assert_eq!(health["handshaken"], true);
+        assert_eq!(health["status"], "healthy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_session_state() {
+        let mut connector = MetabaseConnector::new();
+        connector
+            .handle_configure(json!({
+                "session_token": "tok",
+                "base_url": "https://metabase.example.com/api",
+            }))
+            .await
+            .unwrap();
+        connector
+            .handle_handshake(json!({"session_id": "sess-1"}))
+            .await
+            .unwrap();
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        assert!(connector.session_id.is_none());
+        assert!(!connector.base.handshaken.load(Ordering::Relaxed));
+        assert_eq!(health["handshaken"], false);
+        assert_eq!(health["status"], "unconfigured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_accepts_operation_alias() {
+        let mut connector = MetabaseConnector::new();
+        connector
+            .handle_configure(json!({
+                "session_token": "tok",
+                "base_url": "https://metabase.example.com/api",
+            }))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let error = connector
+            .handle_invoke(json!({
+                "operation": "metabase.unknown",
+                "input": {},
+            }))
+            .await
+            .unwrap_err();
+
+        match error {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1002);
+                assert!(message.contains("Unknown operation"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_returns_fcp_shape_and_reflects_not_ready_state() {
+        let connector = MetabaseConnector::new();
+
+        let response = connector
+            .handle_simulate(json!({
+                "id": "sim-1",
+                "operation": "metabase.dashboards.list",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["type"], "simulate_response");
+        assert_eq!(response["id"], "sim-1");
+        assert_eq!(response["would_succeed"], false);
+        assert_eq!(response["denial_code"], "FCP-1004");
+        assert_eq!(response["failure_reason"], "Connector not configured.");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_secretless_mode() {
+        let mut connector = MetabaseConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+                "base_url": "https://metabase.example.com/api",
+            }))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let response = connector
+            .handle_simulate(json!({
+                "id": "sim-2",
+                "operation_id": "metabase.questions.list",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["type"], "simulate_response");
+        assert_eq!(response["id"], "sim-2");
+        assert_eq!(response["would_succeed"], false);
+        assert_eq!(response["denial_code"], "FCP-1003");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc)]
+
 //! Typed configuration and request models for the `WeCom` connector.
 
 use std::collections::BTreeMap;
@@ -11,6 +13,51 @@ use serde_json::{Value, json};
 pub const DEFAULT_BASE_URL: &str = "https://qyapi.weixin.qq.com";
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const TOKEN_REFRESH_SAFETY_MARGIN_SECS: u64 = 60;
+
+fn is_local_wecom_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1")
+}
+
+#[must_use]
+pub fn base_url_diagnostic(base_url: &str) -> (bool, String) {
+    match Url::parse(base_url) {
+        Err(error) => (false, format!("invalid base_url: {error}")),
+        Ok(url) => {
+            if !matches!(url.scheme(), "http" | "https") {
+                return (false, "base_url must use http or https".into());
+            }
+            let Some(host) = url.host_str() else {
+                return (false, "base_url must include a host".into());
+            };
+            let is_local = is_local_wecom_host(host);
+            if !is_local && url.scheme() != "https" {
+                return (
+                    false,
+                    format!(
+                        "base_url must use https for non-local hosts; got {} for `{host}`",
+                        url.scheme()
+                    ),
+                );
+            }
+            match host {
+                "qyapi.weixin.qq.com" => (
+                    true,
+                    "Base URL matches the official WeCom API host `qyapi.weixin.qq.com`".into(),
+                ),
+                "localhost" | "127.0.0.1" => (
+                    true,
+                    "Base URL uses a localhost / 127.0.0.1 test override".into(),
+                ),
+                _ => (
+                    false,
+                    format!(
+                        "base_url host `{host}` is not allowed; use qyapi.weixin.qq.com or localhost for tests"
+                    ),
+                ),
+            }
+        }
+    }
+}
 
 #[derive(Clone, Deserialize)]
 pub struct WeComConfig {
@@ -163,7 +210,7 @@ impl std::fmt::Debug for WeComConfig {
     }
 }
 
-fn redacted_secret(value: &str) -> Option<&'static str> {
+const fn redacted_secret(value: &str) -> Option<&'static str> {
     if value.is_empty() {
         None
     } else {
@@ -242,6 +289,15 @@ impl WeComConfig {
                 code: 1001,
                 message: "base_url must include a host".into(),
             })?;
+        if !is_local_wecom_host(host) && base_url.scheme() != "https" {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: format!(
+                    "base_url must use https for non-local hosts; got {} for `{host}`",
+                    base_url.scheme()
+                ),
+            });
+        }
         if !matches!(host, "qyapi.weixin.qq.com" | "localhost" | "127.0.0.1") {
             return Err(FcpError::InvalidRequest {
                 code: 1001,
@@ -325,6 +381,15 @@ impl WeComConfig {
         }
     }
 
+    #[must_use]
+    pub fn callback_receive_id_mode(&self) -> &'static str {
+        if self.callback_receive_id.is_empty() {
+            "corp_id_default"
+        } else {
+            "explicit_override"
+        }
+    }
+
     pub fn callback_aes_key(&self) -> Result<[u8; 32], String> {
         decode_callback_aes_key(&self.callback_encoding_aes_key)
     }
@@ -345,10 +410,7 @@ pub fn decode_callback_aes_key(raw: &str) -> Result<[u8; 32], String> {
         .map_err(|error| format!("callback_encoding_aes_key must be valid base64: {error}"))?;
     let decoded_len = decoded.len();
     let key: [u8; 32] = decoded.try_into().map_err(|_| {
-        format!(
-            "callback_encoding_aes_key must decode to exactly 32 bytes, got {}",
-            decoded_len
-        )
+        format!("callback_encoding_aes_key must decode to exactly 32 bytes, got {decoded_len}")
     })?;
     Ok(key)
 }
@@ -733,6 +795,33 @@ mod tests {
         assert!(model.token_cached);
         assert!(model.callback_configured);
         assert_eq!(config.callback_receive_id(), "corp");
+    }
+
+    #[test]
+    fn config_rejects_insecure_public_base_url() {
+        let error = WeComConfig::from_value(json!({
+            "base_url": "http://qyapi.weixin.qq.com",
+            "corp_id": "corp",
+            "agent_id": 1_000_002_u64,
+            "agent_secret": "secret",
+        }))
+        .expect_err("live hosts must require https");
+
+        assert!(matches!(error, FcpError::InvalidRequest { code: 1001, .. }));
+    }
+
+    #[test]
+    fn diagnostic_rejects_insecure_public_base_url() {
+        let (ok, message) = base_url_diagnostic("http://qyapi.weixin.qq.com");
+        assert!(!ok);
+        assert!(message.contains("https"));
+    }
+
+    #[test]
+    fn diagnostic_accepts_localhost_http_override() {
+        let (ok, message) = base_url_diagnostic("http://localhost:8080");
+        assert!(ok);
+        assert!(message.contains("localhost"));
     }
 
     #[test]

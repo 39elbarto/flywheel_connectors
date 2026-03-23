@@ -15,7 +15,7 @@ use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::client::{DingTalkClient, default_mime_type};
+use crate::client::{DingTalkClient, default_mime_type, normalize_callback_event};
 use crate::types::{DingTalkConfig, ParsedTarget};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -24,9 +24,11 @@ const OP_SEND_TEXT: &str = "dingtalk.messages.send_text";
 const OP_SEND_LINK: &str = "dingtalk.messages.send_link";
 const OP_SEND_FILE: &str = "dingtalk.messages.send_file";
 const OP_UPLOAD_MEDIA: &str = "dingtalk.media.upload";
+const OP_NORMALIZE_EVENT: &str = "dingtalk.events.normalize";
 const OP_HEALTH: &str = "dingtalk.health";
 
 const CAP_MESSAGES_WRITE: &str = "dingtalk.messages.write";
+const CAP_MESSAGES_READ: &str = "dingtalk.messages.read";
 const CAP_MEDIA_WRITE: &str = "dingtalk.media.write";
 const CAP_HEALTH_READ: &str = "dingtalk.health.read";
 
@@ -198,6 +200,25 @@ impl DingTalkConnector {
                 "Use when you need a DingTalk media_id before sending files or rich media.",
             ),
             operation(
+                OP_NORMALIZE_EVENT,
+                "Normalize a DingTalk robot callback event into a standard format",
+                CAP_MESSAGES_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                json!({
+                    "type": "object",
+                    "required": ["event"],
+                    "properties": {
+                        "event": {
+                            "type": "object",
+                            "description": "Raw DingTalk robot callback JSON payload"
+                        }
+                    }
+                }),
+                "Use to normalize an inbound DingTalk robot callback event for downstream processing.",
+            ),
+            operation(
                 OP_HEALTH,
                 "Verify DingTalk credentials and token issuance",
                 CAP_HEALTH_READ,
@@ -260,11 +281,7 @@ impl DingTalkConnector {
                 let title = required_string(&req.input, "title")?;
                 let text = required_string(&req.input, "text")?;
                 let message_url = required_string(&req.input, "message_url")?;
-                let pic_url = req
-                    .input
-                    .get("pic_url")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let pic_url = optional_string(&req.input, "pic_url")?;
                 let target = ParsedTarget::parse(to);
                 let (path, body) = if target.is_group {
                     (
@@ -273,12 +290,7 @@ impl DingTalkConnector {
                             "robotCode": client.config().client_id,
                             "openConversationId": target.id,
                             "msgKey": "sampleLink",
-                            "msgParam": json!({
-                                "title": title,
-                                "text": text,
-                                "messageUrl": message_url,
-                                "picUrl": pic_url,
-                            }).to_string(),
+                            "msgParam": link_msg_param(title, text, message_url, pic_url).to_string(),
                         }),
                     )
                 } else {
@@ -288,12 +300,7 @@ impl DingTalkConnector {
                             "robotCode": client.config().client_id,
                             "userIds": [target.id],
                             "msgKey": "sampleLink",
-                            "msgParam": json!({
-                                "title": title,
-                                "text": text,
-                                "messageUrl": message_url,
-                                "picUrl": pic_url,
-                            }).to_string(),
+                            "msgParam": link_msg_param(title, text, message_url, pic_url).to_string(),
                         }),
                     )
                 };
@@ -351,16 +358,27 @@ impl DingTalkConnector {
                     });
                 }
                 let file_name = required_string(&req.input, "file_name")?;
-                let mime_type = req
-                    .input
-                    .get("mime_type")
-                    .and_then(Value::as_str)
+                let mime_type = optional_string(&req.input, "mime_type")?
                     .unwrap_or_else(|| default_mime_type(media_type));
                 let content_base64 = required_string(&req.input, "content_base64")?;
                 client
                     .upload_media(media_type, file_name, mime_type, content_base64)
                     .await
                     .map_err(|e| e.to_fcp_error())?
+            }
+            OP_NORMALIZE_EVENT => {
+                let event_value =
+                    req.input
+                        .get("event")
+                        .ok_or_else(|| FcpError::InvalidRequest {
+                            code: 1005,
+                            message: "event is required".into(),
+                        })?;
+                let normalized =
+                    normalize_callback_event(event_value).map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&normalized).map_err(|e| FcpError::Internal {
+                    message: format!("failed to serialize normalized event: {e}"),
+                })?
             }
             OP_HEALTH => {
                 let _token = client.access_token().await.map_err(|e| e.to_fcp_error())?;
@@ -553,6 +571,36 @@ fn title_for(content: &str) -> String {
     content.chars().take(10).collect()
 }
 
+fn optional_string<'a>(value: &'a Value, field: &str) -> FcpResult<Option<&'a str>> {
+    match value.get(field) {
+        None => Ok(None),
+        Some(Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        Some(_) => Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be a string"),
+        }),
+    }
+}
+
+fn link_msg_param(title: &str, text: &str, message_url: &str, pic_url: Option<&str>) -> Value {
+    let mut msg_param = json!({
+        "title": title,
+        "text": text,
+        "messageUrl": message_url,
+    });
+    if let Some(pic_url) = pic_url {
+        msg_param["picUrl"] = json!(pic_url);
+    }
+    msg_param
+}
+
 fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
     value
         .get(field)
@@ -567,6 +615,7 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
         OP_SEND_TEXT | OP_SEND_LINK | OP_SEND_FILE => CAP_MESSAGES_WRITE,
+        OP_NORMALIZE_EVENT => CAP_MESSAGES_READ,
         OP_UPLOAD_MEDIA => CAP_MEDIA_WRITE,
         OP_HEALTH => CAP_HEALTH_READ,
         _ => {
@@ -585,7 +634,7 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
         .filter(|capability| {
             matches!(
                 capability.as_str(),
-                CAP_MESSAGES_WRITE | CAP_MEDIA_WRITE | CAP_HEALTH_READ
+                CAP_MESSAGES_WRITE | CAP_MESSAGES_READ | CAP_MEDIA_WRITE | CAP_HEALTH_READ
             )
         })
         .map(|capability| CapabilityGrant {
@@ -781,18 +830,19 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn introspect_returns_five_operations() {
+    async fn introspect_returns_six_operations() {
         let connector = DingTalkConnector::new();
         let introspection = connector.introspect();
-        assert_eq!(introspection.operations.len(), 5);
+        assert_eq!(introspection.operations.len(), 6);
     }
 
     #[test]
     fn operations_count() {
         let ops = DingTalkConnector::operations();
-        assert_eq!(ops.len(), 5);
+        assert_eq!(ops.len(), 6);
         assert_eq!(ops[0].id.as_str(), OP_SEND_TEXT);
-        assert_eq!(ops[4].id.as_str(), OP_HEALTH);
+        assert_eq!(ops[4].id.as_str(), OP_NORMALIZE_EVENT);
+        assert_eq!(ops[5].id.as_str(), OP_HEALTH);
     }
 
     #[test]
@@ -800,6 +850,11 @@ mod tests {
         assert!(required_capability(OP_SEND_TEXT).is_ok());
         assert!(required_capability(OP_SEND_LINK).is_ok());
         assert!(required_capability(OP_UPLOAD_MEDIA).is_ok());
+        assert!(required_capability(OP_NORMALIZE_EVENT).is_ok());
+        assert_eq!(
+            required_capability(OP_NORMALIZE_EVENT).unwrap().as_str(),
+            CAP_MESSAGES_READ
+        );
         assert!(required_capability("unknown.op").is_err());
     }
 
@@ -807,16 +862,49 @@ mod tests {
     fn granted_capabilities_filters() {
         let requested = vec![
             CapabilityId::from_static(CAP_MESSAGES_WRITE),
+            CapabilityId::from_static(CAP_MESSAGES_READ),
             CapabilityId::from_static("dingtalk.fake"),
         ];
         let granted = granted_capabilities(requested);
-        assert_eq!(granted.len(), 1);
+        assert_eq!(granted.len(), 2);
         assert_eq!(granted[0].capability.as_str(), CAP_MESSAGES_WRITE);
+        assert_eq!(granted[1].capability.as_str(), CAP_MESSAGES_READ);
     }
 
     #[test]
     fn title_for_truncates() {
         assert_eq!(title_for("hello world, this is long"), "hello worl");
         assert_eq!(title_for("short"), "short");
+    }
+
+    #[test]
+    fn optional_string_rejects_non_string_values() {
+        let err = optional_string(&json!({"pic_url": 42}), "pic_url").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("pic_url must be a string"));
+    }
+
+    #[test]
+    fn optional_string_trims_blank_values_to_none() {
+        assert_eq!(
+            optional_string(&json!({"pic_url": "   "}), "pic_url").unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_string(
+                &json!({"pic_url": " https://example.com/x.png "}),
+                "pic_url"
+            )
+            .unwrap(),
+            Some("https://example.com/x.png")
+        );
+    }
+
+    #[test]
+    fn link_msg_param_omits_absent_pic_url() {
+        let msg_param = link_msg_param("title", "text", "https://example.com", None);
+        assert_eq!(msg_param["title"], "title");
+        assert_eq!(msg_param["messageUrl"], "https://example.com");
+        assert!(msg_param.get("picUrl").is_none());
     }
 }

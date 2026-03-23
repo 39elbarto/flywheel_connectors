@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc)]
+
 //! HTTP client and token-cache runtime for the `WeCom` connector.
 
 use std::collections::BTreeMap;
@@ -192,7 +194,7 @@ impl WeComClient {
         let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
-        if let Some(provider_result) = parse_provider_json_response(&bytes)? {
+        if let Some(provider_result) = parse_provider_json_response(&bytes) {
             return match provider_result {
                 Ok(_) => Err(WeComError::InvalidInput(
                     "WeCom media download returned a JSON payload instead of media bytes".into(),
@@ -236,7 +238,7 @@ impl WeComClient {
         &self,
         request: &WeComCallbackIngestRequest,
     ) -> WeComResult<WeComCallbackEnvelope> {
-        if request.body().as_bytes().len() > MAX_CALLBACK_BODY_BYTES {
+        if request.body().len() > MAX_CALLBACK_BODY_BYTES {
             return Err(WeComError::InvalidInput(format!(
                 "callback body exceeds maximum size of {MAX_CALLBACK_BODY_BYTES} bytes"
             )));
@@ -401,14 +403,14 @@ fn map_config_error(error: FcpError) -> WeComError {
     }
 }
 
-fn parse_provider_json_response(bytes: &[u8]) -> WeComResult<Option<WeComResult<Value>>> {
+fn parse_provider_json_response(bytes: &[u8]) -> Option<WeComResult<Value>> {
     if bytes.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     match serde_json::from_slice::<Value>(bytes) {
-        Ok(body) if body.get("errcode").is_some() => Ok(Some(ensure_wecom_success(body))),
-        Ok(_) | Err(_) => Ok(None),
+        Ok(body) if body.get("errcode").is_some() => Some(ensure_wecom_success(body)),
+        Ok(_) | Err(_) => None,
     }
 }
 
@@ -572,7 +574,7 @@ mod tests {
             .to_string()
     }
 
-    fn callback_config_json(base_url: String) -> Value {
+    fn callback_config_json(base_url: &str) -> Value {
         json!({
             "base_url": base_url,
             "corp_id": "corp",
@@ -588,7 +590,8 @@ mod tests {
         let key = sample_callback_key_bytes();
         let mut plaintext = Vec::new();
         plaintext.extend_from_slice(b"0123456789ABCDEF");
-        plaintext.extend_from_slice(&(message.len() as u32).to_be_bytes());
+        let message_len = u32::try_from(message.len()).expect("test fixture should fit in u32");
+        plaintext.extend_from_slice(&message_len.to_be_bytes());
         plaintext.extend_from_slice(message.as_bytes());
         plaintext.extend_from_slice(receive_id.as_bytes());
 
@@ -799,7 +802,7 @@ mod tests {
     #[test]
     fn verify_callback_url_returns_plaintext_challenge() {
         let client = WeComClient::new(
-            WeComConfig::from_value(callback_config_json("https://qyapi.weixin.qq.com".into()))
+            WeComConfig::from_value(callback_config_json("https://qyapi.weixin.qq.com"))
                 .expect("config should parse"),
         )
         .expect("client should build");
@@ -823,12 +826,12 @@ mod tests {
     #[test]
     fn ingest_callback_event_decrypts_and_parses_xml() {
         let client = WeComClient::new(
-            WeComConfig::from_value(callback_config_json("https://qyapi.weixin.qq.com".into()))
+            WeComConfig::from_value(callback_config_json("https://qyapi.weixin.qq.com"))
                 .expect("config should parse"),
         )
         .expect("client should build");
 
-        let plaintext = r#"<xml><ToUserName><![CDATA[corp]]></ToUserName><FromUserName><![CDATA[alice]]></FromUserName><CreateTime>1710000000</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[hello world]]></Content><MsgId>42</MsgId></xml>"#;
+        let plaintext = r"<xml><ToUserName><![CDATA[corp]]></ToUserName><FromUserName><![CDATA[alice]]></FromUserName><CreateTime>1710000000</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[hello world]]></Content><MsgId>42</MsgId></xml>";
         let encrypted = encrypt_callback_message(plaintext, "corp");
         let request = WeComCallbackIngestRequest::from_value(&json!({
             "msg_signature": callback_signature(&encrypted, "1710000001", "nonce-2"),
@@ -861,7 +864,7 @@ mod tests {
     #[test]
     fn ingest_callback_event_rejects_bad_signature() {
         let client = WeComClient::new(
-            WeComConfig::from_value(callback_config_json("https://qyapi.weixin.qq.com".into()))
+            WeComConfig::from_value(callback_config_json("https://qyapi.weixin.qq.com"))
                 .expect("config should parse"),
         )
         .expect("client should build");
@@ -911,7 +914,7 @@ mod tests {
 
         let client = WeComClient::new(
             WeComConfig::from_value({
-                let mut config = callback_config_json(server.uri());
+                let mut config = callback_config_json(&server.uri());
                 config["callback_token"] = Value::String(String::new());
                 config["callback_encoding_aes_key"] = Value::String(String::new());
                 config

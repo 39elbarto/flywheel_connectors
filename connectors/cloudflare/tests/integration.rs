@@ -156,9 +156,9 @@ async fn doctor_unconfigured_reports_remediation() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn self_check_rejects_invalid_network_constraints() {
+async fn configure_rejects_invalid_network_constraints() {
     let mut connector = CloudflareConnector::new();
-    connector
+    let error = connector
         .configure(json!({
             "mode": "api_token",
             "api_token": "test-cloudflare-token",
@@ -167,13 +167,12 @@ async fn self_check_rejects_invalid_network_constraints() {
             "retry": { "max_retries": 0 },
         }))
         .await
-        .unwrap();
+        .expect_err("invalid base_url policy should fail during configure");
 
-    let report = connector.self_check().await.unwrap();
-    let value = serde_json::to_value(&report).unwrap();
-    assert_self_check_not_ready(&value);
-    assert_eq!(value["reason_code"], "network_constraints_invalid");
-    assert_eq!(value["details"]["provisioning"]["network_ok"], false);
+    assert!(matches!(
+        error,
+        fcp_core::FcpError::InvalidRequest { code: 1001, .. }
+    ));
 }
 
 #[fcp_async_core::runtime::test]

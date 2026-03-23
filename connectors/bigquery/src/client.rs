@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, Response, StatusCode, Url};
 use tracing::{debug, instrument};
 
 use crate::{
@@ -58,24 +58,63 @@ impl fmt::Debug for BigQueryClient {
 
 /// Validate that a user-supplied string is safe for use as a URL path segment.
 ///
-/// Rejects strings containing `/`, `\`, `..`, or percent-encoded equivalents (`%2f`, `%5c`)
-/// which could allow path traversal attacks.
-fn sanitize_path_segment(value: &str, param_name: &str) -> BigQueryResult<()> {
-    let lower = value.to_ascii_lowercase();
-    if value.contains('/')
-        || value.contains('\\')
-        || value.contains("..")
+/// Rejects empty strings plus `/`, `\`, `..`, and percent-encoded traversal
+/// sequences so dynamic path segments cannot alter routing semantics.
+fn sanitize_path_segment<'a>(value: &'a str, param_name: &str) -> BigQueryResult<&'a str> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
         || lower.contains("%2f")
         || lower.contains("%5c")
+        || lower.contains("%2e")
     {
         return Err(BigQueryError::Api {
             status_code: 400,
             message: format!(
-                "invalid {param_name}: must not contain '/', '\\', '..', or encoded traversal sequences"
+                "invalid {param_name}: must be non-empty and must not contain '/', '\\', '..', or encoded traversal sequences"
             ),
         });
     }
-    Ok(())
+    Ok(trimmed)
+}
+
+pub(crate) fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+pub(crate) fn normalize_base_url(base_url: Option<&str>) -> BigQueryResult<String> {
+    let raw = base_url.unwrap_or(DEFAULT_BASE_URL).trim();
+    if raw.is_empty() {
+        return Err(BigQueryError::Config("base_url must not be empty".into()));
+    }
+
+    let parsed = Url::parse(raw)
+        .map_err(|error| BigQueryError::Config(format!("base_url could not be parsed: {error}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| BigQueryError::Config("base_url must include a host".into()))?;
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("bigquery.googleapis.com")
+        || host.to_ascii_lowercase().ends_with(".googleapis.com")
+        || local;
+    if !allowed_host {
+        return Err(BigQueryError::Config(
+            "base_url must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests)"
+                .into(),
+        ));
+    }
+
+    if parsed.scheme() != "https" && !local {
+        return Err(BigQueryError::Config(
+            "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests".into(),
+        ));
+    }
+
+    Ok(raw.trim_end_matches('/').to_string())
 }
 
 impl BigQueryClient {
@@ -90,10 +129,7 @@ impl BigQueryClient {
             .user_agent("fcp-bigquery/0.1.0 (FCP connector)")
             .build()?;
 
-        let url = match base_url {
-            Some(u) => u.trim_end_matches('/').to_string(),
-            None => DEFAULT_BASE_URL.to_string(),
-        };
+        let url = normalize_base_url(base_url)?;
 
         Ok(Self {
             client,
@@ -123,6 +159,23 @@ impl BigQueryClient {
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req.bearer_auth(&self.auth.access_token)
+    }
+
+    fn resource_url<'a, I>(&self, segments: I) -> BigQueryResult<Url>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        let mut url = Url::parse(&self.base_url)
+            .map_err(|error| BigQueryError::Config(format!("invalid client base_url: {error}")))?;
+        {
+            let mut path_segments = url.path_segments_mut().map_err(|()| {
+                BigQueryError::Config("base_url does not support path segments".into())
+            })?;
+            for (segment, param_name) in segments {
+                path_segments.push(sanitize_path_segment(segment, param_name)?);
+            }
+        }
+        Ok(url)
     }
 
     async fn handle_response(&self, resp: Response) -> BigQueryResult<serde_json::Value> {
@@ -170,27 +223,21 @@ impl BigQueryClient {
         }
     }
 
-    #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> BigQueryResult<serde_json::Value> {
-        let url = format!("{}{path}", self.base_url);
+    #[instrument(skip(self), fields(url = %url))]
+    async fn get(&self, url: Url) -> BigQueryResult<serde_json::Value> {
         debug!(url = %url, "GET request");
         let req = self
-            .add_auth(self.client.get(&url))
+            .add_auth(self.client.get(url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
 
-    #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> BigQueryResult<serde_json::Value> {
-        let url = format!("{}{path}", self.base_url);
+    #[instrument(skip(self, body), fields(url = %url))]
+    async fn post(&self, url: Url, body: &serde_json::Value) -> BigQueryResult<serde_json::Value> {
         debug!(url = %url, "POST request");
         let req = self
-            .add_auth(self.client.post(&url))
+            .add_auth(self.client.post(url))
             .header("Accept", "application/json")
             .json(body);
         let resp = req.send().await?;
@@ -201,8 +248,12 @@ impl BigQueryClient {
 
     /// List datasets in a project.
     pub async fn list_datasets(&self, project_id: &str) -> BigQueryResult<serde_json::Value> {
-        sanitize_path_segment(project_id, "project_id")?;
-        self.get(&format!("/projects/{project_id}/datasets")).await
+        let url = self.resource_url([
+            ("projects", "projects"),
+            (project_id, "project_id"),
+            ("datasets", "datasets"),
+        ])?;
+        self.get(url).await
     }
 
     // -- Tables --
@@ -213,20 +264,26 @@ impl BigQueryClient {
         project_id: &str,
         dataset_id: &str,
     ) -> BigQueryResult<serde_json::Value> {
-        sanitize_path_segment(project_id, "project_id")?;
-        sanitize_path_segment(dataset_id, "dataset_id")?;
-        self.get(&format!(
-            "/projects/{project_id}/datasets/{dataset_id}/tables"
-        ))
-        .await
+        let url = self.resource_url([
+            ("projects", "projects"),
+            (project_id, "project_id"),
+            ("datasets", "datasets"),
+            (dataset_id, "dataset_id"),
+            ("tables", "tables"),
+        ])?;
+        self.get(url).await
     }
 
     // -- Jobs --
 
     /// List recent jobs in a project.
     pub async fn list_jobs(&self, project_id: &str) -> BigQueryResult<serde_json::Value> {
-        sanitize_path_segment(project_id, "project_id")?;
-        self.get(&format!("/projects/{project_id}/jobs")).await
+        let url = self.resource_url([
+            ("projects", "projects"),
+            (project_id, "project_id"),
+            ("jobs", "jobs"),
+        ])?;
+        self.get(url).await
     }
 
     /// Run a SQL query.
@@ -236,13 +293,16 @@ impl BigQueryClient {
         query_str: &str,
         use_legacy_sql: bool,
     ) -> BigQueryResult<serde_json::Value> {
-        sanitize_path_segment(project_id, "project_id")?;
+        let url = self.resource_url([
+            ("projects", "projects"),
+            (project_id, "project_id"),
+            ("queries", "queries"),
+        ])?;
         let body = serde_json::json!({
             "query": query_str,
             "useLegacySql": use_legacy_sql,
         });
-        self.post(&format!("/projects/{project_id}/queries"), &body)
-            .await
+        self.post(url, &body).await
     }
 }
 
@@ -275,9 +335,8 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client =
-            BigQueryClient::new(auth, None, Some("https://test.example.com/bq/v2")).unwrap();
-        assert_eq!(client.base_url, "https://test.example.com/bq/v2");
+        let client = BigQueryClient::new(auth, None, Some("http://localhost:8080/bq/v2")).unwrap();
+        assert_eq!(client.base_url, "http://localhost:8080/bq/v2");
     }
 
     #[test]
@@ -294,9 +353,8 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client =
-            BigQueryClient::new(auth, None, Some("https://test.example.com/bq/v2/")).unwrap();
-        assert_eq!(client.base_url, "https://test.example.com/bq/v2");
+        let client = BigQueryClient::new(auth, None, Some("http://localhost:8080/bq/v2/")).unwrap();
+        assert_eq!(client.base_url, "http://localhost:8080/bq/v2");
     }
 
     #[test]
@@ -304,9 +362,9 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "ya29.super-secret-abc".into(),
         };
-        let client = BigQueryClient::new(auth, None, Some("https://example.com")).unwrap();
+        let client = BigQueryClient::new(auth, None, Some("http://localhost:8080")).unwrap();
         let dbg = format!("{client:?}");
-        assert!(dbg.contains("example.com"));
+        assert!(dbg.contains("localhost:8080"));
         assert!(!dbg.contains("ya29.super-secret-abc"));
     }
 
@@ -363,10 +421,10 @@ mod tests {
         let client = BigQueryClient::new(
             auth,
             Some("my-proj".into()),
-            Some("https://custom.bq.example.com/v2"),
+            Some("http://localhost:8181/v2"),
         )
         .unwrap();
-        assert_eq!(client.base_url, "https://custom.bq.example.com/v2");
+        assert_eq!(client.base_url, "http://localhost:8181/v2");
         assert_eq!(client.project_id(), Some("my-proj"));
     }
 
@@ -383,8 +441,7 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client = BigQueryClient::new(auth, None, Some("")).unwrap();
-        assert_eq!(client.base_url, "");
+        assert!(BigQueryClient::new(auth, None, Some("")).is_err());
     }
 
     #[test]
@@ -392,7 +449,7 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client = BigQueryClient::new(auth, None, Some("https://x.com///")).unwrap();
+        let client = BigQueryClient::new(auth, None, Some("http://localhost:8080///")).unwrap();
         assert!(!client.base_url.ends_with('/'));
     }
 
@@ -432,8 +489,8 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client = BigQueryClient::new(auth, None, Some("https://example.com")).unwrap();
-        assert_eq!(client.base_url, "https://example.com");
+        let client = BigQueryClient::new(auth, None, Some("http://localhost:8080")).unwrap();
+        assert_eq!(client.base_url, "http://localhost:8080");
     }
 
     #[test]
@@ -463,6 +520,12 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_rejects_whitespace_only() {
+        let result = sanitize_path_segment("   ", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn sanitize_rejects_encoded_slash() {
         let result = sanitize_path_segment("my%2fproject", "project_id");
         assert!(result.is_err());
@@ -487,6 +550,12 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_rejects_encoded_dot_uppercase() {
+        let result = sanitize_path_segment("my%2Eproject", "project_id");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn sanitize_accepts_clean_project_id() {
         assert!(sanitize_path_segment("my-project-123", "project_id").is_ok());
     }
@@ -499,6 +568,14 @@ mod tests {
     #[test]
     fn sanitize_accepts_dots_without_traversal() {
         assert!(sanitize_path_segment("my.project", "project_id").is_ok());
+    }
+
+    #[test]
+    fn sanitize_trims_clean_segment() {
+        assert_eq!(
+            sanitize_path_segment("  my-project-123  ", "project_id").unwrap(),
+            "my-project-123"
+        );
     }
 
     #[test]
@@ -516,5 +593,50 @@ mod tests {
     fn sanitize_rejects_path_traversal_sequence() {
         let result = sanitize_path_segment("../../../etc/passwd", "project_id");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_unknown_host() {
+        let result = normalize_base_url(Some("https://evil.example.com"));
+        assert!(matches!(result, Err(BigQueryError::Config(_))));
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_non_local_http() {
+        let result = normalize_base_url(Some("http://bigquery.googleapis.com/bigquery/v2"));
+        assert!(matches!(result, Err(BigQueryError::Config(_))));
+    }
+
+    #[test]
+    fn normalize_base_url_accepts_googleapis_https() {
+        let normalized =
+            normalize_base_url(Some("https://bigquery.googleapis.com/bigquery/v2/")).unwrap();
+        assert_eq!(normalized, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn normalize_base_url_accepts_local_http_for_tests() {
+        let normalized = normalize_base_url(Some("http://localhost:8080/bq/v2/")).unwrap();
+        assert_eq!(normalized, "http://localhost:8080/bq/v2");
+    }
+
+    #[test]
+    fn resource_url_preserves_base_prefix() {
+        let auth = BigQueryAuth {
+            access_token: "tok".into(),
+        };
+        let client =
+            BigQueryClient::new(auth, None, Some("http://localhost:8080/bigquery/v2")).unwrap();
+        let url = client
+            .resource_url([
+                ("projects", "projects"),
+                ("demo-project", "project_id"),
+                ("datasets", "datasets"),
+            ])
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://localhost:8080/bigquery/v2/projects/demo-project/datasets"
+        );
     }
 }

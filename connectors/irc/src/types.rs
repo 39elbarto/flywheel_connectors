@@ -164,23 +164,20 @@ impl IrcConfig {
     ///
     /// Returns `FcpError::InvalidRequest` if server or nick is empty, or timeout is zero.
     pub fn validate(&self) -> FcpResult<()> {
-        if self.server.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "server must not be empty".into(),
-            });
+        validate_irc_value("server", &self.server)?;
+        if self.server.chars().any(char::is_whitespace) {
+            return Err(invalid_request("server must not contain whitespace"));
         }
-        if self.nick.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "nick must not be empty".into(),
-            });
+        validate_irc_atom("nick", &self.nick, false)?;
+        validate_irc_atom("username", &self.username, false)?;
+        validate_irc_value("realname", &self.realname)?;
+        if let Some(password) = self.password.as_deref() {
+            validate_irc_value("password", password)?;
         }
         if self.request_timeout_ms == 0 {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "request_timeout_ms must be greater than zero".into(),
-            });
+            return Err(invalid_request(
+                "request_timeout_ms must be greater than zero",
+            ));
         }
         Ok(())
     }
@@ -216,6 +213,47 @@ impl IrcConfig {
             realname: self.realname.clone(),
         }
     }
+}
+
+fn invalid_request(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1001,
+        message: message.into(),
+    }
+}
+
+fn has_forbidden_irc_control(value: &str) -> bool {
+    value.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0'))
+}
+
+pub(crate) fn validate_irc_value(field: &str, value: &str) -> FcpResult<()> {
+    if value.trim().is_empty() {
+        return Err(invalid_request(format!("{field} must not be empty")));
+    }
+    if has_forbidden_irc_control(value) {
+        return Err(invalid_request(format!(
+            "{field} must not contain CR, LF, or NUL bytes"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_irc_atom(field: &str, value: &str, allow_commas: bool) -> FcpResult<()> {
+    validate_irc_value(field, value)?;
+    if value.chars().any(char::is_whitespace) {
+        return Err(invalid_request(format!(
+            "{field} must not contain whitespace"
+        )));
+    }
+    if value.starts_with(':') {
+        return Err(invalid_request(format!("{field} must not start with ':'")));
+    }
+    if !allow_commas && value.contains(',') {
+        return Err(invalid_request(format!(
+            "{field} must identify exactly one IRC target"
+        )));
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -495,6 +533,46 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_whitespace_in_server() {
+        let config: IrcConfig = serde_json::from_value(json!({
+            "server": "irc example.com",
+            "nick": "flywheel"
+        }))
+        .expect("should deserialize");
+        let err = config
+            .validate()
+            .expect_err("whitespace in server should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn config_rejects_whitespace_in_nick() {
+        let config: IrcConfig = serde_json::from_value(json!({
+            "server": "irc.example.com",
+            "nick": "fly wheel"
+        }))
+        .expect("should deserialize");
+        let err = config
+            .validate()
+            .expect_err("whitespace in nick should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn config_rejects_username_with_line_breaks() {
+        let config: IrcConfig = serde_json::from_value(json!({
+            "server": "irc.example.com",
+            "nick": "flywheel",
+            "username": "bad\nuser"
+        }))
+        .expect("should deserialize");
+        let err = config
+            .validate()
+            .expect_err("username with line breaks should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
     fn config_rejects_zero_timeout() {
         let config: IrcConfig = serde_json::from_value(json!({
             "server": "irc.example.com",
@@ -673,6 +751,20 @@ mod tests {
                 realname: "Flywheel Bot".into(),
             }
         );
+    }
+
+    #[test]
+    fn validate_irc_atom_rejects_multi_target_fanout() {
+        let err = validate_irc_atom("target", "#rust,#ops", false)
+            .expect_err("comma-separated targets should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_irc_value_rejects_line_breaks() {
+        let err =
+            validate_irc_value("message", "hello\r\nworld").expect_err("line breaks should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]

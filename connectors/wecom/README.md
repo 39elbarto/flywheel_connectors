@@ -54,6 +54,8 @@ Important implementation truths from `connector.rs`, `main.rs`, and `manifest.to
 - `wecom.callback.ingest_event` verifies the signed callback POST, decrypts the `Encrypt` wrapper payload, parses the plaintext XML, and returns a normalized `EventEnvelope` with conversation stream keys and attachment references.
 - The inbound model is host-forwarded HTTP callback handling, not a connector-owned socket. This is important because upstream WeCom callback delivery is signed and encrypted HTTP, not websocket-based streaming.
 - `wecom.health` and `self_check()` are both grounded in token issuance, not in a separate provider health endpoint.
+- `doctor()` is the operator-facing readiness surface. It summarizes configuration, host allowlist compliance, callback crypto readiness, handshake state, and redacted remediation guidance without attempting live provider mutations.
+- `self_check()` now returns redacted structured details covering provisioning readiness, operator guidance, contract boundaries, and the last token-issuance probe outcome.
 - `main.rs` accepts `subscribe` and `unsubscribe` RPC methods because of the shared connector interface, but the connector advertises `streaming = false` and both methods return `StreamingNotSupported`.
 - The current crate has inline unit tests for configuration validation, message-send payload shape, callback crypto/XML handling, and media transfer behavior, but no crate-local `tests/` directory yet.
 - Runtime configuration validation currently allows only `qyapi.weixin.qq.com` plus `localhost` / `127.0.0.1` for deterministic tests. This first slice is deliberately narrower than a generic operator-supplied host model.
@@ -118,6 +120,35 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 - Health proves credential issuance and basic API reachability, not inbound-event readiness
 - Runtime config validation intentionally pins the first slice to the official WeCom API host rather than allowing arbitrary operator-selected endpoints in production
 - The host allowlist assumption is part of the security boundary for this first slice: production traffic is constrained to the official WeCom API host, while local harnesses are the only accepted exception
+
+## Readiness And Deployment Guidance
+
+- Prefer `doctor()` as the fast preflight summary. It is purely local and tells the operator whether configuration, client initialization, endpoint policy, callback crypto material, and handshake state line up with the accepted first slice.
+- Use `self_check()` when you need a live bounded probe. The connector performs token issuance against `GET /cgi-bin/gettoken` and returns redacted structured details instead of only a pass or fail bit.
+- Use `wecom.health` inside capability-gated flows when a caller needs a lightweight runtime snapshot before making a mutation.
+- For inbound callback deployments, the public HTTPS endpoint belongs to the host. The host receives the signed GET or POST, then forwards raw query/body material into `wecom.callback.verify_url` or `wecom.callback.ingest_event`; the connector does not expose its own listener.
+- Callback readiness requires both `callback_token` and `callback_encoding_aes_key`. If those are omitted, outbound send and directory operations remain usable, but live callback verification and event ingest are not deployment-ready.
+- Treat `agent_secret`, access tokens, callback secrets, decrypted callback plaintext, and tenant-specific IDs as sensitive. The connector’s readiness surfaces are intentionally redacted and should stay that way in external logs or artifacts.
+- Recommended verification bundle:
+  - `rch exec -- cargo fmt --manifest-path connectors/wecom/Cargo.toml --check`
+  - `rch exec -- cargo check --manifest-path connectors/wecom/Cargo.toml --all-targets`
+  - `rch exec -- cargo test --manifest-path connectors/wecom/Cargo.toml --lib`
+  - `rch exec -- cargo clippy --manifest-path connectors/wecom/Cargo.toml -p fcp-wecom --all-targets --no-deps -- -D warnings`
+
+## Verification Handoff
+
+- Deterministic unit coverage now exercises:
+  - outbound send payload shaping for text and image messages, including duplicate-check hints
+  - media upload and media download request handling
+  - callback URL verification, callback decrypt + XML parse, and normalized event routing
+  - health and doctor readiness surfaces, including unconfigured and callback-ready states
+- The current replayable evidence bundle is:
+  - `rch exec -- cargo check --manifest-path connectors/wecom/Cargo.toml --all-targets`
+  - `rch exec -- cargo clippy --manifest-path connectors/wecom/Cargo.toml -p fcp-wecom --all-targets --no-deps -- -D warnings`
+  - `rch exec -- cargo test --manifest-path connectors/wecom/Cargo.toml --lib`
+- Expected lib-test signal after the readiness work: `33 passed, 0 failed`.
+- Conformance note: the connector still truthfully models a host-forwarded callback transport, not a connector-owned listener or websocket stream. Verification should preserve that boundary rather than introducing fake standalone ingress behavior.
+- Known infra noise outside the connector itself: `rch` can finish the remote command successfully and still fail artifact retrieval on the pathological `.beads/recovery_*` tree. Treat the remote cargo exit status as authoritative until that repo-level sync issue is repaired.
 
 ## Capability Families
 

@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.wecom"
 name = "WeCom Enterprise Messaging"
 version = "0.1.0"
-description = "Tenant-scoped WeCom connector for enterprise app messaging, media upload, directory lookups, and health verification"
+description = "Tenant-scoped WeCom connector for enterprise app messaging, host-forwarded callback ingest, media transfer, directory lookups, and health verification"
 archetype = "operational"
 homepage = "https://developer.work.weixin.qq.com/"
 
@@ -15,9 +15,10 @@ homepage = "https://developer.work.weixin.qq.com/"
 # - Authentication uses `corp_id`, `agent_id`, and `agent_secret`.
 # - The operator provisions that application out of band and grants the app the
 #   tenant permissions needed for outbound messaging and directory reads.
-# - The connector acts as the configured enterprise application; user impersonation,
-#   callback verification, and inbound webhook or websocket delivery are explicit non-goals
-#   for this first slice.
+# - Optional callback verification uses a host-forwarded HTTP callback model with
+#   `callback_token` and `callback_encoding_aes_key`; the connector never owns a listener socket.
+# - The connector acts as the configured enterprise application; user impersonation and
+#   websocket delivery remain out of scope.
 
 [zones]
 home = "z:work"
@@ -51,6 +52,13 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
 
+[provides.operations.media_download]
+summary = "Download media bytes for a WeCom media_id"
+capability = "wecom.media.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
 [provides.operations.users_get]
 summary = "Fetch a WeCom user profile"
 capability = "wecom.users.read"
@@ -61,6 +69,20 @@ idempotency = "strict"
 [provides.operations.departments_list]
 summary = "List WeCom departments"
 capability = "wecom.departments.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.callback_verify_url]
+summary = "Verify a host-forwarded WeCom callback URL challenge"
+capability = "wecom.events.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.callback_ingest_event]
+summary = "Verify, decrypt, and normalize one host-forwarded WeCom callback event"
+capability = "wecom.events.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"

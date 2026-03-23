@@ -18,7 +18,7 @@
 
 This document fixes the accepted first V3 slice for `fcp.wecom` so the follow-on runtime and capability work converges on the connector that actually exists today instead of a broader idea of "WeCom enterprise collaboration integration" that would mix outbound app sends, media lifecycle, tenant directory reads, inbound callbacks, websocket delivery, admin provisioning, and org sync into one undefined surface.
 
-The current connector is a request-response WeCom application surface for outbound text and markdown sends, temporary media upload, user lookup, department listing, and credential health verification. It is not yet an inbound event connector, callback-verification service, websocket session runtime, tenant admin SDK, or full WeCom messaging platform abstraction.
+The accepted first slice below was request-response only. The current runtime still preserves that narrow tenant-app boundary, but it now also supports host-forwarded callback URL verification, callback event decrypt/normalization, and media download for inbound `media_id` references. It is still not a websocket session runtime, connector-owned webhook server, tenant admin SDK, or full WeCom messaging platform abstraction.
 
 ## Current Runtime Snapshot
 
@@ -27,24 +27,31 @@ The current crate exposes these operations:
 - `wecom.messages.send_text`
 - `wecom.messages.send_markdown`
 - `wecom.media.upload`
+- `wecom.media.download`
 - `wecom.users.get`
 - `wecom.departments.list`
+- `wecom.callback.verify_url`
+- `wecom.callback.ingest_event`
 - `wecom.health`
 
 Important implementation truths from `connector.rs`, `main.rs`, and `manifest.toml`:
 
-- Configuration is `base_url`, `corp_id`, `agent_id`, `agent_secret`, and bounded `request_timeout_ms`.
+- Configuration is `base_url`, `corp_id`, `agent_id`, `agent_secret`, bounded `request_timeout_ms`, and optional callback credentials (`callback_token`, `callback_encoding_aes_key`, optional `callback_receive_id`).
 - One connector instance is bound to one WeCom tenant application through one `corp_id` / `agent_id` / `agent_secret` tuple.
 - Authentication is application-level token bootstrap against `GET /cgi-bin/gettoken`; the access token is cached in memory only with a refresh safety margin.
 - Text and markdown sends both call `POST /cgi-bin/message/send`.
 - Message sends require at least one WeCom targeting field: `touser`, `toparty`, or `totag`.
 - The current send surface only exposes text and markdown payloads. It does not expose WeCom image, news, template-card, task-card, or recall semantics.
 - Media upload uses `POST /cgi-bin/media/upload` and returns provider media metadata such as `media_id`.
+- Media download uses `GET /cgi-bin/media/get` and returns base64-encoded bytes plus content metadata for a supplied `media_id`.
 - `wecom.users.get` calls `GET /cgi-bin/user/get` and requires one `userid`.
 - `wecom.departments.list` calls `GET /cgi-bin/department/list` with an optional `id`.
+- `wecom.callback.verify_url` verifies the signed WeCom callback URL challenge and returns the decrypted plaintext response the host should echo back.
+- `wecom.callback.ingest_event` verifies the signed callback POST, decrypts the `Encrypt` wrapper payload, parses the plaintext XML, and returns a normalized `EventEnvelope` with conversation stream keys and attachment references.
+- The inbound model is host-forwarded HTTP callback handling, not a connector-owned socket. This is important because upstream WeCom callback delivery is signed and encrypted HTTP, not websocket-based streaming.
 - `wecom.health` and `self_check()` are both grounded in token issuance, not in a separate provider health endpoint.
 - `main.rs` accepts `subscribe` and `unsubscribe` RPC methods because of the shared connector interface, but the connector advertises `streaming = false` and both methods return `StreamingNotSupported`.
-- The current crate has inline unit tests for configuration validation, message-send payload shape, and media upload behavior, but no crate-local `tests/` directory yet.
+- The current crate has inline unit tests for configuration validation, message-send payload shape, callback crypto/XML handling, and media transfer behavior, but no crate-local `tests/` directory yet.
 - Runtime configuration validation currently allows only `qyapi.weixin.qq.com` plus `localhost` / `127.0.0.1` for deterministic tests. This first slice is deliberately narrower than a generic operator-supplied host model.
 
 ## Accepted First Slice
@@ -66,10 +73,11 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 |---------|-----------------------|-------|
 | Outbound text and markdown sends | In scope | Implemented through the WeCom app send API with explicit target fields. |
 | Temporary media upload | In scope | Implemented so later media-aware flows can reference returned provider metadata. |
+| Media download for inbound attachments | In scope in current runtime | Implemented for callback-derived `media_id` fetches; still bounded to explicit operator invocation. |
 | User lookup | In scope | Implemented as direct lookup by known `userid`. |
 | Department listing | In scope | Implemented as bounded org-structure discovery. |
 | Credential and reachability probe | In scope | `wecom.health` and `self_check()` validate token issuance. |
-| Inbound callbacks and event delivery | Out of scope | No callback verification, webhook listener, or websocket event pipeline exists yet. |
+| Host-forwarded inbound callbacks and event normalization | In scope in current runtime | Signature verification, AES decrypt, XML parse, and `EventEnvelope` normalization exist, but the host must own the actual HTTP endpoint. |
 | Conversation or message history readback | Out of scope | The connector does not fetch prior messages, receipts, or chat state. |
 | Rich message families beyond text or markdown | Out of scope | No image, news, template-card, task-card, or recall flows are exposed yet. |
 | Tenant admin and provisioning flows | Out of scope | The connector does not create apps, manage secrets, or administer WeCom tenant policy. |
@@ -80,6 +88,7 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 - One connector instance maps to one WeCom tenant application.
 - Authentication is application-level `corp_id` + `agent_id` + `agent_secret`, exchanged for an access token.
 - The connector caches access tokens in memory only and does not persist token material to disk.
+- Optional callback verification is configured separately with `callback_token` plus `callback_encoding_aes_key`; when `callback_receive_id` is omitted it defaults to `corp_id`.
 - The runtime acts as the configured enterprise application only. It does not impersonate arbitrary users and does not model delegated user OAuth.
 - The operator must provision the WeCom application out of band, keep the app secret available to the connector, and grant the app whatever outbound-send and directory-read privileges are required for the intended tenant workflow.
 - Stable first-slice target identifiers are:
@@ -97,7 +106,8 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 - TLS + SNI required for live traffic
 - `localhost` and `127.0.0.1` are accepted only for deterministic tests
 - The runtime is request-response only
-- No inbound listener, webhook server, websocket loop, replay buffer, or durable connector-local state is part of the accepted slice
+- No inbound listener, webhook server, websocket loop, replay buffer, or durable connector-local state exists inside the connector itself
+- Callback ingress is a host-forwarded HTTP pattern: the host receives the GET or POST, then invokes `wecom.callback.verify_url` or `wecom.callback.ingest_event`
 - Health proves credential issuance and basic API reachability, not inbound-event readiness
 - Runtime config validation intentionally pins the first slice to the official WeCom API host rather than allowing arbitrary operator-selected endpoints in production
 - The host allowlist assumption is part of the security boundary for this first slice: production traffic is constrained to the official WeCom API host, while local harnesses are the only accepted exception
@@ -108,8 +118,10 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 |-----------|---------|
 | `wecom.messages.write` | Outbound text and markdown sends |
 | `wecom.media.write` | Temporary media upload |
+| `wecom.media.read` | Downloading bytes for a WeCom `media_id` |
 | `wecom.users.read` | User profile lookup by known `userid` |
 | `wecom.departments.read` | Department listing |
+| `wecom.events.read` | Callback verification and inbound event normalization |
 | `wecom.health.read` | Credential and reachability verification |
 
 ## Accepted Operation Inventory
@@ -119,21 +131,24 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 | `wecom.messages.send_text` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one text message to at least one supplied WeCom target family. |
 | `wecom.messages.send_markdown` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one markdown message to at least one supplied target family. |
 | `wecom.media.upload` | `POST /cgi-bin/media/upload` | `wecom.media.write` | `Risky` | `Medium` | `BestEffort` | Uploads one temporary media object and returns provider metadata such as `media_id`. |
+| `wecom.media.download` | `GET /cgi-bin/media/get` | `wecom.media.read` | `Safe` | `Low` | `Strict` | Downloads bytes for a known `media_id`, primarily for inbound callback attachments. |
 | `wecom.users.get` | `GET /cgi-bin/user/get` | `wecom.users.read` | `Safe` | `Low` | `Strict` | Fetches one user profile for a known `userid`. |
 | `wecom.departments.list` | `GET /cgi-bin/department/list` | `wecom.departments.read` | `Safe` | `Low` | `Strict` | Lists departments with an optional starting `id`. |
+| `wecom.callback.verify_url` | host-forwarded callback GET | `wecom.events.read` | `Safe` | `Low` | `Strict` | Verifies the signed callback URL challenge and returns the plaintext response body the host should echo. |
+| `wecom.callback.ingest_event` | host-forwarded callback POST | `wecom.events.read` | `Safe` | `Low` | `Strict` | Verifies, decrypts, parses, and normalizes one signed callback event into an `EventEnvelope`. |
 | `wecom.health` | `GET /cgi-bin/gettoken` | `wecom.health.read` | `Safe` | `Low` | `Strict` | Safe auth and reachability probe backed by token issuance. |
 
 ## Explicit Non-Goals
 
 The accepted first WeCom slice does not include:
 
-- inbound callback verification, webhook receipt, or websocket event streams
 - message history readback, thread reconstruction, or receipt tracking
 - image, news, template-card, task-card, or other richer message families
 - media send flows that consume `media_id` in later outbound message types
 - app provisioning, secret rotation, tenant admin, or org-policy management
 - broad people or directory synchronization beyond direct user lookup and department listing
 - user OAuth, delegated-user auth, or multi-tenant brokering
+- connector-owned network listeners or websocket session management
 - runtime enforcement of enterprise policy beyond capability verification and the documented scope boundary
 
 These are excluded on purpose:

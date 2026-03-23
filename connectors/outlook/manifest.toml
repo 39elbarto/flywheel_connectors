@@ -1,0 +1,221 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+
+[connector]
+id = "fcp.outlook"
+name = "Microsoft Outlook Connector"
+version = "0.1.0"
+description = "FCP connector for Microsoft Outlook and Exchange via Microsoft Graph API — mail reading, sending, calendar events, and folder management."
+archetypes = ["request-response", "polling"]
+format = "native"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores Graph API delta tokens for incremental mail sync and calendar subscription IDs."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:owner", "z:private", "z:work"]
+forbidden = ["z:public"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "system.privileged"]
+
+[sandbox]
+profile = "strict"
+memory_limit_mb = 128
+cpu_limit_percent = 25
+wall_clock_timeout_seconds = 30
+deny_exec = true
+deny_ptrace = true
+
+# --- Mail operations ---
+
+[[provides]]
+id = "outlook.list_messages"
+summary = "List recent email messages from a folder"
+capability = "outlook.read"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["graph.microsoft.com"]
+allowed_ports = [443]
+require_tls = true
+follow_redirects = false
+
+[provides.rate_limit]
+pool_name = "graph.read"
+requests = 100
+window = "60s"
+
+[provides.ai_hints]
+when_to_use = "Use to list recent emails in the user's inbox or a specific folder."
+common_mistakes = ["Forgetting to specify folder_id defaults to Inbox"]
+examples = ["{}", "{\"folder_id\": \"Drafts\", \"top\": 10}"]
+related = ["outlook.get_message", "outlook.search_messages"]
+
+[[provides]]
+id = "outlook.get_message"
+summary = "Get a single email message by ID"
+capability = "outlook.read"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["graph.microsoft.com"]
+allowed_ports = [443]
+require_tls = true
+follow_redirects = false
+
+[provides.rate_limit]
+pool_name = "graph.read"
+requests = 100
+window = "60s"
+
+[provides.ai_hints]
+when_to_use = "Use to retrieve the full content of a specific email by its message ID."
+common_mistakes = ["Using display name instead of message ID"]
+examples = ["{\"message_id\": \"AAMk...\"}"]
+related = ["outlook.list_messages"]
+
+[[provides]]
+id = "outlook.search_messages"
+summary = "Search email messages by query"
+capability = "outlook.read"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["graph.microsoft.com"]
+allowed_ports = [443]
+require_tls = true
+follow_redirects = false
+
+[provides.rate_limit]
+pool_name = "graph.read"
+requests = 100
+window = "60s"
+
+[provides.ai_hints]
+when_to_use = "Use to search emails with a keyword query across subjects, bodies, and senders."
+common_mistakes = ["Query must be a non-empty string"]
+examples = ["{\"query\": \"invoice\", \"top\": 10}"]
+related = ["outlook.list_messages"]
+
+[[provides]]
+id = "outlook.send_message"
+summary = "Send a new email message"
+capability = "outlook.send"
+risk_level = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.network_constraints]
+allowed_hosts = ["graph.microsoft.com"]
+allowed_ports = [443]
+require_tls = true
+follow_redirects = false
+
+[provides.rate_limit]
+pool_name = "graph.write"
+requests = 30
+window = "60s"
+
+[provides.ai_hints]
+when_to_use = "Use to send an email from the configured Outlook account."
+common_mistakes = ["At least one recipient is required", "Subject and body must not be empty"]
+examples = ["{\"to\": [\"recipient@example.com\"], \"subject\": \"Hello\", \"body\": \"World\"}"]
+related = ["outlook.list_messages"]
+
+# --- Calendar operations ---
+
+[[provides]]
+id = "outlook.list_events"
+summary = "List calendar events"
+capability = "outlook.calendar"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["graph.microsoft.com"]
+allowed_ports = [443]
+require_tls = true
+follow_redirects = false
+
+[provides.rate_limit]
+pool_name = "graph.read"
+requests = 100
+window = "60s"
+
+[provides.ai_hints]
+when_to_use = "Use to list upcoming calendar events from the user's default calendar."
+common_mistakes = ["Dates should be in ISO 8601 format"]
+examples = ["{}", "{\"top\": 5}"]
+related = ["outlook.create_event"]
+
+[[provides]]
+id = "outlook.create_event"
+summary = "Create a new calendar event"
+capability = "outlook.calendar"
+risk_level = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.network_constraints]
+allowed_hosts = ["graph.microsoft.com"]
+allowed_ports = [443]
+require_tls = true
+follow_redirects = false
+
+[provides.rate_limit]
+pool_name = "graph.write"
+requests = 30
+window = "60s"
+
+[provides.ai_hints]
+when_to_use = "Use to create a new calendar event in the user's Outlook calendar."
+common_mistakes = ["subject, start, and end are required", "Times must include timezone"]
+examples = ["{\"subject\": \"Meeting\", \"start\": \"2026-04-01T10:00:00-04:00\", \"end\": \"2026-04-01T11:00:00-04:00\"}"]
+related = ["outlook.list_events"]
+
+# --- Folder operations ---
+
+[[provides]]
+id = "outlook.list_folders"
+summary = "List mail folders"
+capability = "outlook.read"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.network_constraints]
+allowed_hosts = ["graph.microsoft.com"]
+allowed_ports = [443]
+require_tls = true
+follow_redirects = false
+
+[provides.rate_limit]
+pool_name = "graph.read"
+requests = 100
+window = "60s"
+
+[provides.ai_hints]
+when_to_use = "Use to discover available mail folders (Inbox, Sent Items, Drafts, etc.)."
+common_mistakes = []
+examples = ["{}"]
+related = ["outlook.list_messages"]

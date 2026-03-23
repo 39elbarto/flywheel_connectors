@@ -53,6 +53,7 @@ members = [
     "connectors/google-sheets",
     "connectors/google-workspace-events",
     "connectors/notion",
+    "connectors/outlook",
     "connectors/stripe",
     "connectors/s3",
     "connectors/synology-chat",

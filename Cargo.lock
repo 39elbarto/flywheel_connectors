@@ -4354,6 +4354,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-outlook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-sdk",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-package-registry"
 version = "0.1.0"
 dependencies = [

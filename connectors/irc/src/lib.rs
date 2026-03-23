@@ -1,4 +1,4 @@
-//! FCP IRC connector.
+//! FCP `IRC` connector.
 
 #![forbid(unsafe_code)]
 

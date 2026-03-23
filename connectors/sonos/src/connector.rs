@@ -7,9 +7,9 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
@@ -268,12 +268,36 @@ impl SonosConnector {
         verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match req.operation.as_str() {
-            OP_HEALTH => state.client.health().await.map_err(|error| error.to_fcp_error())?,
-            OP_GET_STATUS => state.client.get_status().await.map_err(|error| error.to_fcp_error())?,
-            OP_PLAY => state.client.play().await.map_err(|error| error.to_fcp_error())?,
-            OP_PAUSE => state.client.pause().await.map_err(|error| error.to_fcp_error())?,
-            OP_NEXT => state.client.next().await.map_err(|error| error.to_fcp_error())?,
-            OP_PREVIOUS => state.client.previous().await.map_err(|error| error.to_fcp_error())?,
+            OP_HEALTH => json!({
+                "status": "ok",
+                "device_url": state.client.device_url(),
+                "manifest_hash": Self::manifest_hash(),
+            }),
+            OP_GET_STATUS => state
+                .client
+                .get_status()
+                .await
+                .map_err(|error| error.to_fcp_error())?,
+            OP_PLAY => state
+                .client
+                .play()
+                .await
+                .map_err(|error| error.to_fcp_error())?,
+            OP_PAUSE => state
+                .client
+                .pause()
+                .await
+                .map_err(|error| error.to_fcp_error())?,
+            OP_NEXT => state
+                .client
+                .next()
+                .await
+                .map_err(|error| error.to_fcp_error())?,
+            OP_PREVIOUS => state
+                .client
+                .previous()
+                .await
+                .map_err(|error| error.to_fcp_error())?,
             OP_SET_VOLUME => {
                 let volume = req
                     .input
@@ -327,6 +351,8 @@ impl FcpConnector for SonosConnector {
             runtime,
         });
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
+        self.verifier = None;
         Ok(())
     }
 
@@ -339,14 +365,7 @@ impl FcpConnector for SonosConnector {
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req
-                .capabilities_requested
-                .into_iter()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
+            capabilities_granted: granted_capabilities(req.capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
@@ -384,7 +403,11 @@ impl FcpConnector for SonosConnector {
                 "Connector is not configured",
             ));
         };
-        let probe = state.client.health().await.map_err(|error| error.to_fcp_error())?;
+        let probe = state
+            .client
+            .health()
+            .await
+            .map_err(|error| error.to_fcp_error())?;
         Ok(SelfCheckReport {
             details: Some(json!({
                 "device_url": state.client.device_url(),
@@ -402,6 +425,10 @@ impl FcpConnector for SonosConnector {
         if let Some(state) = &self.state {
             state.runtime.shutdown();
         }
+        self.state = None;
+        self.verifier = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(())
     }
 
@@ -427,6 +454,40 @@ impl FcpConnector for SonosConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.state.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -436,6 +497,30 @@ impl FcpConnector for SonosConnector {
 
     async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
         Err(FcpError::StreamingNotSupported)
+    }
+}
+
+fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
+    requested
+        .into_iter()
+        .filter(|capability| matches!(capability.as_str(), CAP_READ | CAP_WRITE))
+        .map(|capability| CapabilityGrant {
+            capability,
+            operation: None,
+        })
+        .collect()
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        OP_HEALTH | OP_GET_STATUS => Ok(CapabilityId::from_static(CAP_READ)),
+        OP_PLAY | OP_PAUSE | OP_NEXT | OP_PREVIOUS | OP_SET_VOLUME => {
+            Ok(CapabilityId::from_static(CAP_WRITE))
+        }
+        _ => Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("Unknown operation: {operation}"),
+        }),
     }
 }
 
@@ -464,7 +549,11 @@ mod tests {
         }
     }
 
-    fn capability_token(signing_key: &Ed25519SigningKey, capability: &'static str, operation: &'static str) -> CapabilityToken {
+    fn capability_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let raw = CapabilityTokenBuilder::new()
             .capability_id(capability)
@@ -482,8 +571,16 @@ mod tests {
     fn operations_catalog_contains_transport_and_volume_entries() {
         let operations = SonosConnector::operations_info();
         assert_eq!(operations.len(), 7);
-        assert!(operations.iter().any(|operation| operation.id.as_str() == OP_PLAY));
-        assert!(operations.iter().any(|operation| operation.id.as_str() == OP_SET_VOLUME));
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.id.as_str() == OP_PLAY)
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.id.as_str() == OP_SET_VOLUME)
+        );
     }
 
     #[fcp_async_core::runtime::test]

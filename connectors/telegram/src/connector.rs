@@ -20,6 +20,7 @@ use fcp_sdk::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::client::{SendMediaOptions, SendMessageOptions, TelegramClient, TelegramError};
@@ -32,6 +33,7 @@ const MAX_POLL_TIMEOUT_SECS: i32 = 50;
 const MIN_POLL_LEASE_TTL_SECS: u64 = 10;
 const TELEGRAM_POLL_CURSOR_FILE: &str = "telegram_poll_cursor.json";
 const TELEGRAM_POLL_LEASE_FILE: &str = "telegram_poll_lease.json";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const KNOWN_ALLOWED_UPDATES: &[&str] = &[
     "message",
     "edited_message",
@@ -232,7 +234,7 @@ fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()
         fs::create_dir_all(parent)?;
     }
 
-    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    let tmp_path = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
     fs::write(&tmp_path, payload)?;
     fs::rename(&tmp_path, path)?;
@@ -528,7 +530,7 @@ impl TelegramConnector {
         let (event_tx, _) = broadcast::channel(1000);
 
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("telegram"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("fcp.telegram"))),
             config: None,
             client: None,
             verifier: None,
@@ -541,6 +543,12 @@ impl TelegramConnector {
             event_tx,
             start_time: Instant::now(),
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Handle configure method.
@@ -642,14 +650,6 @@ impl TelegramConnector {
             code: 1003,
             message: "zone_dir is required for Telegram polling cursor + singleton-writer lease persistence".into(),
         })?;
-        let zone_dir = PathBuf::from(zone_dir);
-        fs::create_dir_all(&zone_dir).map_err(|err| FcpError::Internal {
-            message: format!(
-                "Failed to prepare Telegram zone_dir '{}': {err}",
-                zone_dir.display()
-            ),
-        })?;
-        self.zone_dir = Some(zone_dir.clone());
 
         // Verify bot is reachable
         let client = self.client.as_ref().ok_or_else(|| {
@@ -667,6 +667,14 @@ impl TelegramConnector {
                 FcpError::NotConfigured
             }
         })?;
+        let zone_dir = PathBuf::from(zone_dir);
+        fs::create_dir_all(&zone_dir).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to prepare Telegram zone_dir '{}': {err}",
+                zone_dir.display()
+            ),
+        })?;
+        self.zone_dir = Some(zone_dir.clone());
         let bot_info = client
             .get_me()
             .await
@@ -713,7 +721,7 @@ impl TelegramConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:telegram-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1728,6 +1736,14 @@ impl TelegramConnector {
             client.shutdown();
         }
 
+        self.client = None;
+        self.config = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.zone_dir = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
+
         Ok(json!({ "status": "shutdown" }))
     }
 
@@ -2031,6 +2047,14 @@ mod tests {
         dir.to_string_lossy().into_owned()
     }
 
+    fn uncreated_zone_dir(label: &str) -> String {
+        std::env::temp_dir()
+            .join("fcp-telegram-tests")
+            .join(format!("{label}-{}", Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     async fn setup_connector_with_token(
         cap: &str,
     ) -> (TelegramConnector, fcp_core::CapabilityToken, MockServer) {
@@ -2215,6 +2239,35 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_handshake_before_configure_does_not_create_zone_dir() {
+        let mut connector = TelegramConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let zone_dir = uncreated_zone_dir("handshake-before-configure");
+
+        let result = connector
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::NotConfigured)));
+        assert!(connector.zone_dir.is_none());
+        assert!(!Path::new(&zone_dir).exists());
+    }
+
+    #[test]
+    fn connector_base_id_matches_manifest() {
+        let connector = TelegramConnector::new();
+        assert_eq!(connector.base.id.as_ref(), "fcp.telegram");
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_polling_lease_fences_second_instance() {
         let mock_server = MockServer::start().await;
 
@@ -2296,6 +2349,76 @@ mod tests {
             .expect("shutdown should succeed");
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_manifest_hash_and_shutdown_clear_state() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(token_path("getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Test Bot",
+                    "username": "test_bot"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(token_path("getUpdates")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = TelegramConnector::new();
+        connector
+            .handle_configure(serde_json::json!({
+                "credential": TEST_BOT_TOKEN,
+                "base_url": mock_server.uri(),
+                "poll_timeout": 1
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let zone_dir = unique_zone_dir("shutdown-state");
+        let handshake = connector
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await
+            .expect("handshake should succeed");
+
+        assert_eq!(handshake["manifest_hash"], TelegramConnector::manifest_hash());
+
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should succeed");
+
+        assert!(connector.client.is_none());
+        assert!(connector.config.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert!(connector.zone_dir.is_none());
+        assert!(!*connector.poll_running.read().await);
+
+        let health = connector.handle_health().await.expect("health");
+        assert_eq!(health["status"], "not_configured");
+    }
+
     #[test]
     fn test_update_to_event_sets_untrusted_principal() {
         let update = Update {
@@ -2333,7 +2456,7 @@ mod tests {
 
         let event = update_to_event(
             &update,
-            &ConnectorId::from_static("telegram"),
+            &ConnectorId::from_static("fcp.telegram"),
             &InstanceId::new(),
         )
         .expect("event");
@@ -2382,7 +2505,7 @@ mod tests {
             message_thread_id: None,
         };
 
-        let connector_id = ConnectorId::from_static("telegram");
+        let connector_id = ConnectorId::from_static("fcp.telegram");
         let instance_id = InstanceId::new();
 
         let edited = Update {
@@ -2478,7 +2601,7 @@ mod tests {
 
         let event = update_to_event(
             &update,
-            &ConnectorId::from_static("telegram"),
+            &ConnectorId::from_static("fcp.telegram"),
             &InstanceId::new(),
         )
         .expect("event");

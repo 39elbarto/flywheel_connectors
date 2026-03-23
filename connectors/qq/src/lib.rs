@@ -1,4 +1,4 @@
-//! FCP QQ connector.
+//! FCP `QQ` connector.
 
 #![forbid(unsafe_code)]
 

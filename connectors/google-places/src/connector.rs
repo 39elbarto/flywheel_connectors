@@ -7,9 +7,9 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
@@ -326,13 +326,16 @@ impl FcpConnector for GooglePlacesConnector {
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
         );
-        let client = GooglePlacesClient::from_config(&config).map_err(|error| error.to_fcp_error())?;
+        let client =
+            GooglePlacesClient::from_config(&config).map_err(|error| error.to_fcp_error())?;
         self.state = Some(GooglePlacesState {
             config,
             client,
             runtime,
         });
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
+        self.verifier = None;
         Ok(())
     }
 
@@ -345,14 +348,7 @@ impl FcpConnector for GooglePlacesConnector {
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req
-                .capabilities_requested
-                .into_iter()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
+            capabilities_granted: granted_capabilities(req.capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
@@ -410,6 +406,10 @@ impl FcpConnector for GooglePlacesConnector {
         if let Some(state) = &self.state {
             state.runtime.shutdown();
         }
+        self.state = None;
+        self.verifier = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(())
     }
 
@@ -435,6 +435,40 @@ impl FcpConnector for GooglePlacesConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.state.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -445,6 +479,29 @@ impl FcpConnector for GooglePlacesConnector {
     async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
         Err(FcpError::StreamingNotSupported)
     }
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        OP_SEARCH_TEXT | OP_AUTOCOMPLETE | OP_GET_PLACE | OP_HEALTH => {
+            Ok(CapabilityId::from_static(CAP_READ))
+        }
+        _ => Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("Unknown operation: {operation}"),
+        }),
+    }
+}
+
+fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
+    requested
+        .into_iter()
+        .filter(|capability| capability.as_str() == CAP_READ)
+        .map(|capability| CapabilityGrant {
+            capability,
+            operation: None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -469,7 +526,10 @@ mod tests {
         }
     }
 
-    fn capability_token(signing_key: &Ed25519SigningKey, operation: &'static str) -> CapabilityToken {
+    fn capability_token(
+        signing_key: &Ed25519SigningKey,
+        operation: &'static str,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let raw = CapabilityTokenBuilder::new()
             .capability_id(CAP_READ)
@@ -525,8 +585,20 @@ mod tests {
     fn operations_catalog_contains_expected_operations() {
         let operations = GooglePlacesConnector::operations_info();
         assert_eq!(operations.len(), 4);
-        assert!(operations.iter().any(|operation| operation.id.as_str() == OP_SEARCH_TEXT));
-        assert!(operations.iter().any(|operation| operation.id.as_str() == OP_AUTOCOMPLETE));
-        assert!(operations.iter().any(|operation| operation.id.as_str() == OP_GET_PLACE));
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.id.as_str() == OP_SEARCH_TEXT)
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.id.as_str() == OP_AUTOCOMPLETE)
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.id.as_str() == OP_GET_PLACE)
+        );
     }
 }

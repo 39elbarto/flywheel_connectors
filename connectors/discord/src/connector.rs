@@ -27,6 +27,7 @@ use fcp_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use url::Url;
 
@@ -72,6 +73,7 @@ const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
 const DISCORD_GATEWAY_LEASE_FILE: &str = "discord_gateway_lease.json";
 const DISCORD_GATEWAY_LEASE_TTL_SECONDS: u64 = 120;
 const DISCORD_GATEWAY_LEASE_RENEW_INTERVAL_SECONDS: u64 = 30;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const REQUIRED_GATEWAY_INTENTS: [(&str, u64); 4] = [
     ("GUILDS", INTENT_GUILDS),
@@ -91,7 +93,7 @@ fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()
         fs::create_dir_all(parent)?;
     }
 
-    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    let tmp_path = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
     fs::write(&tmp_path, payload)?;
     fs::rename(&tmp_path, path)?;
@@ -255,7 +257,7 @@ impl DiscordConnector {
         let (event_tx, _) = broadcast::channel(1000);
 
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("discord"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("fcp.discord"))),
             config: None,
             api_client: None,
             gateway: None,
@@ -270,6 +272,12 @@ impl DiscordConnector {
             gateway_lease_task: None,
             start_time: Instant::now(),
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Handle configure method.
@@ -404,7 +412,7 @@ impl DiscordConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:discord-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1686,6 +1694,16 @@ impl DiscordConnector {
             warn!(error = %err, "Failed to release Discord gateway lease");
         }
 
+        self.api_client = None;
+        self.gateway = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.zone_dir = None;
+        self.bot_user_id = None;
+        self.config = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
+
         Ok(json!({ "status": "shutdown" }))
     }
 
@@ -2254,10 +2272,13 @@ mod tests {
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
+        let zone_dir = unique_zone_dir("handshake-before-configure");
+
         let result = connector
             .handle_handshake(json!({
                 "protocol_version": "1.0.0",
                 "zone": "z:work",
+                "zone_dir": zone_dir,
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
                 "capabilities_requested": ["discord.read"]
@@ -2288,6 +2309,12 @@ mod tests {
         assert!(matches!(result, Err(FcpError::NotConfigured)));
         assert!(connector.zone_dir.is_none());
         assert!(!Path::new(&zone_dir).exists());
+    }
+
+    #[test]
+    fn connector_base_id_matches_manifest() {
+        let connector = DiscordConnector::new();
+        assert_eq!(connector.base.id.as_ref(), "fcp.discord");
     }
 
     #[test]
@@ -2460,6 +2487,46 @@ mod tests {
         assert!(matches!(result, Err(FcpError::NotHandshaken)));
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_state() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let mut connector = DiscordConnector::new();
+        connector
+            .handle_configure(json!({
+                "bot_credential": "test_token",
+                "api_url": mock_server.uri(),
+                "intents": INTENT_GUILDS
+                    | INTENT_GUILD_MESSAGES
+                    | INTENT_DIRECT_MESSAGES
+                    | INTENT_MESSAGE_CONTENT
+            }))
+            .await
+            .expect("configure should succeed");
+
+        connector.session_id = Some(SessionId::new());
+        connector.zone_dir = Some(PathBuf::from(unique_zone_dir("shutdown-state")));
+        connector.bot_user_id = Some("123456789".into());
+        connector.base.set_handshaken(true);
+
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should succeed");
+
+        assert!(connector.api_client.is_none());
+        assert!(connector.gateway.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert!(connector.zone_dir.is_none());
+        assert!(connector.bot_user_id.is_none());
+        assert!(connector.config.is_none());
+
+        let health = connector.handle_health().await.expect("health");
+        assert_eq!(health["status"], "not_configured");
+    }
+
     #[test]
     fn test_message_length_constants() {
         // Verify our constants match Discord's documented limits
@@ -2576,7 +2643,7 @@ mod tests {
 
     #[test]
     fn test_gateway_event_to_fcp_message_create() {
-        let connector_id = ConnectorId::from_static("discord");
+        let connector_id = ConnectorId::from_static("fcp.discord");
         let instance_id = InstanceId::new();
         let payload = json!({
             "id": "msg-1",
@@ -2606,7 +2673,7 @@ mod tests {
 
     #[test]
     fn test_gateway_event_to_fcp_channel_create_sets_thread_info_for_thread_channels() {
-        let connector_id = ConnectorId::from_static("discord");
+        let connector_id = ConnectorId::from_static("fcp.discord");
         let instance_id = InstanceId::new();
         let payload = json!({
             "id": "thread-1",

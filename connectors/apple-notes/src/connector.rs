@@ -7,9 +7,9 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
 use serde_json::json;
@@ -184,7 +184,8 @@ impl AppleNotesConnector {
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this after obtaining a note identifier from list/search.".into(),
+                    when_to_use: "Use this after obtaining a note identifier from list/search."
+                        .into(),
                     common_mistakes: vec![],
                     examples: vec!["{\"note_id\":\"x-coredata://...\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_NOTES)],
@@ -212,7 +213,9 @@ impl AppleNotesConnector {
                 idempotency: IdempotencyClass::None,
                 ai_hints: AgentHint {
                     when_to_use: "Use this to create a new note in Apple Notes.".into(),
-                    common_mistakes: vec!["Apple Notes automation requires Automation permission on macOS.".into()],
+                    common_mistakes: vec![
+                        "Apple Notes automation requires Automation permission on macOS.".into(),
+                    ],
                     examples: vec![
                         "{\"title\":\"Deploy checklist\",\"body\":\"- verify logs\"}".into(),
                     ],
@@ -249,7 +252,9 @@ impl AppleNotesConnector {
             }),
             OP_LIST_NOTES => {
                 let folder = req.input.get("folder").and_then(|value| value.as_str());
-                client.list_notes(folder).map_err(|error| error.to_fcp_error())?
+                client
+                    .list_notes(folder)
+                    .map_err(|error| error.to_fcp_error())?
             }
             OP_SEARCH_NOTES => {
                 let query = req
@@ -260,7 +265,9 @@ impl AppleNotesConnector {
                         code: 1005,
                         message: "Missing query".into(),
                     })?;
-                client.search_notes(query).map_err(|error| error.to_fcp_error())?
+                client
+                    .search_notes(query)
+                    .map_err(|error| error.to_fcp_error())?
             }
             OP_GET_NOTE => {
                 let note_id = req
@@ -271,7 +278,9 @@ impl AppleNotesConnector {
                         code: 1005,
                         message: "Missing note_id".into(),
                     })?;
-                client.get_note(note_id).map_err(|error| error.to_fcp_error())?
+                client
+                    .get_note(note_id)
+                    .map_err(|error| error.to_fcp_error())?
             }
             OP_CREATE_NOTE => {
                 let title = req
@@ -315,10 +324,13 @@ impl FcpConnector for AppleNotesConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let config = AppleNotesConfig::from_value(config)?;
-        let client = AppleNotesClient::from_config(&config).map_err(|error| error.to_fcp_error())?;
+        let client =
+            AppleNotesClient::from_config(&config).map_err(|error| error.to_fcp_error())?;
         self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
+        self.verifier = None;
         Ok(())
     }
 
@@ -331,14 +343,7 @@ impl FcpConnector for AppleNotesConnector {
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req
-                .capabilities_requested
-                .into_iter()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
+            capabilities_granted: granted_capabilities(req.capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
@@ -396,6 +401,11 @@ impl FcpConnector for AppleNotesConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        self.config = None;
+        self.client = None;
+        self.verifier = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(())
     }
 
@@ -421,6 +431,40 @@ impl FcpConnector for AppleNotesConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.client.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -431,6 +475,30 @@ impl FcpConnector for AppleNotesConnector {
     async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
         Err(FcpError::StreamingNotSupported)
     }
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        OP_HEALTH | OP_LIST_NOTES | OP_SEARCH_NOTES | OP_GET_NOTE => {
+            Ok(CapabilityId::from_static(CAP_READ))
+        }
+        OP_CREATE_NOTE => Ok(CapabilityId::from_static(CAP_WRITE)),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("Unknown operation: {operation}"),
+        }),
+    }
+}
+
+fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
+    requested
+        .into_iter()
+        .filter(|capability| matches!(capability.as_str(), CAP_READ | CAP_WRITE))
+        .map(|capability| CapabilityGrant {
+            capability,
+            operation: None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -458,7 +526,11 @@ mod tests {
         }
     }
 
-    fn capability_token(signing_key: &Ed25519SigningKey, capability: &'static str, operation: &'static str) -> CapabilityToken {
+    fn capability_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let raw = CapabilityTokenBuilder::new()
             .capability_id(capability)
@@ -476,7 +548,11 @@ mod tests {
     fn operations_catalog_contains_expected_entries() {
         let operations = AppleNotesConnector::operations_info();
         assert_eq!(operations.len(), 5);
-        assert!(operations.iter().any(|operation| operation.id.as_str() == OP_CREATE_NOTE));
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.id.as_str() == OP_CREATE_NOTE)
+        );
     }
 
     #[fcp_async_core::runtime::test]

@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn config_accepts_https_url() {
         let config = SynologyChatConfig::from_value(serde_json::json!({
-            "incoming_url": "https://nas.example.com/webapi/entry.cgi?token=abc"
+            "incoming_url": "https://nas.example.com/webapi/entry.cgi"
         }))
         .expect("config should parse");
         assert!(config.outgoing_token.is_none());
@@ -74,11 +74,10 @@ mod tests {
     #[test]
     fn config_rejects_empty_timeout() {
         let error = SynologyChatConfig::from_value(serde_json::json!({
-            "incoming_url": "https://nas.example.com/webapi/entry.cgi?token=abc",
+            "incoming_url": "https://nas.example.com/webapi/entry.cgi",
             "request_timeout_ms": 0
         }))
         .expect_err("timeout must be validated");
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 }
-

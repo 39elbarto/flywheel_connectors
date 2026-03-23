@@ -35,6 +35,16 @@ idempotency = "none"
 [provides.operations.send_message.ai_hints]
 when_to_use = "When you need to deliver a chat message into a Synology Chat webhook target"
 
+[provides.operations.send_payload]
+summary = "Send a raw Synology Chat webhook payload"
+capability = "synology_chat.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.send_payload.ai_hints]
+when_to_use = "When you need advanced webhook payload control for cards or attachments"
+
 [provides.operations.health]
 summary = "Report Synology Chat connector configuration and delivery target"
 capability = "synology_chat.read"
@@ -52,4 +62,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

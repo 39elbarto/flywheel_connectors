@@ -1,8 +1,8 @@
 # Hacker News Connector V3 Contract
 
-> **Status**: planning contract
-> **Bead**: `flywheel_connectors-j05nu.8.2.1`
-> **Unblocks**: `flywheel_connectors-j05nu.8.2.2`
+> **Status**: readiness and verification closeout
+> **Bead**: `flywheel_connectors-j05nu.8.2.3`
+> **Verification**: `scripts/e2e/hackernews_connector_verification.sh`
 > **Primary upstream**: Hacker News Firebase API at `https://github.com/HackerNews/API`
 
 ## Purpose
@@ -37,6 +37,7 @@ Important runtime truths that the contract must preserve:
 - `top_stories`, `new_stories`, and `best_stories` can return up to 500 IDs from the provider; `ask_stories`, `show_stories`, and `job_stories` can return up to 200.
 - The optional `limit` parameter is applied locally after the feed response is fetched.
 - `health` uses the top-stories endpoint as a reachability probe.
+- `health`, `doctor`, and `self_check` all emit operator guidance, artifact hints, and verification-script metadata.
 - The connector exposes no streaming, replay, or write surface.
 
 ## First-Slice Scope
@@ -70,7 +71,7 @@ This slice is intentionally closer to "typed public API mirror" than to "full Ha
 - All exposed operations require only `hackernews.read`.
 - Usernames are sanitized before being inserted into the request path and must not contain `/`, `\\`, `..`, or null bytes.
 - Numeric item IDs are the stable primary identifiers for item retrieval.
-- The manifest is public/read-only oriented: home zone is `z:public`, allowed sources are `z:public` and `z:work`, allowed targets are `z:public`, required capabilities are `network.dns` and `network.outbound`, and forbidden capabilities include `system.exec` and `system.privileged`.
+- The manifest is public/read-only oriented: home zone is `z:public`, allowed sources are `z:public` and `z:work`, allowed targets are `z:public`, required capabilities are `network.dns`, `network.egress`, and `network.tls.sni`, and forbidden capabilities include `system.exec`, `system.privileged`, and `network.listen`.
 
 ## Network And Runtime Invariants
 
@@ -86,6 +87,7 @@ This slice is intentionally closer to "typed public API mirror" than to "full Ha
 - Default request timeout is `30_000 ms`
 - Runtime uses retry-aware GET logic for normal data fetches, including `429` handling with `Retry-After`
 - `health` is a lighter direct GET probe against `topstories.json`
+- Localhost or mirror overrides remain a direct test harness convenience, not the production manifest contract
 
 ## Capability Families
 
@@ -174,4 +176,6 @@ This contract is grounded in the current connector implementation and manifest:
 
 - `connectors/hackernews/src/client.rs` defines the Firebase endpoint paths, retry behavior, username sanitization, `null` item handling, and health probe behavior.
 - `connectors/hackernews/src/connector.rs` defines the public config surface, the single read-capability boundary, and the runtime `OperationInfo` metadata.
+- `connectors/hackernews/tests/integration.rs` captures readiness, operator-guidance, self-check, invoke, and introspection evidence.
+- `scripts/e2e/hackernews_connector_verification.sh` is the replayable `rch` verification bundle for this connector.
 - `connectors/hackernews/manifest.toml` defines the public-zone network policy and read-only connector posture.

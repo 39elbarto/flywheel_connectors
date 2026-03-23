@@ -206,7 +206,7 @@ fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension("tmp");
+    let tmp_path = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let payload = serde_json::to_vec_pretty(value)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     fs::write(&tmp_path, payload)?;

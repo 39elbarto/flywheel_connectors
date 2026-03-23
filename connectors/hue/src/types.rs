@@ -31,10 +31,11 @@ impl HueConfig {
     }
 
     pub fn validate(&self) -> FcpResult<()> {
-        let parsed = Url::parse(self.bridge_url.trim()).map_err(|error| FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("Invalid bridge_url: {error}"),
-        })?;
+        let parsed =
+            Url::parse(self.bridge_url.trim()).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid bridge_url: {error}"),
+            })?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
@@ -86,4 +87,3 @@ mod tests {
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 }
-

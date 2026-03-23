@@ -6,14 +6,20 @@ schema_version = "2.1"
 id = "fcp.nostr"
 name = "Nostr Relay"
 version = "0.1.0"
-description = "Nostr relay connector for signed public-note publishing, event queries, relay inspection, and health verification"
+description = "Nostr relay connector for first-slice public-note publishing, bounded public-event queries, relay inspection, and health verification"
 archetype = "operational"
 homepage = "https://github.com/nostr-protocol/nips"
 
-# Scope notes:
-# - This first slice publishes signed public notes (kind 1 by default) and reads public events.
-# - Bech32 key input, encrypted DMs (NIP-04/NIP-17), profile publishing, and long-lived relay
-#   subscriptions are explicit non-goals for this initial connector.
+# Auth and scope model:
+# - One connector instance is bound to one raw secp256k1 signing key and one static relay list.
+# - Authentication is not OAuth or delegated user auth; the connector signs locally with
+#   `secret_key_hex` and derives the matching x-only public key in-process.
+# - This first slice publishes public kind-1 notes and reads public relay history.
+# - Bech32 `nsec` input, encrypted DMs (NIP-04/NIP-17), profile metadata publication, long-lived
+#   subscriptions, relay scoring, relay discovery, and relay policy mutation are explicit
+#   non-goals for this initial connector.
+# - Relay URLs must use `ws://` or `wss://`; the configured relay list is the effective network
+#   boundary for this first slice.
 
 [zones]
 home = "z:community"
@@ -27,14 +33,14 @@ optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
 [provides.operations.notes_publish]
-summary = "Publish a signed Nostr note to configured relays"
+summary = "Publish a signed public Nostr note to configured relays"
 capability = "nostr.notes.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 
 [provides.operations.events_query]
-summary = "Query public Nostr events from configured relays"
+summary = "Query bounded public Nostr events from configured relays"
 capability = "nostr.events.read"
 risk = "low"
 safety_tier = "safe"
@@ -48,7 +54,7 @@ safety_tier = "safe"
 idempotency = "strict"
 
 [provides.operations.health]
-summary = "Verify relay connectivity and signing identity"
+summary = "Verify relay connectivity and local signing identity"
 capability = "nostr.health.read"
 risk = "low"
 safety_tier = "safe"

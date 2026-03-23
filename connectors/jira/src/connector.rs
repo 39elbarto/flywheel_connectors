@@ -19,6 +19,7 @@ use fcp_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
@@ -28,6 +29,8 @@ use crate::types::{
     JiraBeadRecord, JiraDeployment, JiraIssue, JiraSyncAction, JiraSyncConflict,
     JiraSyncConflictPolicy, JiraSyncOrigin, JiraSyncState,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Parsed configuration for the Jira connector.
 struct JiraConfig {
@@ -161,13 +164,19 @@ impl JiraConnector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("jira"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("fcp.jira"))),
             client: None,
             config: None,
             verifier: None,
             session_id: None,
             zone_dir: None,
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Handle configure method.
@@ -195,6 +204,10 @@ impl JiraConnector {
 
         self.client = Some(client);
         self.config = Some(cfg);
+        self.verifier = None;
+        self.session_id = None;
+        self.zone_dir = None;
+        self.base.set_handshaken(false);
         self.base.set_configured(true);
         info!("Jira connector configured");
 
@@ -211,6 +224,10 @@ impl JiraConnector {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
             })?;
+
+        if self.client.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
 
         self.zone_dir = req.zone_dir.clone().map(PathBuf::from);
         if let Some(zone_dir) = self.zone_dir.as_ref() {
@@ -245,7 +262,7 @@ impl JiraConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:jira-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1532,6 +1549,8 @@ impl JiraConnector {
 
         if let Some(verifier) = &self.verifier {
             verifier.verify(&token, &cap_id, &op_id, &[])?;
+        } else if self.client.is_some() {
+            return Err(FcpError::NotHandshaken);
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -2637,12 +2656,19 @@ impl JiraConnector {
 
     /// Handle shutdown.
     pub async fn handle_shutdown(
-        &self,
+        &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         if let Some(client) = &self.client {
             client.shutdown();
         }
+        self.client = None;
+        self.config = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.zone_dir = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         info!("Jira connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -2787,7 +2813,7 @@ fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension("tmp");
+    let tmp_path = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let payload = serde_json::to_vec_pretty(value)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     fs::write(&tmp_path, payload)?;
@@ -3512,6 +3538,15 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "test",
+                "email": "user@example.com",
+                "api_token": "token",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
         let result = connector
             .handle_handshake(json!({
                 "protocol_version": "1.0.0",
@@ -3523,6 +3558,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+        assert_eq!(result["manifest_hash"], JiraConnector::manifest_hash());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_requires_configure() {
+        let mut connector = JiraConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["jira.read"]
+            }))
+            .await;
+        assert!(matches!(result, Err(FcpError::NotConfigured)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3534,21 +3585,8 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_without_config() {
-        let mut connector = JiraConnector::new();
+        let connector = JiraConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
-
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["jira.get_issue"]
-            }))
-            .await
-            .unwrap();
-
         let token = generate_valid_token(&signing_key, "jira.get_issue");
         let result = connector
             .handle_invoke(json!({
@@ -3559,6 +3597,33 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_without_handshake() {
+        let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "test",
+                "email": "user@example.com",
+                "api_token": "token",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, "jira.get_issue");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "jira.get_issue",
+                "input": { "issue_key": "PROJ-1" },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), FcpError::NotHandshaken));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3660,6 +3725,12 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn connector_base_id_matches_manifest() {
+        let connector = JiraConnector::new();
+        assert_eq!(connector.base.id.as_ref(), "fcp.jira");
     }
 
     // ── Provisioning automation tests ──────────────────────────────────
@@ -3787,6 +3858,42 @@ mod tests {
         assert_eq!(result["status"], "unhealthy");
         let checks = result["checks"].as_array().unwrap();
         assert!(checks.iter().any(|c| c["status"] == "fail"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_state() {
+        let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "test",
+                "email": "user@example.com",
+                "api_token": "token",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["jira.read"]
+            }))
+            .await
+            .unwrap();
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+
+        assert!(connector.client.is_none());
+        assert!(connector.config.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert!(connector.zone_dir.is_none());
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "not_configured");
     }
 
     #[fcp_async_core::runtime::test]

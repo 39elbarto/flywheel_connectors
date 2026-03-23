@@ -1,4 +1,4 @@
-//! IRC connector entrypoint.
+//! `IRC` connector entrypoint.
 
 #![forbid(unsafe_code)]
 
@@ -33,16 +33,17 @@ fn run_fcp_loop() -> Result<()> {
             continue;
         }
 
-        let response = fcp_async_core::runtime::block_on_sync(handle_message(&mut connector, &line))
-            .unwrap_or_else(|error| {
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": "FCP-9001",
-                        "message": format!("Runtime error: {error}")
-                    }
-                })
-            });
+        let response =
+            fcp_async_core::runtime::block_on_sync(handle_message(&mut connector, &line))
+                .unwrap_or_else(|error| {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": "FCP-9001",
+                            "message": format!("Runtime error: {error}")
+                        }
+                    })
+                });
 
         let response_json = serde_json::to_string(&response)?;
         writeln!(stdout, "{response_json}")?;
@@ -58,6 +59,7 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_message(connector: &mut IrcConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(value) => value,
@@ -72,7 +74,10 @@ async fn handle_message(connector: &mut IrcConnector, message: &str) -> serde_js
         }
     };
 
-    let method = request.get("method").and_then(|value| value.as_str()).unwrap_or("");
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let id = request.get("id").cloned();
     let params = request
         .get("params")

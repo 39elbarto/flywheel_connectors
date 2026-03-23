@@ -49,6 +49,8 @@ profile = "strict"
 memory_mb = 256
 cpu_percent = 50
 wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
 
 [provides.operations."feishu.messages.send"]
 description = "Send a bot-authored message through the installed tenant app to one visible user or chat."

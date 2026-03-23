@@ -35,7 +35,8 @@ impl HueClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             "hue-application-key",
-            HeaderValue::from_str(&self.app_key).map_err(|error| HueError::Config(error.to_string()))?,
+            HeaderValue::from_str(&self.app_key)
+                .map_err(|error| HueError::Config(error.to_string()))?,
         );
         Ok(headers)
     }
@@ -179,4 +180,3 @@ mod tests {
             .expect("set should succeed");
     }
 }
-

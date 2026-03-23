@@ -1,4 +1,4 @@
-//! FCP Nostr connector.
+//! FCP `Nostr` connector.
 
 #![forbid(unsafe_code)]
 

@@ -25,13 +25,25 @@ use fcp_pinecone::{client::PineconeClient, connector::PineconeConnector, error::
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn capability_for_operation(operation: &str) -> &'static str {
+    match operation {
+        "pinecone.list_indexes" | "pinecone.describe_index" | "pinecone.describe_index_stats" => {
+            "pinecone.indexes.read"
+        }
+        "pinecone.create_index" | "pinecone.delete_index" => "pinecone.indexes.write",
+        "pinecone.query" | "pinecone.fetch" => "pinecone.vectors.read",
+        "pinecone.upsert" | "pinecone.delete" => "pinecone.vectors.write",
+        _ => "pinecone.indexes.read",
+    }
+}
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
-        .capability_id(cap)
+        .capability_id(capability_for_operation(operation))
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -39,9 +51,16 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> Capabilit
     CapabilityToken { raw: cose }
 }
 
-async fn setup_handshake(connector: &mut PineconeConnector, caps: &[&str]) -> Ed25519SigningKey {
+async fn setup_handshake(
+    connector: &mut PineconeConnector,
+    operations: &[&str],
+) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let capabilities: Vec<&str> = operations
+        .iter()
+        .map(|operation| capability_for_operation(operation))
+        .collect();
 
     connector
         .handle_handshake(json!({
@@ -49,7 +68,7 @@ async fn setup_handshake(connector: &mut PineconeConnector, caps: &[&str]) -> Ed
             "zone": "z:work",
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": caps
+            "capabilities_requested": capabilities
         }))
         .await
         .expect("handshake should succeed");

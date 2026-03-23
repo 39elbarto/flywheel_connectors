@@ -1,4 +1,4 @@
-//! IRC connector.
+//! `IRC` connector.
 
 use std::time::{Duration, Instant};
 
@@ -12,9 +12,9 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
 use serde::Deserialize;
@@ -108,11 +108,14 @@ impl IrcConfig {
     }
 
     fn port(&self) -> u16 {
-        self.port
-            .unwrap_or(if self.tls { DEFAULT_PORT_TLS } else { DEFAULT_PORT_PLAIN })
+        self.port.unwrap_or(if self.tls {
+            DEFAULT_PORT_TLS
+        } else {
+            DEFAULT_PORT_PLAIN
+        })
     }
 
-    fn timeout(&self) -> Duration {
+    const fn timeout(&self) -> Duration {
         Duration::from_millis(self.request_timeout_ms)
     }
 }
@@ -134,6 +137,7 @@ impl IrcConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn operations() -> Vec<OperationInfo> {
         vec![
             operation(
@@ -211,7 +215,7 @@ impl IrcConnector {
             OP_SEND_MESSAGE => {
                 let target = required_string(&req.input, "target")?;
                 let message = required_string(&req.input, "message")?;
-                let transcript = with_irc_session(&state.config, |session| async move {
+                let transcript = with_irc_session(&state.config, |mut session| async move {
                     session.send_privmsg(target, message).await?;
                     session.quit().await?;
                     Ok::<_, FcpError>(Vec::<String>::new())
@@ -226,7 +230,7 @@ impl IrcConnector {
             OP_JOIN_CHANNEL => {
                 let channel = required_string(&req.input, "channel")?;
                 let channel_key = req.input.get("channel_key").and_then(Value::as_str);
-                let transcript = with_irc_session(&state.config, |session| async move {
+                let transcript = with_irc_session(&state.config, |mut session| async move {
                     session.join(channel, channel_key).await?;
                     session.quit().await?;
                     Ok::<_, FcpError>(session.lines)
@@ -246,7 +250,7 @@ impl IrcConnector {
                     .and_then(Value::as_u64)
                     .unwrap_or(DEFAULT_SAMPLE_LINES as u64)
                     .clamp(1, 200) as usize;
-                let transcript = with_irc_session(&state.config, |session| async move {
+                let transcript = with_irc_session(&state.config, |mut session| async move {
                     session.join(channel, None).await?;
                     session.read_until(sample_lines).await?;
                     session.quit().await?;
@@ -259,7 +263,7 @@ impl IrcConnector {
                 })
             }
             OP_HEALTH => {
-                let transcript = with_irc_session(&state.config, |session| async move {
+                let transcript = with_irc_session(&state.config, |mut session| async move {
                     session.quit().await?;
                     Ok::<_, FcpError>(session.lines)
                 })
@@ -307,6 +311,8 @@ impl FcpConnector for IrcConnector {
         config.validate()?;
         self.state = Some(IrcState { config });
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
+        self.verifier = None;
         Ok(())
     }
 
@@ -319,14 +325,7 @@ impl FcpConnector for IrcConnector {
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req
-                .capabilities_requested
-                .into_iter()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
+            capabilities_granted: granted_capabilities(req.capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
@@ -369,7 +368,7 @@ impl FcpConnector for IrcConnector {
                 "configure must be called before IRC self_check",
             ));
         };
-        match with_irc_session(&state.config, |session| async move {
+        match with_irc_session(&state.config, |mut session| async move {
             session.quit().await?;
             Ok::<_, FcpError>(session.lines)
         })
@@ -387,6 +386,8 @@ impl FcpConnector for IrcConnector {
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
         self.state = None;
         self.verifier = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(())
     }
 
@@ -412,6 +413,40 @@ impl FcpConnector for IrcConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.state.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -425,33 +460,41 @@ impl FcpConnector for IrcConnector {
 }
 
 struct IrcSession {
-    writer: Box<dyn AsyncWrite + Unpin + Send>,
-    reader: BufReader<Box<dyn AsyncRead + Unpin + Send>>,
+    stream: BufReader<Box<dyn IrcStream>>,
     timeout: Duration,
     lines: Vec<String>,
 }
 
+trait IrcStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> IrcStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
 impl IrcSession {
     async fn send_line(&mut self, line: &str) -> FcpResult<()> {
-        self.writer
+        self.stream
+            .get_mut()
             .write_all(line.as_bytes())
             .await
             .map_err(io_error("irc write"))?;
-        self.writer
+        self.stream
+            .get_mut()
             .write_all(b"\r\n")
             .await
             .map_err(io_error("irc write"))?;
-        self.writer.flush().await.map_err(io_error("irc flush"))?;
+        self.stream
+            .get_mut()
+            .flush()
+            .await
+            .map_err(io_error("irc flush"))?;
         Ok(())
     }
 
     async fn read_line(&mut self) -> FcpResult<Option<String>> {
         let mut line = String::new();
-        let bytes = fcp_async_core::time::timeout(self.timeout, self.reader.read_line(&mut line))
+        let bytes = fcp_async_core::time::timeout(self.timeout, self.stream.read_line(&mut line))
             .await
-            .map_err(|_| FcpError::Timeout {
-                operation: "irc read".into(),
-                timeout_ms: self.timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            .map_err(|_| FcpError::UpstreamTimeout {
+                service: "irc".into(),
             })?
             .map_err(io_error("irc read"))?;
         if bytes == 0 {
@@ -468,37 +511,42 @@ impl IrcSession {
     async fn await_welcome(&mut self) -> FcpResult<()> {
         loop {
             let Some(line) = self.read_line().await? else {
-                return Err(FcpError::Upstream {
+                return Err(FcpError::External {
                     service: "irc".into(),
                     message: "IRC server closed connection before welcome".into(),
+                    status_code: None,
                     retryable: true,
+                    retry_after: None,
                 });
             };
             if line.contains(" 001 ") {
                 return Ok(());
             }
             if line.contains(" 433 ") {
-                return Err(FcpError::Upstream {
+                return Err(FcpError::External {
                     service: "irc".into(),
                     message: "IRC nickname already in use".into(),
+                    status_code: None,
                     retryable: false,
+                    retry_after: None,
                 });
             }
         }
     }
 
     async fn join(&mut self, channel: &str, channel_key: Option<&str>) -> FcpResult<()> {
-        let cmd = match channel_key {
-            Some(channel_key) => format!("JOIN {channel} {channel_key}"),
-            None => format!("JOIN {channel}"),
-        };
+        let cmd = channel_key.map_or_else(
+            || format!("JOIN {channel}"),
+            |channel_key| format!("JOIN {channel} {channel_key}"),
+        );
         self.send_line(&cmd).await?;
         self.read_until(5).await?;
         Ok(())
     }
 
     async fn send_privmsg(&mut self, target: &str, message: &str) -> FcpResult<()> {
-        self.send_line(&format!("PRIVMSG {target} :{message}")).await
+        self.send_line(&format!("PRIVMSG {target} :{message}"))
+            .await
     }
 
     async fn read_until(&mut self, sample_lines: usize) -> FcpResult<()> {
@@ -521,47 +569,44 @@ where
     Fut: std::future::Future<Output = FcpResult<Vec<String>>>,
 {
     let address = format!("{}:{}", config.server, config.port());
-    let tcp = fcp_async_core::time::timeout(config.timeout(), TcpStream::connect(&address))
+    let tcp = fcp_async_core::time::timeout(config.timeout(), TcpStream::connect(address.clone()))
         .await
-        .map_err(|_| FcpError::Timeout {
-            operation: "irc connect".into(),
-            timeout_ms: config.timeout().as_millis().try_into().unwrap_or(u64::MAX),
+        .map_err(|_| FcpError::UpstreamTimeout {
+            service: "irc".into(),
         })?
         .map_err(io_error("irc connect"))?;
     let _ = tcp.set_nodelay(true);
 
-    let (reader, writer): (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>) =
-        if config.tls {
-            let connector = TlsConnectorBuilder::new()
-                .with_native_roots()
-                .map_err(|error| FcpError::Internal {
-                    message: format!("failed to initialize IRC TLS roots: {error}"),
-                })?
-                .build()
-                .map_err(|error| FcpError::Internal {
-                    message: format!("failed to build IRC TLS connector: {error}"),
-                })?;
-            let tls = fcp_async_core::time::timeout(config.timeout(), connector.connect(&config.server, tcp))
+    let stream: Box<dyn IrcStream> = if config.tls {
+        let connector = TlsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|error| FcpError::Internal {
+                message: format!("failed to initialize IRC TLS roots: {error}"),
+            })?
+            .build()
+            .map_err(|error| FcpError::Internal {
+                message: format!("failed to build IRC TLS connector: {error}"),
+            })?;
+        let tls =
+            fcp_async_core::time::timeout(config.timeout(), connector.connect(&config.server, tcp))
                 .await
-                .map_err(|_| FcpError::Timeout {
-                    operation: "irc tls handshake".into(),
-                    timeout_ms: config.timeout().as_millis().try_into().unwrap_or(u64::MAX),
+                .map_err(|_| FcpError::UpstreamTimeout {
+                    service: "irc".into(),
                 })?
-                .map_err(|error| FcpError::Upstream {
+                .map_err(|error| FcpError::External {
                     service: "irc".into(),
                     message: format!("IRC TLS handshake failed: {error}"),
+                    status_code: None,
                     retryable: true,
+                    retry_after: None,
                 })?;
-            let (read_half, write_half) = fcp_async_core::io::split(tls);
-            (Box::new(read_half), Box::new(write_half))
-        } else {
-            let (read_half, write_half) = fcp_async_core::io::split(tcp);
-            (Box::new(read_half), Box::new(write_half))
-        };
+        Box::new(tls)
+    } else {
+        Box::new(tcp)
+    };
 
     let mut session = IrcSession {
-        writer,
-        reader: BufReader::new(reader),
+        stream: BufReader::new(stream),
         timeout: config.timeout(),
         lines: Vec::new(),
     };
@@ -571,17 +616,22 @@ where
     }
     session.send_line(&format!("NICK {}", config.nick)).await?;
     session
-        .send_line(&format!("USER {} 0 * :{}", config.username, config.realname))
+        .send_line(&format!(
+            "USER {} 0 * :{}",
+            config.username, config.realname
+        ))
         .await?;
     session.await_welcome().await?;
     f(session).await
 }
 
 fn io_error(context: &'static str) -> impl Fn(std::io::Error) -> FcpError {
-    move |error| FcpError::Upstream {
+    move |error| FcpError::External {
         service: "irc".into(),
         message: format!("{context} failed: {error}"),
+        status_code: None,
         retryable: true,
+        retry_after: None,
     }
 }
 
@@ -598,7 +648,23 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
             });
         }
     };
-    Ok(CapabilityId::from(capability.to_string()))
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
+    requested
+        .into_iter()
+        .filter(|capability| {
+            matches!(
+                capability.as_str(),
+                CAP_MESSAGES_WRITE | CAP_CHANNELS_WRITE | CAP_MESSAGES_READ | CAP_HEALTH_READ
+            )
+        })
+        .map(|capability| CapabilityGrant {
+            capability,
+            operation: None,
+        })
+        .collect()
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
@@ -606,16 +672,17 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
         .get(field)
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or(FcpError::InvalidRequest {
+        .ok_or_else(|| FcpError::InvalidRequest {
             code: 1005,
             message: format!("{field} is required"),
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn operation(
-    id: &str,
+    id: &'static str,
     summary: &str,
-    capability: &str,
+    capability: &'static str,
     risk_level: RiskLevel,
     safety_tier: SafetyTier,
     idempotency: IdempotencyClass,
@@ -623,12 +690,12 @@ fn operation(
     when_to_use: &str,
 ) -> OperationInfo {
     OperationInfo {
-        id: OperationId::from(id.to_string()),
+        id: OperationId::from_static(id),
         summary: summary.into(),
         description: Some(summary.into()),
         input_schema,
         output_schema: json!({ "type": "object" }),
-        capability: CapabilityId::from(capability.to_string()),
+        capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
         idempotency,
@@ -639,7 +706,7 @@ fn operation(
                     .into(),
             ],
             examples: Vec::new(),
-            related: vec![CapabilityId::from(OP_HEALTH.to_string())],
+            related: vec![CapabilityId::from_static(OP_HEALTH)],
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),

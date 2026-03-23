@@ -1,15 +1,15 @@
-//! Nostr relay connector.
+//! `Nostr` relay connector.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use fcp_core::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityGrant, CapabilityId,
+    CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
 use fcp_streaming::{StreamError, WsClient, WsMessage};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_QUERY_LIMIT: u64 = 25;
+const NOTE_KIND_TEXT: u64 = 1;
 
 const OP_PUBLISH_NOTE: &str = "nostr.notes.publish";
 const OP_QUERY_EVENTS: &str = "nostr.events.query";
@@ -34,7 +35,7 @@ const CAP_EVENTS_READ: &str = "nostr.events.read";
 const CAP_RELAYS_READ: &str = "nostr.relays.read";
 const CAP_HEALTH_READ: &str = "nostr.health.read";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct NostrConfig {
     relay_urls: Vec<String>,
     secret_key_hex: String,
@@ -44,13 +45,35 @@ struct NostrConfig {
     default_query_limit: u64,
 }
 
-#[derive(Debug)]
+impl std::fmt::Debug for NostrConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NostrConfig")
+            .field("relay_urls", &self.relay_urls)
+            .field("secret_key_hex", &"[REDACTED]")
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("default_query_limit", &self.default_query_limit)
+            .finish()
+    }
+}
+
 struct NostrState {
     relay_urls: Vec<String>,
     secret_key_hex: String,
     request_timeout: Duration,
     default_query_limit: u64,
     public_key_hex: String,
+}
+
+impl std::fmt::Debug for NostrState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NostrState")
+            .field("relay_urls", &self.relay_urls)
+            .field("secret_key_hex", &"[REDACTED]")
+            .field("request_timeout", &self.request_timeout)
+            .field("default_query_limit", &self.default_query_limit)
+            .field("public_key_hex", &self.public_key_hex)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -61,7 +84,7 @@ pub struct NostrConnector {
     started_at: Instant,
 }
 
-fn default_timeout_ms() -> u64 {
+const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
@@ -147,11 +170,13 @@ impl NostrConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn operations() -> Vec<OperationInfo> {
         vec![
             operation(
                 OP_PUBLISH_NOTE,
-                "Publish a signed Nostr note",
+                "Publish a signed public Nostr note",
+                "Sign one public kind-1 Nostr note with the configured secp256k1 secret key and publish it to every configured relay. This first slice does not construct encrypted DMs, profile metadata events, or long-lived relay sessions.",
                 CAP_NOTES_WRITE,
                 RiskLevel::Medium,
                 SafetyTier::Risky,
@@ -161,15 +186,23 @@ impl NostrConnector {
                     "required": ["content"],
                     "properties": {
                         "content": { "type": "string" },
-                        "kind": { "type": "integer" },
+                        "kind": { "type": "integer", "enum": [1] },
                         "tags": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }
                     }
                 }),
-                "Use to publish a signed public note to all configured relays.",
+                "Use when you need to publish one public note through the connector's bound keypair to every configured relay.",
+                &[
+                    "This first slice does not construct or decrypt encrypted DMs (NIP-04/NIP-17).",
+                    "`kind` is fixed to `1` for this first-slice note operation.",
+                    "`secret_key_hex` is raw hex, not bech32 `nsec` input.",
+                    "Publishing fans out to every configured relay; there is no per-request relay override.",
+                ],
+                &[CAP_HEALTH_READ, CAP_RELAYS_READ, CAP_EVENTS_READ],
             ),
             operation(
                 OP_QUERY_EVENTS,
-                "Query Nostr events from configured relays",
+                "Query bounded public Nostr events from configured relays",
+                "Run one bounded REQ/EOSE query across configured relays and collect matching public events. The connector does not maintain long-lived subscriptions, replay cursors, or cross-relay dedupe.",
                 CAP_EVENTS_READ,
                 RiskLevel::Low,
                 SafetyTier::Safe,
@@ -185,27 +218,45 @@ impl NostrConnector {
                         "limit": { "type": "integer" }
                     }
                 }),
-                "Use for bounded public-event queries; this connector does not maintain a long-lived subscription.",
+                "Use for bounded public-event queries when you already know the relay set and do not need a long-lived subscription.",
+                &[
+                    "This is a bounded public-event query surface, not DM sync.",
+                    "If `limit` is omitted the connector uses `default_query_limit`.",
+                    "Results are returned per relay and may contain duplicates across relays.",
+                ],
+                &[CAP_RELAYS_READ, CAP_HEALTH_READ],
             ),
             operation(
                 OP_LIST_RELAYS,
                 "List configured relays",
+                "Return the configured relay allowlist and the x-only public key derived from the bound secp256k1 secret key. This is local inspection only; it does not discover or mutate relays.",
                 CAP_RELAYS_READ,
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
                 json!({ "type": "object" }),
-                "Use to inspect which relays this connector instance targets.",
+                "Use to inspect which relays and public key this connector instance is bound to.",
+                &[
+                    "This does not discover relays from NIP metadata or mutate relay policy.",
+                    "The relay list is static configuration for this first slice.",
+                ],
+                &[CAP_HEALTH_READ, CAP_EVENTS_READ],
             ),
             operation(
                 OP_HEALTH,
-                "Verify relay connectivity and signing identity",
+                "Verify relay connectivity and local signing identity",
+                "Open and close each configured relay and report reachability alongside the derived public key. This verifies relay reachability and local key derivation, not encrypted DM support or publish success policy.",
                 CAP_HEALTH_READ,
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
                 json!({ "type": "object" }),
-                "Use before publishing to make sure configured relays are reachable.",
+                "Use before publishing to confirm the configured relay set is reachable and the bound signing identity is coherent.",
+                &[
+                    "Health checks websocket reachability only; it does not prove encrypted DM support.",
+                    "Health does not score, rank, or deduplicate relays.",
+                ],
+                &[CAP_RELAYS_READ, CAP_NOTES_WRITE],
             ),
         ]
     }
@@ -269,14 +320,7 @@ impl FcpConnector for NostrConnector {
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req
-                .capabilities_requested
-                .into_iter()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
+            capabilities_granted: granted_capabilities(req.capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
@@ -286,7 +330,7 @@ impl FcpConnector for NostrConnector {
                 min_buffer_events: 0,
                 requires_ack: false,
             }),
-            auth_caps: None,
+            auth_caps: Some(nostr_auth_caps()),
             op_catalog_hash: None,
         })
     }
@@ -338,7 +382,7 @@ impl FcpConnector for NostrConnector {
             operations: Self::operations(),
             events: Vec::new(),
             resource_types: Vec::new(),
-            auth_caps: None,
+            auth_caps: Some(nostr_auth_caps()),
             event_caps: Some(EventCaps {
                 streaming: false,
                 replay: false,
@@ -355,6 +399,47 @@ impl FcpConnector for NostrConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        let Some(state) = self.state.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        };
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
+        if let Err(error) = validate_simulation_input(req.operation.as_str(), &req.input, state) {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -369,11 +454,8 @@ impl FcpConnector for NostrConnector {
 
 async fn publish_note(state: &NostrState, input: &Value) -> FcpResult<Value> {
     let content = required_string(input, "content")?;
-    let kind = input.get("kind").and_then(Value::as_u64).unwrap_or(1);
-    let tags = input
-        .get("tags")
-        .cloned()
-        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let kind = note_kind(input)?;
+    let tags = note_tags(input)?;
     let event = build_signed_event(
         &state.secret_key()?,
         &state.public_key_hex,
@@ -456,13 +538,17 @@ async fn publish_to_relay(relay: &str, timeout: Duration, event: &Value) -> FcpR
         .map_err(map_stream_error("nostr publish send"))?;
     let response = fcp_async_core::time::timeout(timeout, ws.recv())
         .await
-        .map_err(|_| FcpError::Timeout { operation: "nostr publish wait".into(), timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX) })?
+        .map_err(|_| FcpError::UpstreamTimeout {
+            service: "nostr".into(),
+        })?
         .map_err(map_stream_error("nostr publish recv"))?;
     let _ = ws.close().await;
-    let response = response.ok_or(FcpError::Upstream {
+    let response = response.ok_or_else(|| FcpError::External {
         service: "nostr".into(),
         message: format!("relay `{relay}` closed before acknowledging event"),
+        status_code: None,
         retryable: true,
+        retry_after: None,
     })?;
     let parsed = parse_ws_message(&response)?;
     Ok(json!({
@@ -471,7 +557,12 @@ async fn publish_to_relay(relay: &str, timeout: Duration, event: &Value) -> FcpR
     }))
 }
 
-async fn query_relay(relay: &str, timeout: Duration, sub_id: &str, filter: &Value) -> FcpResult<Vec<Value>> {
+async fn query_relay(
+    relay: &str,
+    timeout: Duration,
+    sub_id: &str,
+    filter: &Value,
+) -> FcpResult<Vec<Value>> {
     let mut ws = connect_relay(relay).await?;
     ws.send_json(&json!(["REQ", sub_id, filter]))
         .await
@@ -481,7 +572,9 @@ async fn query_relay(relay: &str, timeout: Duration, sub_id: &str, filter: &Valu
     loop {
         let message = fcp_async_core::time::timeout(timeout, ws.recv())
             .await
-            .map_err(|_| FcpError::Timeout { operation: "nostr query wait".into(), timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX) })?
+            .map_err(|_| FcpError::UpstreamTimeout {
+                service: "nostr".into(),
+            })?
             .map_err(map_stream_error("nostr query recv"))?;
         let Some(message) = message else {
             break;
@@ -508,10 +601,12 @@ async fn connect_relay(relay: &str) -> FcpResult<fcp_streaming::WsConnection> {
 }
 
 fn map_stream_error(context: &'static str) -> impl Fn(StreamError) -> FcpError {
-    move |error| FcpError::Upstream {
+    move |error| FcpError::External {
         service: "nostr".into(),
         message: format!("{context} failed: {error}"),
+        status_code: None,
         retryable: true,
+        retry_after: None,
     }
 }
 
@@ -554,12 +649,13 @@ fn build_signed_event(
     let id = hex::encode(Sha256::digest(canonical_bytes));
     let secp = Secp256k1::new();
     let keypair = Keypair::from_secret_key(&secp, secret_key);
-    let msg = Message::from_digest_slice(&hex::decode(&id).map_err(|error| FcpError::Internal {
-        message: format!("failed to decode event id hex: {error}"),
-    })?)
-    .map_err(|error| FcpError::Internal {
-        message: format!("failed to build secp256k1 message: {error}"),
-    })?;
+    let msg =
+        Message::from_digest_slice(&hex::decode(&id).map_err(|error| FcpError::Internal {
+            message: format!("failed to decode event id hex: {error}"),
+        })?)
+        .map_err(|error| FcpError::Internal {
+            message: format!("failed to build secp256k1 message: {error}"),
+        })?;
     let sig: Signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
     Ok(json!({
         "id": id,
@@ -574,25 +670,22 @@ fn build_signed_event(
 
 fn build_filter(input: &Value, default_limit: u64) -> FcpResult<Value> {
     let mut filter = serde_json::Map::new();
-    if let Some(authors) = input.get("authors") {
-        filter.insert("authors".into(), authors.clone());
+    if let Some(authors) = string_array_field(input, "authors")? {
+        filter.insert("authors".into(), Value::Array(authors));
     }
-    if let Some(ids) = input.get("ids") {
-        filter.insert("ids".into(), ids.clone());
+    if let Some(ids) = string_array_field(input, "ids")? {
+        filter.insert("ids".into(), Value::Array(ids));
     }
-    if let Some(kinds) = input.get("kinds") {
-        filter.insert("kinds".into(), kinds.clone());
+    if let Some(kinds) = u64_array_field(input, "kinds")? {
+        filter.insert("kinds".into(), Value::Array(kinds));
     }
-    if let Some(since) = input.get("since").and_then(Value::as_i64) {
+    if let Some(since) = i64_field(input, "since")? {
         filter.insert("since".into(), json!(since));
     }
-    if let Some(until) = input.get("until").and_then(Value::as_i64) {
+    if let Some(until) = i64_field(input, "until")? {
         filter.insert("until".into(), json!(until));
     }
-    let limit = input
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(default_limit);
+    let limit = u64_field(input, "limit")?.unwrap_or(default_limit);
     if limit == 0 {
         return Err(FcpError::InvalidRequest {
             code: 1005,
@@ -605,15 +698,21 @@ fn build_filter(input: &Value, default_limit: u64) -> FcpResult<Value> {
 
 fn parse_ws_message(message: &WsMessage) -> FcpResult<Value> {
     match message {
-        WsMessage::Text(text) => serde_json::from_str::<Value>(text).map_err(|error| FcpError::Upstream {
-            service: "nostr".into(),
-            message: format!("failed to parse relay frame: {error}"),
-            retryable: false,
-        }),
-        other => Err(FcpError::Upstream {
+        WsMessage::Text(text) => {
+            serde_json::from_str::<Value>(text).map_err(|error| FcpError::External {
+                service: "nostr".into(),
+                message: format!("failed to parse relay frame: {error}"),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            })
+        }
+        other => Err(FcpError::External {
             service: "nostr".into(),
             message: format!("unexpected relay frame type: {other:?}"),
+            status_code: None,
             retryable: false,
+            retry_after: None,
         }),
     }
 }
@@ -655,48 +754,212 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
             });
         }
     };
-    Ok(CapabilityId::from(capability.to_string()))
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn validate_simulation_input(operation: &str, input: &Value, state: &NostrState) -> FcpResult<()> {
+    match operation {
+        OP_PUBLISH_NOTE => {
+            let _ = required_string(input, "content")?;
+            let _ = note_kind(input)?;
+            let _ = note_tags(input)?;
+            Ok(())
+        }
+        OP_QUERY_EVENTS => {
+            let _ = build_filter(input, state.default_query_limit)?;
+            Ok(())
+        }
+        OP_LIST_RELAYS | OP_HEALTH => Ok(()),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("unknown operation: {operation}"),
+        }),
+    }
+}
+
+fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
+    requested
+        .into_iter()
+        .filter(|capability| {
+            matches!(
+                capability.as_str(),
+                CAP_NOTES_WRITE | CAP_EVENTS_READ | CAP_RELAYS_READ | CAP_HEALTH_READ
+            )
+        })
+        .map(|capability| CapabilityGrant {
+            capability,
+            operation: None,
+        })
+        .collect()
+}
+
+fn nostr_auth_caps() -> AuthCaps {
+    AuthCaps {
+        methods: vec!["secp256k1_secret_key_hex".to_string()],
+        oauth: None,
+    }
+}
+
+fn note_kind(input: &Value) -> FcpResult<u64> {
+    let kind = u64_field(input, "kind")?.unwrap_or(NOTE_KIND_TEXT);
+    if kind != NOTE_KIND_TEXT {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "nostr.notes.publish only supports kind=1 public notes in this first slice"
+                .into(),
+        });
+    }
+    Ok(kind)
+}
+
+fn note_tags(input: &Value) -> FcpResult<Value> {
+    let Some(tags) = input.get("tags") else {
+        return Ok(Value::Array(Vec::new()));
+    };
+    let Value::Array(tag_rows) = tags else {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "tags must be an array of string arrays".into(),
+        });
+    };
+    for tag in tag_rows {
+        let Value::Array(parts) = tag else {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "each tag must be an array of strings".into(),
+            });
+        };
+        if parts.iter().any(|part| !part.is_string()) {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "each tag entry must be a string".into(),
+            });
+        }
+    }
+    Ok(Value::Array(tag_rows.clone()))
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(FcpError::InvalidRequest {
+    let Some(raw) = value.get(field) else {
+        return Err(FcpError::InvalidRequest {
             code: 1005,
             message: format!("{field} is required"),
+        });
+    };
+    let Some(text) = raw.as_str() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be a non-empty string"),
+        });
+    };
+    if text.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be a non-empty string"),
+        });
+    }
+    Ok(text)
+}
+
+fn string_array_field(input: &Value, field: &str) -> FcpResult<Option<Vec<Value>>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let Value::Array(items) = value else {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be an array of strings"),
+        });
+    };
+    if items.iter().any(|item| !item.is_string()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must contain only strings"),
+        });
+    }
+    Ok(Some(items.clone()))
+}
+
+fn u64_array_field(input: &Value, field: &str) -> FcpResult<Option<Vec<Value>>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let Value::Array(items) = value else {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be an array of integers"),
+        });
+    };
+    if items.iter().any(|item| item.as_u64().is_none()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must contain only integers"),
+        });
+    }
+    Ok(Some(items.clone()))
+}
+
+fn i64_field(input: &Value, field: &str) -> FcpResult<Option<i64>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    value
+        .as_i64()
+        .map(Some)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be an integer"),
         })
 }
 
+fn u64_field(input: &Value, field: &str) -> FcpResult<Option<u64>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be an unsigned integer"),
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn operation(
-    id: &str,
+    id: &'static str,
     summary: &str,
-    capability: &str,
+    description: &str,
+    capability: &'static str,
     risk_level: RiskLevel,
     safety_tier: SafetyTier,
     idempotency: IdempotencyClass,
     input_schema: Value,
     when_to_use: &str,
+    common_mistakes: &[&str],
+    related: &[&'static str],
 ) -> OperationInfo {
     OperationInfo {
-        id: OperationId::from(id.to_string()),
+        id: OperationId::from_static(id),
         summary: summary.into(),
-        description: Some(summary.into()),
+        description: Some(description.into()),
         input_schema,
         output_schema: json!({ "type": "object" }),
-        capability: CapabilityId::from(capability.to_string()),
+        capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
         idempotency,
         ai_hints: AgentHint {
             when_to_use: when_to_use.into(),
-            common_mistakes: vec![
-                "This first slice signs only hex-encoded secret keys and does not implement encrypted DMs."
-                    .into(),
-            ],
+            common_mistakes: common_mistakes
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect(),
             examples: Vec::new(),
-            related: vec![CapabilityId::from(OP_HEALTH.to_string())],
+            related: related
+                .iter()
+                .map(|capability| CapabilityId::from_static(capability))
+                .collect(),
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),
@@ -706,6 +969,7 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::{CapabilityToken, ConnectorId, ZoneId};
 
     #[test]
     fn config_requires_at_least_one_relay() {
@@ -721,13 +985,13 @@ mod tests {
 
     #[test]
     fn build_signed_event_produces_hex_id_and_signature() {
-        let secret_key = parse_secret_key(
+        let secret_key =
+            parse_secret_key("1111111111111111111111111111111111111111111111111111111111111111")
+                .expect("secret key should parse");
+        let public_key = derive_public_key_hex(
             "1111111111111111111111111111111111111111111111111111111111111111",
         )
-        .expect("secret key should parse");
-        let public_key =
-            derive_public_key_hex("1111111111111111111111111111111111111111111111111111111111111111")
-                .expect("public key should derive");
+        .expect("public key should derive");
         let event = build_signed_event(&secret_key, &public_key, 1, &json!([]), "hello nostr")
             .expect("event should build");
         assert_eq!(event["id"].as_str().unwrap().len(), 64);
@@ -739,5 +1003,103 @@ mod tests {
         let filter = build_filter(&json!({ "kinds": [1] }), 25).expect("filter should build");
         assert_eq!(filter["limit"], 25);
         assert_eq!(filter["kinds"], json!([1]));
+    }
+
+    #[test]
+    fn note_kind_rejects_non_note_kinds() {
+        let error = note_kind(&json!({ "kind": 4 })).expect_err("kind 4 must be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn note_kind_rejects_non_integer_values() {
+        let error =
+            note_kind(&json!({ "kind": "1" })).expect_err("string kind values must be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn note_tags_require_string_arrays() {
+        let error = note_tags(&json!({ "tags": [["p", 3]] }))
+            .expect_err("non-string tag entries must be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn required_string_rejects_non_string_values() {
+        let error = required_string(&json!({ "content": 7 }), "content")
+            .expect_err("numeric content must be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+        assert_eq!(
+            error.to_string(),
+            "Invalid request: content must be a non-empty string"
+        );
+    }
+
+    #[test]
+    fn filter_rejects_invalid_limit_type() {
+        let error = build_filter(&json!({ "limit": "10" }), 25)
+            .expect_err("string limit values must be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn filter_rejects_non_string_authors() {
+        let error = build_filter(&json!({ "authors": ["ok", 3] }), 25)
+            .expect_err("authors must contain only strings");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn introspection_reports_raw_key_auth_boundary() {
+        let intro = NostrConnector::new().introspect();
+        let auth = intro.auth_caps.expect("auth caps should be present");
+        assert_eq!(auth.methods, vec!["secp256k1_secret_key_hex"]);
+        let publish = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_PUBLISH_NOTE)
+            .expect("publish operation should exist");
+        assert!(
+            publish
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not construct encrypted DMs")
+        );
+        let related: Vec<_> = publish
+            .ai_hints
+            .related
+            .iter()
+            .map(CapabilityId::as_str)
+            .collect();
+        assert_eq!(
+            related,
+            vec![CAP_HEALTH_READ, CAP_RELAYS_READ, CAP_EVENTS_READ]
+        );
+    }
+
+    #[test]
+    fn simulate_denies_when_not_configured() {
+        let connector = NostrConnector::new();
+        let response = fcp_async_core::runtime::block_on_sync(async {
+            connector
+                .simulate(SimulateRequest::new(
+                    ConnectorId::from_static("fcp.nostr"),
+                    OperationId::from_static(OP_PUBLISH_NOTE),
+                    ZoneId::community(),
+                    json!({ "content": "hello" }),
+                    CapabilityToken::test_token(),
+                ))
+                .await
+        })
+        .expect("runtime should complete");
+        let response = response.expect("simulate should succeed");
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-5002"));
+        assert_eq!(
+            response.failure_reason.as_deref(),
+            Some("Connector is not configured")
+        );
     }
 }

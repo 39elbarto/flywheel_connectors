@@ -160,13 +160,17 @@ impl ZapierConnector {
     /// Create a new Zapier connector.
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("zapier"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("fcp.zapier"))),
             config: None,
             client: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
         }
+    }
+
+    fn is_handshaken(&self) -> bool {
+        self.base.check_ready().is_ok()
     }
 }
 
@@ -228,7 +232,7 @@ impl ZapierConnector {
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.is_handshaken();
 
         let status = if configured && handshaken {
             "healthy"
@@ -273,7 +277,7 @@ impl ZapierConnector {
             critical: true,
         });
 
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.is_handshaken();
         checks.push(DoctorCheck {
             name: "handshake".into(),
             passed: handshaken,
@@ -405,6 +409,7 @@ impl ZapierConnector {
         }
         self.client = None;
         self.config = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -1193,6 +1198,52 @@ mod tests {
     fn connector_new_session_is_none() {
         let c = ZapierConnector::new();
         assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn connector_base_id_matches_manifest() {
+        let c = ZapierConnector::new();
+        assert_eq!(c.base.id.as_ref(), "fcp.zapier");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_reports_handshaken_without_session_id() {
+        let mut c = ZapierConnector::new();
+        c.handle_configure(json!({ "api_key": "tok" }))
+            .await
+            .unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+
+        let health = c.handle_health().await.unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(health["handshaken"], true);
+
+        let doctor = c.handle_doctor().await.unwrap();
+        let handshake = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "handshake")
+            .unwrap();
+        assert_eq!(handshake["passed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_session_and_handshake_state() {
+        let mut c = ZapierConnector::new();
+        c.handle_configure(json!({ "api_key": "tok" }))
+            .await
+            .unwrap();
+        c.handle_handshake(json!({ "session_id": "sess-1" }))
+            .await
+            .unwrap();
+
+        c.handle_shutdown(json!({})).await.unwrap();
+
+        assert!(c.session_id.is_none());
+        let health = c.handle_health().await.unwrap();
+        assert_eq!(health["status"], "unconfigured");
+        assert_eq!(health["handshaken"], false);
     }
 
     #[test]

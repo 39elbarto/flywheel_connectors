@@ -31,24 +31,36 @@ impl SynologyChatClient {
     pub async fn send_message(
         &self,
         text: &str,
-        user_id: Option<&str>,
+        user_ids: &[String],
         bot_name: Option<&str>,
     ) -> SynologyChatResult<Value> {
         if text.trim().is_empty() {
-            return Err(SynologyChatError::Config(
-                "text must not be empty".into(),
-            ));
+            return Err(SynologyChatError::Config("text must not be empty".into()));
         }
 
         let mut body = json!({ "text": text });
-        if let Some(user_id) = user_id {
-            body["user_ids"] = json!([user_id]);
+        if !user_ids.is_empty() {
+            body["user_ids"] = json!(user_ids);
         }
         if let Some(bot_name) = bot_name {
             body["username"] = json!(bot_name);
         }
 
-        let response = self.client.post(&self.incoming_url).json(&body).send().await?;
+        self.send_payload(&body).await
+    }
+
+    pub async fn send_payload(&self, payload: &Value) -> SynologyChatResult<Value> {
+        if !payload.is_object() {
+            return Err(SynologyChatError::Config(
+                "payload must be a JSON object".into(),
+            ));
+        }
+        let response = self
+            .client
+            .post(&self.incoming_url)
+            .json(payload)
+            .send()
+            .await?;
         let status = response.status();
         let body = response.text().await?;
         if !status.is_success() {
@@ -93,10 +105,38 @@ mod tests {
         .expect("config should parse");
         let client = SynologyChatClient::from_config(&config).expect("client should build");
         let result = client
-            .send_message("hello", Some("123"), Some("Flywheel"))
+            .send_message("hello", &[String::from("123")], Some("Flywheel"))
             .await
             .expect("send should succeed");
         assert_eq!(result["success"], true);
     }
-}
 
+    #[fcp_async_core::runtime::test]
+    async fn send_payload_posts_raw_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(json!({
+                "text": "hello",
+                "attachments": [{ "text": "card" }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true
+            })))
+            .mount(&server)
+            .await;
+
+        let config = SynologyChatConfig::from_value(json!({
+            "incoming_url": server.uri()
+        }))
+        .expect("config should parse");
+        let client = SynologyChatClient::from_config(&config).expect("client should build");
+        let result = client
+            .send_payload(&json!({
+                "text": "hello",
+                "attachments": [{ "text": "card" }]
+            }))
+            .await
+            .expect("payload send should succeed");
+        assert_eq!(result["success"], true);
+    }
+}

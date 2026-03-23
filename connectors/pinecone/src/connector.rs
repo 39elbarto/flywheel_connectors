@@ -10,6 +10,7 @@ use fcp_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -17,6 +18,8 @@ use crate::{
     error::PineconeError,
     types::Vector,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Validated configuration for the Pinecone connector.
 struct PineconeConfig {
@@ -122,12 +125,18 @@ impl PineconeConnector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("pinecone"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("fcp.pinecone"))),
             config: None,
             client: None,
             verifier: None,
             session_id: None,
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Handle configure method.
@@ -191,7 +200,7 @@ impl PineconeConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:pinecone-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -766,7 +775,7 @@ impl PineconeConnector {
         if let Some(verifier) = &self.verifier {
             verifier.verify(&token, &cap_id, &op_id, &[])?;
         } else {
-            return Err(FcpError::NotConfigured);
+            return Err(FcpError::NotHandshaken);
         }
 
         match operation {
@@ -969,13 +978,19 @@ impl PineconeConnector {
 
     /// Handle shutdown.
     pub async fn handle_shutdown(
-        &self,
+        &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Pinecone connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
         }
+        self.client = None;
+        self.config = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(json!({ "status": "shutdown" }))
     }
 }
@@ -1070,6 +1085,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+        assert_eq!(result["manifest_hash"], PineconeConnector::manifest_hash());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1106,6 +1122,32 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_without_handshake() {
+        let mut connector = PineconeConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "control_plane_url": "http://localhost:9999",
+                "data_plane_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, "pinecone.list_indexes");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "pinecone.list_indexes",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), FcpError::NotHandshaken));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1261,6 +1303,47 @@ mod tests {
         assert_eq!(health["status"], "healthy");
         assert!(health["auth_mode"].as_str().unwrap().contains("api_key"));
         assert!(health["control_plane_url"].as_str().is_some());
+    }
+
+    #[test]
+    fn connector_base_id_matches_manifest() {
+        let connector = PineconeConnector::new();
+        assert_eq!(connector.base.id.as_ref(), "fcp.pinecone");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_state() {
+        let mut connector = PineconeConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "control_plane_url": "http://localhost:9999",
+                "data_plane_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["pinecone.indexes.read"]
+            }))
+            .await
+            .unwrap();
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+
+        assert!(connector.client.is_none());
+        assert!(connector.config.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "not_configured");
     }
 
     #[fcp_async_core::runtime::test]

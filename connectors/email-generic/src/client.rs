@@ -1,7 +1,7 @@
 //! Generic IMAP/SMTP client helpers.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::time::Duration;
 
 use lettre::message::Mailbox;
@@ -39,6 +39,15 @@ impl Write for ImapStream {
         match self {
             Self::Plain(stream) => stream.flush(),
             Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+impl ImapStream {
+    fn shutdown(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.shutdown(Shutdown::Both),
+            Self::Tls(stream) => stream.get_mut().shutdown(Shutdown::Both),
         }
     }
 }
@@ -103,7 +112,9 @@ impl EmailGenericClient {
         loop {
             let line = Self::read_line(reader)?;
             if line.is_empty() {
-                return Err(EmailGenericError::Imap("Unexpected EOF from IMAP server".into()));
+                return Err(EmailGenericError::Imap(
+                    "Unexpected EOF from IMAP server".into(),
+                ));
             }
             let trimmed = line.trim_end().to_string();
             let done = trimmed.starts_with(&format!("{tag} "));
@@ -130,14 +141,12 @@ impl EmailGenericClient {
             Self::quote_imap(&self.config.imap.password)
         );
         let login_lines = Self::run_imap_command(&mut reader, "a1", &login)?;
-        if !login_lines
-            .last()
-            .is_some_and(|line| line.contains(" OK"))
-        {
+        if !login_lines.last().is_some_and(|line| line.contains(" OK")) {
             return Err(EmailGenericError::Imap(login_lines.join("\n")));
         }
         let result = f(&mut reader)?;
         let _ = Self::run_imap_command(&mut reader, "az", "LOGOUT");
+        let _ = reader.get_mut().shutdown();
         Ok(result)
     }
 
@@ -148,7 +157,9 @@ impl EmailGenericClient {
                 if !line.starts_with("* LIST") {
                     return None;
                 }
-                line.rsplit('"').nth(1).map(std::string::ToString::to_string)
+                line.rsplit('"')
+                    .nth(1)
+                    .map(std::string::ToString::to_string)
             })
             .collect()
     }
@@ -233,18 +244,14 @@ impl EmailGenericClient {
         );
         let mut builder = Message::builder().from(from).subject(subject);
         for recipient in to {
-            builder = builder.to(
-                recipient
-                    .parse::<Mailbox>()
-                    .map_err(|error| EmailGenericError::Address(error.to_string()))?,
-            );
+            builder = builder.to(recipient
+                .parse::<Mailbox>()
+                .map_err(|error| EmailGenericError::Address(error.to_string()))?);
         }
         for recipient in cc {
-            builder = builder.cc(
-                recipient
-                    .parse::<Mailbox>()
-                    .map_err(|error| EmailGenericError::Address(error.to_string()))?,
-            );
+            builder = builder.cc(recipient
+                .parse::<Mailbox>()
+                .map_err(|error| EmailGenericError::Address(error.to_string()))?);
         }
         let message = builder
             .body(body.to_string())

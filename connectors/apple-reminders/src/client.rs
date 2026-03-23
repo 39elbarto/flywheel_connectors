@@ -111,17 +111,29 @@ impl AppleRemindersClient {
     pub fn list_reminders_invocation(&self, list_name: Option<&str>) -> ScriptInvocation {
         ScriptInvocation {
             script: LIST_REMINDERS_SCRIPT,
-            args: vec![list_name.or(self.default_list.as_deref()).unwrap_or("").to_string()],
+            args: vec![
+                list_name
+                    .or(self.default_list.as_deref())
+                    .unwrap_or("")
+                    .to_string(),
+            ],
         }
     }
 
     #[must_use]
-    pub fn create_reminder_invocation(&self, title: &str, list_name: Option<&str>) -> ScriptInvocation {
+    pub fn create_reminder_invocation(
+        &self,
+        title: &str,
+        list_name: Option<&str>,
+    ) -> ScriptInvocation {
         ScriptInvocation {
             script: CREATE_REMINDER_SCRIPT,
             args: vec![
                 title.to_string(),
-                list_name.or(self.default_list.as_deref()).unwrap_or("").to_string(),
+                list_name
+                    .or(self.default_list.as_deref())
+                    .unwrap_or("")
+                    .to_string(),
             ],
         }
     }
@@ -190,9 +202,15 @@ impl AppleRemindersClient {
         Ok(json!({ "reminders": reminders }))
     }
 
-    pub fn create_reminder(&self, title: &str, list_name: Option<&str>) -> AppleRemindersResult<Value> {
+    pub fn create_reminder(
+        &self,
+        title: &str,
+        list_name: Option<&str>,
+    ) -> AppleRemindersResult<Value> {
         if title.trim().is_empty() {
-            return Err(AppleRemindersError::Config("title must not be empty".into()));
+            return Err(AppleRemindersError::Config(
+                "title must not be empty".into(),
+            ));
         }
         let raw = self.run_invocation(self.create_reminder_invocation(title, list_name))?;
         let mut parts = raw.split('\t');
@@ -205,7 +223,9 @@ impl AppleRemindersClient {
 
     pub fn complete_reminder(&self, reminder_id: &str) -> AppleRemindersResult<Value> {
         if reminder_id.trim().is_empty() {
-            return Err(AppleRemindersError::Config("reminder_id must not be empty".into()));
+            return Err(AppleRemindersError::Config(
+                "reminder_id must not be empty".into(),
+            ));
         }
         let raw = self.run_invocation(self.complete_reminder_invocation(reminder_id))?;
         let mut parts = raw.split('\t');
@@ -243,4 +263,3 @@ mod tests {
         assert!(invocation.args.is_empty());
     }
 }
-

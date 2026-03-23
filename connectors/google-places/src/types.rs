@@ -48,10 +48,11 @@ impl GooglePlacesConfig {
                 message: "request_timeout_ms must be greater than zero".into(),
             });
         }
-        let parsed = Url::parse(self.base_url.trim()).map_err(|error| FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("Invalid base_url: {error}"),
-        })?;
+        let parsed =
+            Url::parse(self.base_url.trim()).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid base_url: {error}"),
+            })?;
         if parsed.scheme() != "https" && parsed.scheme() != "http" {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
@@ -78,7 +79,10 @@ mod tests {
             "base_url": "https://places.googleapis.com/"
         }))
         .expect("config should parse");
-        assert_eq!(config.normalized_base_url(), "https://places.googleapis.com");
+        assert_eq!(
+            config.normalized_base_url(),
+            "https://places.googleapis.com"
+        );
     }
 
     #[test]
@@ -90,4 +94,3 @@ mod tests {
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 }
-

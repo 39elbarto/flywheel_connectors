@@ -1,4 +1,4 @@
-//! Tencent QQ bot connector.
+//! Tencent `QQ` bot connector.
 
 use std::{
     sync::Arc,
@@ -11,9 +11,9 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
 use reqwest::Url;
@@ -139,9 +139,10 @@ impl QqState {
     }
 
     fn api_url(&self, path: &str) -> FcpResult<Url> {
-        let mut url = Url::parse(self.config.base_url.trim()).map_err(|error| FcpError::Internal {
-            message: format!("stored QQ base_url is invalid: {error}"),
-        })?;
+        let mut url =
+            Url::parse(self.config.base_url.trim()).map_err(|error| FcpError::Internal {
+                message: format!("stored QQ base_url is invalid: {error}"),
+            })?;
         url.set_path(path);
         Ok(url)
     }
@@ -223,10 +224,12 @@ impl QqState {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(FcpError::Upstream {
+            return Err(FcpError::External {
                 service: "qq".into(),
                 message: format!("QQ API request failed [{status}]: {body}"),
+                status_code: Some(status),
                 retryable: false,
+                retry_after: None,
             });
         }
         response.json().await.map_err(|error| FcpError::Internal {
@@ -252,6 +255,7 @@ impl QqConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn operations() -> Vec<OperationInfo> {
         vec![
             operation(
@@ -381,14 +385,13 @@ impl QqConnector {
                     .await?
             }
             OP_HEALTH => {
-                let token = state.access_token().await?;
+                let _token = state.access_token().await?;
                 let gateway = state
                     .api_request(reqwest::Method::GET, "/gateway", None)
                     .await?;
                 json!({
                     "status": "ok",
                     "base_url": state.config.base_url,
-                    "token_prefix": &token[..token.len().min(8)],
                     "gateway": gateway.get("url").cloned().unwrap_or(Value::Null),
                     "manifest_hash": Self::manifest_hash(),
                 })
@@ -425,6 +428,8 @@ impl FcpConnector for QqConnector {
             })?;
         self.state = Some(QqState::new(config)?);
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
+        self.verifier = None;
         Ok(())
     }
 
@@ -437,14 +442,7 @@ impl FcpConnector for QqConnector {
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req
-                .capabilities_requested
-                .into_iter()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
+            capabilities_granted: granted_capabilities(req.capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
@@ -499,6 +497,8 @@ impl FcpConnector for QqConnector {
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
         self.state = None;
         self.verifier = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(())
     }
 
@@ -524,6 +524,40 @@ impl FcpConnector for QqConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.state.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -541,7 +575,7 @@ fn validate_host(raw: &str, allowed_hosts: &[&str]) -> FcpResult<()> {
         code: 1001,
         message: format!("invalid URL `{raw}`: {error}"),
     })?;
-    let host = url.host_str().ok_or(FcpError::InvalidRequest {
+    let host = url.host_str().ok_or_else(|| FcpError::InvalidRequest {
         code: 1001,
         message: format!("URL `{raw}` must include a host"),
     })?;
@@ -555,10 +589,12 @@ fn validate_host(raw: &str, allowed_hosts: &[&str]) -> FcpResult<()> {
 }
 
 fn map_transport_error(context: &'static str) -> impl Fn(reqwest::Error) -> FcpError {
-    move |error| FcpError::Upstream {
+    move |error| FcpError::External {
         service: "qq".into(),
         message: format!("{context} failed: {error}"),
+        status_code: None,
         retryable: error.is_timeout() || error.is_connect(),
+        retry_after: None,
     }
 }
 
@@ -574,7 +610,23 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
             });
         }
     };
-    Ok(CapabilityId::from(capability.to_string()))
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
+    requested
+        .into_iter()
+        .filter(|capability| {
+            matches!(
+                capability.as_str(),
+                CAP_MESSAGES_WRITE | CAP_GATEWAY_READ | CAP_HEALTH_READ
+            )
+        })
+        .map(|capability| CapabilityGrant {
+            capability,
+            operation: None,
+        })
+        .collect()
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
@@ -582,7 +634,7 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
         .get(field)
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or(FcpError::InvalidRequest {
+        .ok_or_else(|| FcpError::InvalidRequest {
             code: 1005,
             message: format!("{field} is required"),
         })
@@ -610,10 +662,11 @@ fn channel_message_body(content: &str, msg_id: Option<&str>) -> Value {
     body
 }
 
+#[allow(clippy::too_many_arguments)]
 fn operation(
-    id: &str,
+    id: &'static str,
     summary: &str,
-    capability: &str,
+    capability: &'static str,
     risk_level: RiskLevel,
     safety_tier: SafetyTier,
     idempotency: IdempotencyClass,
@@ -621,12 +674,12 @@ fn operation(
     when_to_use: &str,
 ) -> OperationInfo {
     OperationInfo {
-        id: OperationId::from(id.to_string()),
+        id: OperationId::from_static(id),
         summary: summary.into(),
         description: Some(summary.into()),
         input_schema,
         output_schema: json!({ "type": "object" }),
-        capability: CapabilityId::from(capability.to_string()),
+        capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
         idempotency,
@@ -637,7 +690,7 @@ fn operation(
                     .into(),
             ],
             examples: Vec::new(),
-            related: vec![CapabilityId::from(OP_HEALTH.to_string())],
+            related: vec![CapabilityId::from_static(OP_HEALTH)],
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),

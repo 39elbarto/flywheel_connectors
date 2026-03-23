@@ -1,4 +1,4 @@
-//! DingTalk enterprise robot connector.
+//! `DingTalk` enterprise robot connector.
 
 use std::{
     sync::Arc,
@@ -12,9 +12,9 @@ use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
 use reqwest::{Url, multipart};
@@ -112,7 +112,10 @@ impl DingTalkConfig {
                 message: "request_timeout_ms must be greater than zero".into(),
             });
         }
-        validate_host(&self.base_url, &["api.dingtalk.com", "localhost", "127.0.0.1"])?;
+        validate_host(
+            &self.base_url,
+            &["api.dingtalk.com", "localhost", "127.0.0.1"],
+        )?;
         validate_host(
             &self.media_base_url,
             &["oapi.dingtalk.com", "localhost", "127.0.0.1"],
@@ -138,9 +141,10 @@ impl DingTalkState {
     }
 
     fn api_url(&self, path: &str) -> FcpResult<Url> {
-        let mut url = Url::parse(self.config.base_url.trim()).map_err(|error| FcpError::Internal {
-            message: format!("stored DingTalk base_url is invalid: {error}"),
-        })?;
+        let mut url =
+            Url::parse(self.config.base_url.trim()).map_err(|error| FcpError::Internal {
+                message: format!("stored DingTalk base_url is invalid: {error}"),
+            })?;
         url.set_path(path);
         Ok(url)
     }
@@ -212,10 +216,12 @@ impl DingTalkState {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(FcpError::Upstream {
+            return Err(FcpError::External {
                 service: "dingtalk".into(),
                 message: format!("DingTalk API request failed [{status}]: {body}"),
+                status_code: Some(status),
                 retryable: false,
+                retry_after: None,
             });
         }
         response.json().await.map_err(|error| FcpError::Internal {
@@ -231,12 +237,13 @@ impl DingTalkState {
         content_base64: &str,
     ) -> FcpResult<Value> {
         let token = self.access_token().await?;
-        let bytes = BASE64
-            .decode(content_base64.trim())
-            .map_err(|error| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("content_base64 must be valid base64: {error}"),
-            })?;
+        let bytes =
+            BASE64
+                .decode(content_base64.trim())
+                .map_err(|error| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("content_base64 must be valid base64: {error}"),
+                })?;
         let mut url = self.media_url("/media/upload")?;
         {
             let mut query = url.query_pairs_mut();
@@ -281,6 +288,7 @@ impl DingTalkConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn operations() -> Vec<OperationInfo> {
         vec![
             operation(
@@ -371,6 +379,7 @@ impl DingTalkConnector {
         ]
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
@@ -383,11 +392,10 @@ impl DingTalkConnector {
                 let to = required_string(&req.input, "to")?;
                 let content = required_string(&req.input, "content")?;
                 let target = ParsedTarget::parse(to);
-                let path;
-                let body;
-                if target.is_group {
-                    path = "/v1.0/robot/groupMessages/send";
-                    body = json!({
+                let (path, body) = if target.is_group {
+                    (
+                        "/v1.0/robot/groupMessages/send",
+                        json!({
                         "robotCode": state.config.client_id,
                         "openConversationId": target.id,
                         "msgKey": "sampleMarkdown",
@@ -395,10 +403,12 @@ impl DingTalkConnector {
                             "title": title_for(content),
                             "text": content,
                         }).to_string(),
-                    });
+                        }),
+                    )
                 } else {
-                    path = "/v1.0/robot/oToMessages/batchSend";
-                    body = json!({
+                    (
+                        "/v1.0/robot/oToMessages/batchSend",
+                        json!({
                         "robotCode": state.config.client_id,
                         "userIds": [target.id],
                         "msgKey": "sampleMarkdown",
@@ -406,8 +416,9 @@ impl DingTalkConnector {
                             "title": title_for(content),
                             "text": content,
                         }).to_string(),
-                    });
-                }
+                        }),
+                    )
+                };
                 state.post_json(path, body).await?
             }
             OP_SEND_LINK => {
@@ -415,13 +426,16 @@ impl DingTalkConnector {
                 let title = required_string(&req.input, "title")?;
                 let text = required_string(&req.input, "text")?;
                 let message_url = required_string(&req.input, "message_url")?;
-                let pic_url = req.input.get("pic_url").and_then(Value::as_str).unwrap_or("");
+                let pic_url = req
+                    .input
+                    .get("pic_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let target = ParsedTarget::parse(to);
-                let path;
-                let body;
-                if target.is_group {
-                    path = "/v1.0/robot/groupMessages/send";
-                    body = json!({
+                let (path, body) = if target.is_group {
+                    (
+                        "/v1.0/robot/groupMessages/send",
+                        json!({
                         "robotCode": state.config.client_id,
                         "openConversationId": target.id,
                         "msgKey": "sampleLink",
@@ -431,10 +445,12 @@ impl DingTalkConnector {
                             "messageUrl": message_url,
                             "picUrl": pic_url,
                         }).to_string(),
-                    });
+                        }),
+                    )
                 } else {
-                    path = "/v1.0/robot/oToMessages/batchSend";
-                    body = json!({
+                    (
+                        "/v1.0/robot/oToMessages/batchSend",
+                        json!({
                         "robotCode": state.config.client_id,
                         "userIds": [target.id],
                         "msgKey": "sampleLink",
@@ -444,8 +460,9 @@ impl DingTalkConnector {
                             "messageUrl": message_url,
                             "picUrl": pic_url,
                         }).to_string(),
-                    });
-                }
+                        }),
+                    )
+                };
                 state.post_json(path, body).await?
             }
             OP_SEND_FILE => {
@@ -454,11 +471,10 @@ impl DingTalkConnector {
                 let file_name = required_string(&req.input, "file_name")?;
                 let file_type = required_string(&req.input, "file_type")?;
                 let target = ParsedTarget::parse(to);
-                let path;
-                let body;
-                if target.is_group {
-                    path = "/v1.0/robot/groupMessages/send";
-                    body = json!({
+                let (path, body) = if target.is_group {
+                    (
+                        "/v1.0/robot/groupMessages/send",
+                        json!({
                         "robotCode": state.config.client_id,
                         "openConversationId": target.id,
                         "msgKey": "sampleFile",
@@ -467,10 +483,12 @@ impl DingTalkConnector {
                             "fileName": file_name,
                             "fileType": file_type,
                         }).to_string(),
-                    });
+                        }),
+                    )
                 } else {
-                    path = "/v1.0/robot/oToMessages/batchSend";
-                    body = json!({
+                    (
+                        "/v1.0/robot/oToMessages/batchSend",
+                        json!({
                         "robotCode": state.config.client_id,
                         "userIds": [target.id],
                         "msgKey": "sampleFile",
@@ -479,8 +497,9 @@ impl DingTalkConnector {
                             "fileName": file_name,
                             "fileType": file_type,
                         }).to_string(),
-                    });
-                }
+                        }),
+                    )
+                };
                 state.post_json(path, body).await?
             }
             OP_UPLOAD_MEDIA => {
@@ -496,20 +515,19 @@ impl DingTalkConnector {
                     .input
                     .get("mime_type")
                     .and_then(Value::as_str)
-                    .unwrap_or(default_mime_type(media_type));
+                    .unwrap_or_else(|| default_mime_type(media_type));
                 let content_base64 = required_string(&req.input, "content_base64")?;
                 state
                     .upload_media(media_type, file_name, mime_type, content_base64)
                     .await?
             }
             OP_HEALTH => {
-                let token = state.access_token().await?;
+                let _token = state.access_token().await?;
                 json!({
                     "status": "ok",
                     "base_url": state.config.base_url,
                     "media_base_url": state.config.media_base_url,
                     "client_id": state.config.client_id,
-                    "token_prefix": &token[..token.len().min(8)],
                     "manifest_hash": Self::manifest_hash(),
                 })
             }
@@ -545,6 +563,8 @@ impl FcpConnector for DingTalkConnector {
             })?;
         self.state = Some(DingTalkState::new(config)?);
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
+        self.verifier = None;
         Ok(())
     }
 
@@ -557,14 +577,7 @@ impl FcpConnector for DingTalkConnector {
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req
-                .capabilities_requested
-                .into_iter()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
+            capabilities_granted: granted_capabilities(req.capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
@@ -619,6 +632,8 @@ impl FcpConnector for DingTalkConnector {
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
         self.state = None;
         self.verifier = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(())
     }
 
@@ -644,6 +659,40 @@ impl FcpConnector for DingTalkConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.state.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -663,12 +712,10 @@ struct ParsedTarget<'a> {
 }
 
 impl<'a> ParsedTarget<'a> {
+    #[allow(clippy::option_if_let_else)]
     fn parse(raw: &'a str) -> Self {
         if let Some(id) = raw.strip_prefix("chat:") {
-            Self {
-                id,
-                is_group: true,
-            }
+            Self { id, is_group: true }
         } else if let Some(id) = raw.strip_prefix("user:") {
             Self {
                 id,
@@ -688,7 +735,7 @@ fn validate_host(raw: &str, allowed_hosts: &[&str]) -> FcpResult<()> {
         code: 1001,
         message: format!("invalid URL `{raw}`: {error}"),
     })?;
-    let host = url.host_str().ok_or(FcpError::InvalidRequest {
+    let host = url.host_str().ok_or_else(|| FcpError::InvalidRequest {
         code: 1001,
         message: format!("URL `{raw}` must include a host"),
     })?;
@@ -710,17 +757,19 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
         .get(field)
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or(FcpError::InvalidRequest {
+        .ok_or_else(|| FcpError::InvalidRequest {
             code: 1005,
             message: format!("{field} is required"),
         })
 }
 
 fn map_transport_error(context: &'static str) -> impl Fn(reqwest::Error) -> FcpError {
-    move |error| FcpError::Upstream {
+    move |error| FcpError::External {
         service: "dingtalk".into(),
         message: format!("{context} failed: {error}"),
+        status_code: None,
         retryable: error.is_timeout() || error.is_connect(),
+        retry_after: None,
     }
 }
 
@@ -733,10 +782,12 @@ fn ensure_dingtalk_media_success(body: Value) -> FcpResult<Value> {
             .get("errmsg")
             .and_then(Value::as_str)
             .unwrap_or("unknown DingTalk media upload error");
-        Err(FcpError::Upstream {
+        Err(FcpError::External {
             service: "dingtalk".into(),
             message: format!("DingTalk media upload error {errcode}: {errmsg}"),
+            status_code: None,
             retryable: false,
+            retry_after: None,
         })
     }
 }
@@ -753,7 +804,23 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
             });
         }
     };
-    Ok(CapabilityId::from(capability.to_string()))
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
+    requested
+        .into_iter()
+        .filter(|capability| {
+            matches!(
+                capability.as_str(),
+                CAP_MESSAGES_WRITE | CAP_MEDIA_WRITE | CAP_HEALTH_READ
+            )
+        })
+        .map(|capability| CapabilityGrant {
+            capability,
+            operation: None,
+        })
+        .collect()
 }
 
 fn default_mime_type(media_type: &str) -> &'static str {
@@ -765,10 +832,11 @@ fn default_mime_type(media_type: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn operation(
-    id: &str,
+    id: &'static str,
     summary: &str,
-    capability: &str,
+    capability: &'static str,
     risk_level: RiskLevel,
     safety_tier: SafetyTier,
     idempotency: IdempotencyClass,
@@ -776,12 +844,12 @@ fn operation(
     when_to_use: &str,
 ) -> OperationInfo {
     OperationInfo {
-        id: OperationId::from(id.to_string()),
+        id: OperationId::from_static(id),
         summary: summary.into(),
         description: Some(summary.into()),
         input_schema,
         output_schema: json!({ "type": "object" }),
-        capability: CapabilityId::from(capability.to_string()),
+        capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
         idempotency,
@@ -791,7 +859,7 @@ fn operation(
                 "Group routes must use the `chat:` prefix with an openConversationId.".into(),
             ],
             examples: Vec::new(),
-            related: vec![CapabilityId::from(OP_HEALTH.to_string())],
+            related: vec![CapabilityId::from_static(OP_HEALTH)],
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),

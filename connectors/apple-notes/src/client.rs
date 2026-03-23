@@ -118,7 +118,12 @@ impl AppleNotesClient {
     pub fn list_notes_invocation(&self, folder: Option<&str>) -> ScriptInvocation {
         ScriptInvocation {
             script: LIST_NOTES_SCRIPT,
-            args: vec![folder.or(self.default_folder.as_deref()).unwrap_or("").to_string()],
+            args: vec![
+                folder
+                    .or(self.default_folder.as_deref())
+                    .unwrap_or("")
+                    .to_string(),
+            ],
         }
     }
 
@@ -229,7 +234,12 @@ impl AppleNotesClient {
         }))
     }
 
-    pub fn create_note(&self, title: &str, body: &str, folder: Option<&str>) -> AppleNotesResult<Value> {
+    pub fn create_note(
+        &self,
+        title: &str,
+        body: &str,
+        folder: Option<&str>,
+    ) -> AppleNotesResult<Value> {
         if title.trim().is_empty() {
             return Err(AppleNotesError::Config("title must not be empty".into()));
         }
@@ -265,4 +275,3 @@ mod tests {
         assert_eq!(value["notes"][0]["title"], "Title");
     }
 }
-

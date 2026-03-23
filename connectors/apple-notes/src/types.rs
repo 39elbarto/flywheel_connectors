@@ -44,9 +44,8 @@ mod tests {
 
     #[test]
     fn config_defaults_osascript_path() {
-        let config = AppleNotesConfig::from_value(serde_json::json!({}))
-            .expect("config should parse");
+        let config =
+            AppleNotesConfig::from_value(serde_json::json!({})).expect("config should parse");
         assert_eq!(config.osascript_path, "/usr/bin/osascript");
     }
 }
-

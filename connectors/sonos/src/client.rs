@@ -118,50 +118,46 @@ impl SonosClient {
     }
 
     pub async fn play(&self) -> SonosResult<Value> {
-        self
-            .soap_action(
-                "/MediaRenderer/AVTransport/Control",
-                AV_TRANSPORT_SERVICE,
-                "Play",
-                "<InstanceID>0</InstanceID><Speed>1</Speed>",
-            )
-            .await?;
+        self.soap_action(
+            "/MediaRenderer/AVTransport/Control",
+            AV_TRANSPORT_SERVICE,
+            "Play",
+            "<InstanceID>0</InstanceID><Speed>1</Speed>",
+        )
+        .await?;
         Ok(json!({ "status": "ok", "action": "play" }))
     }
 
     pub async fn pause(&self) -> SonosResult<Value> {
-        self
-            .soap_action(
-                "/MediaRenderer/AVTransport/Control",
-                AV_TRANSPORT_SERVICE,
-                "Pause",
-                "<InstanceID>0</InstanceID>",
-            )
-            .await?;
+        self.soap_action(
+            "/MediaRenderer/AVTransport/Control",
+            AV_TRANSPORT_SERVICE,
+            "Pause",
+            "<InstanceID>0</InstanceID>",
+        )
+        .await?;
         Ok(json!({ "status": "ok", "action": "pause" }))
     }
 
     pub async fn next(&self) -> SonosResult<Value> {
-        self
-            .soap_action(
-                "/MediaRenderer/AVTransport/Control",
-                AV_TRANSPORT_SERVICE,
-                "Next",
-                "<InstanceID>0</InstanceID>",
-            )
-            .await?;
+        self.soap_action(
+            "/MediaRenderer/AVTransport/Control",
+            AV_TRANSPORT_SERVICE,
+            "Next",
+            "<InstanceID>0</InstanceID>",
+        )
+        .await?;
         Ok(json!({ "status": "ok", "action": "next" }))
     }
 
     pub async fn previous(&self) -> SonosResult<Value> {
-        self
-            .soap_action(
-                "/MediaRenderer/AVTransport/Control",
-                AV_TRANSPORT_SERVICE,
-                "Previous",
-                "<InstanceID>0</InstanceID>",
-            )
-            .await?;
+        self.soap_action(
+            "/MediaRenderer/AVTransport/Control",
+            AV_TRANSPORT_SERVICE,
+            "Previous",
+            "<InstanceID>0</InstanceID>",
+        )
+        .await?;
         Ok(json!({ "status": "ok", "action": "previous" }))
     }
 
@@ -213,9 +209,11 @@ mod tests {
     #[test]
     fn capture_extracts_xml_tag_values() {
         assert_eq!(
-            SonosClient::capture("<root><CurrentVolume>18</CurrentVolume></root>", "CurrentVolume"),
+            SonosClient::capture(
+                "<root><CurrentVolume>18</CurrentVolume></root>",
+                "CurrentVolume"
+            ),
             Some("18".into())
         );
     }
 }
-

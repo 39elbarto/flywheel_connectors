@@ -216,14 +216,15 @@ impl MondayClient {
         let cv_arg = match column_values {
             Some(cv) => {
                 // Escape the column_values JSON string for embedding in GraphQL.
-                let escaped = cv.replace('\\', "\\\\").replace('"', "\\\"");
-                format!(", column_values: \"{escaped}\"")
+                // Using serde_json::to_string ensures all control chars (like newlines) are properly escaped.
+                let escaped = serde_json::to_string(cv).unwrap_or_else(|_| "\"\"".to_string());
+                format!(", column_values: {escaped}")
             }
             None => String::new(),
         };
-        let escaped_name = item_name.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_name = serde_json::to_string(item_name).unwrap_or_else(|_| "\"\"".to_string());
         let query = format!(
-            "mutation {{ create_item(board_id: {board_id}, item_name: \"{escaped_name}\"{cv_arg}) {{ id name }} }}"
+            "mutation {{ create_item(board_id: {board_id}, item_name: {escaped_name}{cv_arg}) {{ id name }} }}"
         );
         self.query(&query).await
     }
@@ -250,9 +251,9 @@ impl MondayClient {
         item_id: &str,
         body_text: &str,
     ) -> MondayResult<serde_json::Value> {
-        let escaped = body_text.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = serde_json::to_string(body_text).unwrap_or_else(|_| "\"\"".to_string());
         let query = format!(
-            "mutation {{ create_update(item_id: {item_id}, body: \"{escaped}\") {{ id text_body }} }}"
+            "mutation {{ create_update(item_id: {item_id}, body: {escaped}) {{ id text_body }} }}"
         );
         self.query(&query).await
     }

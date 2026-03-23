@@ -70,9 +70,7 @@ impl GooglePlacesClient {
         field_mask: Option<&str>,
     ) -> GooglePlacesResult<Value> {
         if query.trim().is_empty() {
-            return Err(GooglePlacesError::Config(
-                "query must not be empty".into(),
-            ));
+            return Err(GooglePlacesError::Config("query must not be empty".into()));
         }
         let url = format!("{}/v1/places:searchText", self.base_url);
         let mut body = json!({ "textQuery": query });
@@ -100,9 +98,7 @@ impl GooglePlacesClient {
         field_mask: Option<&str>,
     ) -> GooglePlacesResult<Value> {
         if input.trim().is_empty() {
-            return Err(GooglePlacesError::Config(
-                "input must not be empty".into(),
-            ));
+            return Err(GooglePlacesError::Config("input must not be empty".into()));
         }
         let url = format!("{}/v1/places:autocomplete", self.base_url);
         let mut body = json!({ "input": input });
@@ -126,9 +122,7 @@ impl GooglePlacesClient {
         field_mask: Option<&str>,
     ) -> GooglePlacesResult<Value> {
         if place.trim().is_empty() {
-            return Err(GooglePlacesError::Config(
-                "place must not be empty".into(),
-            ));
+            return Err(GooglePlacesError::Config("place must not be empty".into()));
         }
         let place = place.trim_start_matches('/');
         let url = format!("{}/v1/{}", self.base_url, place);
@@ -146,7 +140,7 @@ impl GooglePlacesClient {
 
 #[cfg(test)]
 mod tests {
-    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -155,17 +149,6 @@ mod tests {
     async fn text_search_uses_expected_endpoint_and_headers() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/places:searchText"))
-            .and(header("x-goog-api-key", "test-key"))
-            .and(header(
-                "x-goog-fieldmask",
-                "places.id,places.displayName,places.formattedAddress",
-            ))
-            .and(body_json(json!({
-                "textQuery": "coffee",
-                "maxResultCount": 3,
-                "openNow": true
-            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "places": [
                     {
@@ -189,6 +172,38 @@ mod tests {
             .search_text("coffee", Some(3), Some(true), None)
             .await
             .expect("search should succeed");
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording should be enabled");
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method, reqwest::Method::POST);
+        assert_eq!(request.url.path(), "/v1/places:searchText");
+        assert_eq!(
+            request
+                .headers
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("test-key")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("x-goog-fieldmask")
+                .and_then(|value| value.to_str().ok()),
+            Some("places.id,places.displayName,places.formattedAddress")
+        );
+        assert_eq!(
+            request
+                .body_json::<Value>()
+                .expect("request body should be valid JSON"),
+            json!({
+                "textQuery": "coffee",
+                "maxResultCount": 3,
+                "openNow": true
+            })
+        );
         assert_eq!(result["places"][0]["id"], "abc");
     }
 
@@ -217,4 +232,3 @@ mod tests {
         assert_eq!(result["id"], "abc123");
     }
 }
-

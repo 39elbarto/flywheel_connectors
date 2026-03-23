@@ -59,6 +59,7 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_message(connector: &mut SynologyChatConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(value) => value,
@@ -73,7 +74,10 @@ async fn handle_message(connector: &mut SynologyChatConnector, message: &str) ->
         }
     };
 
-    let method = request.get("method").and_then(|value| value.as_str()).unwrap_or("");
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let id = request.get("id").cloned();
     let params = request
         .get("params")

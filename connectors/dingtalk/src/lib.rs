@@ -1,4 +1,4 @@
-//! FCP DingTalk connector.
+//! FCP `DingTalk` connector.
 
 #![forbid(unsafe_code)]
 

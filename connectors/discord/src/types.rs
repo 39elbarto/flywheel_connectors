@@ -247,7 +247,7 @@ pub struct GatewayPayload {
 }
 
 /// Gateway identify payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GatewayIdentify {
     /// Bot token
     pub token: String,
@@ -261,6 +261,17 @@ pub struct GatewayIdentify {
     /// Shard info
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shard: Option<[u32; 2]>,
+}
+
+impl std::fmt::Debug for GatewayIdentify {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayIdentify")
+            .field("token", &"[REDACTED]")
+            .field("intents", &self.intents)
+            .field("properties", &self.properties)
+            .field("shard", &self.shard)
+            .finish()
+    }
 }
 
 /// Gateway connection properties.
@@ -304,7 +315,7 @@ pub struct GatewayHello {
 }
 
 /// Gateway resume payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GatewayResume {
     /// Bot token
     pub token: String,
@@ -312,6 +323,16 @@ pub struct GatewayResume {
     pub session_id: String,
     /// Last sequence number received
     pub seq: u64,
+}
+
+impl std::fmt::Debug for GatewayResume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayResume")
+            .field("token", &"[REDACTED]")
+            .field("session_id", &self.session_id)
+            .field("seq", &self.seq)
+            .finish()
+    }
 }
 
 /// Create message request.

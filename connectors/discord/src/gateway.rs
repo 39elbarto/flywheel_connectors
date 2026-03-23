@@ -963,7 +963,7 @@ fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()
         fs::create_dir_all(parent)?;
     }
 
-    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    let tmp_path = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
     fs::write(&tmp_path, payload)?;
     fs::rename(&tmp_path, path)?;

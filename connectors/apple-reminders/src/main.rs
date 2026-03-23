@@ -59,7 +59,10 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
-async fn handle_message(connector: &mut AppleRemindersConnector, message: &str) -> serde_json::Value {
+async fn handle_message(
+    connector: &mut AppleRemindersConnector,
+    message: &str,
+) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(value) => value,
         Err(error) => {
@@ -73,7 +76,10 @@ async fn handle_message(connector: &mut AppleRemindersConnector, message: &str) 
         }
     };
 
-    let method = request.get("method").and_then(|value| value.as_str()).unwrap_or("");
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let id = request.get("id").cloned();
     let params = request
         .get("params")

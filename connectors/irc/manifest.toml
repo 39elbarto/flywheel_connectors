@@ -1,57 +1,44 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
 
 [connector]
 id = "fcp.irc"
 name = "IRC"
 version = "0.1.0"
 description = "IRC connector for bounded connect, join, message send, transcript sampling, and health verification"
-archetype = "operational"
-homepage = "https://datatracker.ietf.org/doc/html/rfc2812"
+archetypes = ["operational"]
+format = "native"
 
-# Scope notes:
-# - This first slice uses short-lived IRC sessions per operation.
-# - Long-lived event streams, SASL negotiation, DCC, and bouncer management are deferred.
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "The connector keeps no durable local state. Each operation opens a short-lived IRC session using runtime-injected server, nick, optional password, TLS, and timeout settings."
+
+# Auth and scope notes:
+# - This first slice authenticates only with an optional PASS plus NICK/USER registration.
+# - Each operation opens one short-lived IRC session and then quits.
+# - Connector instances bind to one operator-configured IRC server plus one configured identity.
+# - IRC host policy is runtime-configured rather than hard-coded because real deployments may target
+#   public networks, self-hosted servers, or deterministic localhost test harnesses on standard
+#   IRC ports.
+# - Long-lived subscriptions, SASL negotiation, DCC, bouncer management, and operator-controlled
+#   channel moderation flows are explicit non-goals.
 
 [zones]
 home = "z:community"
 allowed_sources = ["z:owner", "z:private", "z:work", "z:community", "z:project:*"]
 allowed_targets = ["z:community", "z:project:*", "z:public"]
-tailscale_tag = "tag:fcp-community"
 
 [capabilities]
-required = ["network.dns", "network.outbound", "network.tls.sni"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
-
-[provides.operations.messages_send]
-summary = "Send an IRC PRIVMSG"
-capability = "irc.messages.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "none"
-
-[provides.operations.channels_join]
-summary = "Join an IRC channel"
-capability = "irc.channels.write"
-risk = "medium"
-safety_tier = "risky"
-idempotency = "best_effort"
-
-[provides.operations.transcript_sample]
-summary = "Open a short IRC session and collect a bounded transcript sample"
-capability = "irc.messages.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
-
-[provides.operations.health]
-summary = "Verify IRC connectivity and registration flow"
-capability = "irc.health.read"
-risk = "low"
-safety_tier = "safe"
-idempotency = "strict"
 
 [sandbox]
 profile = "strict"
@@ -60,3 +47,71 @@ cpu_percent = 30
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
+
+[provides.operations."irc.messages.send"]
+description = "Send one IRC PRIVMSG to a channel or nick using a short-lived session."
+capability = "irc.messages.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["target", "message"] }
+output_schema = { type = "object", required = ["status", "target", "transcript"] }
+network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."irc.messages.send".ai_hints]
+when_to_use = "Use when a bounded IRC send to one nick or channel is intentionally desired."
+common_mistakes = ["This first slice opens a short-lived session per operation and does not keep a persistent connection.", "The connector only supports PASS plus NICK/USER registration; SASL is not included.", "Sending to the wrong target can create a visible side effect in a community channel."]
+examples = []
+related = ["irc.health", "irc.channels.join"]
+
+[provides.operations."irc.channels.join"]
+description = "Join one IRC channel using a short-lived session and optional channel key."
+capability = "irc.channels.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["channel"] }
+output_schema = { type = "object", required = ["status", "channel", "transcript"] }
+network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."irc.channels.join".ai_hints]
+when_to_use = "Use when you need to verify channel access or join a channel intentionally with the configured IRC identity."
+common_mistakes = ["Join is a visible side effect to other IRC participants.", "This first slice does not keep a persistent joined presence after the operation completes.", "Use channel_key only for keyed channels."]
+examples = []
+related = ["irc.health", "irc.transcript.sample"]
+
+[provides.operations."irc.transcript.sample"]
+description = "Join a channel and collect a bounded transcript sample without keeping a long-lived IRC session open."
+capability = "irc.messages.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["channel"] }
+output_schema = { type = "object", required = ["channel", "lines"] }
+network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."irc.transcript.sample".ai_hints]
+when_to_use = "Use when you need a short bounded sample of IRC traffic from one channel."
+common_mistakes = ["This is a bounded sampling operation, not a subscription or backlog replay API.", "sample_lines is clamped and the connector quits after collecting the sample."]
+examples = []
+related = ["irc.health", "irc.channels.join"]
+
+[provides.operations."irc.health"]
+description = "Verify IRC connectivity, optional PASS handling, and registration with the configured nick."
+capability = "irc.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object", required = ["status", "server", "port", "tls", "nick", "transcript", "manifest_hash"] }
+network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."irc.health".ai_hints]
+when_to_use = "Use before join, send, or transcript sampling to verify that registration succeeds against the configured IRC server."
+common_mistakes = ["Health proves bounded registration/connectivity only; it does not establish a persistent subscribed session.", "TLS is optional in config but port defaults differ between TLS and plaintext."]
+examples = []
+related = ["irc.messages.send", "irc.channels.join", "irc.transcript.sample"]

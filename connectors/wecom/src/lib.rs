@@ -1,4 +1,4 @@
-//! FCP WeCom connector.
+//! FCP `WeCom` connector.
 
 #![forbid(unsafe_code)]
 

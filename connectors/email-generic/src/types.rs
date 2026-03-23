@@ -116,4 +116,3 @@ mod tests {
         assert_eq!(config.smtp.port, 587);
     }
 }
-

@@ -4,7 +4,9 @@
 
 ## Executive Summary
 
-**89 connectors** audited across 10 V3 maturity criteria. Overall V3 readiness: **93.7%** weighted compliance. 4 connectors have critical gaps (gap score > 3), 7 have moderate gaps (score 2-3), the remaining 78 are fully compliant or have minor gaps only.
+This matrix is a **historical 89-connector audit snapshot** from 2026-03-18, not a live inventory view of the current repository.
+
+**89 connectors** were audited across 10 V3 maturity criteria. Overall V3 readiness: **93.7%** weighted compliance. 4 connectors have critical gaps (gap score > 3), 7 have moderate gaps (score 2-3), the remaining 78 are fully compliant or have minor gaps only.
 
 ---
 

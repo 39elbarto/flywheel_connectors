@@ -8,7 +8,7 @@
 > target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
 > When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. **89 connectors**, **29 infrastructure crates**, **1.4 million lines of Rust**, **58,000+ tests**, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. **136 connector crates**, **28 core crates**, **1.4 million lines of Rust**, **58,000+ tests**, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state.
 
 ---
 
@@ -20,7 +20,7 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 2. **A real host-first Rust platform**: today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`
 
-3. **A complete connector workspace**: 89 production-quality connectors covering messaging, cloud, databases, AI providers, dev tools, productivity, and Google Workspace, all with typed operations, structured error mapping, and manifest-declared security policy
+3. **A complete connector workspace**: 136 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations, all with typed operations, structured error mapping, and manifest-declared security policy
 
 **Current reality**: the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. The implemented operator surface today is primarily host-first (`fwc` -> `fcp-host` -> connector subprocesses), with the mesh-native data plane proven at the protocol and store layers.
 
@@ -677,30 +677,33 @@ These unlock entire categories of autonomous agent work.
 | `fcp.redis` | Queue/Pub-Sub | Caching, message queues |
 | `fcp.whisper` | CLI/Process | Voice transcription |
 
-### Full Connector Catalog (89 connectors)
+### Connector Inventory (136 connector crates)
 
 Every connector follows the same structural contract: a `manifest.toml` declaring capabilities, zones, rate limits, network constraints, and sandbox policy; a `ConnectorErrorMapping` implementation bridging connector-specific errors to the FCP error taxonomy; and typed `OperationInfo` structs with AI agent hints (when to use, common mistakes, examples).
 
-| Category | Connectors | Count |
-|----------|-----------|-------|
-| **AI & LLM** | Anthropic, OpenAI, Google AI (Gemini), LLM Router, Whisper | 5 |
-| **Google Workspace** | Gmail, Calendar, Drive, Docs, Sheets, Chat, YouTube, People, Workspace Events, Admin Reports, BigQuery, Google AI | 12 |
-| **Messaging** | Slack, Discord, Telegram, Twitter/X | 4 |
-| **Dev Tools** | GitHub, GitLab, Bitbucket, Linear, Jira, ClickUp, Todoist, Trello, Asana | 9 |
-| **Databases** | PostgreSQL, Redis, MongoDB, Elasticsearch, DuckDB, Snowflake, Qdrant, Pinecone, VectorDB | 9 |
-| **Cloud & Infra** | S3, Kubernetes, Terraform, Pulumi, Datadog, Grafana, Sentry | 7 |
-| **Productivity** | Notion, Airtable, Figma, DocuSign, Pandadoc, Evernote, Logseq, Roam | 8 |
-| **Communication** | SendGrid, Twilio, Mailchimp, HubSpot, Intercom, Zendesk | 6 |
-| **Finance** | Stripe, Plaid | 2 |
-| **Analytics** | Mixpanel, Amplitude, PostHog, Segment, Metabase | 5 |
-| **Security** | 1Password, Bitwarden | 2 |
-| **Automation** | Zapier, Make, n8n, Retool, Cron, Webhook Receiver | 6 |
-| **Content** | Reddit, LinkedIn, Spotify, Anna's Archive, Arxiv, Semantic Scholar | 6 |
-| **Other** | Browser, MCP Bridge, Microsoft 365, Salesforce, Box, Dropbox, Home Assistant | 8 |
+The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. The category map below is representative rather than exhaustive. Recent additions in the current wave include BlueBubbles, Synology Chat, Google Places, Email Generic, Sonos, Hue, Apple Notes, and Apple Reminders.
+
+| Category | Representative Connectors |
+|----------|---------------------------|
+| **AI & LLM** | Anthropic, OpenAI, Google AI (Gemini), LLM Router, Whisper |
+| **Google Services** | Gmail, Calendar, Drive, Docs, Sheets, Chat, Places, YouTube, People, Workspace Events, Admin Reports, BigQuery, Google AI |
+| **Messaging & Collaboration** | Slack, Discord, Telegram, Twitter/X, Synology Chat, BlueBubbles |
+| **Dev Tools** | GitHub, GitLab, Bitbucket, Linear, Jira, ClickUp, Todoist, Trello, Asana |
+| **Databases** | PostgreSQL, Redis, MongoDB, Elasticsearch, DuckDB, Snowflake, Qdrant, Pinecone, VectorDB |
+| **Cloud & Infra** | S3, Kubernetes, Terraform, Pulumi, Datadog, Grafana, Sentry |
+| **Productivity & Personal** | Notion, Airtable, Figma, DocuSign, Pandadoc, Evernote, Logseq, Roam, Apple Notes, Apple Reminders, Email Generic |
+| **Communication** | SendGrid, Twilio, Mailchimp, HubSpot, Intercom, Zendesk |
+| **Finance** | Stripe, Plaid |
+| **Analytics** | Mixpanel, Amplitude, PostHog, Segment, Metabase |
+| **Security** | 1Password, Bitwarden |
+| **Automation** | Zapier, Make, n8n, Retool, Cron, Webhook Receiver |
+| **Content** | Reddit, LinkedIn, Spotify, Anna's Archive, Arxiv, Semantic Scholar |
+| **Home & Local Devices** | Sonos, Hue, Home Assistant |
+| **Other** | Browser, MCP Bridge, Microsoft 365, Salesforce, Box, Dropbox |
 
 ### Google Workspace Platform
 
-The 12 Google connectors share a discovery-pinned substrate (`fcp-google-discovery`) that provides:
+The 13 Google service connectors share a discovery-pinned substrate (`fcp-google-discovery`) that provides:
 
 - **`GoogleAuthSelection`**: unified config parsing for `access_token`, `credential_id`, or OAuth refresh
 - **`GoogleMaterializedAuth`**: materialized auth with `BearerToken` and `CredentialReference` variants
@@ -711,7 +714,7 @@ All Google connectors use the same auth flow: `GoogleAuthSelection::from_connect
 
 ### Connector SDK & Migration Framework
 
-The `fcp-sdk` crate provides the migration framework that all 89 connectors implement:
+The `fcp-sdk` crate provides the migration framework used across the connector workspace:
 
 ```rust
 // Every connector implements this trait for unified error handling
@@ -1309,7 +1312,7 @@ For operator and agent workflows, migration guidance, and evidence-bundle expect
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 29 crates under `crates/` and 89 connector crates under `connectors/`, totaling 1.4 million lines of Rust with 58,000+ tests. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 28 crates under `crates/` and 136 connector crates under `connectors/`, totaling 1.4 million lines of Rust with 58,000+ tests. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/
@@ -1340,7 +1343,7 @@ flywheel_connectors/
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
 │   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
-├── connectors/                # 89 connector crates at varying maturity
+├── connectors/                # 136 connector crates at varying maturity
 │   ├── github/
 │   ├── gmail/
 │   ├── slack/
@@ -1404,7 +1407,7 @@ The remaining quarantine surfaces (see `docs/FCP3_Retirement_Kill_List.md` for t
 
 - `fcp-async-core` wraps the Asupersync runtime and retains a Tokio compatibility bridge for wiremock/reqwest test infrastructure. The bridge is quarantined with explicit removal triggers.
 - `fwc/src/serve_mcp.rs` has one remaining `tokio::io` import, quarantined until `fcp-async-core::io` gains `AsyncWrite` and `lines()` support.
-- All 89 connectors implement `ConnectorErrorMapping`; the migration framework (`ConnectorRuntime`, `RetryLoop`) is proven across request-response, streaming, and polling archetypes.
+- Connector crates use `ConnectorErrorMapping`; the migration framework (`ConnectorRuntime`, `RetryLoop`) is proven across request-response, streaming, and polling archetypes.
 
 The FCP3 runtime kernel uses Asupersync natively. All production transport code (including WebSocket in `fcp-streaming`) runs on the Asupersync runtime. No compatibility-first holdouts remain in production paths.
 
@@ -1775,7 +1778,7 @@ Honest about what FCP doesn't do yet:
 
 - **No production mesh deployment**: The mesh protocol and data plane are implemented and tested, but no production multi-device deployment guide exists yet. The host-first stack is the proven operator path today.
 - **No GUI**: `fwc` is CLI-only. The `serve-mcp` command exposes connectors as MCP tools for AI agent consumption, but there is no web dashboard.
-- **Connector maturity varies**: The 89 connectors all compile and pass tests, but depth of operation coverage ranges from comprehensive (GitHub: 12 ops, Gmail: 10 ops) to minimal (some connectors have 3-5 core operations).
+- **Connector maturity varies**: The connector workspace compiles and passes tests, but depth of operation coverage ranges from comprehensive (GitHub: 12 ops, Gmail: 10 ops) to minimal (some connectors have 3-5 core operations).
 - **No Windows sandbox**: `fcp-sandbox` implements seccomp/Landlock on Linux and basic WASI isolation. macOS uses seatbelt. Windows sandbox support is Tier 2 and not yet hardened.
 - **Capability constraint enforcement is declarative only**: Constraints are serialized into COSE tokens but runtime enforcement is not yet wired into the request execution path. This is the next major security milestone.
 - **No automatic connector updates**: `fwc install` and `fwc update` exist but automatic background updates with rollback are not yet implemented.

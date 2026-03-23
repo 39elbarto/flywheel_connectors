@@ -1,7 +1,8 @@
 # FCP Connector Census — V3 Gap Scoring
 
 > Generated: 2026-03-18 by SunnyMoose
-> Scope: All 89 connectors in `/connectors/`
+> Scope: Historical 89-connector snapshot from 2026-03-18.
+> Current inventory note: the live repository has grown beyond this audit snapshot; use `connectors/`, README, or manifest-backed `fwc list --offline` for the current connector inventory.
 
 ## Executive Summary
 

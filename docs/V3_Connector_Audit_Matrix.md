@@ -1,10 +1,12 @@
 # FCP V3 Connector Compliance Audit Matrix
 
 **Date:** 2026-03-18
-**Scope:** 89 connectors in `connectors/`
+**Scope:** Historical 89-connector snapshot in `connectors/` as of 2026-03-18
 **Method:** Static analysis of manifest.toml, Cargo.toml, and src/ files
 **Agent:** SunnyMoose (claude-code, opus-4.6)
 **Bead:** j05nu.12.1
+
+This document is a dated audit snapshot, not the live connector inventory. The current repository has additional connector crates beyond this 89-connector analysis window.
 
 ---
 

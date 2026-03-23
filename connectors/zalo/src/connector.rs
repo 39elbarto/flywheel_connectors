@@ -5,8 +5,11 @@ use serde_json::{Value, json};
 
 const CONNECTOR_ID: &str = "fcp.zalo";
 const CONNECTOR_VERSION: &str = "0.1.0";
-const BOUNDARY: &str =
-    "This first slice covers bot identity, message send, photo send, long-poll updates, webhook setup, and webhook token verification.";
+const BOUNDARY: &str = "This first slice covers bot identity, message send, photo send, long-poll updates, webhook setup, and webhook token verification.";
+const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
+const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
+const UNIMPLEMENTED_REASON_CODE: &str = "invoke_surface_unimplemented";
+const UNIMPLEMENTED_MESSAGE: &str = "This connector scaffold only declares planned operations. Live invoke support is not implemented yet.";
 
 pub struct ZaloConnector {
     base: Arc<BaseConnector>,
@@ -14,6 +17,7 @@ pub struct ZaloConnector {
     handshaken: bool,
 }
 
+#[allow(clippy::missing_errors_doc, clippy::unused_async)]
 impl ZaloConnector {
     #[must_use]
     pub fn new() -> Self {
@@ -40,34 +44,53 @@ impl ZaloConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": ["zalo.messages", "zalo.updates", "zalo.webhook"]
+            "capabilities": [],
+            "planned_capabilities": ["zalo.messages", "zalo.updates", "zalo.webhook"],
+            "surface_status": "planned_only"
         }))
     }
 
     pub async fn handle_health(&self) -> FcpResult<Value> {
         Ok(json!({
-            "status": if self.configured && self.handshaken { "healthy" } else if self.configured { "degraded" } else { "unconfigured" },
+            "status": if self.configured { "degraded" } else { "unconfigured" },
             "configured": self.configured,
             "handshaken": self.handshaken,
+            "live_requests_supported": false,
         }))
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<Value> {
         Ok(json!({
-            "status": if self.configured { "healthy" } else { "unhealthy" },
+            "status": if self.configured { "degraded" } else { "unhealthy" },
             "checks": [
                 { "name": "configuration", "passed": self.configured, "critical": true },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
+                { "name": "invoke_surface", "passed": false, "critical": false, "message": UNIMPLEMENTED_MESSAGE },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
             ]
         }))
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<Value> {
+        let (status, reason_code, message) = if !self.configured {
+            ("degraded", json!("not_configured"), json!(BOUNDARY))
+        } else if !self.handshaken {
+            (
+                "degraded",
+                json!(NOT_HANDSHAKEN_REASON_CODE),
+                json!(NOT_HANDSHAKEN_MESSAGE),
+            )
+        } else {
+            (
+                "unsupported",
+                json!(UNIMPLEMENTED_REASON_CODE),
+                json!(UNIMPLEMENTED_MESSAGE),
+            )
+        };
         Ok(json!({
-            "status": if self.configured { "ok" } else { "degraded" },
-            "reason_code": if self.configured { Value::Null } else { json!("not_configured") },
-            "message": BOUNDARY
+            "status": status,
+            "reason_code": reason_code,
+            "message": message
         }))
     }
 
@@ -76,15 +99,16 @@ impl ZaloConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
-                { "id": "zalo.self.get_me", "summary": "Get Zalo bot identity", "capability": "zalo.messages", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
-                { "id": "zalo.messages.send", "summary": "Send a Zalo text message", "capability": "zalo.messages", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort" },
-                { "id": "zalo.messages.send_photo", "summary": "Send a Zalo photo message", "capability": "zalo.messages", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort" },
-                { "id": "zalo.updates.poll", "summary": "Long-poll one Zalo update", "capability": "zalo.updates", "risk_level": "low", "safety_tier": "safe", "idempotency": "none" },
-                { "id": "zalo.webhook.set", "summary": "Set the Zalo webhook URL", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort" },
-                { "id": "zalo.webhook.delete", "summary": "Delete the Zalo webhook", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort" },
-                { "id": "zalo.webhook.info", "summary": "Get Zalo webhook info", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
-                { "id": "zalo.webhook.verify", "summary": "Verify a webhook secret token against local config", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" }
+                { "id": "zalo.self.get_me", "summary": "Get Zalo bot identity", "capability": "zalo.messages", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
+                { "id": "zalo.messages.send", "summary": "Send a Zalo text message", "capability": "zalo.messages", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
+                { "id": "zalo.messages.send_photo", "summary": "Send a Zalo photo message", "capability": "zalo.messages", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
+                { "id": "zalo.updates.poll", "summary": "Long-poll one Zalo update", "capability": "zalo.updates", "risk_level": "low", "safety_tier": "safe", "idempotency": "none", "implemented": false },
+                { "id": "zalo.webhook.set", "summary": "Set the Zalo webhook URL", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
+                { "id": "zalo.webhook.delete", "summary": "Delete the Zalo webhook", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
+                { "id": "zalo.webhook.info", "summary": "Get Zalo webhook info", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
+                { "id": "zalo.webhook.verify", "summary": "Verify a webhook secret token against local config", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false }
             ],
+            "surface_status": "planned_only",
             "events": [],
             "resource_types": []
         }))
@@ -101,12 +125,26 @@ impl ZaloConnector {
                 message: "Missing operation_id".into(),
             })?;
 
-        Ok(json!({
-            "status": "not_implemented",
-            "operation_id": operation,
-            "connector_id": CONNECTOR_ID,
-            "boundary": BOUNDARY
-        }))
+        Err(FcpError::InvalidRequest {
+            code: 1002,
+            message: if matches!(
+                operation,
+                "zalo.self.get_me"
+                    | "zalo.messages.send"
+                    | "zalo.messages.send_photo"
+                    | "zalo.updates.poll"
+                    | "zalo.webhook.set"
+                    | "zalo.webhook.delete"
+                    | "zalo.webhook.info"
+                    | "zalo.webhook.verify"
+            ) {
+                format!(
+                    "Operation {operation} is planned but not implemented in this connector slice"
+                )
+            } else {
+                format!("Unknown operation: {operation}")
+            },
+        })
     }
 
     pub async fn handle_simulate(&self, params: Value) -> FcpResult<Value> {
@@ -117,7 +155,9 @@ impl ZaloConnector {
             .unwrap_or("");
 
         Ok(json!({
-            "allowed": matches!(
+            "allowed": false,
+            "simulate_capability": "unsupported",
+            "reason": if matches!(
                 operation,
                 "zalo.self.get_me"
                     | "zalo.messages.send"
@@ -127,8 +167,11 @@ impl ZaloConnector {
                     | "zalo.webhook.delete"
                     | "zalo.webhook.info"
                     | "zalo.webhook.verify"
-            ),
-            "reason": BOUNDARY
+            ) {
+                UNIMPLEMENTED_MESSAGE
+            } else {
+                "Unknown operation."
+            }
         }))
     }
 
@@ -147,3 +190,83 @@ impl Default for ZaloConnector {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[fcp_async_core::runtime::test]
+    async fn planned_only_connector_reports_degraded_readiness() {
+        let mut connector = ZaloConnector::new();
+        connector
+            .handle_configure(json!({}))
+            .await
+            .expect("configure should succeed");
+
+        let pre_handshake = connector
+            .handle_self_check()
+            .await
+            .expect("self_check before handshake should succeed");
+        assert_eq!(pre_handshake["status"], "degraded");
+        assert_eq!(pre_handshake["reason_code"], NOT_HANDSHAKEN_REASON_CODE);
+
+        connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake should succeed");
+
+        let health = connector
+            .handle_health()
+            .await
+            .expect("health should succeed");
+        assert_eq!(health["status"], "degraded");
+        assert_eq!(health["live_requests_supported"], false);
+
+        let introspect = connector
+            .handle_introspect()
+            .await
+            .expect("introspect should succeed");
+        assert_eq!(introspect["surface_status"], "planned_only");
+        assert!(
+            introspect["operations"]
+                .as_array()
+                .expect("operations should be an array")
+                .iter()
+                .all(|operation| {
+                    operation.get("implemented").and_then(Value::as_bool) == Some(false)
+                })
+        );
+
+        let self_check = connector
+            .handle_self_check()
+            .await
+            .expect("self_check should succeed");
+        assert_eq!(self_check["status"], "unsupported");
+        assert_eq!(self_check["reason_code"], UNIMPLEMENTED_REASON_CODE);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn planned_operation_invoke_and_simulate_refuse_execution() {
+        let mut connector = ZaloConnector::new();
+        connector
+            .handle_configure(json!({}))
+            .await
+            .expect("configure should succeed");
+        connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake should succeed");
+
+        let error = connector
+            .handle_invoke(json!({"operation_id": "zalo.messages.send"}))
+            .await
+            .expect_err("invoke should refuse planned operation");
+        assert!(error.to_string().contains("not implemented"));
+
+        let simulate = connector
+            .handle_simulate(json!({"operation_id": "zalo.messages.send"}))
+            .await
+            .expect("simulate should succeed");
+        assert_eq!(simulate["allowed"], false);
+        assert_eq!(simulate["simulate_capability"], "unsupported");
+    }
+}

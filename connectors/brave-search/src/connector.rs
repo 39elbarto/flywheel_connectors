@@ -15,23 +15,25 @@ const DEFAULT_BASE_URL: &str = "https://api.search.brave.com/res/v1";
 #[derive(Clone, Debug)]
 enum Auth {
     ApiKey(String),
-    CredentialId(String),
+    CredentialId { _id: String },
 }
 
 impl Auth {
-    fn redacted_label(&self) -> &'static str {
+    const fn redacted_label(&self) -> &'static str {
         match self {
             Self::ApiKey(_) => "api_key",
-            Self::CredentialId(_) => "credential_id",
+            Self::CredentialId { .. } => "credential_id",
         }
+    }
+
+    const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
     }
 
     fn apply(&self, request: RequestBuilder) -> RequestBuilder {
         match self {
             Self::ApiKey(key) => request.header("X-Subscription-Token", key),
-            Self::CredentialId(credential_id) => {
-                request.header("X-FCP-Credential-Id", credential_id)
-            }
+            Self::CredentialId { .. } => request,
         }
     }
 }
@@ -60,7 +62,7 @@ impl BraveConfig {
 
         let auth = match (api_key, credential_id) {
             (Some(key), None) => Auth::ApiKey(key),
-            (None, Some(credential_id)) => Auth::CredentialId(credential_id),
+            (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
@@ -82,10 +84,16 @@ impl BraveConfig {
                 DEFAULT_BASE_URL,
                 &["api.search.brave.com", "search.brave.com"],
             )?,
-            request_timeout_ms: params
-                .get("request_timeout_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(30_000),
+            request_timeout_ms: match params.get("request_timeout_ms").and_then(Value::as_u64) {
+                Some(0) => {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "request_timeout_ms must be greater than 0".into(),
+                    });
+                }
+                Some(timeout_ms) => timeout_ms,
+                None => 30_000,
+            },
         })
     }
 }
@@ -115,7 +123,10 @@ impl BraveClient {
 
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         self.auth
-            .apply(self.http.request(method, format!("{}{}", self.base_url, path)))
+            .apply(
+                self.http
+                    .request(method, format!("{}{}", self.base_url, path)),
+            )
             .header("Accept", "application/json")
     }
 
@@ -164,6 +175,7 @@ pub struct BraveSearchConnector {
     error_count: AtomicU64,
 }
 
+#[allow(clippy::missing_errors_doc, clippy::unused_async)]
 impl BraveSearchConnector {
     #[must_use]
     pub fn new() -> Self {
@@ -206,10 +218,21 @@ impl BraveSearchConnector {
     }
 
     pub async fn handle_health(&self) -> FcpResult<Value> {
+        let live_requests_supported = self
+            .config
+            .as_ref()
+            .is_some_and(|config| !config.auth.is_secretless());
         Ok(json!({
-            "status": if self.config.is_some() && self.handshaken { "healthy" } else if self.config.is_some() { "degraded" } else { "unconfigured" },
+            "status": if self.config.is_some() && self.handshaken && live_requests_supported {
+                "healthy"
+            } else if self.config.is_some() {
+                "degraded"
+            } else {
+                "unconfigured"
+            },
             "configured": self.config.is_some(),
             "handshaken": self.handshaken,
+            "live_requests_supported": live_requests_supported,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
             "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
@@ -217,11 +240,35 @@ impl BraveSearchConnector {
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<Value> {
+        let live_requests_supported = self
+            .config
+            .as_ref()
+            .is_some_and(|config| !config.auth.is_secretless());
         Ok(json!({
-            "status": if self.config.is_some() && self.client.is_some() { "healthy" } else { "unhealthy" },
+            "status": if self.config.is_some()
+                && self.client.is_some()
+                && self.handshaken
+                && live_requests_supported
+            {
+                "healthy"
+            } else if self.config.is_some() && self.client.is_some() {
+                "degraded"
+            } else {
+                "unhealthy"
+            },
             "checks": [
                 { "name": "configuration", "passed": self.config.is_some(), "critical": true },
                 { "name": "client_initialized", "passed": self.client.is_some(), "critical": true },
+                {
+                    "name": "credential_injection",
+                    "passed": self.config.as_ref().is_some_and(|config| !config.auth.is_secretless()),
+                    "critical": false,
+                    "message": if self.config.as_ref().is_some_and(|config| config.auth.is_secretless()) {
+                        json!("credential_id mode requires host-side credential injection, which this connector slice does not implement.")
+                    } else {
+                        Value::Null
+                    }
+                },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
             ]
@@ -229,6 +276,18 @@ impl BraveSearchConnector {
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<Value> {
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.auth.is_secretless())
+        {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "credential_injection_required",
+                "message": "Configured with credential_id; this connector slice cannot perform live checks without host-side credential injection."
+            }));
+        }
+
         let Some(client) = &self.client else {
             return Ok(json!({
                 "status": "degraded",
@@ -264,6 +323,16 @@ impl BraveSearchConnector {
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "Brave Search client not initialized".into(),
         })?;
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.auth.is_secretless())
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "credential_id mode requires host-side credential injection, which this connector slice does not implement".into(),
+            });
+        }
         let operation = params
             .get("operation_id")
             .or_else(|| params.get("operation"))
@@ -296,10 +365,22 @@ impl BraveSearchConnector {
             .or_else(|| params.get("operation"))
             .and_then(Value::as_str)
             .unwrap_or("");
+        let supported = operation == "brave-search.web.search";
+        let blocked_by_secretless_auth = supported
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|config| config.auth.is_secretless());
 
         Ok(json!({
-            "allowed": operation == "brave-search.web.search",
-            "reason": BOUNDARY
+            "allowed": supported && !blocked_by_secretless_auth,
+            "reason": if blocked_by_secretless_auth {
+                "credential_id mode requires host-side credential injection, which this connector slice does not implement."
+            } else if supported {
+                "Supported operation."
+            } else {
+                "Unknown operation."
+            }
         }))
     }
 
@@ -324,7 +405,10 @@ fn normalize_base_url(
     default_value: &str,
     allowed_hosts: &[&str],
 ) -> FcpResult<String> {
-    let candidate = override_value.unwrap_or(default_value).trim().trim_end_matches('/');
+    let candidate = override_value
+        .unwrap_or(default_value)
+        .trim()
+        .trim_end_matches('/');
     let parsed = Url::parse(candidate).map_err(|error| FcpError::InvalidRequest {
         code: 1003,
         message: format!("Invalid base_url: {error}"),
@@ -334,15 +418,14 @@ fn normalize_base_url(
         message: "base_url must include a host".into(),
     })?;
     let is_localhost = matches!(host, "127.0.0.1" | "localhost");
-    let valid_scheme =
-        parsed.scheme() == "https" || (parsed.scheme() == "http" && is_localhost);
+    let valid_scheme = parsed.scheme() == "https" || (parsed.scheme() == "http" && is_localhost);
     if !valid_scheme {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: "base_url must use https (or http only for localhost tests)".into(),
         });
     }
-    if !is_localhost && !allowed_hosts.iter().any(|allowed| host == *allowed) {
+    if !is_localhost && !allowed_hosts.contains(&host) {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!("base_url host {host} is not allowed"),
@@ -351,10 +434,22 @@ fn normalize_base_url(
     Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
 async fn send_json(request: RequestBuilder, service: &'static str) -> FcpResult<Value> {
-    let response = request.send().await.map_err(|error| map_reqwest_error(service, error))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| map_reqwest_error(service, &error))?;
     let status = response.status();
     if !status.is_success() {
+        let retry_after = parse_retry_after(response.headers());
         let body = response
             .text()
             .await
@@ -364,19 +459,22 @@ async fn send_json(request: RequestBuilder, service: &'static str) -> FcpResult<
             message: format!("HTTP {status}: {body}"),
             status_code: Some(status.as_u16()),
             retryable: status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error(),
-            retry_after: None,
+            retry_after,
         });
     }
-    response.json::<Value>().await.map_err(|error| FcpError::External {
-        service: service.into(),
-        message: format!("Failed to decode JSON response: {error}"),
-        status_code: Some(status.as_u16()),
-        retryable: false,
-        retry_after: None,
-    })
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| FcpError::External {
+            service: service.into(),
+            message: format!("Failed to decode JSON response: {error}"),
+            status_code: Some(status.as_u16()),
+            retryable: false,
+            retry_after: None,
+        })
 }
 
-fn map_reqwest_error(service: &'static str, error: reqwest::Error) -> FcpError {
+fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError {
     if error.is_timeout() {
         FcpError::UpstreamTimeout {
             service: service.into(),
@@ -389,5 +487,64 @@ fn map_reqwest_error(service: &'static str, error: reqwest::Error) -> FcpError {
             retryable: error.is_connect() || error.is_timeout(),
             retry_after: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_requires_exactly_one_auth_source() {
+        let error = BraveConfig::from_params(&json!({
+            "api_key": "a",
+            "credential_id": "b"
+        }))
+        .expect_err("expected invalid config");
+        assert!(error.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn base_url_rejects_unapproved_hosts() {
+        let error = normalize_base_url(
+            Some("https://evil.example.com"),
+            DEFAULT_BASE_URL,
+            &["api.search.brave.com", "search.brave.com"],
+        )
+        .expect_err("expected host validation failure");
+        assert!(error.to_string().contains("not allowed"));
+    }
+
+    #[test]
+    fn request_timeout_must_be_positive() {
+        let error = BraveConfig::from_params(&json!({
+            "api_key": "test-key",
+            "request_timeout_ms": 0
+        }))
+        .expect_err("expected invalid timeout");
+        assert!(error.to_string().contains("greater than 0"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn credential_id_mode_blocks_simulation() {
+        let mut connector = BraveSearchConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "cred-123"
+            }))
+            .await
+            .expect("expected configure to succeed");
+
+        let simulate = connector
+            .handle_simulate(json!({"operation_id": "brave-search.web.search"}))
+            .await
+            .expect("expected simulate");
+        assert_eq!(simulate["allowed"], false);
+        assert!(
+            simulate["reason"]
+                .as_str()
+                .expect("reason should be a string")
+                .contains("credential_id mode")
+        );
     }
 }

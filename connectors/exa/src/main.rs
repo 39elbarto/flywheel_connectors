@@ -61,7 +61,10 @@ async fn handle_message(connector: &mut ExaConnector, message: &str) -> serde_js
         }
     };
 
-    let method = request.get("method").and_then(|value| value.as_str()).unwrap_or("");
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let id = request.get("id").cloned();
     let params = request
         .get("params")
@@ -101,4 +104,3 @@ async fn handle_message(connector: &mut ExaConnector, message: &str) -> serde_js
         }
     }
 }
-

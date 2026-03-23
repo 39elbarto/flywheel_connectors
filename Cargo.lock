@@ -2639,6 +2639,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -2910,12 +2911,16 @@ name = "fcp-elevenlabs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -2966,10 +2971,13 @@ dependencies = [
  "anyhow",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -3047,10 +3055,13 @@ dependencies = [
  "anyhow",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -3576,10 +3587,13 @@ dependencies = [
  "anyhow",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -4032,12 +4046,16 @@ name = "fcp-mistral"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -4408,10 +4426,13 @@ dependencies = [
  "anyhow",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -5253,10 +5274,13 @@ dependencies = [
  "anyhow",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -5392,10 +5416,13 @@ dependencies = [
  "anyhow",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -5730,10 +5757,13 @@ dependencies = [
  "anyhow",
  "fcp-async-core",
  "fcp-core",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -6163,6 +6193,7 @@ dependencies = [
  "fcp-raptorq",
  "fcp-sandbox",
  "fcp-telemetry",
+ "fcp-testkit",
  "handlebars",
  "hex",
  "ipnet",

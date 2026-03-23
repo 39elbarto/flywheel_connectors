@@ -10,6 +10,7 @@ use crate::types::{QueryResult, WolframConfig};
 /// Wolfram Alpha API client.
 pub struct WolframClient {
     base_url: String,
+    timeout: std::time::Duration,
     #[allow(dead_code)]
     runtime: ConnectorRuntime,
     #[allow(dead_code)]
@@ -29,6 +30,7 @@ impl WolframClient {
         };
         Self {
             base_url,
+            timeout: std::time::Duration::from_millis(config.timeout_ms),
             runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
@@ -42,6 +44,7 @@ impl WolframClient {
     pub fn with_base_url(base_url: String) -> Self {
         Self {
             base_url,
+            timeout: std::time::Duration::from_secs(30),
             runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
@@ -74,6 +77,7 @@ impl WolframClient {
                 ("output", "json"),
                 ("format", "plaintext,image"),
             ])
+            .timeout(self.timeout)
             .send()
             .await
             .map_err(WolframError::Http)?;
@@ -117,6 +121,7 @@ impl WolframClient {
         let resp = client
             .get(&url)
             .query(&[("i", input), ("appid", app_id)])
+            .timeout(self.timeout)
             .send()
             .await
             .map_err(WolframError::Http)?;
@@ -154,6 +159,7 @@ impl WolframClient {
         let resp = client
             .get(&url)
             .query(&[("i", input), ("appid", app_id)])
+            .timeout(self.timeout)
             .send()
             .await
             .map_err(WolframError::Http)?;

@@ -94,23 +94,43 @@ pub struct BlueBubblesConnector {
     state: Option<BlueBubblesState>,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
+    manifest_toml: &'static str,
 }
 
 impl BlueBubblesConnector {
     /// Create a new connector instance.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_connector_metadata("fcp.imessage", MANIFEST_TOML)
+    }
+
+    /// Create a new connector instance with an explicit connector identifier.
+    ///
+    /// This allows thin wrapper crates to expose the same bridge-backed
+    /// implementation under a different connector ID and manifest surface.
+    #[must_use]
+    pub fn with_connector_id(connector_id: &'static str) -> Self {
+        Self::with_connector_metadata(connector_id, MANIFEST_TOML)
+    }
+
+    /// Create a connector with explicit connector metadata.
+    #[must_use]
+    pub fn with_connector_metadata(
+        connector_id: &'static str,
+        manifest_toml: &'static str,
+    ) -> Self {
         Self {
-            base: BaseConnector::new(ConnectorId::from_static("fcp.imessage")),
+            base: BaseConnector::new(ConnectorId::from_static(connector_id)),
             state: None,
             started_at: Instant::now(),
             verifier: None,
+            manifest_toml,
         }
     }
 
-    fn manifest_hash() -> String {
+    fn manifest_hash(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(MANIFEST_TOML.as_bytes());
+        hasher.update(self.manifest_toml.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
@@ -625,7 +645,7 @@ impl FcpConnector for BlueBubblesConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id: SessionId::new(),
-            manifest_hash: Self::manifest_hash(),
+            manifest_hash: self.manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -1333,8 +1353,9 @@ mod tests {
 
     #[test]
     fn test_manifest_hash_deterministic() {
-        let hash1 = BlueBubblesConnector::manifest_hash();
-        let hash2 = BlueBubblesConnector::manifest_hash();
+        let connector = BlueBubblesConnector::new();
+        let hash1 = connector.manifest_hash();
+        let hash2 = connector.manifest_hash();
         assert_eq!(hash1, hash2);
         assert!(hash1.starts_with("sha256:"));
     }
@@ -1364,6 +1385,12 @@ mod tests {
     fn test_default_impl() {
         let connector = BlueBubblesConnector::default();
         assert_eq!(connector.id().as_str(), "fcp.imessage");
+    }
+
+    #[test]
+    fn test_custom_connector_id() {
+        let connector = BlueBubblesConnector::with_connector_id("fcp.bluebubbles");
+        assert_eq!(connector.id().as_str(), "fcp.bluebubbles");
     }
 
     #[fcp_async_core::runtime::test]

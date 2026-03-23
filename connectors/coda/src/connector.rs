@@ -31,12 +31,12 @@ const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/coda_connector_verification.
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/coda_connector/<timestamp>";
 const VERIFY_COMMANDS: [&str; 7] = [
     "scripts/e2e/coda_connector_verification.sh",
-    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/coda/manifest.toml --check --json",
-    "rch exec -- cargo check -p fcp-coda --all-targets",
-    "rch exec -- cargo fmt --manifest-path connectors/coda/Cargo.toml --check",
-    "rch exec -- cargo test -p fcp-coda --test integration -- --nocapture",
-    "rch exec -- cargo test -p fcp-coda",
-    "rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings",
+    "RCH_FORCE_REMOTE=1 rch exec -- cargo run -q -p fwc -- manifest fix connectors/coda/manifest.toml --check --json",
+    "RCH_FORCE_REMOTE=1 rch exec -- cargo check -p fcp-coda --all-targets",
+    "cargo fmt --manifest-path connectors/coda/Cargo.toml --check",
+    "RCH_FORCE_REMOTE=1 rch exec -- cargo test -p fcp-coda --test integration -- --nocapture",
+    "RCH_FORCE_REMOTE=1 rch exec -- cargo test -p fcp-coda",
+    "RCH_FORCE_REMOTE=1 rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings",
 ];
 
 // Operation IDs
@@ -892,10 +892,10 @@ impl FcpConnector for CodaConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let config = CodaConfig::from_value(config)?;
-        self.runtime = Some(ConnectorRuntime::new(
+        let runtime = ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
-        ));
+        );
         let client = CodaClient::new(
             &config.base_url,
             &config.api_token,
@@ -906,9 +906,12 @@ impl FcpConnector for CodaConnector {
             message: format!("Failed to create Coda client: {e}"),
         })?;
 
+        self.runtime = Some(runtime);
         self.client = Some(client);
         self.config = Some(config);
+        self.verifier = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(())
     }
 
@@ -1082,6 +1085,12 @@ impl FcpConnector for CodaConnector {
         if let Some(runtime) = &self.runtime {
             runtime.shutdown();
         }
+        self.client = None;
+        self.config = None;
+        self.runtime = None;
+        self.verifier = None;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
         Ok(())
     }
 
@@ -1614,6 +1623,21 @@ mod tests {
         assert!(connector.config.is_some());
         assert!(connector.client.is_some());
         assert!(connector.runtime.is_some());
+        assert!(connector.verifier.is_none());
+        assert!(!connector.base.handshaken.load(Ordering::Acquire));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconfigure_clears_handshake_state() {
+        let mut connector = CodaConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        connector.handshake(base_handshake()).await.unwrap();
+        assert!(connector.base.handshaken.load(Ordering::Acquire));
+        assert!(connector.verifier.is_some());
+
+        connector.configure(test_config()).await.unwrap();
+        assert!(!connector.base.handshaken.load(Ordering::Acquire));
+        assert!(connector.verifier.is_none());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1713,6 +1737,34 @@ mod tests {
                 .and_then(|details| details.get("verification_script"))
                 .is_some()
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_runtime_state() {
+        let mut connector = CodaConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        connector.handshake(base_handshake()).await.unwrap();
+
+        connector
+            .shutdown(ShutdownRequest {
+                r#type: "shutdown".into(),
+                deadline_ms: 1_000,
+                drain: false,
+                reason: Some("test".into()),
+            })
+            .await
+            .unwrap();
+
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
+        assert!(connector.runtime.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(!connector.base.configured.load(Ordering::Acquire));
+        assert!(!connector.base.handshaken.load(Ordering::Acquire));
+        assert!(matches!(
+            connector.health().await.status,
+            HealthState::Degraded { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]

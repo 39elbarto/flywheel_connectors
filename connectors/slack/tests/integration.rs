@@ -14,17 +14,23 @@
 
 #![allow(clippy::too_many_lines)]
 
-use asupersync_tokio_compat::io::TokioIo;
+use asupersync::Cx;
+use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::net::websocket::{
+    CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
+};
 use chrono::{Duration, Utc};
 use fcp_async_core::channel::oneshot;
-use fcp_async_core::net::TcpListener;
+use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
-use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration as StdDuration;
-use tokio_tungstenite::{accept_async, tungstenite::protocol::Message as WsMessage};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -109,6 +115,74 @@ fn slack_channel(id: &str, name: &str) -> serde_json::Value {
         "is_private": false,
         "num_members": 42
     })
+}
+
+type TestServerWebSocket = ServerWebSocket<TcpStream>;
+
+async fn read_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+    const MAX_HEADERS: usize = 16 * 1024;
+
+    let mut buf = Vec::with_capacity(1024);
+    let mut temp = [0u8; 256];
+
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before websocket handshake completed",
+            ));
+        }
+
+        buf.extend_from_slice(&temp[..read]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_test_websocket(mut stream: TcpStream) -> TestServerWebSocket {
+    let request = read_http_headers(&mut stream)
+        .await
+        .expect("read websocket handshake");
+    WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept websocket")
+}
+
+async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
+    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Option<String> {
+    match ws.recv(&Cx::for_testing()).await {
+        Ok(Some(ServerWsMessage::Text(text))) => Some(text),
+        Ok(Some(other)) => panic!("expected text frame for {context}, got {other:?}"),
+        Ok(None) => None,
+        Err(err) => panic!("{context}: {err}"),
+    }
+}
+
+async fn close_test_websocket(ws: &mut TestServerWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
 }
 
 // ============================================================================
@@ -1535,47 +1609,39 @@ async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
     let (ack_tx, ack_rx) = oneshot::channel::<Option<String>>();
     let ws_task = fcp_async_core::task::spawn(async move {
         let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
-        let mut ws_stream = accept_async(TokioIo::new(tcp_stream))
-            .await
-            .expect("accept websocket");
+        let mut ws_stream = accept_test_websocket(tcp_stream).await;
 
-        ws_stream
-            .send(WsMessage::Text(
-                json!({ "type": "hello" }).to_string().into(),
-            ))
-            .await
-            .expect("send hello frame");
-        ws_stream
-            .send(WsMessage::Text(
-                json!({
-                    "envelope_id": "envelope-1",
-                    "type": "events_api",
-                    "payload": {
-                        "event_id": "Ev01",
-                        "team_id": "T_TEAM_1",
-                        "event": {
-                            "type": "message",
-                            "user": "U_EVT_1",
-                            "channel": "C_EVT_1",
-                            "text": "hello from socket mode",
-                            "ts": "1700000000.000001"
-                        }
+        send_json_frame(
+            &mut ws_stream,
+            json!({ "type": "hello" }),
+            "send hello frame",
+        )
+        .await;
+        send_json_frame(
+            &mut ws_stream,
+            json!({
+                "envelope_id": "envelope-1",
+                "type": "events_api",
+                "payload": {
+                    "event_id": "Ev01",
+                    "team_id": "T_TEAM_1",
+                    "event": {
+                        "type": "message",
+                        "user": "U_EVT_1",
+                        "channel": "C_EVT_1",
+                        "text": "hello from socket mode",
+                        "ts": "1700000000.000001"
                     }
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .expect("send events_api frame");
+                }
+            }),
+            "send events_api frame",
+        )
+        .await;
 
-        let ack_payload = if let Some(Ok(WsMessage::Text(text))) = ws_stream.next().await {
-            Some(text.to_string())
-        } else {
-            None
-        };
+        let ack_payload = recv_text_frame(&mut ws_stream, "ack frame").await;
         let _ = ack_tx.send(ack_payload);
 
-        let _ = ws_stream.close(None).await;
+        close_test_websocket(&mut ws_stream).await;
     });
 
     Mock::given(method("POST"))
@@ -1669,31 +1735,29 @@ async fn socket_mode_subscribe_reuses_single_connection() {
         let Some((tcp_stream, _)) = accepted else {
             return;
         };
-        let mut ws_stream = accept_async(TokioIo::new(tcp_stream))
-            .await
-            .expect("accept websocket");
+        let mut ws_stream = accept_test_websocket(tcp_stream).await;
         let _ = connected_tx.send(());
 
-        ws_stream
-            .send(WsMessage::Text(
-                json!({ "type": "hello" }).to_string().into(),
-            ))
-            .await
-            .expect("send hello frame");
+        send_json_frame(
+            &mut ws_stream,
+            json!({ "type": "hello" }),
+            "send hello frame",
+        )
+        .await;
 
         fcp_async_core::select! {
             _ = stop_ws_rx.changed() => {},
             () = async {
-                while let Some(frame) = ws_stream.next().await {
-                    match frame {
-                        Ok(WsMessage::Close(_)) | Err(_) => break,
+                loop {
+                    match ws_stream.recv(&Cx::for_testing()).await {
+                        Ok(Some(ServerWsMessage::Close(_))) | Ok(None) | Err(_) => break,
                         _ => {}
                     }
                 }
             } => {}
         }
 
-        let _ = ws_stream.close(None).await;
+        close_test_websocket(&mut ws_stream).await;
     });
 
     Mock::given(method("POST"))

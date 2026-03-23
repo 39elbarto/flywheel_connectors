@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:89ac38fc95896332149e7b4d90b2fa8a039e2803caf864fb0be60462388d4b39"
+interface_hash = "blake3-256:fcp.interface.v2:c6b5845751767bdc612f1900ceb6297e4be0b559784ba524646412ccdcc58b18"
 
 [connector]
 id = "fcp.line"
@@ -31,7 +31,6 @@ migration_hint = "One channel access token plus retry and timeout settings are i
 home = "z:private"
 allowed_sources = ["z:private"]
 allowed_targets = ["z:private"]
-tailscale_tag = "tag:fcp-private"
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
@@ -45,6 +44,36 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
+
+[provides.operations."line.messages.push".input_schema]
+type = "object"
+required = ["to", "messages"]
+
+[provides.operations."line.messages.push".input_schema.properties.to]
+description = "LINE recipient ID. This connector accepts any valid LINE recipient ID string already known to the caller."
+type = "string"
+
+[provides.operations."line.messages.push".input_schema.properties.messages]
+description = "Array of LINE Messaging API message objects. LINE allows at most 5 messages per request."
+type = "array"
+
+[provides.operations."line.messages.push".input_schema.properties.messages.items]
+type = "object"
+
+[provides.operations."line.messages.push".output_schema]
+type = "object"
+
+[provides.operations."line.messages.push".output_schema.properties.sent_messages]
+type = "array"
+
+[provides.operations."line.messages.push".ai_hints]
+when_to_use = "Use for proactive outbound messages when the recipient ID is already known and a live side effect is intended."
+common_mistakes = [
+    "Assuming push is limited to user IDs; LINE also accepts other recipient identifiers where permitted.",
+    "Sending more than 5 messages in one request.",
+]
+examples = []
+related = ["line.messages.reply", "line.messages.multicast"]
 
 [provides.operations."line.messages.push".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
@@ -72,6 +101,36 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
 
+[provides.operations."line.messages.reply".input_schema]
+type = "object"
+required = ["reply_token", "messages"]
+
+[provides.operations."line.messages.reply".input_schema.properties.reply_token]
+description = "Fresh reply token from an external LINE webhook event."
+type = "string"
+
+[provides.operations."line.messages.reply".input_schema.properties.messages]
+description = "Array of LINE Messaging API message objects. LINE allows at most 5 messages per request."
+type = "array"
+
+[provides.operations."line.messages.reply".input_schema.properties.messages.items]
+type = "object"
+
+[provides.operations."line.messages.reply".output_schema]
+type = "object"
+
+[provides.operations."line.messages.reply".output_schema.properties.sent_messages]
+type = "array"
+
+[provides.operations."line.messages.reply".ai_hints]
+when_to_use = "Use immediately after a webhook event when you must answer with the one-time reply token."
+common_mistakes = [
+    "Using a reply token after it expires or after it has already been consumed.",
+    "Treating reply like push; this operation depends on webhook state outside the connector.",
+]
+examples = []
+related = ["line.messages.push"]
+
 [provides.operations."line.messages.reply".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
@@ -97,6 +156,39 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
+
+[provides.operations."line.messages.multicast".input_schema]
+type = "object"
+required = ["to", "messages"]
+
+[provides.operations."line.messages.multicast".input_schema.properties.to]
+description = "Array of LINE user IDs. LINE allows at most 500 user IDs per multicast request."
+type = "array"
+
+[provides.operations."line.messages.multicast".input_schema.properties.to.items]
+type = "string"
+
+[provides.operations."line.messages.multicast".input_schema.properties.messages]
+description = "Array of LINE Messaging API message objects. LINE allows at most 5 messages per request."
+type = "array"
+
+[provides.operations."line.messages.multicast".input_schema.properties.messages.items]
+type = "object"
+
+[provides.operations."line.messages.multicast".output_schema]
+type = "object"
+
+[provides.operations."line.messages.multicast".output_schema.properties.sent_messages]
+type = "array"
+
+[provides.operations."line.messages.multicast".ai_hints]
+when_to_use = "Use when you need to send the same message payload to multiple LINE users at once."
+common_mistakes = [
+    "Passing more than 500 user IDs in one request.",
+    "Assuming LINE multicast can target arbitrary groups or rooms; this slice models the user-ID path.",
+]
+examples = []
+related = ["line.messages.push"]
 
 [provides.operations."line.messages.multicast".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
@@ -124,6 +216,35 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."line.profile.get".input_schema]
+type = "object"
+required = ["user_id"]
+
+[provides.operations."line.profile.get".input_schema.properties.user_id]
+description = "LINE user ID."
+type = "string"
+
+[provides.operations."line.profile.get".output_schema]
+type = "object"
+
+[provides.operations."line.profile.get".output_schema.properties.displayName]
+type = "string"
+
+[provides.operations."line.profile.get".output_schema.properties.userId]
+type = "string"
+
+[provides.operations."line.profile.get".output_schema.properties.pictureUrl]
+type = "string"
+
+[provides.operations."line.profile.get".output_schema.properties.statusMessage]
+type = "string"
+
+[provides.operations."line.profile.get".ai_hints]
+when_to_use = "Use for one-user profile lookup after you already have the LINE user ID."
+common_mistakes = []
+examples = []
+related = ["line.group.profile", "line.health"]
+
 [provides.operations."line.profile.get".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
@@ -149,6 +270,32 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."line.group.profile".input_schema]
+type = "object"
+required = ["group_id"]
+
+[provides.operations."line.group.profile".input_schema.properties.group_id]
+description = "LINE group ID."
+type = "string"
+
+[provides.operations."line.group.profile".output_schema]
+type = "object"
+
+[provides.operations."line.group.profile".output_schema.properties.groupId]
+type = "string"
+
+[provides.operations."line.group.profile".output_schema.properties.groupName]
+type = "string"
+
+[provides.operations."line.group.profile".output_schema.properties.pictureUrl]
+type = "string"
+
+[provides.operations."line.group.profile".ai_hints]
+when_to_use = "Use when you need basic metadata for one LINE group."
+common_mistakes = ["LINE group IDs typically start with C."]
+examples = []
+related = ["line.group.members"]
 
 [provides.operations."line.group.profile".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
@@ -176,6 +323,39 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."line.group.members".input_schema]
+type = "object"
+required = ["group_id"]
+
+[provides.operations."line.group.members".input_schema.properties.group_id]
+description = "LINE group ID."
+type = "string"
+
+[provides.operations."line.group.members".input_schema.properties.start]
+description = "Pagination token returned in the previous page's next field."
+type = "string"
+
+[provides.operations."line.group.members".output_schema]
+type = "object"
+
+[provides.operations."line.group.members".output_schema.properties.memberIds]
+type = "array"
+
+[provides.operations."line.group.members".output_schema.properties.memberIds.items]
+type = "string"
+
+[provides.operations."line.group.members".output_schema.properties.next]
+type = "string"
+
+[provides.operations."line.group.members".ai_hints]
+when_to_use = "Use when you need paginated LINE group member IDs and the connected official account tier supports full enumeration."
+common_mistakes = [
+    "Forgetting to pass the next token back as start when paging.",
+    "Expecting live full member enumeration on LINE accounts that lack the verified-or-premium entitlement.",
+]
+examples = []
+related = ["line.group.profile"]
+
 [provides.operations."line.group.members".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
@@ -201,6 +381,21 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."line.rich_menu.list".input_schema]
+type = "object"
+
+[provides.operations."line.rich_menu.list".output_schema]
+type = "object"
+
+[provides.operations."line.rich_menu.list".output_schema.properties.richmenus]
+type = "array"
+
+[provides.operations."line.rich_menu.list".ai_hints]
+when_to_use = "Use to inspect existing rich-menu metadata before creating or deleting menus."
+common_mistakes = []
+examples = []
+related = ["line.rich_menu.create", "line.rich_menu.delete"]
 
 [provides.operations."line.rich_menu.list".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
@@ -228,6 +423,50 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
 
+[provides.operations."line.rich_menu.create".input_schema]
+type = "object"
+required = ["size", "selected", "name", "chatBarText", "areas"]
+
+[provides.operations."line.rich_menu.create".input_schema.properties.size]
+type = "object"
+
+[provides.operations."line.rich_menu.create".input_schema.properties.size.properties.width]
+type = "integer"
+
+[provides.operations."line.rich_menu.create".input_schema.properties.size.properties.height]
+type = "integer"
+
+[provides.operations."line.rich_menu.create".input_schema.properties.selected]
+type = "boolean"
+
+[provides.operations."line.rich_menu.create".input_schema.properties.name]
+type = "string"
+
+[provides.operations."line.rich_menu.create".input_schema.properties.chatBarText]
+type = "string"
+
+[provides.operations."line.rich_menu.create".input_schema.properties.areas]
+type = "array"
+
+[provides.operations."line.rich_menu.create".input_schema.properties.areas.items]
+type = "object"
+
+[provides.operations."line.rich_menu.create".output_schema]
+type = "object"
+
+[provides.operations."line.rich_menu.create".output_schema.properties.richMenuId]
+type = "string"
+
+[provides.operations."line.rich_menu.create".ai_hints]
+when_to_use = "Use when you need to create a new rich-menu metadata object for a LINE bot."
+common_mistakes = [
+    "Using an unsupported rich-menu size; LINE expects one of the documented width and height combinations.",
+    "Assuming the image upload is part of this connector slice; only metadata creation is implemented here.",
+    "Assuming retries are deduplicated by LINE retry keys; this slice still treats create as best-effort.",
+]
+examples = []
+related = ["line.rich_menu.list", "line.rich_menu.delete"]
+
 [provides.operations."line.rich_menu.create".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
@@ -253,6 +492,29 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+
+[provides.operations."line.rich_menu.delete".input_schema]
+type = "object"
+required = ["rich_menu_id"]
+
+[provides.operations."line.rich_menu.delete".input_schema.properties.rich_menu_id]
+description = "LINE rich-menu ID to delete."
+type = "string"
+
+[provides.operations."line.rich_menu.delete".output_schema]
+type = "object"
+
+[provides.operations."line.rich_menu.delete".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."line.rich_menu.delete".ai_hints]
+when_to_use = "Use only when you intentionally want to remove an existing rich-menu metadata object."
+common_mistakes = [
+    "Treating deletion as reversible.",
+    "Deleting a menu without checking which experiences still depend on it.",
+]
+examples = []
+related = ["line.rich_menu.list", "line.rich_menu.create"]
 
 [provides.operations."line.rich_menu.delete".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
@@ -280,6 +542,23 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."line.health".input_schema]
+type = "object"
+
+[provides.operations."line.health".output_schema]
+type = "object"
+
+[provides.operations."line.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."line.health".ai_hints]
+when_to_use = "Use before deeper verification to confirm that the configured token can reach GET /v2/bot/info."
+common_mistakes = [
+    "Treating a passing health probe as proof that reply tokens, group-member enumeration, or rich-menu mutations are all safe to run.",
+]
+examples = []
+related = ["line.profile.get"]
+
 [provides.operations."line.health".network_constraints]
 host_allow = ["api.line.me", "localhost", "127.0.0.1"]
 port_allow = [443, 80]
@@ -297,3 +576,13 @@ max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

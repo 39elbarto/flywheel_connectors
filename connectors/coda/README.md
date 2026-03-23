@@ -162,12 +162,12 @@ The follow-on closeout bead for this connector is `flywheel_connectors-j05nu.5.3
 
 - Replayable verification bundle: `scripts/e2e/coda_connector_verification.sh`
 - Artifact root: `artifacts/e2e/coda_connector/<timestamp>`
-- Manifest verification command: `rch exec -- cargo run -q -p fwc -- manifest fix connectors/coda/manifest.toml --check --json`
+- Manifest verification command: `RCH_FORCE_REMOTE=1 rch exec -- cargo run -q -p fwc -- manifest fix connectors/coda/manifest.toml --check --json`
 - Focused cargo checks:
-  - `rch exec -- cargo check -p fcp-coda --all-targets`
-  - `rch exec -- cargo test -p fcp-coda --test integration -- --nocapture`
-  - `rch exec -- cargo test -p fcp-coda -- --nocapture`
-  - `rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings`
+  - `RCH_FORCE_REMOTE=1 rch exec -- cargo check -p fcp-coda --all-targets`
+  - `RCH_FORCE_REMOTE=1 rch exec -- cargo test -p fcp-coda --test integration -- --nocapture`
+  - `RCH_FORCE_REMOTE=1 rch exec -- cargo test -p fcp-coda -- --nocapture`
+  - `RCH_FORCE_REMOTE=1 rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings`
 
 Operator guidance for verification:
 
@@ -234,9 +234,9 @@ Common remediation:
 
 Rerun commands:
 - `scripts/e2e/coda_connector_verification.sh`
-- `fwc manifest fix connectors/coda/manifest.toml --check --json`
+- `RCH_FORCE_REMOTE=1 rch exec -- cargo run -q -p fwc -- manifest fix connectors/coda/manifest.toml --check --json`
 - `cargo fmt --manifest-path connectors/coda/Cargo.toml --check`
-- `rch exec -- cargo check -p fcp-coda --all-targets`
-- `rch exec -- cargo test -p fcp-coda --test integration -- --nocapture`
-- `rch exec -- cargo test -p fcp-coda`
-- `rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings`
+- `RCH_FORCE_REMOTE=1 rch exec -- cargo check -p fcp-coda --all-targets`
+- `RCH_FORCE_REMOTE=1 rch exec -- cargo test -p fcp-coda --test integration -- --nocapture`
+- `RCH_FORCE_REMOTE=1 rch exec -- cargo test -p fcp-coda`
+- `RCH_FORCE_REMOTE=1 rch exec -- cargo clippy -p fcp-coda --all-targets -- -D warnings`

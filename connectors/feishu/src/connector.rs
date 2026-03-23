@@ -1,6 +1,9 @@
 //! Feishu connector implementation.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use fcp_core::{
@@ -23,6 +26,20 @@ const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const FEISHU_CN_HOST: &str = "open.feishu.cn";
 const FEISHU_GLOBAL_HOST: &str = "open.larksuite.com";
 const FEISHU_TENANT_APP_BOUNDARY: &str = "This connector acts as one installed tenant app; it does not impersonate arbitrary users or cross tenant boundaries.";
+const FEISHU_IMPLEMENTATION_STATUS: &str = "first_slice";
+const FEISHU_BINDING_MODEL: &str = "single_tenant_app";
+const FEISHU_AUTH_MODEL: &str = "tenant_app_credentials";
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/feishu_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/feishu_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 7] = [
+    "scripts/e2e/feishu_connector_verification.sh",
+    "rch exec -- cargo run -q -p fwc -- manifest fix connectors/feishu/manifest.toml --check --json",
+    "rch exec -- cargo check -p fcp-feishu --all-targets",
+    "rch exec -- cargo fmt --manifest-path connectors/feishu/Cargo.toml --check",
+    "rch exec -- cargo test -p fcp-feishu --test integration -- --nocapture",
+    "rch exec -- cargo test -p fcp-feishu -- --nocapture",
+    "rch exec -- cargo clippy -p fcp-feishu --all-targets -- -D warnings",
+];
 const MAX_CHATS_PAGE_SIZE: u32 = 200;
 const ALLOWED_RECEIVE_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id", "email", "chat_id"];
 const ALLOWED_USER_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id"];
@@ -231,8 +248,13 @@ fn validate_chats_page_size(page_size: u64) -> FcpResult<u32> {
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
+    pub ready: bool,
     pub passed: bool,
     pub checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -244,10 +266,148 @@ pub struct DoctorCheck {
 }
 
 impl DoctorResult {
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+    fn from_checks(checks: Vec<DoctorCheck>, provisioning: Option<ProvisioningReadiness>) -> Self {
         let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
-        Self { passed, checks }
+        Self {
+            ready: passed,
+            passed,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RetryReadiness {
+    max_retries: u32,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+    jitter_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProvisioningReadiness {
+    base_url: String,
+    auth_mode: &'static str,
+    request_timeout_ms: u64,
+    retry: RetryReadiness,
+    network_ok: bool,
+    network_message: String,
+    credentials_configured: bool,
+    authenticated_identity_probe: &'static str,
+    risky_mutations: Vec<&'static str>,
+    supported_hosts: Vec<&'static str>,
+    tenant_app_boundary: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
+}
+
+fn auth_mode_label(config: &FeishuConfig) -> &'static str {
+    if config.app_id.trim().is_empty() || config.app_secret.trim().is_empty() {
+        "unconfigured"
+    } else {
+        FEISHU_AUTH_MODEL
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable Feishu/Lark tenant app or a localhost mock server before running readiness verification.",
+            "Grant the tenant app the scopes needed for the message, chat, directory, docs, sheets, and calendar surfaces you plan to exercise.",
+            "Configure exactly one app_id/app_secret pair per connector instance and keep base_url on the CN or global production host unless the verification bundle is pointed at localhost.",
+        ],
+        dedicated_environment: "Prefer a sandbox tenant or a localhost fixture. feishu.messages.send and feishu.messages.reply are live side effects and should not target production chats during verification.",
+        redaction_rules: vec![
+            "Never print app_secret, tenant access tokens, Authorization headers, or copied auth-endpoint payloads.",
+            "Treat app_id, message IDs, chat IDs, user IDs, document IDs, spreadsheet tokens, calendar IDs, and raw content bodies as sensitive tenant metadata.",
+            "If verification captures live Feishu/Lark responses, redact message content, display names, email addresses, and tenant-specific URLs before sharing artifacts.",
+        ],
+        limitations: vec![
+            "This first slice is tenant-app bound and does not impersonate arbitrary users or cross tenant boundaries.",
+            "Webhook ingestion, websocket event delivery, Drive search/export/write, and calendar mutations remain explicit non-goals.",
+            "Known-token reads are supported for docs, sheets, and calendar events, but this connector does not discover or enumerate those resources globally.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "not_configured",
+                symptom: "health or self_check reports that the connector is not configured",
+                action: "Configure app_id, app_secret, request_timeout_ms, retry policy, and an allowed base_url, then rerun self_check.",
+            },
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "doctor or self_check reports that base_url violates the Feishu/Lark host policy",
+                action: "Use https://open.feishu.cn or https://open.larksuite.com for live verification, or an explicit localhost / 127.0.0.1 override for deterministic tests.",
+            },
+            RemediationHint {
+                code: "feishu_auth_rejected",
+                symptom: "the tenant-access-token probe returns 401 or 403",
+                action: "Rotate the tenant app secret, confirm the app_id/app_secret pair is valid for the target tenant, and rerun the verification bundle.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "self_check reports rate limiting, transport timeouts, or transient 5xx errors from Feishu/Lark",
+                action: "Respect the upstream retry window or increase request_timeout_ms and retry settings before rerunning verification.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
+    }
+}
+
+fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
+    json!({
+        "implementation": {
+            "api": "feishu_open_platform",
+            "status": FEISHU_IMPLEMENTATION_STATUS,
+            "notes": [
+                "The connector is bound to one installed tenant app and uses the tenant access token internal auth endpoint.",
+                "Read operations cover messages, chats, users, known docs, known spreadsheets, and known calendar event lists.",
+            ],
+        },
+        "auth_boundary": {
+            "binding": FEISHU_BINDING_MODEL,
+            "token_type": FEISHU_AUTH_MODEL,
+            "credential_mode": config.map(auth_mode_label).unwrap_or("unconfigured"),
+            "base_url": config.map(|cfg| cfg.base_url.clone()),
+            "cross_tenant_supported": false,
+            "user_impersonation_supported": false,
+            "webhook_receiver_included": false,
+            "websocket_events_included": false,
+        },
+        "service_inventory": {
+            "messages": [OP_MESSAGES_SEND, OP_MESSAGES_REPLY, OP_MESSAGES_GET],
+            "chats": [OP_CHATS_LIST, OP_CHATS_GET],
+            "directory": [OP_USERS_GET],
+            "docs": [OP_DOCS_GET, OP_SHEETS_GET],
+            "calendar": [OP_CALENDAR_EVENTS],
+            "health": [OP_HEALTH],
+        },
+        "non_goals": [
+            "Webhook ingestion and websocket event delivery",
+            "Cross-tenant brokering or arbitrary user impersonation",
+            "Drive search, export, folder traversal, and write operations",
+            "Calendar mutation or subscription setup"
+        ]
+    })
 }
 
 /// Feishu connector state.
@@ -283,9 +443,76 @@ impl FeishuConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn provisioning_readiness(&self) -> Option<ProvisioningReadiness> {
+        self.config.as_ref().map(|config| {
+            let (network_ok, network_message) = base_url_diagnostic(&config.base_url);
+            ProvisioningReadiness {
+                base_url: config.base_url.clone(),
+                auth_mode: auth_mode_label(config),
+                request_timeout_ms: config.request_timeout_ms,
+                retry: RetryReadiness {
+                    max_retries: config.retry.max_retries,
+                    initial_delay_ms: config.retry.initial_delay_ms,
+                    max_delay_ms: config.retry.max_delay_ms,
+                    jitter_enabled: config.retry.jitter_enabled,
+                },
+                network_ok,
+                network_message,
+                credentials_configured: !config.app_id.trim().is_empty()
+                    && !config.app_secret.trim().is_empty(),
+                authenticated_identity_probe: "POST /open-apis/auth/v3/tenant_access_token/internal",
+                risky_mutations: vec![OP_MESSAGES_SEND, OP_MESSAGES_REPLY],
+                supported_hosts: vec![FEISHU_CN_HOST, FEISHU_GLOBAL_HOST],
+                tenant_app_boundary: FEISHU_TENANT_APP_BOUNDARY,
+            }
+        })
+    }
+
+    fn diagnostic_details(&self, live_probe: Option<serde_json::Value>) -> serde_json::Value {
+        json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.base.handshaken.load(Ordering::Acquire),
+            "manifest_hash": Self::manifest_hash(),
+            "auth_mode": self.config.as_ref().map(auth_mode_label),
+            "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
+            "base_url_validation": self.config.as_ref().map(|config| {
+                match parse_base_url(&config.base_url) {
+                    Ok(url) => json!({
+                        "host": url.host_str(),
+                        "scheme": url.scheme(),
+                        "local_test_host": url.host_str().is_some_and(is_local_test_host),
+                    }),
+                    Err(err) => json!({
+                        "valid": false,
+                        "error": err.to_string(),
+                    }),
+                }
+            }),
+            "request_timeout_ms": self.config.as_ref().map(|config| config.request_timeout_ms),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.provisioning_readiness(),
+            "operator_guidance": operator_guidance(),
+            "contract": contract_details(self.config.as_ref()),
+            "live_probe": live_probe,
+        })
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        live_probe: Option<serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(self.diagnostic_details(live_probe));
+        report
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
+        let provisioning = self.provisioning_readiness();
 
         let configured = self.config.is_some();
         checks.push(DoctorCheck {
@@ -323,29 +550,38 @@ impl FeishuConnector {
             critical: true,
         });
 
-        if let Some(config) = &self.config {
-            let (host_ok, host_message) = base_url_diagnostic(&config.base_url);
+        if let Some(readiness) = &provisioning {
             checks.push(DoctorCheck {
-                name: "network_constraints".into(),
-                passed: host_ok,
-                message: Some(host_message),
+                name: "endpoint_policy".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message.clone()),
                 critical: true,
             });
-
-            let creds_ok = self.client.as_ref().is_some_and(|c| c.has_credentials());
             checks.push(DoctorCheck {
-                name: "credentials".into(),
-                passed: creds_ok,
-                message: Some(if creds_ok {
-                    "App credentials configured".into()
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "secret_material".into(),
+                passed: readiness.credentials_configured,
+                message: Some(if readiness.credentials_configured {
+                    "Concrete tenant app credentials configured".into()
                 } else {
                     "App ID or secret missing".into()
                 }),
                 critical: true,
             });
+            checks.push(DoctorCheck {
+                name: "tenant_boundary".into(),
+                passed: true,
+                message: Some(readiness.tenant_app_boundary.into()),
+                critical: false,
+            });
         }
 
-        DoctorResult::from_checks(checks)
+        DoctorResult::from_checks(checks, provisioning)
     }
 }
 
@@ -867,7 +1103,9 @@ impl FcpConnector for FeishuConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.verifier = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(())
     }
 
@@ -906,43 +1144,98 @@ impl FcpConnector for FeishuConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
+        let provisioning = self.provisioning_readiness();
+        let ready = self.config.is_some()
+            && self.client.is_some()
+            && self.runtime.is_some()
+            && provisioning
+                .as_ref()
+                .is_none_or(|readiness| readiness.network_ok && readiness.credentials_configured);
+        let mut snapshot = if ready {
             HealthSnapshot::ready()
         } else {
             HealthSnapshot::degraded("not configured")
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(self.diagnostic_details(None));
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        let provisioning = self.provisioning_readiness();
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                None,
             ));
         };
 
-        if !client.has_credentials() {
-            return Ok(SelfCheckReport::degraded(
-                "missing_credentials",
-                "App ID or secret not configured",
-            ));
+        if let Some(readiness) = &provisioning {
+            if !readiness.network_ok {
+                return Ok(self.attach_self_check_details(
+                    SelfCheckReport::failed(
+                        "network_constraints_invalid",
+                        readiness.network_message.clone(),
+                    ),
+                    None,
+                ));
+            }
+            if !readiness.credentials_configured {
+                return Ok(self.attach_self_check_details(
+                    SelfCheckReport::degraded(
+                        "missing_credentials",
+                        "App ID or secret not configured",
+                    ),
+                    None,
+                ));
+            }
         }
 
         match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
+            Ok(()) => Ok(self.attach_self_check_details(
+                SelfCheckReport::ok(),
+                Some(json!({
+                    "endpoint": "POST /open-apis/auth/v3/tenant_access_token/internal",
+                    "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
+                    "status": "ok",
+                })),
+            )),
             Err(err) => {
                 if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
+                    Ok(self.attach_self_check_details(
+                        SelfCheckReport::degraded("self_check_retryable", err.to_string()),
+                        Some(json!({
+                            "endpoint": "POST /open-apis/auth/v3/tenant_access_token/internal",
+                            "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
+                            "status": "retryable_error",
+                            "retryable": true,
+                            "retry_after_ms": err.retry_after().map(|duration| duration.as_millis() as u64),
+                            "error": err.to_string(),
+                        })),
                     ))
                 } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
+                    let reason_code = if matches!(
+                        err,
+                        crate::error::FeishuError::Unauthorized(_)
+                            | crate::error::FeishuError::HttpStatus {
+                                status: 401 | 403,
+                                ..
+                            }
+                    ) {
+                        "feishu_auth_rejected"
+                    } else {
+                        "self_check_failed"
+                    };
+                    Ok(self.attach_self_check_details(
+                        SelfCheckReport::failed(reason_code, err.to_string()),
+                        Some(json!({
+                            "endpoint": "POST /open-apis/auth/v3/tenant_access_token/internal",
+                            "base_url": self.config.as_ref().map(|config| config.base_url.clone()),
+                            "status": "error",
+                            "retryable": false,
+                            "error": err.to_string(),
+                        })),
                     ))
                 }
             }

@@ -263,13 +263,16 @@ impl VectorDbConnector {
         checks.push(tls_check);
 
         // Check 4: Credential ID present
+        let cred_str = config.credential_id.to_string();
+        let cred_prefix = if cred_str.len() >= 8 {
+            &cred_str[..8]
+        } else {
+            &cred_str
+        };
         let cred_check = DoctorCheck {
             name: "credential".into(),
             passed: true, // We have a credential_id if we have config
-            message: Some(format!(
-                "Credential ID: {}...",
-                &config.credential_id.to_string()[..8]
-            )),
+            message: Some(format!("Credential ID: {cred_prefix}...")),
             critical: true,
         };
         checks.push(cred_check);

@@ -39,9 +39,6 @@ percent-encoding.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat", features = ["tokio-io"] }
-futures-util.workspace = true
-tokio-tungstenite.workspace = true
 wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }

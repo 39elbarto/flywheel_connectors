@@ -68,12 +68,85 @@ async fn connect_gateway_websocket(url: &str) -> DiscordResult<WsConnection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync_tokio_compat::io::TokioIo;
+    use asupersync::Cx;
+    use asupersync::io::{AsyncRead, ReadBuf};
+    use asupersync::net::websocket::{
+        CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
+    };
     use fcp_async_core::net::TcpListener;
     use fcp_async_core::time::sleep;
-    use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
-    use tokio_tungstenite::{accept_async, tungstenite::protocol::Message as ServerWsMessage};
+    use std::{future::poll_fn, io, pin::Pin, task::Poll};
+
+    type TestServerWebSocket = ServerWebSocket<fcp_async_core::net::TcpStream>;
+
+    async fn read_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+        const MAX_HEADERS: usize = 16 * 1024;
+
+        let mut buf = Vec::with_capacity(1024);
+        let mut temp = [0u8; 256];
+
+        loop {
+            let read = poll_fn(|cx| {
+                let mut read_buf = ReadBuf::new(&mut temp);
+                match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF before websocket handshake completed",
+                ));
+            }
+
+            buf.extend_from_slice(&temp[..read]);
+            if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                return Ok(buf);
+            }
+            if buf.len() > MAX_HEADERS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "websocket handshake headers too large",
+                ));
+            }
+        }
+    }
+
+    async fn accept_test_websocket(
+        mut stream: fcp_async_core::net::TcpStream,
+    ) -> TestServerWebSocket {
+        let request = read_http_headers(&mut stream)
+            .await
+            .expect("read websocket handshake");
+        WebSocketAcceptor::new()
+            .accept(&Cx::for_testing(), &request, stream)
+            .await
+            .expect("accept websocket")
+    }
+
+    async fn recv_message(ws: &mut TestServerWebSocket, context: &str) -> ServerWsMessage {
+        ws.recv(&Cx::for_testing())
+            .await
+            .expect(context)
+            .unwrap_or_else(|| panic!("{context} missing"))
+    }
+
+    async fn recv_payload(ws: &mut TestServerWebSocket, context: &str) -> GatewayPayload {
+        parse_payload(recv_message(ws, context).await)
+    }
+
+    async fn send_message(ws: &mut TestServerWebSocket, message: ServerWsMessage, context: &str) {
+        ws.send(&Cx::for_testing(), message).await.expect(context);
+    }
+
+    async fn close_test_websocket(ws: &mut TestServerWebSocket) {
+        let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    }
 
     fn parse_payload(msg: ServerWsMessage) -> GatewayPayload {
         match msg {
@@ -216,42 +289,41 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
+            let mut ws = accept_test_websocket(socket).await;
 
-            ws.send(hello_payload(1_000)).await.expect("send hello");
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
 
-            let identify = parse_payload(
-                ws.next()
-                    .await
-                    .expect("client identify frame")
-                    .expect("identify frame ok"),
-            );
+            let identify = recv_payload(&mut ws, "client identify frame").await;
             assert_eq!(identify.op, GatewayOpcode::Identify as i32);
 
-            ws.send(dispatch_payload(
-                "READY",
-                1,
-                &json!({
-                    "v": 10,
-                    "user": { "id": "123", "username": "bot" },
-                    "session_id": "sess-identify",
-                    "resume_gateway_url": "wss://gateway.discord.gg"
-                }),
-            ))
-            .await
-            .expect("send ready");
+            send_message(
+                &mut ws,
+                dispatch_payload(
+                    "READY",
+                    1,
+                    &json!({
+                        "v": 10,
+                        "user": { "id": "123", "username": "bot" },
+                        "session_id": "sess-identify",
+                        "resume_gateway_url": "wss://gateway.discord.gg"
+                    }),
+                ),
+                "send ready",
+            )
+            .await;
 
-            ws.send(dispatch_payload(
-                "MESSAGE_CREATE",
-                2,
-                &json!({ "id": "msg-1", "content": "hello" }),
-            ))
-            .await
-            .expect("send message create");
+            send_message(
+                &mut ws,
+                dispatch_payload(
+                    "MESSAGE_CREATE",
+                    2,
+                    &json!({ "id": "msg-1", "content": "hello" }),
+                ),
+                "send message create",
+            )
+            .await;
 
-            ws.close(None).await.expect("close websocket");
+            close_test_websocket(&mut ws).await;
         });
 
         let client_ws = connect_gateway_websocket(&ws_url)
@@ -300,27 +372,23 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
+            let mut ws = accept_test_websocket(socket).await;
 
-            ws.send(hello_payload(1_000)).await.expect("send hello");
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
 
-            let resume = parse_payload(
-                ws.next()
-                    .await
-                    .expect("client resume frame")
-                    .expect("resume frame ok"),
-            );
+            let resume = recv_payload(&mut ws, "client resume frame").await;
             assert_eq!(resume.op, GatewayOpcode::Resume as i32);
             let payload = resume.d.expect("resume payload");
             assert_eq!(payload["session_id"], "sess-resume");
             assert_eq!(payload["seq"], 7);
 
-            ws.send(dispatch_payload("RESUMED", 8, &json!({})))
-                .await
-                .expect("send resumed");
-            ws.close(None).await.expect("close websocket");
+            send_message(
+                &mut ws,
+                dispatch_payload("RESUMED", 8, &json!({})),
+                "send resumed",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
         });
 
         let client_ws = connect_gateway_websocket(&ws_url)
@@ -359,28 +427,24 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
+            let mut ws = accept_test_websocket(socket).await;
 
-            ws.send(hello_payload(1_000)).await.expect("send hello");
-            let _ = ws
-                .next()
-                .await
-                .expect("identify frame")
-                .expect("identify frame ok");
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
+            let _ = recv_message(&mut ws, "identify frame").await;
 
-            ws.send(ServerWsMessage::Text("{ this is not json".into()))
-                .await
-                .expect("send malformed frame");
-            ws.send(dispatch_payload(
-                "MESSAGE_DELETE",
-                9,
-                &json!({ "id": "msg-delete-1" }),
-            ))
-            .await
-            .expect("send valid dispatch");
-            ws.close(None).await.expect("close websocket");
+            send_message(
+                &mut ws,
+                ServerWsMessage::Text("{ this is not json".into()),
+                "send malformed frame",
+            )
+            .await;
+            send_message(
+                &mut ws,
+                dispatch_payload("MESSAGE_DELETE", 9, &json!({ "id": "msg-delete-1" })),
+                "send valid dispatch",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
         });
 
         let client_ws = connect_gateway_websocket(&ws_url)
@@ -415,20 +479,13 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
+            let mut ws = accept_test_websocket(socket).await;
 
-            ws.send(hello_payload(1_000)).await.expect("send hello");
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
 
-            let first_payload = parse_payload(
-                ws.next()
-                    .await
-                    .expect("client frame")
-                    .expect("client frame ok"),
-            );
+            let first_payload = recv_payload(&mut ws, "client frame").await;
             assert_eq!(first_payload.op, GatewayOpcode::Identify as i32);
-            ws.close(None).await.expect("close websocket");
+            close_test_websocket(&mut ws).await;
         });
 
         let client_ws = connect_gateway_websocket(&ws_url)
@@ -462,19 +519,13 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
+            let mut ws = accept_test_websocket(socket).await;
 
-            ws.send(hello_payload(1_000)).await.expect("send hello");
-            let _ = ws
-                .next()
-                .await
-                .expect("identify frame")
-                .expect("identify frame ok");
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
+            let _ = recv_message(&mut ws, "identify frame").await;
 
             sleep(Duration::from_millis(50)).await;
-            ws.close(None).await.expect("close websocket");
+            close_test_websocket(&mut ws).await;
         });
 
         let config = test_config(ws_url);
@@ -510,36 +561,32 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
-            ws.send(hello_payload(1_000)).await.expect("send hello");
-            let _ = ws
-                .next()
-                .await
-                .expect("identify frame")
-                .expect("identify frame ok");
+            let mut ws = accept_test_websocket(socket).await;
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
+            let _ = recv_message(&mut ws, "identify frame").await;
 
-            ws.send(dispatch_payload(
-                "READY",
-                1,
-                &json!({
-                    "v": 10,
-                    "user": { "id": "321", "username": "persist-bot" },
-                    "session_id": "sess-persist",
-                    "resume_gateway_url": "wss://gateway.discord.gg"
-                }),
-            ))
-            .await
-            .expect("send ready");
-            ws.send(dispatch_payload(
-                "MESSAGE_CREATE",
-                2,
-                &json!({ "id": "msg-persist" }),
-            ))
-            .await
-            .expect("send message");
-            ws.close(None).await.expect("close websocket");
+            send_message(
+                &mut ws,
+                dispatch_payload(
+                    "READY",
+                    1,
+                    &json!({
+                        "v": 10,
+                        "user": { "id": "321", "username": "persist-bot" },
+                        "session_id": "sess-persist",
+                        "resume_gateway_url": "wss://gateway.discord.gg"
+                    }),
+                ),
+                "send ready",
+            )
+            .await;
+            send_message(
+                &mut ws,
+                dispatch_payload("MESSAGE_CREATE", 2, &json!({ "id": "msg-persist" })),
+                "send message",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
         });
 
         let config = test_config(ws_url);
@@ -588,26 +635,22 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
-            ws.send(hello_payload(1_000)).await.expect("send hello");
+            let mut ws = accept_test_websocket(socket).await;
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
 
-            let resume = parse_payload(
-                ws.next()
-                    .await
-                    .expect("client resume frame")
-                    .expect("resume frame ok"),
-            );
+            let resume = recv_payload(&mut ws, "client resume frame").await;
             assert_eq!(resume.op, GatewayOpcode::Resume as i32);
             let payload = resume.d.expect("resume payload");
             assert_eq!(payload["session_id"], "sess-resume-file");
             assert_eq!(payload["seq"], 7);
 
-            ws.send(dispatch_payload("RESUMED", 8, &json!({})))
-                .await
-                .expect("send resumed");
-            ws.close(None).await.expect("close websocket");
+            send_message(
+                &mut ws,
+                dispatch_payload("RESUMED", 8, &json!({})),
+                "send resumed",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
         });
 
         let config = test_config(ws_url);
@@ -660,19 +703,12 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(TokioIo::new(socket))
-                .await
-                .expect("accept websocket");
-            ws.send(hello_payload(1_000)).await.expect("send hello");
+            let mut ws = accept_test_websocket(socket).await;
+            send_message(&mut ws, hello_payload(1_000), "send hello").await;
 
-            let first_payload = parse_payload(
-                ws.next()
-                    .await
-                    .expect("client frame")
-                    .expect("client frame ok"),
-            );
+            let first_payload = recv_payload(&mut ws, "client frame").await;
             assert_eq!(first_payload.op, GatewayOpcode::Identify as i32);
-            ws.close(None).await.expect("close websocket");
+            close_test_websocket(&mut ws).await;
         });
 
         let config = test_config(ws_url);

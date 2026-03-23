@@ -171,10 +171,16 @@ impl WolframConnector {
             }));
 
             // Check 3: Credential ID
+            let cred_str = config.credential_id.to_string();
+            let cred_prefix = if cred_str.len() >= 8 {
+                &cred_str[..8]
+            } else {
+                &cred_str
+            };
             checks.push(json!({
                 "name": "credential",
                 "passed": true,
-                "message": format!("Credential ID: {}...", &config.credential_id.to_string()[..8]),
+                "message": format!("Credential ID: {cred_prefix}..."),
                 "critical": true
             }));
 
@@ -293,6 +299,15 @@ impl WolframConnector {
     /// Handle invoke.
     #[allow(clippy::unused_async)]
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         if self.config.is_none() {
             return Err(FcpError::NotConfigured);
         }
@@ -320,7 +335,6 @@ impl WolframConnector {
                     message: format!("Unknown operation: {operation}"),
                 })?;
             let op_id = OperationId::from_static(
-                // The operation string is statically known
                 match operation {
                     "wolfram.query" => "wolfram.query",
                     "wolfram.short_answer" => "wolfram.short_answer",
@@ -360,7 +374,7 @@ impl WolframConnector {
 
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        let result = match operation {
+        match operation {
             "wolfram.query" => {
                 let qr = client.query(query, app_id).await.map_err(|e| {
                     use fcp_sdk::migration::ConnectorErrorMapping;
@@ -368,30 +382,25 @@ impl WolframConnector {
                 })?;
                 serde_json::to_value(qr).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize query result: {e}"),
-                })?
+                })
             }
             "wolfram.short_answer" => {
                 client.short_answer(query, app_id).await.map_err(|e| {
                     use fcp_sdk::migration::ConnectorErrorMapping;
                     e.to_fcp_error()
-                })?
+                })
             }
             "wolfram.spoken_result" => {
                 client.spoken_result(query, app_id).await.map_err(|e| {
                     use fcp_sdk::migration::ConnectorErrorMapping;
                     e.to_fcp_error()
-                })?
+                })
             }
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
-
-        self.base.record_request(true);
-        Ok(result)
+            _ => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Unknown operation: {operation}"),
+            }),
+        }
     }
 
     /// Handle introspect.

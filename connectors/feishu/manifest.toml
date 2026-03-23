@@ -1,214 +1,221 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
 
 [connector]
 id = "fcp.feishu"
 name = "Feishu/Lark"
 version = "0.1.0"
-description = "Tenant-scoped Feishu/Lark connector for first-slice bot messaging, chat discovery, directory reads, docx and sheets reads, calendar reads, and connectivity verification"
-archetype = "operational"
-homepage = "https://open.feishu.cn/document/"
+description = "Tenant-scoped Feishu/Lark connector for first-slice bot messaging, chat discovery, directory reads, known docs and sheets reads, calendar reads, and connectivity verification"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "One connector instance binds to one installed Feishu/Lark tenant app via runtime-injected app_id, app_secret, base_url, retry, and request_timeout_ms settings."
 
 # Auth and scope model:
 # - One connector instance is bound to one installed Feishu/Lark tenant app.
-# - Authentication is `app_id` + `app_secret`, exchanged against
-#   `/open-apis/auth/v3/tenant_access_token/internal`.
+# - Authentication is app_id + app_secret exchanged against
+#   /open-apis/auth/v3/tenant_access_token/internal.
 # - The connector acts only as that installed app inside one tenant; it does not
 #   impersonate arbitrary users or cross tenant boundaries.
-# - Mainland China traffic uses `https://open.feishu.cn`; global traffic uses
-#   `https://open.larksuite.com`.
+# - Mainland China traffic uses https://open.feishu.cn; global traffic uses
+#   https://open.larksuite.com.
+# - Localhost and 127.0.0.1 are allowed only for deterministic verification harnesses.
 # - User-delegated OAuth, cross-tenant brokering, webhook ingestion, websocket
-#   event delivery, Drive search/export/write, and calendar mutations are
-#   explicit non-goals for this first slice.
+#   event delivery, Drive search/export/write, and calendar mutations are explicit
+#   non-goals for this first slice.
 
 [zones]
-home = "z:private"
-allowed_sources = ["z:private"]
-allowed_targets = ["z:private"]
-tailscale_tag = "tag:fcp-private"
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:community", "z:public"]
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "system.privileged", "network.listen"]
 
-[provides.operations.messages_send]
-summary = "Send a message"
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 30000
+
+[provides.operations."feishu.messages.send"]
+description = "Send a bot-authored message through the installed tenant app to one visible user or chat."
 capability = "feishu.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["receive_id", "msg_type", "content"] }
+output_schema = { type = "object", required = ["message_id"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.messages_send.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.messages.send".ai_hints]
+when_to_use = "Use when you need the installed tenant app to send a message to one known user or chat."
+common_mistakes = ["Content must be a JSON-encoded string matching msg_type.", "receive_id_type defaults to open_id if omitted.", "This connector is bound to one tenant app and cannot impersonate arbitrary users."]
+examples = []
+related = ["feishu.messages.reply"]
 
-[provides.operations.messages_reply]
-summary = "Reply to a message"
+[provides.operations."feishu.messages.reply"]
+description = "Reply to an existing message visible to the installed tenant app."
 capability = "feishu.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "none"
+input_schema = { type = "object", required = ["message_id", "msg_type", "content"] }
+output_schema = { type = "object", required = ["message_id"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.messages_reply.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.messages.reply".ai_hints]
+when_to_use = "Use when replying to an existing Feishu/Lark message thread already visible to the app."
+common_mistakes = ["message_id must refer to a message visible to the installed app.", "This is not a general inbound-event or thread-sync surface."]
+examples = []
+related = ["feishu.messages.send"]
 
-[provides.operations.messages_get]
-summary = "Get a message"
+[provides.operations."feishu.messages.get"]
+description = "Retrieve one message visible to the installed tenant app."
 capability = "feishu.messages.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["message_id"] }
+output_schema = { type = "object", required = ["message_id", "msg_type"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.messages_get.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.messages.get".ai_hints]
+when_to_use = "Use when you need to read the content of one specific Feishu/Lark message."
+common_mistakes = ["This first slice only reads messages already visible to the installed app."]
+examples = []
+related = []
 
-[provides.operations.chats_list]
-summary = "List chats"
+[provides.operations."feishu.chats.list"]
+description = "List chats visible to the installed tenant app with pagination."
 capability = "feishu.chats.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object", required = ["items", "has_more"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.chats_list.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.chats.list".ai_hints]
+when_to_use = "Use when you need paginated chat discovery for chats already visible to the installed app."
+common_mistakes = ["Use page_token from the previous response to continue pagination.", "The result set is limited to chats visible to the installed app."]
+examples = []
+related = ["feishu.chats.get"]
 
-[provides.operations.chats_get]
-summary = "Get chat details"
+[provides.operations."feishu.chats.get"]
+description = "Get metadata for one chat visible to the installed tenant app."
 capability = "feishu.chats.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["chat_id"] }
+output_schema = { type = "object", required = ["chat_id"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.chats_get.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.chats.get".ai_hints]
+when_to_use = "Use when you need details about one known Feishu/Lark chat."
+common_mistakes = ["chat_id must refer to a chat visible to the installed app."]
+examples = []
+related = ["feishu.chats.list"]
 
-[provides.operations.users_get]
-summary = "Get user info"
+[provides.operations."feishu.users.get"]
+description = "Retrieve directory information for one tenant user identifier."
 capability = "feishu.users.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["user_id"] }
+output_schema = { type = "object", required = ["user_id", "name"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.users_get.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.users.get".ai_hints]
+when_to_use = "Use when you need to look up one Feishu/Lark user already within the bound tenant."
+common_mistakes = ["user_id_type must match the identifier format supplied.", "This connector does not cross tenant boundaries."]
+examples = []
+related = []
 
-[provides.operations.docs_get]
-summary = "Get document content"
+[provides.operations."feishu.docs.get"]
+description = "Retrieve the raw content of one known Feishu docx document."
 capability = "feishu.docs.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["document_id"] }
+output_schema = { type = "object", required = ["document", "body"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.docs_get.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.docs.get".ai_hints]
+when_to_use = "Use when you already know the token for a Feishu/Lark docx document and need its content."
+common_mistakes = ["This first slice does not search Drive or traverse folders.", "The operation expects a known docx token, not an arbitrary document URL."]
+examples = []
+related = ["feishu.sheets.get"]
 
-[provides.operations.sheets_get]
-summary = "Get spreadsheet data"
+[provides.operations."feishu.sheets.get"]
+description = "Retrieve spreadsheet metadata and sheet inventory for one known token."
 capability = "feishu.docs.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["spreadsheet_token"] }
+output_schema = { type = "object", required = ["spreadsheet_token", "title", "sheets"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.sheets_get.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.sheets.get".ai_hints]
+when_to_use = "Use when you need spreadsheet structure or sheet inventory for one known Feishu/Lark spreadsheet."
+common_mistakes = ["This first slice exposes read-only spreadsheet metadata, not write handles or bulk export flows."]
+examples = []
+related = ["feishu.docs.get"]
 
-[provides.operations.calendar_events]
-summary = "List calendar events"
+[provides.operations."feishu.calendar.events"]
+description = "List events from one known calendar within the bound tenant app."
 capability = "feishu.calendar.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object", required = ["calendar_id"] }
+output_schema = { type = "object", required = ["items", "has_more"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.calendar_events.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.calendar.events".ai_hints]
+when_to_use = "Use when you need paginated event listing for one known Feishu/Lark calendar."
+common_mistakes = ["calendar_id is required and is not interchangeable with user_id.", "Calendar mutations and subscriptions are explicit non-goals in this first slice."]
+examples = []
+related = []
 
-[provides.operations.health]
-summary = "Health check"
+[provides.operations."feishu.health"]
+description = "Probe the internal tenant access token endpoint to verify host reachability and credential validity."
 capability = "feishu.users.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object", required = ["status"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.health.network_constraints]
-host_allow = ["open.feishu.cn", "open.larksuite.com"]
-port_allow = [443]
-require_tls = true
-require_sni = true
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-deny_ip_literals = true
-max_redirects = 0
+[provides.operations."feishu.health".ai_hints]
+when_to_use = "Use when you need a lightweight readiness probe for configured Feishu/Lark credentials."
+common_mistakes = ["Health proves auth endpoint reachability and credential validity, not every optional product scope."]
+examples = []
+related = []

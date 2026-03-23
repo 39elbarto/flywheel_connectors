@@ -26,6 +26,8 @@ The current crate exposes these operations:
 
 - `wecom.messages.send_text`
 - `wecom.messages.send_markdown`
+- `wecom.messages.send_image`
+- `wecom.messages.send_file`
 - `wecom.media.upload`
 - `wecom.media.download`
 - `wecom.users.get`
@@ -39,9 +41,11 @@ Important implementation truths from `connector.rs`, `main.rs`, and `manifest.to
 - Configuration is `base_url`, `corp_id`, `agent_id`, `agent_secret`, bounded `request_timeout_ms`, and optional callback credentials (`callback_token`, `callback_encoding_aes_key`, optional `callback_receive_id`).
 - One connector instance is bound to one WeCom tenant application through one `corp_id` / `agent_id` / `agent_secret` tuple.
 - Authentication is application-level token bootstrap against `GET /cgi-bin/gettoken`; the access token is cached in memory only with a refresh safety margin.
-- Text and markdown sends both call `POST /cgi-bin/message/send`.
+- Text, markdown, image, and file sends all call `POST /cgi-bin/message/send`.
 - Message sends require at least one WeCom targeting field: `touser`, `toparty`, or `totag`.
-- The current send surface only exposes text and markdown payloads. It does not expose WeCom image, news, template-card, task-card, or recall semantics.
+- Image and file sends consume a temporary `media_id`, which the caller obtains first from `wecom.media.upload`.
+- The current send surface supports optional WeCom duplicate-check hints on outbound sends via `enable_duplicate_check` and `duplicate_check_interval`.
+- The current send surface still does not expose WeCom voice, video, news, template-card, task-card, or recall semantics.
 - Media upload uses `POST /cgi-bin/media/upload` and returns provider media metadata such as `media_id`.
 - Media download uses `GET /cgi-bin/media/get` and returns base64-encoded bytes plus content metadata for a supplied `media_id`.
 - `wecom.users.get` calls `GET /cgi-bin/user/get` and requires one `userid`.
@@ -60,6 +64,8 @@ The accepted first WeCom slice is intentionally narrow:
 
 - send one text message to WeCom users, parties, or tags
 - send one markdown message to WeCom users, parties, or tags
+- send one image message to WeCom users, parties, or tags using a previously uploaded `media_id`
+- send one file message to WeCom users, parties, or tags using a previously uploaded `media_id`
 - upload one temporary media object and return its provider metadata
 - fetch one user profile by known `userid`
 - list departments, optionally from a supplied department root
@@ -71,15 +77,16 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 
 | Surface | Status in first slice | Notes |
 |---------|-----------------------|-------|
-| Outbound text and markdown sends | In scope | Implemented through the WeCom app send API with explicit target fields. |
-| Temporary media upload | In scope | Implemented so later media-aware flows can reference returned provider metadata. |
+| Outbound text and markdown sends | In scope | Implemented through the WeCom app send API with explicit target fields and optional duplicate-check hints. |
+| Outbound image and file sends | In scope in current runtime | Implemented through the same send API using a caller-supplied temporary `media_id` from `wecom.media.upload`. |
+| Temporary media upload | In scope | Implemented so media-aware outbound flows and inbound attachment resolution can reference returned provider metadata. |
 | Media download for inbound attachments | In scope in current runtime | Implemented for callback-derived `media_id` fetches; still bounded to explicit operator invocation. |
 | User lookup | In scope | Implemented as direct lookup by known `userid`. |
 | Department listing | In scope | Implemented as bounded org-structure discovery. |
 | Credential and reachability probe | In scope | `wecom.health` and `self_check()` validate token issuance. |
 | Host-forwarded inbound callbacks and event normalization | In scope in current runtime | Signature verification, AES decrypt, XML parse, and `EventEnvelope` normalization exist, but the host must own the actual HTTP endpoint. |
 | Conversation or message history readback | Out of scope | The connector does not fetch prior messages, receipts, or chat state. |
-| Rich message families beyond text or markdown | Out of scope | No image, news, template-card, task-card, or recall flows are exposed yet. |
+| Rich message families beyond text, markdown, image, or file | Out of scope | No voice, video, news, template-card, task-card, or recall flows are exposed yet. |
 | Tenant admin and provisioning flows | Out of scope | The connector does not create apps, manage secrets, or administer WeCom tenant policy. |
 | Broad directory or org sync | Out of scope | The current runtime only exposes one user lookup and one department-list surface. |
 
@@ -128,8 +135,10 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `wecom.messages.send_text` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one text message to at least one supplied WeCom target family. |
-| `wecom.messages.send_markdown` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one markdown message to at least one supplied target family. |
+| `wecom.messages.send_text` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one text message to at least one supplied WeCom target family; accepts optional duplicate-check hints. |
+| `wecom.messages.send_markdown` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one markdown message to at least one supplied target family; accepts optional duplicate-check hints. |
+| `wecom.messages.send_image` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one image message using a previously uploaded temporary `media_id`; accepts optional duplicate-check hints. |
+| `wecom.messages.send_file` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one file message using a previously uploaded temporary `media_id`; accepts optional duplicate-check hints. |
 | `wecom.media.upload` | `POST /cgi-bin/media/upload` | `wecom.media.write` | `Risky` | `Medium` | `BestEffort` | Uploads one temporary media object and returns provider metadata such as `media_id`. |
 | `wecom.media.download` | `GET /cgi-bin/media/get` | `wecom.media.read` | `Safe` | `Low` | `Strict` | Downloads bytes for a known `media_id`, primarily for inbound callback attachments. |
 | `wecom.users.get` | `GET /cgi-bin/user/get` | `wecom.users.read` | `Safe` | `Low` | `Strict` | Fetches one user profile for a known `userid`. |
@@ -143,8 +152,7 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 The accepted first WeCom slice does not include:
 
 - message history readback, thread reconstruction, or receipt tracking
-- image, news, template-card, task-card, or other richer message families
-- media send flows that consume `media_id` in later outbound message types
+- voice, video, news, template-card, task-card, recall, or other richer message families beyond the current image/file send surface
 - app provisioning, secret rotation, tenant admin, or org-policy management
 - broad people or directory synchronization beyond direct user lookup and department listing
 - user OAuth, delegated-user auth, or multi-tenant brokering
@@ -154,7 +162,7 @@ The accepted first WeCom slice does not include:
 These are excluded on purpose:
 
 - The current runtime is a small tenant-app wrapper with explicit outbound/admin primitives, not a full collaboration or event-ingestion runtime.
-- The parent feature's inbound and richer messaging ambitions belong to later beads and should not be implied by the current operation inventory.
+- The parent feature's voice/video and richer-card ambitions belong to later beads and should not be implied by the current operation inventory.
 - App-provisioning and callback-management flows are a different trust and risk class from bounded outbound messaging and read-only tenant lookup surfaces.
 
 ## Implementation Notes For `flywheel_connectors-j05nu.1.12.2`
@@ -163,7 +171,7 @@ These are excluded on purpose:
 - Keep token cache state in memory only and make refresh behavior explicit; token issuance is the central readiness dependency for this connector.
 - Keep the first-slice host boundary explicit around `qyapi.weixin.qq.com` for production and deterministic localhost harnesses for tests.
 - Preserve the current target model where at least one of `touser`, `toparty`, or `totag` is required for sends.
-- Do not silently expand the current runtime into inbound callbacks, richer message families, or user-impersonation flows as part of the typed-config or client refactor.
+- Do not silently expand the current runtime beyond text, markdown, image, and file sends, inbound callbacks, and user-impersonation exclusions as part of the typed-config or client refactor.
 - Error mapping should preserve provider error detail such as `errcode` / `errmsg` rather than collapsing failures into opaque internal errors.
 
 ## Source Notes

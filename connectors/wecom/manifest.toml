@@ -45,6 +45,20 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 
+[provides.operations.messages_send_image]
+summary = "Send a WeCom image message"
+capability = "wecom.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_send_file]
+summary = "Send a WeCom file message"
+capability = "wecom.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
 [provides.operations.media_upload]
 summary = "Upload temporary media to WeCom"
 capability = "wecom.media.write"

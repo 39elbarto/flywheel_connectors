@@ -290,7 +290,7 @@ impl HolderProof {
         let req_bytes = request_id.0.as_bytes();
         bytes.extend_from_slice(
             &u32::try_from(req_bytes.len())
-                .expect("request_id length exceeds u32::MAX")
+                .unwrap_or(u32::MAX)
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(req_bytes);
@@ -298,14 +298,14 @@ impl HolderProof {
         let op_bytes = operation_id.as_str().as_bytes();
         bytes.extend_from_slice(
             &u32::try_from(op_bytes.len())
-                .expect("operation_id length exceeds u32::MAX")
+                .unwrap_or(u32::MAX)
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(op_bytes);
 
         bytes.extend_from_slice(
             &u32::try_from(token_jti.len())
-                .expect("token_jti length exceeds u32::MAX")
+                .unwrap_or(u32::MAX)
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(token_jti);

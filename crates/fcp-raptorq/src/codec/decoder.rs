@@ -1240,15 +1240,16 @@ impl InactivationDecoder {
     /// # Errors
     /// Returns `DecodeError::UnsupportedSourceBlockSize` if `k` exceeds 56,403.
     pub fn new(k: usize, symbol_size: usize, seed: u64) -> Result<Self, DecodeError> {
-        let params = SystematicParams::try_for_source_block(k, symbol_size).map_err(|err| match err {
-            SystematicParamError::UnsupportedSourceBlockSize {
-                requested,
-                max_supported,
-            } => DecodeError::UnsupportedSourceBlockSize {
-                requested,
-                max_supported,
-            },
-        })?;
+        let params =
+            SystematicParams::try_for_source_block(k, symbol_size).map_err(|err| match err {
+                SystematicParamError::UnsupportedSourceBlockSize {
+                    requested,
+                    max_supported,
+                } => DecodeError::UnsupportedSourceBlockSize {
+                    requested,
+                    max_supported,
+                },
+            })?;
         Ok(Self {
             params,
             seed,

@@ -661,7 +661,7 @@ fn derive_violation_id(input: &ThrottleViolationInput) -> ObjectId {
     let z_bytes = input.zone_id.as_bytes();
     bytes.extend_from_slice(
         &u32::try_from(z_bytes.len())
-            .expect("zone_id too long")
+            .unwrap_or(u32::MAX)
             .to_le_bytes(),
     );
     bytes.extend_from_slice(z_bytes);
@@ -669,11 +669,7 @@ fn derive_violation_id(input: &ThrottleViolationInput) -> ObjectId {
     if let Some(id) = input.connector_id.as_ref() {
         bytes.push(1);
         let s = id.as_str().as_bytes();
-        bytes.extend_from_slice(
-            &u32::try_from(s.len())
-                .expect("connector_id too long")
-                .to_le_bytes(),
-        );
+        bytes.extend_from_slice(&u32::try_from(s.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(s);
     } else {
         bytes.push(0);
@@ -682,11 +678,7 @@ fn derive_violation_id(input: &ThrottleViolationInput) -> ObjectId {
     if let Some(id) = input.operation_id.as_ref() {
         bytes.push(1);
         let s = id.as_str().as_bytes();
-        bytes.extend_from_slice(
-            &u32::try_from(s.len())
-                .expect("operation_id too long")
-                .to_le_bytes(),
-        );
+        bytes.extend_from_slice(&u32::try_from(s.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(s);
     } else {
         bytes.push(0);

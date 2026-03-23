@@ -199,20 +199,21 @@ impl RaptorQDecoder {
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    fn map_decode_error(error: crate::codec::decoder::DecodeError, received: u32, needed: u32) -> DecodeError {
+    fn map_decode_error(
+        error: crate::codec::decoder::DecodeError,
+        received: u32,
+        needed: u32,
+    ) -> DecodeError {
         use crate::codec::decoder::DecodeError as InnerError;
         match error {
-            InnerError::InsufficientSymbols { .. }
-            | InnerError::SingularMatrix { .. } => {
+            InnerError::InsufficientSymbols { .. } | InnerError::SingularMatrix { .. } => {
                 DecodeError::InsufficientSymbols { received, needed }
             }
-            InnerError::SymbolSizeMismatch { expected, actual } => {
-                DecodeError::InvalidSymbol {
-                    reason: format!(
-                        "symbol size mismatch: expected {expected} bytes, got {actual} bytes"
-                    ),
-                }
-            }
+            InnerError::SymbolSizeMismatch { expected, actual } => DecodeError::InvalidSymbol {
+                reason: format!(
+                    "symbol size mismatch: expected {expected} bytes, got {actual} bytes"
+                ),
+            },
             InnerError::SymbolEquationArityMismatch {
                 esi,
                 columns,
@@ -231,12 +232,13 @@ impl RaptorQDecoder {
                     "symbol ESI {esi} referenced out-of-range column {column} (max valid {max_valid})"
                 ),
             },
-            InnerError::UnsupportedSourceBlockSize { requested, max_supported } => {
-                DecodeError::UnsupportedSourceBlockSize {
-                    requested,
-                    max_supported,
-                }
-            }
+            InnerError::UnsupportedSourceBlockSize {
+                requested,
+                max_supported,
+            } => DecodeError::UnsupportedSourceBlockSize {
+                requested,
+                max_supported,
+            },
             InnerError::CorruptDecodedOutput {
                 esi, byte_index, ..
             } => DecodeError::InvalidSymbol {

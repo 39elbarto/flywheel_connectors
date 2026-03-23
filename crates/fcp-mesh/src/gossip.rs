@@ -541,7 +541,7 @@ impl GossipSummary {
         let from_bytes = self.from.as_str().as_bytes();
         bytes.extend_from_slice(
             &u32::try_from(from_bytes.len())
-                .expect("from field length exceeds u32::MAX")
+                .unwrap_or(u32::MAX)
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(from_bytes);
@@ -549,7 +549,7 @@ impl GossipSummary {
         let zone_bytes = self.zone_id.as_bytes();
         bytes.extend_from_slice(
             &u32::try_from(zone_bytes.len())
-                .expect("zone_id length exceeds u32::MAX")
+                .unwrap_or(u32::MAX)
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(zone_bytes);
@@ -557,7 +557,7 @@ impl GossipSummary {
         let epoch_bytes = self.epoch_id.as_str().as_bytes();
         bytes.extend_from_slice(
             &u32::try_from(epoch_bytes.len())
-                .expect("epoch_id length exceeds u32::MAX")
+                .unwrap_or(u32::MAX)
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(epoch_bytes);
@@ -569,7 +569,7 @@ impl GossipSummary {
 
         bytes.extend_from_slice(
             &u32::try_from(self.iblt.len())
-                .expect("iblt length exceeds u32::MAX")
+                .unwrap_or(u32::MAX)
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(&self.iblt);

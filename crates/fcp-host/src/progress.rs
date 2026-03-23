@@ -280,7 +280,7 @@ impl ProgressController {
         };
         self.operations
             .write()
-            .expect("progress lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(operation_id.to_string(), tracked);
     }
 
@@ -300,7 +300,10 @@ impl ProgressController {
         update: ProgressUpdate,
         now: DateTime<Utc>,
     ) -> bool {
-        let mut ops = self.operations.write().expect("progress lock");
+        let mut ops = self
+            .operations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(tracked) = ops.get_mut(operation_id) else {
             return false;
         };
@@ -339,7 +342,10 @@ impl ProgressController {
         remaining: &[&str],
         now: DateTime<Utc>,
     ) -> bool {
-        let mut ops = self.operations.write().expect("progress lock");
+        let mut ops = self
+            .operations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(tracked) = ops.get_mut(operation_id) else {
             return false;
         };
@@ -375,7 +381,7 @@ impl ProgressController {
     pub fn latest_update(&self, operation_id: &str) -> Option<ProgressUpdate> {
         self.operations
             .read()
-            .expect("progress lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(operation_id)
             .and_then(|t| t.latest_update.clone())
     }
@@ -389,7 +395,7 @@ impl ProgressController {
     pub fn current_phase(&self, operation_id: &str) -> Option<String> {
         self.operations
             .read()
-            .expect("progress lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(operation_id)
             .map(|t| t.current_phase.clone())
     }
@@ -403,7 +409,7 @@ impl ProgressController {
     pub fn notifications(&self, operation_id: &str) -> Vec<ProgressNotification> {
         self.operations
             .read()
-            .expect("progress lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(operation_id)
             .map_or_else(Vec::new, |t| t.notifications.clone())
     }
@@ -415,7 +421,10 @@ impl ProgressController {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn tracked_count(&self) -> usize {
-        self.operations.read().expect("progress lock").len()
+        self.operations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Stop tracking an operation and return its notifications.
@@ -426,7 +435,7 @@ impl ProgressController {
     pub fn stop_tracking(&self, operation_id: &str) -> Vec<ProgressNotification> {
         self.operations
             .write()
-            .expect("progress lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(operation_id)
             .map_or_else(Vec::new, |t| t.notifications)
     }
@@ -440,7 +449,7 @@ impl ProgressController {
     pub fn elapsed_ms(&self, operation_id: &str) -> Option<u64> {
         self.operations
             .read()
-            .expect("progress lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(operation_id)
             .map(|t| u64::try_from(t.started_at.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
@@ -452,7 +461,10 @@ impl ProgressController {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn aggregate(&self) -> AggregatedProgress {
-        let ops = self.operations.read().expect("progress lock");
+        let ops = self
+            .operations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let total = ops.len();
         let mut completed = 0usize;
         let mut in_progress = 0usize;
@@ -503,7 +515,7 @@ impl ProgressController {
     pub fn completed_phases(&self, operation_id: &str) -> Vec<String> {
         self.operations
             .read()
-            .expect("progress lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(operation_id)
             .map_or_else(Vec::new, |t| t.completed_phases.clone())
     }

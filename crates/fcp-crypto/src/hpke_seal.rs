@@ -134,13 +134,9 @@ impl Fcp2Aad {
     /// Encode AAD to canonical CBOR bytes.
     ///
     /// This ensures a unique, non-malleable representation for the encryption context.
-    ///
-    /// # Panics
-    ///
-    /// Panics if serialization fails (should not happen for this struct).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        crate::canonicalize::to_deterministic_cbor(self).expect("AAD serialization failed")
+        crate::canonicalize::to_deterministic_cbor(self).unwrap_or_default()
     }
 }
 

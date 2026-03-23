@@ -740,7 +740,9 @@ impl Sandbox for LinuxSandbox {
 
                     if ruleset_fd >= 0 {
                         // Add rules
-                        let apply_rule = |c_path: &std::ffi::CString, access: u64| -> Result<(), std::io::Error> {
+                        let apply_rule = |c_path: &std::ffi::CString,
+                                          access: u64|
+                         -> Result<(), std::io::Error> {
                             let fd = libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
                             if fd >= 0 {
                                 let rule_attr = LandlockPathBeneathAttr {

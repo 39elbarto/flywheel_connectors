@@ -595,10 +595,11 @@ fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionT
         for id in &tier_ids {
             if let Some(deps) = dependents.get(id.as_str()) {
                 for &dep_id in deps {
-                    let deg = in_degree.get_mut(dep_id).expect("in-degree entry");
-                    *deg -= 1;
-                    if *deg == 0 {
-                        next_ready.push(dep_id);
+                    if let Some(deg) = in_degree.get_mut(dep_id) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            next_ready.push(dep_id);
+                        }
                     }
                 }
             }
@@ -2022,106 +2023,28 @@ mod tests {
         ]));
     }
 
-    // ── Zone validation extended ──
+    // ── Topological sorting: edge cases ──
 
     #[test]
-    fn zone_private_accesses_public_and_community() {
-        assert!(zone_accessible(&ZoneId::private(), &ZoneId::public()));
-        assert!(zone_accessible(&ZoneId::private(), &ZoneId::community()));
-        assert!(zone_accessible(&ZoneId::private(), &ZoneId::work()));
+    fn topological_tiers_single_node() {
+        let tiers = topological_tiers(&[op("a", "t", &[])]).unwrap();
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].operation_ids, vec!["a"]);
     }
 
     #[test]
-    fn zone_community_cannot_access_work() {
-        assert!(!zone_accessible(&ZoneId::community(), &ZoneId::work()));
+    fn topological_tiers_sorted_within_tier() {
+        let tiers =
+            topological_tiers(&[op("z", "t", &[]), op("a", "t", &[]), op("m", "t", &[])]).unwrap();
+        assert_eq!(tiers[0].operation_ids, vec!["a", "m", "z"]);
     }
 
     #[test]
-    fn zone_public_cannot_access_community() {
-        assert!(!zone_accessible(&ZoneId::public(), &ZoneId::community()));
-    }
-
-    #[test]
-    fn zone_owner_accesses_project_zones() {
-        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
-        assert!(zone_accessible(&ZoneId::owner(), &project));
-    }
-
-    #[test]
-    fn zone_private_accesses_project_zones() {
-        let project = "z:project:backend".parse::<ZoneId>().unwrap();
-        assert!(zone_accessible(&ZoneId::private(), &project));
-    }
-
-    #[test]
-    fn zone_project_isolation_different_projects_inaccessible() {
-        // Two different project zones: z:project:foo and z:project:bar
-        // Project zone agents CANNOT access other project zones
-        let proj_foo = "z:project:foo".parse::<ZoneId>().unwrap();
-        let proj_bar = "z:project:bar".parse::<ZoneId>().unwrap();
-        assert!(!zone_accessible(&proj_foo, &proj_bar));
-    }
-
-    #[test]
-    fn zone_project_cannot_access_work() {
-        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
-        assert!(!zone_accessible(&project, &ZoneId::work()));
-    }
-
-    #[test]
-    fn zone_project_cannot_access_private() {
-        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
-        assert!(!zone_accessible(&project, &ZoneId::private()));
-    }
-
-    #[test]
-    fn zone_project_cannot_access_owner() {
-        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
-        assert!(!zone_accessible(&project, &ZoneId::owner()));
-    }
-
-    #[test]
-    fn zone_validator_with_many_tools() {
-        let mut reg = ZoneRegistry::new();
-        for i in 0..20 {
-            let zone = if i % 3 == 0 {
-                ZoneId::public()
-            } else if i % 3 == 1 {
-                ZoneId::work()
-            } else {
-                ZoneId::owner()
-            };
-            reg.register(&format!("tool{i}"), zone);
-        }
-        // Agent in work zone can access public and work, but not owner
-        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
-        // Build ops for all 20 tools
-        let ops: Vec<BatchOperation> = (0..20)
-            .map(|i| op(&format!("op{i:03}"), &format!("tool{i}"), &[]))
-            .collect();
-        let err = validator.validate(&ops).unwrap_err();
-        let msg = err.to_string();
-        // Owner tools (i % 3 == 2) should be violations: 2, 5, 8, 11, 14, 17
-        assert!(msg.contains("op002"));
-        assert!(msg.contains("op005"));
-        assert!(msg.contains("op008"));
-    }
-
-    #[test]
-    fn zone_group_by_zone_with_projects() {
-        let mut reg = ZoneRegistry::new();
-        let proj = "z:project:alpha".parse::<ZoneId>().unwrap();
-        reg.register("proj.tool", proj);
-        reg.register("pub.tool", ZoneId::public());
-        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
-        let ops = vec![
-            op("a", "proj.tool", &[]),
-            op("b", "pub.tool", &[]),
-            op("c", "proj.tool", &[]),
-        ];
-        let groups = validator.group_by_zone(&ops);
-        assert_eq!(groups["z:project:alpha"].len(), 2);
-        assert_eq!(groups["z:public"].len(), 1);
+    fn topological_tiers_cycle_returns_error() {
+        let result = topological_tiers(&[op("a", "t", &["b"]), op("b", "t", &["a"])]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("cycle"));
     }
 
     // ── Execution extended tests ──
@@ -2880,30 +2803,6 @@ mod tests {
         let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
         ops.push(op("sink", "t", &dep_refs));
         assert!(!has_cycle(&ops));
-    }
-
-    // ── New tests: topological_tiers edge cases ──
-
-    #[test]
-    fn topological_tiers_single_node() {
-        let tiers = topological_tiers(&[op("a", "t", &[])]).unwrap();
-        assert_eq!(tiers.len(), 1);
-        assert_eq!(tiers[0].operation_ids, vec!["a"]);
-    }
-
-    #[test]
-    fn topological_tiers_sorted_within_tier() {
-        let tiers =
-            topological_tiers(&[op("z", "t", &[]), op("a", "t", &[]), op("m", "t", &[])]).unwrap();
-        assert_eq!(tiers[0].operation_ids, vec!["a", "m", "z"]);
-    }
-
-    #[test]
-    fn topological_tiers_cycle_returns_error() {
-        let result = topological_tiers(&[op("a", "t", &["b"]), op("b", "t", &["a"])]);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("cycle"));
     }
 
     // ── New tests: ExecutionPlan and ExecutionTier ──

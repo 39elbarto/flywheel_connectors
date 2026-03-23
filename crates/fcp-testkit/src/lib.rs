@@ -63,6 +63,7 @@ mod mock_server;
 pub mod readiness_helpers;
 pub mod supervisor_examples;
 mod tracing_config;
+pub mod session_script;
 pub mod webhook_helpers;
 
 pub use assertions::*;

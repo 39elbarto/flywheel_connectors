@@ -37,6 +37,7 @@
 )]
 
 mod api;
+pub mod client;
 mod config;
 mod connector;
 mod error;
@@ -44,6 +45,7 @@ mod gateway;
 pub mod limits;
 mod types;
 
+pub use client::DiscordClient;
 pub use config::DiscordConfig;
 pub use connector::DiscordConnector;
 pub use error::DiscordError;

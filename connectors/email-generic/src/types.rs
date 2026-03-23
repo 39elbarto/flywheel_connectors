@@ -96,9 +96,8 @@ impl EmailGenericConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn config_parses_successfully() {
-        let config = EmailGenericConfig::from_value(serde_json::json!({
+    fn valid_config_json() -> Value {
+        serde_json::json!({
             "imap": {
                 "host": "imap.example.com",
                 "username": "user@example.com",
@@ -110,9 +109,140 @@ mod tests {
                 "password": "secret",
                 "from_address": "user@example.com"
             }
-        }))
-        .expect("config should parse");
+        })
+    }
+
+    #[test]
+    fn config_parses_successfully() {
+        let config = EmailGenericConfig::from_value(valid_config_json())
+            .expect("config should parse");
         assert_eq!(config.imap.port, 993);
         assert_eq!(config.smtp.port, 587);
+    }
+
+    #[test]
+    fn config_defaults_imap_port_to_993() {
+        let config = EmailGenericConfig::from_value(valid_config_json()).unwrap();
+        assert_eq!(config.imap.port, 993);
+    }
+
+    #[test]
+    fn config_defaults_smtp_port_to_587() {
+        let config = EmailGenericConfig::from_value(valid_config_json()).unwrap();
+        assert_eq!(config.smtp.port, 587);
+    }
+
+    #[test]
+    fn config_defaults_tls_to_true() {
+        let config = EmailGenericConfig::from_value(valid_config_json()).unwrap();
+        assert!(config.imap.tls);
+    }
+
+    #[test]
+    fn config_defaults_starttls_to_true() {
+        let config = EmailGenericConfig::from_value(valid_config_json()).unwrap();
+        assert!(config.smtp.starttls);
+    }
+
+    #[test]
+    fn config_defaults_timeout_to_15000() {
+        let config = EmailGenericConfig::from_value(valid_config_json()).unwrap();
+        assert_eq!(config.request_timeout_ms, 15_000);
+    }
+
+    #[test]
+    fn config_accepts_custom_ports() {
+        let config = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "port": 143, "username": "u", "password": "p" },
+            "smtp": { "host": "h", "port": 25, "username": "u", "password": "p", "from_address": "a@b.com" }
+        })).unwrap();
+        assert_eq!(config.imap.port, 143);
+        assert_eq!(config.smtp.port, 25);
+    }
+
+    #[test]
+    fn config_rejects_empty_imap_host() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "  ", "username": "u", "password": "p" },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" }
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_empty_smtp_host() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "p" },
+            "smtp": { "host": "  ", "username": "u", "password": "p", "from_address": "a@b.com" }
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_empty_imap_username() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "  ", "password": "p" },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" }
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_empty_imap_password() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "  " },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" }
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_empty_smtp_from_address() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "p" },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "  " }
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_zero_timeout() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "p" },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" },
+            "request_timeout_ms": 0
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_missing_imap() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" }
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_missing_smtp() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "p" }
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_accepts_optional_from_name() {
+        let config = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "p" },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com", "from_name": "Test User" }
+        })).unwrap();
+        assert_eq!(config.smtp.from_name.as_deref(), Some("Test User"));
+    }
+
+    #[test]
+    fn config_from_name_defaults_to_none() {
+        let config = EmailGenericConfig::from_value(valid_config_json()).unwrap();
+        assert!(config.smtp.from_name.is_none());
     }
 }

@@ -529,6 +529,19 @@ mod tests {
     }
 
     #[test]
+    fn connector_id_is_correct() {
+        let connector = EmailGenericConnector::new();
+        assert_eq!(connector.id().as_str(), "fcp.email-generic");
+    }
+
+    #[test]
+    fn default_creates_same_as_new() {
+        let c1 = EmailGenericConnector::new();
+        let c2 = EmailGenericConnector::default();
+        assert_eq!(c1.id().as_str(), c2.id().as_str());
+    }
+
+    #[test]
     fn operations_catalog_contains_expected_entries() {
         let operations = EmailGenericConnector::operations_info();
         assert_eq!(operations.len(), 4);
@@ -537,6 +550,277 @@ mod tests {
                 .iter()
                 .any(|operation| operation.id.as_str() == OP_SEND_MESSAGE)
         );
+    }
+
+    #[test]
+    fn operations_catalog_contains_all_four_ops() {
+        let ops = EmailGenericConnector::operations_info();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
+        assert!(ids.contains(&OP_HEALTH));
+        assert!(ids.contains(&OP_LIST_MAILBOXES));
+        assert!(ids.contains(&OP_SEARCH_MESSAGES));
+        assert!(ids.contains(&OP_SEND_MESSAGE));
+    }
+
+    #[test]
+    fn send_message_is_risky() {
+        let ops = EmailGenericConnector::operations_info();
+        let send = ops.iter().find(|o| o.id.as_str() == OP_SEND_MESSAGE).unwrap();
+        assert_eq!(send.safety_tier, SafetyTier::Risky);
+        assert_eq!(send.idempotency, IdempotencyClass::None);
+    }
+
+    #[test]
+    fn read_operations_are_safe() {
+        let ops = EmailGenericConnector::operations_info();
+        for op_id in [OP_HEALTH, OP_LIST_MAILBOXES, OP_SEARCH_MESSAGES] {
+            let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
+            assert_eq!(op.safety_tier, SafetyTier::Safe, "{op_id} should be Safe");
+            assert_eq!(
+                op.idempotency,
+                IdempotencyClass::Strict,
+                "{op_id} should be Strict"
+            );
+        }
+    }
+
+    #[test]
+    fn read_operations_use_read_capability() {
+        let ops = EmailGenericConnector::operations_info();
+        for op_id in [OP_HEALTH, OP_LIST_MAILBOXES, OP_SEARCH_MESSAGES] {
+            let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
+            assert_eq!(op.capability.as_str(), CAP_READ);
+        }
+    }
+
+    #[test]
+    fn send_uses_write_capability() {
+        let ops = EmailGenericConnector::operations_info();
+        let send = ops.iter().find(|o| o.id.as_str() == OP_SEND_MESSAGE).unwrap();
+        assert_eq!(send.capability.as_str(), CAP_WRITE);
+    }
+
+    #[test]
+    fn operations_have_nonempty_summaries() {
+        for op in EmailGenericConnector::operations_info() {
+            assert!(!op.summary.is_empty(), "{} has empty summary", op.id);
+        }
+    }
+
+    #[test]
+    fn operations_have_descriptions() {
+        for op in EmailGenericConnector::operations_info() {
+            assert!(
+                op.description.is_some(),
+                "{} missing description",
+                op.id
+            );
+        }
+    }
+
+    #[test]
+    fn operations_have_ai_hints() {
+        for op in EmailGenericConnector::operations_info() {
+            assert!(
+                !op.ai_hints.when_to_use.is_empty(),
+                "{} has empty when_to_use hint",
+                op.id
+            );
+        }
+    }
+
+    #[test]
+    fn operations_have_examples() {
+        for op in EmailGenericConnector::operations_info() {
+            assert!(
+                !op.ai_hints.examples.is_empty(),
+                "{} has no examples",
+                op.id
+            );
+        }
+    }
+
+    #[test]
+    fn introspect_returns_all_operations() {
+        let connector = EmailGenericConnector::new();
+        let intro = connector.introspect();
+        assert_eq!(intro.operations.len(), 4);
+    }
+
+    #[test]
+    fn introspect_reports_no_streaming() {
+        let connector = EmailGenericConnector::new();
+        let intro = connector.introspect();
+        let caps = intro.event_caps.expect("should have event_caps");
+        assert!(!caps.streaming);
+        assert!(!caps.replay);
+    }
+
+    #[test]
+    fn doctor_before_configure_fails() {
+        let connector = EmailGenericConnector::new();
+        let result = connector.doctor();
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn doctor_checks_are_nonempty() {
+        let connector = EmailGenericConnector::new();
+        let result = connector.doctor();
+        assert!(!result.checks.is_empty());
+    }
+
+    #[test]
+    fn manifest_hash_is_deterministic() {
+        let h1 = EmailGenericConnector::manifest_hash();
+        let h2 = EmailGenericConnector::manifest_hash();
+        assert_eq!(h1, h2);
+        assert!(h1.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn required_capability_read_ops() {
+        assert_eq!(
+            required_capability(OP_HEALTH).unwrap().as_str(),
+            CAP_READ
+        );
+        assert_eq!(
+            required_capability(OP_LIST_MAILBOXES).unwrap().as_str(),
+            CAP_READ
+        );
+        assert_eq!(
+            required_capability(OP_SEARCH_MESSAGES).unwrap().as_str(),
+            CAP_READ
+        );
+    }
+
+    #[test]
+    fn required_capability_write_ops() {
+        assert_eq!(
+            required_capability(OP_SEND_MESSAGE).unwrap().as_str(),
+            CAP_WRITE
+        );
+    }
+
+    #[test]
+    fn required_capability_unknown_op() {
+        assert!(required_capability("email_generic.unknown").is_err());
+    }
+
+    #[test]
+    fn granted_capabilities_filters_valid() {
+        let grants = granted_capabilities(vec![
+            CapabilityId::from_static(CAP_READ),
+            CapabilityId::from_static("bogus.cap"),
+            CapabilityId::from_static(CAP_WRITE),
+        ]);
+        assert_eq!(grants.len(), 2);
+    }
+
+    #[test]
+    fn granted_capabilities_rejects_all_bogus() {
+        let grants = granted_capabilities(vec![CapabilityId::from_static("bogus.cap")]);
+        assert!(grants.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_before_configure_is_degraded() {
+        let connector = EmailGenericConnector::new();
+        let snapshot = connector.health().await;
+        assert!(
+            matches!(
+                snapshot.status,
+                fcp_core::HealthState::Degraded { .. }
+            ),
+            "should be degraded before configure"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_accepts_valid_config() {
+        let mut connector = EmailGenericConnector::new();
+        let result = connector
+            .configure(json!({
+                "imap": { "host": "h", "username": "u", "password": "p" },
+                "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" }
+            }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_config() {
+        let mut connector = EmailGenericConnector::new();
+        let result = connector.configure(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_after_configure_is_ready() {
+        let mut connector = EmailGenericConnector::new();
+        connector
+            .configure(json!({
+                "imap": { "host": "h", "username": "u", "password": "p" },
+                "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" }
+            }))
+            .await
+            .unwrap();
+        let snapshot = connector.health().await;
+        assert!(matches!(snapshot.status, fcp_core::HealthState::Ready));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_before_configure_returns_degraded() {
+        let connector = EmailGenericConnector::new();
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(
+            report.status,
+            fcp_core::SelfCheckStatus::Degraded
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn subscribe_returns_not_supported() {
+        let connector = EmailGenericConnector::new();
+        let result = connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("sub"),
+                topics: vec![],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: None,
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_state() {
+        let mut connector = EmailGenericConnector::new();
+        connector
+            .configure(json!({
+                "imap": { "host": "h", "username": "u", "password": "p" },
+                "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" }
+            }))
+            .await
+            .unwrap();
+        connector
+            .shutdown(ShutdownRequest {
+                r#type: "shutdown".into(),
+                deadline_ms: 1000,
+                drain: false,
+                reason: Some("test".into()),
+            })
+            .await
+            .unwrap();
+        let snapshot = connector.health().await;
+        assert!(matches!(
+            snapshot.status,
+            fcp_core::HealthState::Degraded { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]

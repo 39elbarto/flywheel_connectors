@@ -50,4 +50,128 @@ impl SonosError {
             },
         }
     }
+
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Http(_) | Self::Api { status: 429 | 500 | 502 | 503 | 504, .. })
+    }
+}
+
+impl fcp_sdk::migration::ConnectorErrorMapping for SonosError {
+    fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
+        match error {
+            fcp_async_core::AsyncError::Timeout { timeout_ms } => {
+                Self::Api { status: 408, message: format!("deadline exceeded after {timeout_ms}ms") }
+            }
+            fcp_async_core::AsyncError::Cancelled => {
+                Self::Api { status: 0, message: "request cancelled".into() }
+            }
+            other => Self::Api { status: 0, message: other.to_string() },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        self.to_fcp_error()
+    }
+
+    fn is_retryable(&self) -> bool {
+        self.is_retryable()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_error_maps_to_invalid_request() {
+        let err = SonosError::Config("bad".into());
+        assert!(matches!(err.to_fcp_error(), FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn api_500_maps_to_retryable_external() {
+        let err = SonosError::Api { status: 500, message: "internal".into() };
+        match err.to_fcp_error() {
+            FcpError::External { retryable, status_code, .. } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(500));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_404_maps_to_non_retryable_external() {
+        let err = SonosError::Api { status: 404, message: "not found".into() };
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(!retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_maps_to_internal() {
+        let err = SonosError::Parse("bad xml".into());
+        assert!(matches!(err.to_fcp_error(), FcpError::Internal { .. }));
+    }
+
+    #[test]
+    fn api_429_is_retryable() {
+        let err = SonosError::Api { status: 429, message: "rate limited".into() };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_400_is_not_retryable() {
+        let err = SonosError::Api { status: 400, message: "bad request".into() };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn config_error_is_not_retryable() {
+        let err = SonosError::Config("bad".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn parse_error_is_not_retryable() {
+        let err = SonosError::Parse("bad xml".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn error_display_config() {
+        let err = SonosError::Config("missing url".into());
+        assert_eq!(err.to_string(), "configuration error: missing url");
+    }
+
+    #[test]
+    fn error_display_api() {
+        let err = SonosError::Api { status: 503, message: "unavailable".into() };
+        assert_eq!(err.to_string(), "api error: status=503, message=unavailable");
+    }
+
+    #[test]
+    fn error_display_parse() {
+        let err = SonosError::Parse("expected closing tag".into());
+        assert_eq!(err.to_string(), "parse error: expected closing tag");
+    }
+
+    #[test]
+    fn connector_error_mapping_from_timeout() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = SonosError::from_async_error(
+            fcp_async_core::AsyncError::Timeout { timeout_ms: 3000 },
+        );
+        assert!(matches!(err, SonosError::Api { status: 408, .. }));
+    }
+
+    #[test]
+    fn connector_error_mapping_from_cancelled() {
+        use fcp_sdk::migration::ConnectorErrorMapping;
+        let err = SonosError::from_async_error(fcp_async_core::AsyncError::Cancelled);
+        assert!(matches!(err, SonosError::Api { .. }));
+        assert!(err.to_string().contains("cancelled"));
+    }
 }

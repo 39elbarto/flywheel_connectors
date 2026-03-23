@@ -68,4 +68,89 @@ mod tests {
         .expect("config should parse");
         assert_eq!(config.normalized_device_url(), "http://speaker.local:1400");
     }
+
+    #[test]
+    fn config_defaults_timeout_to_10000() {
+        let config = SonosConfig::from_value(serde_json::json!({
+            "device_url": "http://speaker.local:1400"
+        }))
+        .unwrap();
+        assert_eq!(config.request_timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn config_defaults_insecure_ssl_to_false() {
+        let config = SonosConfig::from_value(serde_json::json!({
+            "device_url": "http://speaker.local:1400"
+        }))
+        .unwrap();
+        assert!(!config.allow_insecure_ssl);
+    }
+
+    #[test]
+    fn config_accepts_https() {
+        let config = SonosConfig::from_value(serde_json::json!({
+            "device_url": "https://speaker.local:1443"
+        }));
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn config_rejects_ftp_scheme() {
+        let result = SonosConfig::from_value(serde_json::json!({
+            "device_url": "ftp://speaker.local"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_empty_url() {
+        let result = SonosConfig::from_value(serde_json::json!({
+            "device_url": ""
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_zero_timeout() {
+        let result = SonosConfig::from_value(serde_json::json!({
+            "device_url": "http://speaker.local:1400",
+            "request_timeout_ms": 0
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_missing_device_url() {
+        let result = SonosConfig::from_value(serde_json::json!({}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn normalized_url_trims_trailing_slash() {
+        let config = SonosConfig::from_value(serde_json::json!({
+            "device_url": "http://speaker.local:1400/"
+        }))
+        .unwrap();
+        assert_eq!(config.normalized_device_url(), "http://speaker.local:1400");
+    }
+
+    #[test]
+    fn normalized_url_trims_whitespace() {
+        let config = SonosConfig::from_value(serde_json::json!({
+            "device_url": "  http://speaker.local:1400  "
+        }))
+        .unwrap();
+        assert_eq!(config.normalized_device_url(), "http://speaker.local:1400");
+    }
+
+    #[test]
+    fn config_accepts_custom_timeout() {
+        let config = SonosConfig::from_value(serde_json::json!({
+            "device_url": "http://speaker.local:1400",
+            "request_timeout_ms": 5000
+        }))
+        .unwrap();
+        assert_eq!(config.request_timeout_ms, 5000);
+    }
 }

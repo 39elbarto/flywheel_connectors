@@ -14,7 +14,8 @@ unmaintained = "warn"
 yanked = "warn"
 notice = "warn"
 ignore = [
-    # Add advisory IDs to ignore here if needed
+    # rsa crate Marvin Attack (RUSTSEC-2023-0071) — no fixed version available upstream
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]

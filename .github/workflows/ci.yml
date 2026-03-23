@@ -487,7 +487,8 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run security audit
-        run: cargo audit
+        # RUSTSEC-2023-0071: rsa Marvin Attack — no fixed version available
+        run: cargo audit --ignore RUSTSEC-2023-0071
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked

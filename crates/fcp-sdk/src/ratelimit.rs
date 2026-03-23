@@ -128,7 +128,7 @@ impl PoolState {
     fn check_consume(&mut self, amount: u32) -> Result<(), RateLimitError> {
         self.maybe_reset_window();
 
-        let effective_limit = self.config.config.requests + self.config.config.burst.unwrap_or(0);
+        let effective_limit = self.config.config.requests.saturating_add(self.config.config.burst.unwrap_or(0));
 
         if self.count.saturating_add(amount) > effective_limit {
             let retry_after_ms = self.ms_until_reset();
@@ -167,7 +167,7 @@ impl PoolState {
     /// Get current status.
     fn status(&mut self) -> RateLimitStatus {
         self.maybe_reset_window();
-        let effective_limit = self.config.config.requests + self.config.config.burst.unwrap_or(0);
+        let effective_limit = self.config.config.requests.saturating_add(self.config.config.burst.unwrap_or(0));
         let remaining = effective_limit.saturating_sub(self.count);
         let reset_at = {
             let elapsed_secs = self.window_start.elapsed().as_secs();

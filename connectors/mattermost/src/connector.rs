@@ -1354,7 +1354,7 @@ fn user_and_team_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to verify authentication and get the bot or user identity."
                     .into(),
@@ -1376,7 +1376,7 @@ fn user_and_team_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to look up another user's profile by their ID.".into(),
                 common_mistakes: vec!["Passing a username instead of a Mattermost user ID.".into()],
@@ -1397,7 +1397,7 @@ fn user_and_team_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to discover available teams before listing channels.".into(),
                 common_mistakes: vec![
@@ -1422,7 +1422,7 @@ fn user_and_team_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use:
                     "Use to resolve a team name, slug, or description from a known team ID.".into(),
@@ -1458,7 +1458,7 @@ fn channel_and_post_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to enumerate the channels available in a team before reading or posting.".into(),
                 common_mistakes: vec![
@@ -1482,7 +1482,7 @@ fn channel_and_post_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to get details about a specific channel.".into(),
                 common_mistakes: vec!["Using a channel name instead of a channel ID.".into()],
@@ -1501,7 +1501,7 @@ fn channel_and_post_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to retrieve a specific post or message by its ID.".into(),
                 common_mistakes: vec![],
@@ -1537,7 +1537,7 @@ fn channel_and_post_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to reconstruct a thread rooted at a post, including replies and pagination cursors.".into(),
                 common_mistakes: vec!["Passing the wrong post_id when you meant a thread root.".into()],
@@ -1569,7 +1569,7 @@ fn channel_and_post_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to read message history in a channel or thread root.".into(),
                 common_mistakes: vec!["Setting per_page too high for the upstream server's configured limits.".into()],
@@ -1600,7 +1600,7 @@ fn file_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to inspect file attachments before deciding whether to download or preview them.".into(),
                 common_mistakes: vec!["Passing a post ID instead of a file ID.".into()],
@@ -1621,7 +1621,7 @@ fn file_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to retrieve the public sharing URL for a file when a direct link is needed.".into(),
                 common_mistakes: vec!["Passing a post ID instead of a file ID.".into()],
@@ -1642,7 +1642,7 @@ fn file_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use when the connector needs the file body itself, not just metadata or a share link.".into(),
                 common_mistakes: vec!["Downloading large files when metadata inspection would have been enough.".into()],
@@ -1663,7 +1663,7 @@ fn file_read_operations() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static("mattermost.read"),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
+            idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "Use to enumerate all files attached to a post before fetching individual file metadata.".into(),
                 common_mistakes: vec!["Passing a root thread ID when you meant a specific post ID.".into()],
@@ -1696,7 +1696,7 @@ fn search_operations() -> Vec<OperationInfo> {
         capability: CapabilityId::from_static("mattermost.read"),
         risk_level: RiskLevel::Low,
         safety_tier: SafetyTier::Safe,
-        idempotency: IdempotencyClass::BestEffort,
+        idempotency: IdempotencyClass::Strict,
         ai_hints: AgentHint {
             when_to_use: "Use to search messages across a team's channels.".into(),
             common_mistakes: vec![
@@ -2689,6 +2689,21 @@ mod tests {
     }
 
     #[test]
+    fn read_operations_are_strictly_idempotent() {
+        let ops = operations_info();
+        for op in &ops {
+            if op.capability.as_str().rsplit('.').next() == Some("read") {
+                assert!(
+                    matches!(op.idempotency, IdempotencyClass::Strict),
+                    "read operation {} should be Strict, got {:?}",
+                    op.id.as_str(),
+                    op.idempotency
+                );
+            }
+        }
+    }
+
+    #[test]
     fn introspect_returns_operations_and_events() {
         let connector = MattermostConnector::new();
         let introspection = connector.introspect();
@@ -3293,5 +3308,25 @@ mod tests {
                 .as_str(),
             "mattermost.write"
         );
+    }
+
+    #[test]
+    fn manifest_lists_extended_post_and_group_operations() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .expect("mattermost manifest.toml should be readable");
+
+        for operation in [
+            "mattermost.get_reactions_for_post",
+            "mattermost.create_group_channel",
+            "mattermost.update_post",
+            "mattermost.pin_post",
+            "mattermost.unpin_post",
+        ] {
+            assert!(
+                manifest.contains(operation),
+                "manifest should advertise {operation}"
+            );
+        }
     }
 }

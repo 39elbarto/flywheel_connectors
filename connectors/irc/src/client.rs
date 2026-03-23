@@ -11,6 +11,12 @@ use crate::error::IrcError;
 use crate::types::IrcConfig;
 use std::time::Duration;
 
+/// Strip `\r` and `\n` from user-controlled strings to prevent
+/// CRLF injection of additional IRC commands.
+fn sanitize_irc_input(s: &str) -> String {
+    s.chars().filter(|&c| c != '\r' && c != '\n').collect()
+}
+
 // ── Stream abstraction ──
 
 /// Trait alias for any async read/write stream (TCP or TLS).
@@ -75,7 +81,23 @@ impl IrcSession {
             return Ok(None);
         }
         let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-        if let Some(payload) = trimmed.strip_prefix("PING :") {
+        // Handle PING from the server: both "PING :payload" and "PING payload"
+        // formats, as well as prefixed forms like ":server PING :payload".
+        let ping_source = trimmed
+            .strip_prefix("PING :")
+            .or_else(|| trimmed.strip_prefix("PING "))
+            .or_else(|| {
+                // Handle prefixed PING: ":server PING :payload" or ":server PING payload"
+                if trimmed.starts_with(':') {
+                    let after_prefix = trimmed.split_once(' ').map(|(_, rest)| rest)?;
+                    after_prefix
+                        .strip_prefix("PING :")
+                        .or_else(|| after_prefix.strip_prefix("PING "))
+                } else {
+                    None
+                }
+            });
+        if let Some(payload) = ping_source {
             self.send_line(&format!("PONG :{payload}")).await?;
         }
         self.lines.push(trimmed.clone());
@@ -120,9 +142,13 @@ impl IrcSession {
     ///
     /// Returns an error if sending the JOIN command or reading responses fails.
     pub async fn join(&mut self, channel: &str, channel_key: Option<&str>) -> FcpResult<()> {
+        let safe_channel = sanitize_irc_input(channel);
         let cmd = channel_key.map_or_else(
-            || format!("JOIN {channel}"),
-            |channel_key| format!("JOIN {channel} {channel_key}"),
+            || format!("JOIN {safe_channel}"),
+            |key| {
+                let safe_key = sanitize_irc_input(key);
+                format!("JOIN {safe_channel} {safe_key}")
+            },
         );
         self.send_line(&cmd).await?;
         self.read_until(5).await?;
@@ -135,17 +161,20 @@ impl IrcSession {
     ///
     /// Returns an error if sending the message fails.
     pub async fn send_privmsg(&mut self, target: &str, message: &str) -> FcpResult<()> {
-        self.send_line(&format!("PRIVMSG {target} :{message}"))
+        let safe_target = sanitize_irc_input(target);
+        let safe_message = sanitize_irc_input(message);
+        self.send_line(&format!("PRIVMSG {safe_target} :{safe_message}"))
             .await
     }
 
-    /// Read lines until we have at least `sample_lines` or EOF.
+    /// Read an additional bounded number of lines from the server.
     ///
     /// # Errors
     ///
     /// Returns an error if reading a line fails.
     pub async fn read_until(&mut self, sample_lines: usize) -> FcpResult<()> {
-        while self.lines.len() < sample_lines {
+        let target_len = self.lines.len().saturating_add(sample_lines);
+        while self.lines.len() < target_len {
             if self.read_line().await?.is_none() {
                 break;
             }
@@ -218,14 +247,15 @@ where
     };
 
     if let Some(password) = config.password.as_deref() {
-        session.send_line(&format!("PASS {password}")).await?;
+        let safe_password = sanitize_irc_input(password);
+        session.send_line(&format!("PASS {safe_password}")).await?;
     }
-    session.send_line(&format!("NICK {}", config.nick)).await?;
+    let safe_nick = sanitize_irc_input(&config.nick);
+    let safe_username = sanitize_irc_input(&config.username);
+    let safe_realname = sanitize_irc_input(&config.realname);
+    session.send_line(&format!("NICK {safe_nick}")).await?;
     session
-        .send_line(&format!(
-            "USER {} 0 * :{}",
-            config.username, config.realname
-        ))
+        .send_line(&format!("USER {safe_username} 0 * :{safe_realname}"))
         .await?;
     session.await_welcome().await?;
     f(session).await
@@ -267,6 +297,24 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(config.address(), "irc.example.com:6697");
+    }
+
+    #[test]
+    fn sanitize_strips_cr_lf() {
+        assert_eq!(sanitize_irc_input("hello\r\nworld"), "helloworld");
+        assert_eq!(sanitize_irc_input("no\rnewlines\nhere"), "nonewlineshere");
+        assert_eq!(sanitize_irc_input("clean"), "clean");
+        assert_eq!(sanitize_irc_input(""), "");
+    }
+
+    #[test]
+    fn sanitize_prevents_crlf_injection() {
+        // An attacker might try to inject extra IRC commands via CRLF
+        let malicious = "#channel\r\nPRIVMSG #admin :hacked";
+        let sanitized = sanitize_irc_input(malicious);
+        assert_eq!(sanitized, "#channelPRIVMSG #admin :hacked");
+        assert!(!sanitized.contains('\r'));
+        assert!(!sanitized.contains('\n'));
     }
 
     #[fcp_async_core::runtime::test]

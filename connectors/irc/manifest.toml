@@ -73,7 +73,7 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["channel"] }
-output_schema = { type = "object", required = ["status", "channel", "transcript"] }
+output_schema = { type = "object", required = ["status", "channel", "transcript", "events", "identity"] }
 network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.channels.join".ai_hints]
@@ -90,12 +90,12 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", required = ["channel"] }
-output_schema = { type = "object", required = ["channel", "lines"] }
+output_schema = { type = "object", required = ["channel", "lines", "events", "identity"] }
 network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.transcript.sample".ai_hints]
-when_to_use = "Use when you need a short bounded sample of IRC traffic from one channel."
-common_mistakes = ["This is a bounded sampling operation, not a subscription or backlog replay API.", "sample_lines is clamped and the connector quits after collecting the sample."]
+when_to_use = "Use when you need a short bounded sample of IRC traffic from one channel plus normalized IRC event metadata."
+common_mistakes = ["This is a bounded sampling operation, not a subscription or backlog replay API.", "sample_lines is clamped and the connector quits after collecting the sample.", "The raw lines are preserved, but agents should prefer the normalized `events` list for numerics, routing, and source identity."]
 examples = []
 related = ["irc.health", "irc.channels.join"]
 
@@ -107,7 +107,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object" }
-output_schema = { type = "object", required = ["status", "server", "port", "tls", "nick", "transcript", "manifest_hash"] }
+output_schema = { type = "object", required = ["status", "server", "port", "tls", "nick", "transcript", "events", "identity", "manifest_hash"] }
 network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.health".ai_hints]

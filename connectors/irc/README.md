@@ -4,6 +4,8 @@
 
 `fcp-irc` is a bounded IRC connector for short-lived connect, register, join, send, transcript-sample, and health-check flows.
 
+The connector preserves raw IRC lines, but read-oriented operations now also return normalized event metadata so agents can reason about numerics, source identity, and channel-versus-private routing without reparsing protocol text themselves.
+
 The connector is intentionally narrow. It favors one-shot operator or agent actions over long-lived presence, streaming, or automation that would blur community boundaries.
 
 ## Runtime Model
@@ -12,6 +14,7 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 - Authentication is limited to optional `PASS` followed by `NICK` and `USER`.
 - TLS is supported and defaults to port `6697`; plaintext defaults to `6667`.
 - The connector keeps no durable local state.
+- `irc.channels.join`, `irc.transcript.sample`, and `irc.health` expose both raw transcript lines and normalized event records for IRC numerics and message routing.
 
 ## Auth Boundary
 
@@ -41,7 +44,7 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 | --- | --- | --- |
 | `irc.messages.send` | `irc.messages.write` | Send one `PRIVMSG` to a channel or nick |
 | `irc.channels.join` | `irc.channels.write` | Join one channel, optionally with a key |
-| `irc.transcript.sample` | `irc.messages.read` | Collect a bounded sample of recent IRC lines |
+| `irc.transcript.sample` | `irc.messages.read` | Collect a bounded sample of recent IRC lines plus normalized event metadata |
 | `irc.health` | `irc.health.read` | Verify registration and connectivity |
 
 ## Safety Matrix
@@ -57,6 +60,7 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 
 - This first slice uses short-lived IRC sessions per operation.
 - Sampling is bounded and does not expose a replay buffer or subscription surface.
+- Read-oriented outputs preserve raw lines while also surfacing parsed numerics, source identity, and channel/private route classification.
 - Production use is expected to target one explicitly configured IRC server on standard ports.
 
 ## Moderation Boundary

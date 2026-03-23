@@ -19,7 +19,7 @@ use crate::client::with_irc_session;
 use crate::types::{
     CAP_CHANNELS_WRITE, CAP_HEALTH_READ, CAP_MESSAGES_READ, CAP_MESSAGES_WRITE,
     DEFAULT_SAMPLE_LINES, IrcConfig, OP_HEALTH, OP_JOIN_CHANNEL, OP_SAMPLE_TRANSCRIPT,
-    OP_SEND_MESSAGE,
+    OP_SEND_MESSAGE, parse_irc_lines,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -153,6 +153,15 @@ impl IrcConnector {
                         "message": { "type": "string" }
                     }
                 }),
+                json!({
+                    "type": "object",
+                    "required": ["status", "target", "transcript"],
+                    "properties": {
+                        "status": { "type": "string" },
+                        "target": { "type": "string" },
+                        "transcript": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
                 "Use for bounded IRC sends to a channel or nick.",
             ),
             operation(
@@ -170,6 +179,13 @@ impl IrcConnector {
                         "channel_key": { "type": "string" }
                     }
                 }),
+                transcript_output_schema(&[
+                    "status",
+                    "channel",
+                    "transcript",
+                    "events",
+                    "identity",
+                ]),
                 "Use to validate that a configured IRC identity can join a channel.",
             ),
             operation(
@@ -187,6 +203,7 @@ impl IrcConnector {
                         "sample_lines": { "type": "integer" }
                     }
                 }),
+                transcript_output_schema(&["channel", "lines", "events", "identity"]),
                 "Use to collect a short bounded transcript without keeping a long-lived IRC session open.",
             ),
             operation(
@@ -197,6 +214,17 @@ impl IrcConnector {
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
                 json!({ "type": "object" }),
+                transcript_output_schema(&[
+                    "status",
+                    "server",
+                    "port",
+                    "tls",
+                    "nick",
+                    "transcript",
+                    "events",
+                    "identity",
+                    "manifest_hash",
+                ]),
                 "Use before joining or sending to make sure registration succeeds.",
             ),
         ]
@@ -216,7 +244,7 @@ impl IrcConnector {
                 let transcript = with_irc_session(&state.config, |mut session| async move {
                     session.send_privmsg(target, message).await?;
                     session.quit().await?;
-                    Ok::<_, FcpError>(Vec::<String>::new())
+                    Ok::<_, FcpError>(session.lines)
                 })
                 .await?;
                 json!({
@@ -234,10 +262,13 @@ impl IrcConnector {
                     Ok::<_, FcpError>(session.lines)
                 })
                 .await?;
+                let events = parse_irc_lines(&transcript, &state.config.nick);
                 json!({
                     "status": "joined",
                     "channel": channel,
                     "transcript": transcript,
+                    "events": events,
+                    "identity": state.config.identity(),
                 })
             }
             OP_SAMPLE_TRANSCRIPT => {
@@ -255,9 +286,12 @@ impl IrcConnector {
                     Ok::<_, FcpError>(session.lines)
                 })
                 .await?;
+                let events = parse_irc_lines(&transcript, &state.config.nick);
                 json!({
                     "channel": channel,
                     "lines": transcript,
+                    "events": events,
+                    "identity": state.config.identity(),
                 })
             }
             OP_HEALTH => {
@@ -266,6 +300,7 @@ impl IrcConnector {
                     Ok::<_, FcpError>(session.lines)
                 })
                 .await?;
+                let events = parse_irc_lines(&transcript, &state.config.nick);
                 json!({
                     "status": "ok",
                     "server": state.config.server,
@@ -273,6 +308,8 @@ impl IrcConnector {
                     "tls": state.config.tls,
                     "nick": state.config.nick,
                     "transcript": transcript,
+                    "events": events,
+                    "identity": state.config.identity(),
                     "manifest_hash": Self::manifest_hash(),
                 })
             }
@@ -511,6 +548,7 @@ fn operation(
     safety_tier: SafetyTier,
     idempotency: IdempotencyClass,
     input_schema: Value,
+    output_schema: Value,
     when_to_use: &str,
 ) -> OperationInfo {
     OperationInfo {
@@ -518,7 +556,7 @@ fn operation(
         summary: summary.into(),
         description: Some(summary.into()),
         input_schema,
-        output_schema: json!({ "type": "object" }),
+        output_schema,
         capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
@@ -530,11 +568,81 @@ fn operation(
                     .into(),
             ],
             examples: Vec::new(),
-            related: vec![CapabilityId::from_static(OP_HEALTH)],
+            related: vec![CapabilityId::from_static(CAP_HEALTH_READ)],
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),
     }
+}
+
+fn transcript_output_schema(required: &[&str]) -> Value {
+    json!({
+        "type": "object",
+        "required": required,
+        "properties": {
+            "status": { "type": "string" },
+            "channel": { "type": "string" },
+            "lines": { "type": "array", "items": { "type": "string" } },
+            "transcript": { "type": "array", "items": { "type": "string" } },
+            "events": { "type": "array", "items": normalized_event_schema() },
+            "identity": identity_schema(),
+            "server": { "type": "string" },
+            "port": { "type": "integer" },
+            "tls": { "type": "boolean" },
+            "nick": { "type": "string" },
+            "manifest_hash": { "type": "string" }
+        }
+    })
+}
+
+fn identity_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["nick", "username", "realname"],
+        "properties": {
+            "nick": { "type": "string" },
+            "username": { "type": "string" },
+            "realname": { "type": "string" }
+        }
+    })
+}
+
+fn normalized_event_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["raw", "kind", "command", "route"],
+        "properties": {
+            "raw": { "type": "string" },
+            "kind": { "type": "string" },
+            "command": { "type": "string" },
+            "numeric": { "type": "integer" },
+            "prefix": {
+                "type": "object",
+                "required": ["raw"],
+                "properties": {
+                    "raw": { "type": "string" },
+                    "nick": { "type": "string" },
+                    "user": { "type": "string" },
+                    "host": { "type": "string" },
+                    "server": { "type": "string" }
+                }
+            },
+            "params": { "type": "array", "items": { "type": "string" } },
+            "trailing": { "type": "string" },
+            "route": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                    "kind": { "type": "string" },
+                    "conversation": { "type": "string" },
+                    "peer_nick": { "type": "string" }
+                }
+            },
+            "target": { "type": "string" },
+            "channel": { "type": "string" },
+            "message": { "type": "string" }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -879,5 +987,21 @@ mod tests {
         let connector = IrcConnector::new();
         let metrics = connector.metrics();
         assert_eq!(metrics.requests_total, 0);
+    }
+
+    #[test]
+    fn transcript_sample_schema_advertises_normalized_events() {
+        let op = IrcConnector::operations()
+            .into_iter()
+            .find(|op| op.id.as_str() == OP_SAMPLE_TRANSCRIPT)
+            .expect("sample op should exist");
+        let required = op.output_schema["required"]
+            .as_array()
+            .expect("required should be an array");
+        assert!(required.iter().any(|value| value == "events"));
+        assert_eq!(
+            op.output_schema["properties"]["identity"]["required"],
+            json!(["nick", "username", "realname"])
+        );
     }
 }

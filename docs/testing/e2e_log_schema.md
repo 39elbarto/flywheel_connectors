@@ -68,10 +68,19 @@ Optional Fields (All Shapes)
 
 - `level` (string: info|warn|error)
 - `step_number` (u64)
+- `step_id` (string; stable logical step label for report/bundle correlation)
+- `attempt` (u64; retry/attempt number for the step)
 - `artifacts` (array of strings)
 - `context` (object/array/string/number/boolean/null; free-form context)
 - `error_code` (string; stable FCP error code when `result=fail`)
 - `details` (object/array/string/number/boolean/null; extra error metadata)
+- `summary` (object/array/string/number/boolean/null; compact run/step summary payload)
+- `command` (object/array/string/number/boolean/null; per-step command metadata)
+- `scan` (object/array/string/number/boolean/null; secret-scan evidence)
+- `prerequisites` (object/array/string/number/boolean/null; prerequisite state snapshot)
+- `failure_summary` (object/array/string/number/boolean/null; short debugging summary)
+- `run_id` (string; stable run-level identifier)
+- `scenario_id` (string; stable scenario identifier when the run is scenario-backed)
 
 Truthfulness Context Conventions
 --------------------------------
@@ -166,6 +175,37 @@ fcp-e2e --validate-log scripts/e2e/out/e2e_happy_path.jsonl
 
 The CLI will exit non-zero on the first invalid line and print a line number
 plus the schema violation.
+
+Rich Run Reports (fcp-e2e CLI)
+------------------------------
+
+The `fcp-e2e` CLI now supports a richer reporting/bundle flow for connector and
+interop runs:
+
+```bash
+fcp-e2e --connector-cmd ./target/debug/fcp-example \
+  --request-file ./requests/happy.json \
+  --output ./artifacts/logs.jsonl \
+  --stable-output ./artifacts/logs.stable.jsonl \
+  --report-json ./artifacts/report.json \
+  --summary-output ./artifacts/summary.txt \
+  --bundle-dir ./artifacts/run-001
+```
+
+Bundle/report expectations:
+- `logs.jsonl` remains the canonical schema-validated event stream.
+- `logs.stable.jsonl` normalizes nondeterministic fields for deterministic diffs.
+- `report.json` is the machine-readable run report with per-step command metadata,
+  artifact paths, prerequisite state, failure summaries, and aggregate scan
+  results.
+- `summary.txt` is the human-readable triage summary.
+- `bundle-dir` stores per-step request/response/stderr artifacts so failures are
+  replayable without rerunning interactively.
+
+The `fwc` observability bundle contract in
+`crates/fwc/src/test_observability.rs` uses the same vocabulary for artifact
+paths, replay scripts, redaction, and truthfulness summaries even though its
+trace entries are stored in a separate type system.
 
 Scenario Matrix Runner
 ----------------------

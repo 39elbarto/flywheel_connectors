@@ -1,9 +1,9 @@
 # FCP V3 Connector Acceptance Contract
 
 > **Status**: NORMATIVE
-> **Version**: 1.0.0
-> **Date**: 2026-03-18
-> **Bead Reference**: `flywheel_connectors-j05nu.11.1`
+> **Version**: 1.1.0
+> **Date**: 2026-03-23
+> **Bead Reference**: `flywheel_connectors-j05nu.11.1`, `flywheel_connectors-49z0b.2`
 > **Supersedes**: `STANDARD_Connector_Compliance.md` (legacy V2)
 
 ---
@@ -163,28 +163,108 @@ The contract answers two questions:
 
 ## 6. Evidence and Verification
 
-### 6a. Unit Tests (MUST)
+### 6a. Testing Taxonomy and Naming Rules (MUST)
+
+All connector evidence must be classified into exactly one of these suite classes:
+
+| Suite Class | What It Exercises | Allowed Doubles | Counts As Final Acceptance? | Naming Rule |
+|-------------|-------------------|-----------------|-----------------------------|-------------|
+| `pure_unit` | In-memory helpers, schemas, mappers, risk/idempotency classification, config parsing, redaction, small protocol helpers | No network, no daemon, no subprocess, no external service | No | Use `unit` in the test name or module name |
+| `deterministic_contract` | Multi-step connector behavior against deterministic mocks or fake peers | `wiremock`, local fake servers, stub connectors, fake polling APIs, fixture payloads | No | Use `contract`, `integration`, or `compliance`; MUST NOT be named `no_mock`, `acceptance`, or `live` |
+| `local_non_mock` | Real local fixture boundary without provider fakery: local DB engine, object store, webhook listener, bridge daemon, browser, filesystem, or platform API | Real local processes and loopback/private-network fixtures only | Yes | Use `local_non_mock` or `fixture_acceptance` |
+| `host_e2e` | Real `fcp-host` / `fwc` / connector subprocess boundary with manifests, sandbox, receipts, and policy enforcement | Real host process; mocks allowed only behind the connector when the purpose is host-boundary verification | Yes, but only for host-boundary truth, not upstream provider semantics | Use `host_e2e` or `subprocess_e2e` |
+| `live` | Real provider sandbox or nightly live verification against the true upstream service | Real sandbox/test tenant/device/account only | Yes | Use `live`, `sandbox`, or `nightly_live` |
+
+Hard naming rule:
+
+- If a suite depends on `wiremock`, fake polling APIs, stub connectors, or mock servers, it is supplemental confidence and MUST NOT be presented as the connector's only acceptance evidence.
+- `no_mock`, `acceptance`, `host_e2e`, and `live` labels are reserved for suites that cross a real non-fake boundary.
+- Bead closure comments MUST name the highest suite class actually exercised. "All tests pass" is insufficient.
+
+### 6b. Base Suite Requirements (MUST)
+
+Every connector MUST satisfy all of the following:
+
+- `pure_unit` coverage for config parsing, operation routing, error translation, redaction-sensitive output, and risk/idempotency classification.
+- `deterministic_contract` coverage for configure -> health/self_check -> introspect -> invoke lifecycle, error propagation, and common provider failures.
+- Conformance coverage via the shared `fcp-conformance` and/or `fcp-e2e` harnesses where applicable.
+- At least one suite from the acceptance classes (`local_non_mock`, `host_e2e`, `live`) according to the archetype matrix in Section 6e.
+
+### 6c. Pure Unit Tests (MUST)
 
 - Minimum 30 unit tests for simple connectors, 50+ for connectors with multiple operations.
 - Cover every operation's success path.
 - Cover every distinct error path (rate limit, auth failure, malformed response, timeout, network error).
-- All external API calls use `wiremock::MockServer` or equivalent mock infrastructure.
-- NEVER make real API calls in tests.
+- Unit tests MUST NOT require `wiremock`, real daemons, or real external services.
+- Unit tests MUST verify `ConnectorErrorMapping`, `OperationInfo`, config validation, and redaction-sensitive output paths.
 - Tests for `ConnectorErrorMapping`: verify every error variant maps to the correct `FcpError` discriminant.
 - Tests for `OperationInfo` completeness: verify introspection returns all declared operations.
 
-### 6b. Integration Tests (MUST for connectors with lib.rs)
+### 6d. Deterministic Contract / Integration Tests (MUST for connectors with lib.rs)
 
 - Multi-step flows (configure -> invoke -> verify response).
 - Error propagation chains (external error -> ConnectorErrorMapping -> FcpError).
 - Health check under various states (configured, degraded, not configured).
+- `wiremock::MockServer` and equivalent fake peers belong in this class, not in `pure_unit`.
+- Deterministic contract coverage is REQUIRED supplemental confidence, but it MUST NOT be the sole acceptance boundary for a connector.
 
-### 6c. Conformance Tests (MUST)
+### 6e. Minimum Acceptance Suites by Archetype (MUST)
+
+The minimum acceptance boundary varies by connector family:
+
+| Archetype Family | Minimum Acceptance Requirement | Notes |
+|------------------|-------------------------------|-------|
+| Request-response / GraphQL | `local_non_mock` when the service can be reproduced locally; otherwise `live` | `host_e2e` is SHOULD for auth-heavy or risky/dangerous connectors |
+| Webhook | `local_non_mock` + `host_e2e` | Use a real local webhook listener, signature material, duplicate-delivery handling, and end-to-end host receipts |
+| Streaming / Bidirectional | `local_non_mock` + `host_e2e` | Real session lifecycle, reconnect, bounded queue, shutdown drain, and replay/ack semantics must cross a non-fake boundary |
+| Queue / Pub-Sub | `local_non_mock` + `host_e2e` | Use a real broker fixture when possible; fall back to `live` for managed-only providers |
+| Database | `local_non_mock` | Use a real engine instance, not SQL mocks; add `host_e2e` when admin or destructive flows depend on host policy or receipts |
+| File / Blob | `local_non_mock` when a real local/object-store fixture exists; otherwise `live` | Presign/ACL semantics that cannot be safely reproduced locally require provider sandbox coverage |
+| CLI / Process | `local_non_mock` + `host_e2e` | The acceptance boundary is the real child process / tool invocation path, not a fake stdout fixture alone |
+| Browser | `local_non_mock` + `host_e2e` | Real browser session management is required; use `live` only for auth or anti-bot flows that cannot be represented locally |
+| Bridge-backed / Mobile | `local_non_mock` + `host_e2e` | Real bridge/daemon/socket behavior is required; add `live` when the bridge alone cannot validate upstream semantics |
+| Local-platform | `local_non_mock` | Real platform APIs or local automation boundaries are required; add `host_e2e` when the connector is expected to run through the host subprocess boundary |
+
+### 6f. Acceptable Exceptions When Local Non-Mock Is Impossible (MUST)
+
+An exception is acceptable only when a real local fixture cannot truthfully reproduce the upstream boundary. Common examples include managed SaaS-only semantics, closed mobile/cloud bridges, or anti-automation login flows.
+
+When this happens, the connector MUST provide all of the following:
+
+- `deterministic_contract` coverage that proves input/output shape, retries, error mapping, and denial behavior.
+- `host_e2e` coverage when the connector is expected to run through `fcp-host` / `fwc`.
+- `live` coverage against a provider sandbox, disposable tenant, nightly account, or explicitly documented device lab.
+- README guidance that states why local non-mock acceptance is impossible, what real prerequisites exist, and how the suite is replayed safely.
+
+### 6g. Logging, Redaction, and Replay Requirements for E2E-Capable Suites (MUST)
+
+Every `local_non_mock`, `host_e2e`, and `live` suite MUST:
+
+- emit schema-valid JSONL according to [`docs/testing/e2e_log_schema.md`](./testing/e2e_log_schema.md)
+- include `correlation_id`, `phase`, and a truthful provenance trail (`command_mode`, `provenance_markers`, host IDs or receipt IDs when applicable)
+- record the suite class in structured context as one of `local_non_mock`, `host_e2e`, or `live`
+- preserve replayable artifacts (`trace.jsonl`, `summary.json`, `environment.json`, `replay.sh`) when run through `fwc` or shell-based E2E harnesses, or an equivalent documented artifact bundle when the harness is connector-local
+- pass secret and PII redaction checks before artifacts are accepted
+
+These suites MUST NOT log raw:
+
+- `Authorization` headers
+- bearer tokens, API keys, client secrets, webhook secrets, or session cookies
+- provider credentials embedded in URLs or query strings
+- real user PII unless the fixture data is explicitly synthetic and documented as such
+
+For destructive or provider-sandbox suites, the artifact bundle MUST also record:
+
+- the sandbox/test tenant identity in redacted form
+- cleanup expectations
+- whether the run exercised live mutation, denial, or dry-run-only flows
+
+### 6h. Conformance Tests (MUST)
 
 - `ComplianceSuite` (from `fcp-conformance`): default-deny enforcement, capability mismatch rejection.
 - `ConnectorSuite` (from `fcp-conformance`): operation count > 0 in introspection, manifest extractability.
 
-### 6d. Quality Gates (MUST pass)
+### 6i. Quality Gates (MUST pass)
 
 ```bash
 rch exec -- cargo clippy -p <connector> --all-targets -- -D warnings
@@ -232,7 +312,7 @@ All three must exit 0 with no warnings.
 A new connector bead is **done** when ALL of the following are true:
 
 1. **Compiles clean**: `cargo clippy -p <connector> --all-targets -- -D warnings` exits 0.
-2. **Tests pass**: `cargo test -p <connector>` exits 0 with the required test count and coverage.
+2. **Required suite classes pass**: `cargo test -p <connector>` exits 0 and the suite inventory satisfies Sections 6b-6g for the connector's archetype.
 3. **Lifecycle correct**: `ConnectorRuntime` initialized in `configure()`, used in all request paths, `shutdown()` propagated.
 4. **Retry correct**: All HTTP calls use `RetryLoop` or SDK retry infrastructure. No hand-rolled retry loops.
 5. **Errors mapped**: `ConnectorErrorMapping` impl covers every error variant. Tests verify each mapping.
@@ -241,6 +321,7 @@ A new connector bead is **done** when ALL of the following are true:
 8. **Health truthful**: `self_check()` / health returns actionable diagnostics. Reports degraded when service unreachable.
 9. **Secrets safe**: No credential leakage in logs, errors, or Debug impls.
 10. **Conformance**: Passes `ComplianceSuite` (default-deny) and `ConnectorSuite` (introspection) where applicable.
+11. **Acceptance boundary truthful**: the bead closure comment explicitly names which suite class provided final acceptance evidence (`local_non_mock`, `host_e2e`, or `live`) and why that class is sufficient for the archetype.
 
 ### 9b. Existing Connector Audit/Remediation Bead
 
@@ -252,6 +333,7 @@ An existing connector audit bead is **done** when ALL of the following are true:
    - Filed as a blocking child bead with specific remediation instructions.
 3. **Evidence collected**: The bead's closure comment includes:
    - Test count (unit + integration).
+   - Suite taxonomy classification (`pure_unit`, `deterministic_contract`, `local_non_mock`, `host_e2e`, `live`) and which one supplied the final acceptance boundary.
    - Clippy clean confirmation.
    - List of `OperationInfo` operations verified.
    - `ConnectorErrorMapping` coverage confirmed.
@@ -350,12 +432,14 @@ New connector authors should study the exemplar for their archetype before start
 [ ] manifest.toml with capabilities, network, sandbox
 [ ] Health/self_check returns truthful diagnostics
 [ ] Secrets redacted in all log/error/Debug paths
-[ ] Unit tests (30+ simple, 50+ complex)
+[ ] Pure unit tests (30+ simple, 50+ complex)
     [ ] Success path per operation
     [ ] Error path per distinct failure mode
     [ ] ConnectorErrorMapping coverage
     [ ] OperationInfo introspection completeness
-[ ] Integration tests (multi-step flows)
+[ ] Deterministic contract / integration tests (multi-step flows, mock-backed if needed)
+[ ] Acceptance suite matches archetype matrix (`local_non_mock`, `host_e2e`, or `live`)
+[ ] E2E-capable suites emit schema-valid logs + replayable artifacts
 [ ] cargo clippy --all-targets -- -D warnings clean
 [ ] cargo test passes
 [ ] cargo fmt --check passes
@@ -370,6 +454,7 @@ New connector authors should study the exemplar for their archetype before start
 | `FCP_Specification_V3.md` | Canonical protocol specification; this contract extracts the connector-specific requirements |
 | `STANDARD_Connector_Compliance.md` | Legacy V2 checklist; superseded by this contract for all new and audit work |
 | `STANDARD_Connector_Testing.md` | Legacy V2 testing requirements; this contract defines the V3 testing bar |
+| `docs/testing/coverage-inventory.md` | Live inventory of the current workspace test surface; use it to plan remediation against this policy |
 | `FCP3_Retirement_Kill_List.md` | Compatibility abstractions scheduled for removal; connectors must not depend on them |
 | `FWC_Host_First_Truthfulness_Playbook.md` | Host-side truthfulness requirements; complementary to this connector-side contract |
 
@@ -377,4 +462,5 @@ New connector authors should study the exemplar for their archetype before start
 
 ## Changelog
 
+- **1.1.0** (2026-03-23): Added explicit testing taxonomy, archetype-specific acceptance minimums, non-mock exception rules, and E2E logging/redaction requirements. Clarifies that mock-backed suites are supplemental confidence, not final acceptance evidence.
 - **1.0.0** (2026-03-18): Initial V3 acceptance contract. Codifies non-negotiables from V3 spec, README, and implemented exemplar patterns. Defines done-definitions for new-connector and audit-remediation beads. Retroactively binding on all workspace connectors.

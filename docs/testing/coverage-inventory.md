@@ -1,584 +1,412 @@
-# Test Coverage Inventory and Mock Usage Map
+# Test Coverage Inventory and Acceptance Gap Matrix
 
-> Generated: 2026-01-27 | Bead: bd-32k7
+> Generated: 2026-03-23 | Beads: `flywheel_connectors-49z0b.1`, `flywheel_connectors-49z0b.16.1`
 >
-> Snapshot caveat: this is a dated inventory, not a live source-of-truth scan.
-> Prefer current crate-local `tests/` directories plus `rg` for up-to-date
-> coverage state. References to the old `fcp-cli` surface map to the current
-> `fwc` CLI.
+> This document supersedes the 2026-01-27 snapshot. It is based on a live scan of
+> the current repository tree on 2026-03-23 and is intended to be the planning
+> baseline for the testing-completeness program.
+>
+> Read this inventory together with `docs/V3_Connector_Acceptance_Contract.md`
+> Section 6, which defines the normative suite taxonomy and the archetype-by-
+> archetype acceptance minimums this matrix is meant to drive.
+>
+> Addendum: the row-level `Unit`, `NoMock`, and `E2E` cells below remain useful
+> as raw scan provenance, but bead `flywheel_connectors-49z0b.16.1` found that
+> those legacy columns do not map 1:1 onto the closed suite classes from the V3
+> contract. The addendum sections below supersede any contradictory reading of
+> those legacy columns until `flywheel_connectors-49z0b.15.1` lands an automated
+> suite-class scanner.
+
+## Scope and Interpretation
+
+This matrix covers:
+
+- every current connector directory under `connectors/`
+- every current workspace crate under `crates/`
+- crate-local unit test signals from `src/**/*.rs`
+- crate-local integration test surfaces from `tests/**/*.rs`
+- mock or fake reliance signals (`wiremock`, `MockServer`, `MockApiServer`, fixture-driven harnesses)
+- `no_mock_integration.rs` presence
+- host-backed or subprocess-oriented test signals
+- `fcp-e2e` coverage signals
+- logging or replay-bundle validation signals
+- documented live or provider prerequisites from connector README files
+
+Interpret the columns as follows:
+
+- `Unit`: inline or source-adjacent test signal exists.
+- `Int`: a crate-local `tests/` surface exists.
+- `Mock`: the current verification path relies on mock servers, fake fixtures, or similar doubles.
+- `NoMock`: a `no_mock_integration.rs`-style suite exists.
+- `Host`: explicit host-backed or subprocess-oriented verification signal exists.
+- `E2E`: connector is covered by `crates/fcp-e2e/tests/*`.
+- `Logs`: explicit replay/log/report evidence exists through `fcp-e2e`, `fcp-testkit`, `fwc`, or a documented verification bundle.
+- `Live`: the best current non-mock prerequisite signal from the connector README.
+
+For this program, the repository currently has two materially different kinds of confidence:
+
+- `Deterministic contract coverage`: unit tests, crate-local integration tests, and `fcp-e2e` suites driven by mocks or local harnesses.
+- `True non-mock acceptance`: `no_mock_integration.rs`, host-backed live verification, or documented verification bundles that require real providers, local devices, or real operator setup.
+
+The most important conclusion from the live scan is that connector coverage is still overwhelmingly in the first bucket.
+
+## Closed Suite Reclassification Addendum
+
+This addendum is the current planning source of truth for `pure_unit`,
+`deterministic_contract`, `local_non_mock`, `host_e2e`, and `live`
+classification. It exists because the original `.1` scan answered "what test
+surfaces exist?" while bead `.16.1` had to answer the stricter question "which
+suite class do those surfaces actually belong to under Section 6 of the V3
+contract?"
+
+### Reclassification Rules Applied Here
+
+| Existing Signal | Reclassified Meaning |
+| --- | --- |
+| `src/**/*.rs` tests with no mock or fake imports | `pure_unit` signal |
+| `src/**/*.rs` tests with non-comment `wiremock`, `Mock*`, or `Fake*` code signals for boundary peers | `pure_unit` contamination; the file mixes in fake-backed boundary behavior and does not count as a clean unit floor |
+| `tests/integration.rs` or `*_compliance_e2e.rs` that still import mock infrastructure | `deterministic_contract`, not `host_e2e` or `live` |
+| `tests/no_mock_integration.rs` that still import mocks, fake clients, or fake verifiers | naming violation; currently `deterministic_contract` until a real non-fake boundary exists |
+| `tests/no_mock_integration.rs` with no fake signal in the file | provisional `local_non_mock`, pending deeper semantic audit in later beads |
+
+### Current Reclassification Findings
+
+- Connectors with some source-adjacent `#[cfg(test)]` signal: `149/149`. The old `139/149` number is obsolete.
+- Connectors with a clean source-adjacent `pure_unit` floor: `87/149`.
+- Connectors with inline mock leakage in `src/**/*.rs`: `62/149`.
+- Workspace crates with some source-adjacent `#[cfg(test)]` signal: `27/28`.
+- Workspace crates with a clean source-adjacent `pure_unit` floor: `15/28`.
+- Workspace crates with inline mock leakage in `src/**/*.rs`: `12/28`.
+- Workspace crates with `tests/no_mock_integration.rs`: `18/28`, but `3` of those suites are currently misnamed under the V3 contract.
+- `crates/fcp-e2e/tests` currently contains `87` suite files, and `79/87` of them still import `wiremock`, `MockServer`, or `MockApiServer`; `fcp-e2e` presence therefore currently means "connector is covered by a deterministic contract harness" unless the individual file crosses a real host or provider boundary.
+- The crate leakage inventory below now ignores comment-only mentions, so prose such as `fcp-async-core`'s runtime-compatibility notes about `wiremock` no longer inflates the suite counts.
+
+### Pure-Unit Floor Gaps and Leakage Inventory
+
+#### Crates With No Source-Adjacent `pure_unit` Signal
+
+- `fcp-async-core-macros`
+
+#### Crates With Inline Mock Leakage in `src/**/*.rs`
+
+- `fcp-bootstrap`
+- `fcp-conformance`
+- `fcp-core`
+- `fcp-e2e`
+- `fcp-google-discovery`
+- `fcp-oauth`
+- `fcp-registry`
+- `fcp-sandbox`
+- `fcp-tailscale`
+- `fcp-testkit`
+- `fcp-webhook`
+- `fwc`
+
+#### Connectors With Inline Mock Leakage in `src/**/*.rs`
+
+- `airtable`, `anthropic`, `azure`, `browser`, `calendly`, `circleci`, `coda`, `confluence`, `deepgram`, `dingtalk`, `discord`, `feishu`, `figma`, `firebase`, `github`, `gmail`, `google-ai`, `google-chat`, `google-docs`, `google-places`, `google-sheets`, `google-workspace-events`, `hackernews`, `hue`, `imessage`, `jira`, `line`, `linear`, `mastodon`, `matrix`, `microsoft365`, `nextcloud-talk`, `notion`, `openai`, `package-registry`, `paypal`, `pinecone`, `plaid`, `postgresql`, `qdrant`, `qq`, `redis`, `s3`, `signal`, `slack`, `sonos`, `square`, `stripe`, `synology-chat`, `teams`, `telegram`, `twilio`, `twitch`, `twitter`, `vercel`, `wecom`, `whatsapp`, `whisper`, `wolfram`, `youtube`, `zendesk`, `zoom`
+
+### Naming Violations: `no_mock_integration.rs` That Are Not Actually Non-Mock
+
+- `crates/fcp-streaming/tests/no_mock_integration.rs` is currently `deterministic_contract`, not `local_non_mock`, because the file explicitly documents "SSE streaming via wiremock" and imports `wiremock::{Mock, MockServer, ResponseTemplate}`.
+- `crates/fcp-tailscale/tests/no_mock_integration.rs` is currently `deterministic_contract`, not `local_non_mock`, because it exercises `MockTailscaleClient` rather than a real daemon or local mesh boundary.
+- `crates/fcp-registry/tests/no_mock_integration.rs` is currently mixed and cannot honestly keep the current name as-is, because the file uses `MockTransparencyVerifier`, `MockTufVerifier`, and `MockSigstoreVerifier` for parts of the verification path even though other portions are real in-memory crypto and store flows.
+
+### Backlog-Ready Downstream Consumers
+
+- `flywheel_connectors-49z0b.16.2` should consume the 62-connector inline-mock list plus the 79 mock-backed `fcp-e2e` compliance suites and split them into "pure unit extraction" vs "deterministic contract rename" work.
+- `flywheel_connectors-49z0b.16.3` should consume the `fcp-streaming` and `fcp-tailscale` naming violations plus the bridge, daemon, browser, and local-platform connectors that need truthful `local_non_mock` or `host_e2e` evidence.
+- `flywheel_connectors-49z0b.7.1` should consume the twelve crate-level inline-mock leaks and the `fcp-async-core-macros` unit-floor gap.
 
 ## Executive Summary
 
-The flywheel_connectors codebase has **~3,600+ test markers** across **177 files**, with strong coverage in protocol, crypto, and security domains but significant gaps in connector implementations.
-
-**Key Findings:**
-- 12/27 crates (44%) have dedicated test directories
-- 15/27 crates (56%) rely solely on inline tests or have no tests
-- 0/5 connector implementations have any tests
-- ~227 test markers are disabled/unimplemented
-- Mock usage is minimal; golden vectors dominate
-
----
-
-## Coverage by Crate
-
-### Tier 1: Excellent Coverage
-
-| Crate | Test Files | Test Count | Notes |
-|-------|-----------|------------|-------|
-| fcp-core | 15 | 1313 | Golden vectors for capability, revocation, audit, protocol, simulation |
-| fcp-sdk | 9 | ~300 | Error handling, schemas, streaming, state, standard methods |
-| fcp-sandbox | 3 | ~132 | Allow/deny matrix (83), credential injection (28), canary (21) |
-
-### Tier 2: Good Coverage
-
-| Crate | Test Files | Test Count | Notes |
-|-------|-----------|------------|-------|
-| fcp-protocol | 4 | 204 | FCPC/FCPS golden vectors, session framing, malformed input rejection |
-| fcp-ratelimit | 3 | ~85 | Golden vectors, token bucket drift |
-| fcp-mesh | 1 | ~38 | Mesh integration tests |
-
-### Tier 3: Adequate Coverage
-
-| Crate | Test Files | Test Count | Notes |
-|-------|-----------|------------|-------|
-| fwc | 2 | ~32 | Bench test, doctor test |
-| fcp-bootstrap | 2 | ~25 | Golden vectors, integration |
-| fcp-manifest | 1 | ~40 | Golden vectors |
-
-### Tier 4: Minimal Coverage
-
-| Crate | Test Files | Test Count | Notes |
-|-------|-----------|------------|-------|
-| fcp-host | 2 | 9 | Rate limit + subprocess connector integration |
-| fcp-tailscale | 1 | ~10 | Enrollment lifecycle only |
-| fcp-conformance | 1 | 19 | FZPF schema validation |
-
-### Tier 1b: Good Inline Coverage (No Dedicated Test Dir)
-
-| Crate | Inline Tests | Status | Notes |
-|-------|-------------|--------|-------|
-| **fcp-crypto** | 109 | **GOOD** | Ed25519, X25519, HPKE, HKDF, AEAD, COSE |
-| **fcp-store** | 100 | **GOOD** | Object store, symbol store, GC, repair |
-| **fcp-raptorq** | 88 | **GOOD** | FEC encoding/decoding, chunking |
-
-### Tier 5: No Tests (Actual Gaps)
-
-| Crate | Tests | Status | Risk |
-|-------|-------|--------|------|
-| **fcp-oauth** | 0 | **HIGH** | OAuth1/2/PKCE flows untested |
-| **fcp-streaming** | 0 | **HIGH** | SSE/WebSocket/reconnect untested |
-| **fcp-telemetry** | 0 | **MEDIUM** | Metrics/tracing/logging untested |
-| **fcp-registry** | 0 | **MEDIUM** | Service discovery untested |
-| **fcp-cbor** | 0 | **LOW** | Relies on conformance tests |
-| **fcp-webhook** | TBD | **MEDIUM** | Webhook event/signature untested |
-
-### Connector Implementations
-
-| Connector | Tests | Status |
-|-----------|-------|--------|
-| anthropic | 0 | **NO TESTS** |
-| discord | 0 | **NO TESTS** |
-| openai | 0 | **NO TESTS** |
-| telegram | 0 | **NO TESTS** |
-| twitter | 0 | **NO TESTS** |
-
----
-
-## Mock and Test Double Usage
-
-### Mock Framework: wiremock (Minimal Usage)
-
-**Provider:** `fcp-testkit/src/mock_server.rs`
-- `MockApiServer` wrapper with convenience methods
-- OAuth token/refresh mocking
-- Request verification and assertion helpers
-
-**Consumers (19 files):**
-1. `fcp-sandbox/tests/credential_injection_integration.rs` - MockCredentialInjector
-2. `fcp-host/tests/rate_limit_integration.rs`
-3. `fcp-tailscale/src/client.rs`
-4. `fcp-protocol/src/fcps.rs`
-5. `fcp-bootstrap/src/hardware_token.rs`
-6. `fcp-e2e/src/lib.rs`
-7. `fcp-conformance/src/harness.rs`
-8. Various golden vector test files
-
-### Dominant Pattern: Golden Vectors
-
-Golden vector testing is the primary strategy across:
-- fcp-core (capability, revocation, audit, protocol)
-- fcp-sdk (error, schema, streaming, state)
-- fcp-protocol (FCPC, FCPS, session)
-- fcp-manifest, fcp-bootstrap, fcp-ratelimit
-
-**Characteristics:**
-- CBOR fixtures loaded from disk
-- Cross-implementation verification
-- Deterministic and archivable
-- Less useful for performance/timing tests
-
-### Custom Test Doubles
-
-| Double | Location | Purpose |
-|--------|----------|---------|
-| MockCredentialInjector | fcp-sandbox | Credential backend simulation |
-| MockApiServer | fcp-testkit | HTTP endpoint mocking |
-| Test fixtures | fcp-conformance | Harness infrastructure |
-
----
-
-## Critical Path Coverage Analysis
-
-### Protocol Parse/Serialize: WELL TESTED
-
-| Component | Tests | Coverage |
-|-----------|-------|----------|
-| FCPC frame parsing | 8 | fcpc_control_plane_integration.rs |
-| FCPS session framing | 72 | session_golden_vectors.rs |
-| FCPC golden vectors | 28 | fcpc_golden_vectors.rs |
-
-### Crypto Verification: WELL TESTED
-
-| Component | Unit Tests | Status |
-|-----------|-----------|--------|
-| Ed25519 signing/verification | 17+ | RFC 8032 test vectors, malleability tests |
-| X25519 key exchange | 15+ | RFC 7748 test vectors, iterated tests |
-| HPKE_Seal | 20+ | Multiple recipients, AAD tests |
-| HKDF | 10+ | Key derivation tests |
-| AEAD ChaCha20Poly1305 | 15+ | Encryption/decryption tests |
-| COSE tokens | 20+ | Sign/verify, builder tests |
-
-**Note:** fcp-crypto has 109 comprehensive inline unit tests including RFC test vectors.
-
-### Revocation Freshness: WELL TESTED
-
-| Test File | Count | Coverage |
-|-----------|-------|----------|
-| revocation_golden_vectors.rs | 30 | Chain integrity, quorum, freshness policies |
-
-**Adversarial tests included:**
-- Revocation withholding
-- Replay attacks
-- Forgery detection
-- Stale frontier attacks
-- Chain fork injection
-
-### Audit/Receipt Logic: WELL TESTED
-
-| Test File | Count | Coverage |
-|-----------|-------|----------|
-| audit_chain_golden_vectors.rs | 34 | Hash linking, sequence validation, fork detection |
-
-**Coverage includes:**
-- `follows()` semantics
-- Quorum signatures
-- Zone checkpoint binding
-- Decision receipt explainability
-- TraceContext propagation
-
-### Sandbox Enforcement: EXCELLENT
-
-| Test File | Count | Coverage |
-|-----------|-------|----------|
-| allow_deny_matrix.rs | 83 | Network policy enforcement |
-| credential_injection_integration.rs | 28 | Credential safety |
-| canary_connector.rs | 21 | Integration validation |
-
-**Coverage includes:**
-- Localhost/private range/tailnet defaults
-- SSRF protection
-- IP literal validation
-- TLS verification
-- Sandbox profile enforcement (strict/moderate/permissive)
-
----
-
-## Gap List: Untested Critical Paths
-
-### Priority 1 (HIGH) - No Unit Tests
-
-| Gap ID | Crate | Module | Risk |
-|--------|-------|--------|------|
-| GAP-001 | fcp-oauth | oauth1 | OAuth 1.0 flow untested |
-| GAP-002 | fcp-oauth | oauth2 | OAuth 2.0 flow untested |
-| GAP-003 | fcp-oauth | pkce | PKCE challenge untested |
-| GAP-004 | fcp-streaming | sse | SSE protocol untested |
-| GAP-005 | fcp-streaming | websocket | WebSocket protocol untested |
-| GAP-006 | fcp-streaming | reconnect | Reconnection logic untested |
-| GAP-007 | connectors/* | all | All 5 connectors have 0 tests |
-
-### Priority 2 (MEDIUM) - No Unit Tests
-
-| Gap ID | Crate | Module | Risk |
-|--------|-------|--------|------|
-| GAP-008 | fcp-telemetry | metrics | Metrics collection untested |
-| GAP-009 | fcp-telemetry | tracing | Tracing untested |
-| GAP-010 | fcp-registry | lib | Service discovery untested |
-| GAP-011 | fcp-webhook | signature | Webhook signature verification untested |
-| GAP-012 | fcp-webhook | handler | Webhook handling untested |
-| GAP-013 | fcp-cbor | lib | CBOR serialization untested (uses conformance only) |
-
-### Previously Identified as Gaps (Now Verified as Tested)
-
-The following crates were initially flagged as untested but actually have comprehensive inline tests:
-
-| Crate | Actual Tests | Coverage |
-|-------|-------------|----------|
-| fcp-crypto | 109 | Ed25519, X25519, HPKE, HKDF, AEAD, COSE (RFC vectors) |
-| fcp-store | 100 | Object store, symbol store, GC, repair, quarantine |
-| fcp-raptorq | 88 | FEC encoding/decoding, chunking |
-
----
-
-## Disabled Test Markers
-
-| Crate | Disabled Markers | Status |
-|-------|-----------------|--------|
-| fcp-telemetry | 179 | `#[test]` markers without implementation |
-| fcp-registry | 48 | `#[test]` markers without implementation |
-| fcp-streaming | 24 | Inline markers disabled |
-| fcp-webhook | 15 | Inline markers disabled |
-| **Total** | **266** | Requires implementation |
-
----
-
-## Recommended Follow-up Beads
-
-Based on this inventory, the following beads should be created:
-
-### CRITICAL Priority
-
-1. **TEST-CRYPTO-UNIT**: Unit tests for fcp-crypto primitives (GAP-001 through GAP-005)
-2. **TEST-STORE-UNIT**: Unit tests for fcp-store logic (GAP-006 through GAP-010)
-3. **TEST-CONNECTORS**: Basic tests for all 5 connector implementations (GAP-018)
-
-### HIGH Priority
-
-4. **TEST-OAUTH-UNIT**: Unit tests for fcp-oauth flows (GAP-011 through GAP-013)
-5. **TEST-RAPTORQ-UNIT**: Unit tests for fcp-raptorq (GAP-014)
-6. **TEST-STREAMING-UNIT**: Unit tests for fcp-streaming (GAP-015 through GAP-017)
-
-### MEDIUM Priority
-
-7. **TEST-TELEMETRY-ENABLE**: Enable 179 disabled test markers in fcp-telemetry
-8. **TEST-REGISTRY-ENABLE**: Enable 48 disabled test markers in fcp-registry
-9. **TEST-WEBHOOK-UNIT**: Unit tests for fcp-webhook (GAP-020, GAP-021)
-10. **TEST-AUDIT-UNIT**: Unit tests for fcp-audit (GAP-019)
-
----
-
-## Summary Statistics
-
-```
-Total test markers:           ~3,600+ (verified by cargo test)
-Test files (dedicated):       43
-Files with inline tests:      100+
-Crates with test dirs:        12/27 (44%)
-Crates with inline tests:     15/27 (56%)
-Crates without any tests:     6/27 (22%) - oauth, streaming, telemetry, registry, webhook, cbor
-Connectors with tests:        0/5 (0%)
-High priority gaps:           7
-Medium priority gaps:         6
-Mock usage files:             19
-Dominant test pattern:        Inline #[cfg(test)] modules + Golden Vectors
-
-Key verified test counts:
-- fcp-crypto:   109 tests
-- fcp-store:    100 tests
-- fcp-raptorq:   88 tests
-- fcp-core:     650+ tests
-- fcp-sdk:      300+ tests
-- fcp-sandbox:  132 tests
-
----
-
-## ASUPERSYNC Validation Pack (flywheel_connectors-235t.27)
-
-Use the scripted validation entrypoint for the ASUPERSYNC conformance/E2E/fuzz revalidation track:
-
-```bash
-bash scripts/e2e/asupersync_validation_pack.sh --run-id 235t-27-baseline
-```
-
-Dry-run mode (emit deterministic command plan + artifact contract without executing heavy suites):
-
-```bash
-bash scripts/e2e/asupersync_validation_pack.sh --dry-run --run-id 235t-27-plan
-```
-
-### Artifact Contract
-
-For run `<id>`, output is rooted at:
-
-```text
-artifacts/asupersync/validation/<id>/
-```
-
-Required artifacts:
-- `summary.json` - machine-readable run verdict + step status.
-- `steps.jsonl` - per-step forensics records (`schema_version: asupersync-forensics/v1`) with run/scenario/trace correlation fields.
-- `replay.sh` - deterministic replay script with exact commands.
-- `<step>/command.txt` - frozen command for each step.
-- `<step>/execution.log` - stdout/stderr for each executed step.
-
-Forensics schema contract reference:
-- `docs/ASUPERSYNC_Logging_Forensics_Standard.md` (owner bead `flywheel_connectors-235t.32`)
-
-### Step Coverage
-
-Validation pack currently orchestrates:
-1. Conformance revalidation: `rch exec -- cargo test -p fcp-conformance --all-targets`
-2. Cross-component E2E matrix: `scripts/e2e/run_matrix.sh`
-3. Fuzz boundary compile gate: `rch exec -- cargo check --manifest-path fuzz/Cargo.toml --bins`
-
-All cargo-intensive steps are intentionally routed through `rch exec -- ...`.
-
-E2E matrix artifact contract (bead `flywheel_connectors-235t.26.4.1`):
-- Validation pack executes matrix into `artifacts/asupersync/validation/<id>/scenarios/e2e-matrix/`.
-- Matrix root emits `results.jsonl`, `summary.json`, `manifest.json`, `scenario_plan.json`, and `replay.sh`.
-- Each scenario emits `scenarios/<scenario>/command.txt`, `execution.log`, and `scenario.json` plus scenario-local artifacts.
-
-### CI/RCH Lane Topology (bead `flywheel_connectors-235t.6`)
-
-CI now supports explicit migration lanes via `workflow_dispatch` input `lane`:
-- `smoke`: fast formatting + targeted compile + tokio guardrails
-- `focused`: crate-scoped check/clippy/test using `focus_crate`
-- `full`: existing full-gate matrix (lint, tests, vectors, security, msrv, build, docs, connectors)
-
-Recommended local command mirrors (all cargo-heavy commands routed through `rch`):
-
-```bash
-# smoke
-rch exec -- cargo fmt --check
-rch exec -- cargo check -p fcp-core --all-targets
-rch exec -- cargo check -p fcp-conformance --all-targets
-
-# focused (replace crate)
-rch exec -- cargo check -p <crate> --all-targets
-rch exec -- cargo clippy -p <crate> --all-targets -- -D warnings
-rch exec -- cargo test -p <crate> --all-targets -- --nocapture
-
-# full gate
-rch exec -- cargo check --workspace --all-targets
-rch exec -- cargo clippy --workspace --all-targets -- -D warnings
-rch exec -- cargo test --workspace --all-targets -- --nocapture
-```
-
-RCH fail-open policy:
-- Keep `rch exec -- ...` prefixes in all scripted commands and replay artifacts.
-- If a worker is unavailable and command falls back local, record that fallback in run logs/artifact summaries.
-
----
-
-## ASUPERSYNC E2E Journey Registry (flywheel_connectors-235t.26.6.1)
-
-Machine-consumable scenario governance artifacts:
-- `scripts/e2e/scenario_registry.json` (stable scenario IDs, script mapping, contract mapping, archetype, user impact category)
-- `scripts/e2e/validate_scenario_registry.sh` (enforces ID/path patterns, uniqueness constraints, and parity with `run_matrix.sh` scenarios)
-
-Validation command:
-
-```bash
-bash scripts/e2e/validate_scenario_registry.sh
-```
-
----
-
-## ASUPERSYNC Shared Async Harness (flywheel_connectors-235t.26.1)
-
-`fcp-testkit` now provides shared async harness fixtures in `fcp_testkit::AsyncTestContext` and helpers in `fcp_testkit::async_harness` for:
-- deterministic `run_id` / `scenario_id` / `correlation_id` generation
-- request-scoped timeout/cancellation helpers (`run_with_timeout`, `spawn_cancel_after`)
-- bounded queue + shutdown channel setup for runtime/backpressure tests
-
-Adoption anchors:
-- Core crate suite: `crates/fcp-host/tests/agent_integration.rs`
-- Connector suite: `connectors/openai/src/client.rs` (`test_logs_redact_api_key_and_prompt`)
-
-Maintenance guidance:
-- New migrated async tests should call `AsyncTestContext::for_scenario("<crate>.<suite>.<case>")`.
-- Structured test logs should include `run_id`, `scenario_id`, and `correlation_id` fields.
-- Prefer harness helpers over ad hoc timeout/channel/cancellation setup in individual tests.
-
----
-
-## Manual Connector Integration Suites (bd-3m2a)
-
-These are **manual-only** runs against dedicated sandbox accounts. No mocks. Use the E2E JSONL schema in `docs/testing/e2e_log_schema.md` and validate with `fcp-e2e --validate-log`.
-
-### Preferred Entry Point
-
-Use `scripts/e2e/live_connector_smoke_suite.sh` for Anthropic, OpenAI, Telegram, Discord, and Twitter/X. It:
-- offloads cargo-backed build/run steps through `rch exec -- cargo ...`
-- generates JSON request files from environment variables so secrets do not need to appear on the command line
-- runs `fcp-e2e --connector-cmd` with redacted JSONL logging
-- validates the resulting JSONL artifacts and emits a redaction scan report per connector
-
-Example:
-
-```bash
-export OPENAI_API_KEY=...
-export ANTHROPIC_API_KEY=...
-export TELEGRAM_BOT_TOKEN=...
-export DISCORD_BOT_TOKEN=...
-export TWITTER_CONSUMER_KEY=...
-export TWITTER_CONSUMER_SECRET=...
-export TWITTER_ACCESS_TOKEN=...
-export TWITTER_ACCESS_TOKEN_SECRET=...
-
-bash scripts/e2e/live_connector_smoke_suite.sh \
-  --connectors anthropic,openai,telegram,discord,twitter \
-  --out-root artifacts/e2e/live_connector_smoke/manual-run
-```
-
-Optional invoke coverage:
-- Set `FCP_LIVE_CAPABILITY_TOKEN` to enable honest direct-connector invoke requests.
-- Set `TELEGRAM_CHAT_ID`, `DISCORD_CHANNEL_ID`, and `TWITTER_TWEET_ID` to enable connector-specific invoke smoke.
-- `OPENAI_PROMPT`, `OPENAI_MODEL`, `ANTHROPIC_PROMPT`, and `ANTHROPIC_MODEL` can tune the low-cost LLM smoke request.
-- If `fcp-e2e` is not already on `PATH`, keep `rch` installed so the script can invoke `cargo run -p fcp-e2e --bin fcp-e2e -- ...` through the remote builder.
-
-### Common Setup (All Connectors)
-- Provision a dedicated sandbox account (no production data).
-- Acquire scoped API keys/tokens for the connector capabilities under test.
-- Configure a minimal zone (e.g., `z:work`) with only the required caps.
-- Set `CORRELATION_ID` for each run and log it in every step.
-- Store logs in `./artifacts/e2e/<connector>/<YYYY-MM-DD>/run.jsonl`.
-
-### Required Scenarios (Minimum)
-- **Discovery/Introspection**: list connector, introspect tools, verify schemas.
-- **Happy Path Invoke**: execute one safe operation and verify receipt/audit event.
-- **Denial Path**: attempt operation without capability, verify DecisionReceipt.
-- **Health**: health ready/degraded status with clear reason.
-- **Rate Limits**: exceed rate limit in a controlled way and verify response.
-
-### Connector-Specific Notes
-- **Twitter/X**: verify post + read timeline in sandbox; ensure rate limit handling.
-- **Telegram**: bot token only; validate send_message + polling or webhook flow.
-- **Discord**: bot token only; test send_message + edit_message minimal.
-- **Gmail**: use a sandbox Gmail account; test list + search; avoid deletes.
-- **OpenAI/Anthropic**: use low-cost model; test minimal prompt invoke.
-
-### Command Templates (fcp-e2e connector mode)
-Build the connector binary first:
-```bash
-rch exec -- cargo build -p fcp-telegram
-rch exec -- cargo build -p fcp-discord
-rch exec -- cargo build -p fcp-twitter
-rch exec -- cargo build -p fcp-openai
-rch exec -- cargo build -p fcp-anthropic
-```
-
-Low-level fallback note:
-- Prefer the script above over hand-written command lines so secrets stay in environment variables and request files rather than shell history or process arguments.
-
-**Common JSON-RPC request skeletons** (use with `--request '<json>'`):
-- Configure: `{"jsonrpc":"2.0","id":"1","method":"configure","params":{...}}`
-- Handshake:
-  ```json
-  {"jsonrpc":"2.0","id":"2","method":"handshake","params":{
-    "protocol_version":"2.0",
-    "zone":"z:work",
-    "zone_dir":null,
-    "host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    "nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-    "capabilities_requested":[]
-  }}
-  ```
-- Health: `{"jsonrpc":"2.0","id":"3","method":"health","params":{}}`
-- Introspect: `{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}`
-- Invoke (example):
-  ```json
-  {"jsonrpc":"2.0","id":"5","method":"invoke","params":{
-    "type":"invoke",
-    "id":"req-123",
-    "connector_id":"<connector_id>",
-    "operation":"<operation>",
-    "zone_id":"z:work",
-    "input":{...},
-    "capability_token":"<base64-cose-token>"
-  }}
-  ```
-
-**Telegram (bot token required)**:
-```bash
-fcp-e2e --connector-cmd target/debug/fcp-telegram \
-  --module telegram --test-name telegram_smoke \
-  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"token":"<BOT_TOKEN>"}}' \
-  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
-  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
-  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/telegram/<YYYY-MM-DD>/run.jsonl
-```
-
-**Discord (bot token required)**:
-```bash
-fcp-e2e --connector-cmd target/debug/fcp-discord \
-  --module discord --test-name discord_smoke \
-  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"bot_token":"<BOT_TOKEN>"}}' \
-  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
-  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
-  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/discord/<YYYY-MM-DD>/run.jsonl
-```
-
-**Twitter/X (OAuth 1.0a required)**:
-```bash
-fcp-e2e --connector-cmd target/debug/fcp-twitter \
-  --module twitter --test-name twitter_smoke \
-  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"consumer_key":"<CONSUMER_KEY>","consumer_secret":"<CONSUMER_SECRET>","access_token":"<ACCESS_TOKEN>","access_token_secret":"<ACCESS_TOKEN_SECRET>"}}' \
-  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
-  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
-  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/twitter/<YYYY-MM-DD>/run.jsonl
-```
-
-**OpenAI (API key required)**:
-```bash
-fcp-e2e --connector-cmd target/debug/fcp-openai \
-  --module openai --test-name openai_smoke \
-  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"api_key":"<OPENAI_API_KEY>"}}' \
-  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
-  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
-  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/openai/<YYYY-MM-DD>/run.jsonl
-```
-
-**Anthropic (API key required)**:
-```bash
-fcp-e2e --connector-cmd target/debug/fcp-anthropic \
-  --module anthropic --test-name anthropic_smoke \
-  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"api_key":"<ANTHROPIC_API_KEY>"}}' \
-  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
-  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
-  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/anthropic/<YYYY-MM-DD>/run.jsonl
-```
-
-**Invoke note:** connector `invoke` requires a valid `capability_token`. For manual runs, mint tokens via the host/mesh policy path (preferred). If running connectors directly, defer invoke until token minting is wired.
-
-### Logging Checklist
-- Every step emits a JSONL entry with `timestamp`, `script`, `step`, `correlation_id`, `result`.
-- Attach artifacts (response payloads, receipts, decision receipts) in `artifacts`.
-- Validate log schema after each run:
-  ```bash
-  fcp-e2e --validate-log artifacts/e2e/<connector>/<date>/run.jsonl
-  ```
-```
-
----
-
-## Appendix: Files with Highest Inline Test Density
-
-| File | Test Count | Notes |
-|------|-----------|-------|
-| fcp-core/src/provenance.rs | 103 | Provenance chain tests |
-| fcp-core/src/quorum.rs | 65 | Quorum logic tests |
-| fcp-core/src/operation.rs | 59 | Operation handling |
-| fcp-core/src/audit.rs | 55 | Audit chain tests |
-| fcp-core/src/error.rs | 54 | Error taxonomy |
-| fcp-core/src/protocol.rs | 54 | Protocol handling |
-| fcp-telemetry/src/metrics.rs | 49 | (disabled) |
-| fcp-registry/src/lib.rs | 48 | (disabled) |
-| fcp-core/src/health.rs | 37 | Health check logic |
-| fcp-core/src/checkpoint.rs | 35 | Checkpoint logic |
+- Current tree size: 149 connector directories and 28 workspace crates.
+- Connector source-adjacent test signal exists in 149/149 connectors, but only 87/149 currently present a clean `pure_unit` floor.
+- Connector crate-local `tests/` coverage exists in 100/149 connectors.
+- Connector `fcp-e2e` coverage exists in 84/149 connectors.
+- Connector `no_mock_integration.rs` coverage exists in 0/149 connectors.
+- Inline mock leakage exists in 62 connector crates and 12 workspace crates.
+- Workspace `no_mock_integration.rs` coverage exists in 18/28 crates, but 3 of those suites are misnamed and still belong to `deterministic_contract`.
+- Documented connector verification bundles exist in 8 connectors: `calendly`, `coda`, `feishu`, `hackernews`, `line`, `obsidian`, `square`, `zoom`.
+- Host-backed connector references exist for only 10 connectors: `browser`, `discord`, `exa`, `github`, `line`, `make`, `matrix`, `openai`, `signal`, `slack`.
+- Logging or replay-bundle evidence exists for 92/149 connectors.
+- `fcp-e2e` presence is not acceptance evidence by itself today: 79/87 `crates/fcp-e2e/tests` suites still import mock infrastructure.
+- High-risk connector gaps are concentrated in:
+- 10 connectors with only source-adjacent or otherwise pre-acceptance coverage and still no truthful acceptance path.
+- 36 connectors that are effectively unit-only and have no acceptance path.
+- 12 connectors with crate-local integration tests but no `fcp-e2e` coverage and no documented live bundle.
+- 8 stateful ingress connectors with no `fcp-e2e` or live-proof path.
+
+## Planning Priorities
+
+### P0: Pre-Acceptance Connectors Still Missing a Truthful Boundary
+
+These connectors still have no crate-local integration tests, no `fcp-e2e`
+coverage, and no documented live bundle. Some now have source-adjacent
+`#[cfg(test)]` coverage, but none currently cross a truthful acceptance
+boundary:
+
+- `brave-search`
+- `deepgram`
+- `exa`
+- `firecrawl`
+- `huggingface`
+- `perplexity-search`
+- `tavily`
+- `tlon`
+- `zalo`
+- `zalouser`
+
+### P1: Stateful ingress without real acceptance proof
+
+These connectors declare `streaming`, `bidirectional`, `polling`, or `webhook` behavior but currently have no `fcp-e2e` coverage or documented live bundle:
+
+- `google-workspace-events`
+- `matrix`
+- `mattermost`
+- `nextcloud-talk`
+- `signal`
+- `teams`
+- `tlon`
+- `zalo`
+
+### P2: Integration exists but acceptance is still missing
+
+These connectors have crate-local integration tests but no `fcp-e2e` coverage and no documented live bundle:
+
+- `aws`
+- `azure`
+- `cloudflare`
+- `firebase`
+- `google-places`
+- `hue`
+- `mysql`
+- `package-registry`
+- `sqlite`
+- `supabase`
+- `synology-chat`
+- `whatsapp`
+
+### P3: Archetype normalization debt
+
+Testing waves need a stable taxonomy, but the current manifest labels are not yet normalized to the V3 closed set. The live scan found one connector with no archetype and multiple connectors using non-V3 labels like `operational`, `knowledge`, `storage`, `local`, `cloud-control-plane`, and `read-only`.
+
+- `google-admin-reports` is currently missing an archetype declaration entirely.
+
+The family tables below therefore group connectors into planning families while preserving the raw manifest archetype values in each row.
+
+## Core Crate Matrix
+
+| Crate | Unit | Tests Dir | Mock/Fake | NoMock | Host | Logs | Benches | Known Gap |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fcp-async-core | Y | N | N | N | N | N | N | inline-only |
+| fcp-async-core-macros | Y | N | N | N | N | N | N | inline-only |
+| fcp-audit | Y | N | N | N | N | N | N | inline-only |
+| fcp-bootstrap | Y | Y | Y | Y | N | N | N | none |
+| fcp-cbor | Y | Y | N | N | N | N | Y | none |
+| fcp-conformance | Y | Y | Y | Y | Y | Y | N | none |
+| fcp-core | Y | Y | Y | N | N | Y | Y | none |
+| fcp-crypto | Y | Y | N | Y | N | N | Y | none |
+| fcp-e2e | Y | Y | Y | N | N | Y | N | none |
+| fcp-google-discovery | Y | N | Y | N | N | N | N | inline-only |
+| fcp-graphql | Y | Y | Y | Y | Y | N | N | none |
+| fcp-host | Y | Y | Y | Y | Y | Y | N | none |
+| fcp-manifest | Y | Y | Y | Y | N | N | N | none |
+| fcp-mesh | Y | Y | Y | Y | N | Y | Y | none |
+| fcp-oauth | Y | Y | Y | Y | N | N | N | none |
+| fcp-protocol | Y | Y | Y | Y | N | N | Y | none |
+| fcp-raptorq | Y | Y | Y | Y | N | Y | N | none |
+| fcp-ratelimit | Y | Y | N | N | N | N | N | none |
+| fcp-registry | Y | Y | Y | Y | N | N | N | none |
+| fcp-sandbox | Y | Y | Y | Y | Y | N | N | none |
+| fcp-sdk | Y | Y | Y | Y | N | Y | N | none |
+| fcp-store | Y | Y | Y | Y | N | Y | Y | none |
+| fcp-streaming | Y | Y | Y | Y | N | N | N | none |
+| fcp-tailscale | Y | Y | Y | Y | N | N | N | none |
+| fcp-telemetry | Y | Y | N | Y | N | N | N | none |
+| fcp-testkit | Y | Y | Y | N | Y | Y | N | none |
+| fcp-webhook | Y | Y | Y | Y | Y | N | N | none |
+| fwc | Y | Y | Y | N | Y | Y | Y | none |
+
+## Connector Matrix
+
+### Operational / Request
+
+| Connector | Manifest Archetypes | Unit | Int | Mock | NoMock | Host | E2E | Logs | Live | Known Gap |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| bluebubbles | operational | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| brave-search | request-response | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
+| browser | operational | Y | Y | Y | N | Y | Y | Y | undocumented | mock-backed e2e only |
+| calendly | operational | Y | Y | Y | N | N | N | Y | documented verification bundle | bundle only |
+| circleci | operational | Y | N | Y | N | N | N | N | mock-first localhost override | unit-only; no acceptance path |
+| coda | operational | Y | Y | Y | N | N | N | Y | documented verification bundle | bundle only |
+| confluence | operational | Y | N | Y | N | N | N | N | mock-first localhost override | unit-only; no acceptance path |
+| cron | operational | Y | Y | N | N | N | Y | Y | undocumented | mock-backed e2e only |
+| deepgram | request-response | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
+| dingtalk | operational | Y | N | Y | N | N | N | N | LAN or device-local runtime | unit-only; no acceptance path |
+| dockerhub | operational | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| elevenlabs | request-response | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| email-generic | operational | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| exa | request-response | N | N | N | N | Y | N | N | undocumented | no crate-local tests; no acceptance path |
+| feishu | operational | Y | Y | Y | N | N | N | Y | documented verification bundle | bundle only |
+| firecrawl | request-response | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
+| google-admin-reports | missing | Y | N | N | N | N | N | N | undocumented | archetype missing; unit-only; no acceptance path |
+| google-chat | operational | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| google-drive | request-response | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| google-people | operational | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| hue | operational | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| huggingface | request-response | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
+| imessage | operational | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| irc | operational | Y | N | N | N | N | N | N | mock-first localhost override | unit-only; no acceptance path |
+| line | operational | Y | Y | Y | N | Y | Y | Y | documented verification bundle | bundle only |
+| llm-router | operational | Y | Y | N | N | N | Y | Y | undocumented | mock-backed e2e only |
+| mailchimp | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| make | operational | Y | Y | Y | N | Y | Y | Y | undocumented | mock-backed e2e only |
+| mastodon | operational | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| mistral | request-response | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| n8n | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| netlify | operational | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| nostr | operational | Y | N | N | N | N | N | N | provider sandbox/account | unit-only; no acceptance path |
+| openrouter | request-response | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| package-registry | operational | Y | Y | Y | N | N | N | Y | mock-first localhost override | no acceptance path |
+| paypal | operational | Y | N | Y | N | N | N | N | provider sandbox/account | unit-only; no acceptance path |
+| perplexity-search | request-response | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
+| pulumi | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| qq | operational | Y | N | Y | N | N | N | N | LAN or device-local runtime | unit-only; no acceptance path |
+| retool | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| segment | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| sendgrid | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| shopify | operational | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| sonos | operational | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| square | operational | Y | Y | Y | N | N | N | Y | documented verification bundle | bundle only |
+| synology-chat | operational | Y | Y | Y | N | N | N | N | LAN or device-local runtime | no acceptance path |
+| tavily | request-response | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
+| telegram | messaging, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| terraform | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| twitch | operational | Y | N | Y | N | N | N | N | mock-first localhost override | unit-only; no acceptance path |
+| vercel | cloud-control-plane | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| wecom | operational | Y | N | Y | N | N | N | N | provider sandbox/account | unit-only; no acceptance path |
+| whatsapp | operational | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| whisper | operational | Y | N | Y | N | N | Y | Y | undocumented | unit-only; mock-backed e2e only |
+| wolfram | request-response | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| zapier | operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| zoom | operational | Y | Y | Y | N | N | N | Y | documented verification bundle | bundle only |
+
+### Knowledge / Retrieval
+
+| Connector | Manifest Archetypes | Unit | Int | Mock | NoMock | Host | E2E | Logs | Live | Known Gap |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1password | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| algolia | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| amplitude | knowledge | Y | Y | Y | N | N | Y | Y | mock-first localhost override | mock-backed e2e only |
+| annas-archive | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| asana | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| bitbucket | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| bitwarden | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| clickup | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| datadog | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| elasticsearch | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| evernote | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| gitlab | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| google-docs | operational, knowledge | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| google-places | read-only | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| google-sheets | operational, knowledge | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path |
+| grafana | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| hackernews | knowledge | Y | Y | Y | N | N | N | Y | documented verification bundle | bundle only |
+| intercom | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| linkedin | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| logseq | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| mcp-bridge | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| metabase | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| mixpanel | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| monday | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| obsidian | knowledge, operational | Y | Y | Y | N | N | N | Y | documented verification bundle | bundle only |
+| pandadoc | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| pinecone | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| posthog | knowledge | Y | Y | Y | N | N | Y | Y | mock-first localhost override | mock-backed e2e only |
+| qdrant | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| redis | knowledge, operational | Y | N | Y | N | N | Y | Y | undocumented | unit-only; mock-backed e2e only |
+| roam | knowledge | Y | Y | Y | N | N | Y | Y | LAN or device-local runtime | mock-backed e2e only |
+| salesforce | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| semanticscholar | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| todoist | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| trello | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| youtube | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+
+### Stateful Ingress
+
+| Connector | Manifest Archetypes | Unit | Int | Mock | NoMock | Host | E2E | Logs | Live | Known Gap |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| anthropic | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| arxiv | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| discord | operational, streaming, bidirectional | Y | Y | Y | N | Y | Y | Y | undocumented | mock-backed e2e only |
+| docusign | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| figma | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| github | operational, streaming, knowledge | Y | Y | Y | N | Y | Y | Y | undocumented | mock-backed e2e only |
+| gmail | operational, streaming, knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| google-ai | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| google-calendar | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| google-workspace-events | streaming, operational | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path; stateful ingress lacks host/live proof |
+| homeassistant | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| hubspot | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| jira | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| kubernetes | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| linear | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| matrix | bidirectional | Y | N | Y | N | Y | N | N | LAN or device-local runtime | unit-only; no acceptance path; stateful ingress lacks host/live proof |
+| mattermost | operational, bidirectional | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path; stateful ingress lacks host/live proof |
+| nextcloud-talk | operational, bidirectional | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path; stateful ingress lacks host/live proof |
+| notion | operational, knowledge, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| openai | operational, streaming | Y | Y | Y | N | Y | Y | Y | undocumented | mock-backed e2e only |
+| plaid | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| reddit | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| sentry | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| signal | operational, bidirectional | Y | N | Y | N | Y | N | N | undocumented | unit-only; no acceptance path; stateful ingress lacks host/live proof |
+| slack | operational, streaming, bidirectional | Y | Y | Y | N | Y | Y | Y | undocumented | mock-backed e2e only |
+| spotify | knowledge, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| stripe | operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| teams | bidirectional | Y | N | Y | N | N | N | N | undocumented | unit-only; no acceptance path; stateful ingress lacks host/live proof |
+| tlon | bidirectional | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path; stateful ingress lacks host/live proof |
+| twilio | operational, streaming, bidirectional | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| twitter | operational, streaming, bidirectional | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| vectordb | operational, bidirectional | Y | Y | N | N | N | Y | Y | undocumented | mock-backed e2e only |
+| webhook-receiver | operational, streaming | Y | Y | N | N | N | Y | Y | undocumented | mock-backed e2e only |
+| zalo | bidirectional, polling, webhook | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path; stateful ingress lacks host/live proof |
+| zendesk | operational, streaming, knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+
+### Storage / Data
+
+| Connector | Manifest Archetypes | Unit | Int | Mock | NoMock | Host | E2E | Logs | Live | Known Gap |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| airtable | storage, operational, streaming | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| aws | operational, storage | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| azure | operational, storage | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| bigquery | knowledge, storage | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| box | knowledge, storage | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| cloudflare | operational, storage | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| dropbox | knowledge, storage | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| duckdb | knowledge, storage | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| firebase | storage, operational | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| gcp | operational, storage | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| microsoft365 | knowledge, operational, streaming, storage | Y | Y | Y | N | N | Y | Y | mock-first localhost override | mock-backed e2e only |
+| mongodb | knowledge, storage | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| mysql | storage, operational | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+| postgresql | knowledge, storage | Y | N | Y | N | N | Y | Y | undocumented | unit-only; mock-backed e2e only |
+| s3 | storage, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| snowflake | knowledge, storage | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| sqlite | storage, operational | Y | Y | N | N | N | N | N | undocumented | no acceptance path |
+| supabase | storage, operational | Y | Y | Y | N | N | N | N | undocumented | no acceptance path |
+
+### Local / Tool
+
+| Connector | Manifest Archetypes | Unit | Int | Mock | NoMock | Host | E2E | Logs | Live | Known Gap |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| apple-notes | local | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| apple-reminders | local | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
+| zalouser | cli-process | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
+
+## What This Means For Wave Planning
+
+- The next policy bead should treat connector `no_mock` acceptance as essentially absent. The only real connector-side non-mock evidence today is the small verification-bundle set documented above.
+- The first implementation waves should target `P0` and `P1` connectors before polishing already well-covered mock-backed request/response surfaces.
+- The host, conformance, SDK, store, and `fwc` layers already have strong enough scaffolding to support acceptance expansion without another archaeology pass.
+- A later cleanup bead should normalize manifest archetype labels to the V3 contract so these testing waves can align directly with the normative taxonomy instead of this derived grouping.

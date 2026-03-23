@@ -730,6 +730,72 @@ mod tests {
         assert_eq!(output["media_id"], "MEDIA123");
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn send_image_message_posts_media_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cgi-bin/gettoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errcode": 0,
+                "errmsg": "ok",
+                "access_token": "token-123",
+                "expires_in": 7200
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/cgi-bin/message/send"))
+            .and(query_param("access_token", "token-123"))
+            .and(body_partial_json(json!({
+                "touser": "zhangsan",
+                "msgtype": "image",
+                "agentid": 1_000_002_u64,
+                "image": { "media_id": "MEDIA123" },
+                "safe": 1,
+                "enable_duplicate_check": 1,
+                "duplicate_check_interval": 120
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errcode": 0,
+                "errmsg": "ok",
+                "msgid": "mid-image-1"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = WeComClient::new(
+            WeComConfig::from_value(json!({
+                "base_url": server.uri(),
+                "corp_id": "corp",
+                "agent_id": 1_000_002_u64,
+                "agent_secret": "secret",
+                "request_timeout_ms": DEFAULT_TIMEOUT_MS,
+            }))
+            .expect("config should parse"),
+        )
+        .expect("client should build");
+
+        let request = WeComMessageRequest::from_value(
+            &json!({
+                "touser": "zhangsan",
+                "media_id": "MEDIA123",
+                "safe": true,
+                "enable_duplicate_check": true,
+                "duplicate_check_interval": 120,
+            }),
+            WeComMessageKind::Image,
+        )
+        .expect("image request should parse");
+
+        let output = client
+            .send_message(&request)
+            .await
+            .expect("send image should succeed");
+
+        assert_eq!(output["msgid"], "mid-image-1");
+    }
+
     #[test]
     fn verify_callback_url_returns_plaintext_challenge() {
         let client = WeComClient::new(

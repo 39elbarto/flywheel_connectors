@@ -28,6 +28,8 @@ const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_SEND_TEXT: &str = "wecom.messages.send_text";
 const OP_SEND_MARKDOWN: &str = "wecom.messages.send_markdown";
+const OP_SEND_IMAGE: &str = "wecom.messages.send_image";
+const OP_SEND_FILE: &str = "wecom.messages.send_file";
 const OP_UPLOAD_MEDIA: &str = "wecom.media.upload";
 const OP_DOWNLOAD_MEDIA: &str = "wecom.media.download";
 const OP_GET_USER: &str = "wecom.users.get";
@@ -100,7 +102,9 @@ impl WeComConnector {
                         "touser": { "type": "string" },
                         "toparty": { "type": "string" },
                         "totag": { "type": "string" },
-                        "safe": { "type": "boolean" }
+                        "safe": { "type": "boolean" },
+                        "enable_duplicate_check": { "type": "boolean" },
+                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
                     }
                 }),
                 "Use when a work-zone automation must proactively deliver plain text into WeCom.",
@@ -119,10 +123,56 @@ impl WeComConnector {
                         "content": { "type": "string" },
                         "touser": { "type": "string" },
                         "toparty": { "type": "string" },
-                        "totag": { "type": "string" }
+                        "totag": { "type": "string" },
+                        "enable_duplicate_check": { "type": "boolean" },
+                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
                     }
                 }),
                 "Use when the destination accepts WeCom markdown rendering and rich formatting matters.",
+            ),
+            operation(
+                OP_SEND_IMAGE,
+                "Send a WeCom image message",
+                CAP_MESSAGES_WRITE,
+                RiskLevel::Medium,
+                SafetyTier::Risky,
+                IdempotencyClass::None,
+                json!({
+                    "type": "object",
+                    "required": ["media_id"],
+                    "properties": {
+                        "media_id": { "type": "string" },
+                        "touser": { "type": "string" },
+                        "toparty": { "type": "string" },
+                        "totag": { "type": "string" },
+                        "safe": { "type": "boolean" },
+                        "enable_duplicate_check": { "type": "boolean" },
+                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
+                    }
+                }),
+                "Use after `wecom.media.upload` when you need to send one uploaded image by its temporary WeCom `media_id`.",
+            ),
+            operation(
+                OP_SEND_FILE,
+                "Send a WeCom file message",
+                CAP_MESSAGES_WRITE,
+                RiskLevel::Medium,
+                SafetyTier::Risky,
+                IdempotencyClass::None,
+                json!({
+                    "type": "object",
+                    "required": ["media_id"],
+                    "properties": {
+                        "media_id": { "type": "string" },
+                        "touser": { "type": "string" },
+                        "toparty": { "type": "string" },
+                        "totag": { "type": "string" },
+                        "safe": { "type": "boolean" },
+                        "enable_duplicate_check": { "type": "boolean" },
+                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
+                    }
+                }),
+                "Use after `wecom.media.upload` when you need to send one uploaded file by its temporary WeCom `media_id`.",
             ),
             operation(
                 OP_UPLOAD_MEDIA,
@@ -262,6 +312,24 @@ impl WeComConnector {
             OP_SEND_MARKDOWN => {
                 let request =
                     WeComMessageRequest::from_value(&req.input, WeComMessageKind::Markdown)?;
+                let output = state
+                    .client
+                    .send_message(&request)
+                    .await
+                    .map_err(|error| error.to_fcp_error())?;
+                (output, Vec::new())
+            }
+            OP_SEND_IMAGE => {
+                let request = WeComMessageRequest::from_value(&req.input, WeComMessageKind::Image)?;
+                let output = state
+                    .client
+                    .send_message(&request)
+                    .await
+                    .map_err(|error| error.to_fcp_error())?;
+                (output, Vec::new())
+            }
+            OP_SEND_FILE => {
+                let request = WeComMessageRequest::from_value(&req.input, WeComMessageKind::File)?;
                 let output = state
                     .client
                     .send_message(&request)
@@ -695,6 +763,11 @@ fn callback_conversation(
     message: &BTreeMap<String, String>,
     agent_id: &str,
 ) -> Option<WeComConversation> {
+    if xml_field(message, "MsgType").is_some_and(|msg_type| msg_type.eq_ignore_ascii_case("event"))
+    {
+        return None;
+    }
+
     if let Some(chat_id) = xml_field(message, "OpenChatId").or_else(|| xml_field(message, "ChatId"))
     {
         let chat_id = chat_id.to_string();
@@ -902,7 +975,7 @@ fn push_unique(values: &mut Vec<String>, candidate: String) {
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
-        OP_SEND_TEXT | OP_SEND_MARKDOWN => CAP_MESSAGES_WRITE,
+        OP_SEND_TEXT | OP_SEND_MARKDOWN | OP_SEND_IMAGE | OP_SEND_FILE => CAP_MESSAGES_WRITE,
         OP_UPLOAD_MEDIA => CAP_MEDIA_WRITE,
         OP_DOWNLOAD_MEDIA => CAP_MEDIA_READ,
         OP_GET_USER => CAP_USERS_READ,
@@ -1141,6 +1214,47 @@ mod tests {
     }
 
     #[test]
+    fn operations_advertise_image_file_and_duplicate_check_inputs() {
+        let operations = WeComConnector::operations();
+
+        let send_text = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_SEND_TEXT)
+            .expect("send_text operation should exist");
+        assert!(
+            send_text
+                .input_schema
+                .get("properties")
+                .and_then(|value| value.get("enable_duplicate_check"))
+                .is_some(),
+            "send_text should advertise duplicate-check input"
+        );
+
+        let send_image = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_SEND_IMAGE)
+            .expect("send_image operation should exist");
+        assert_eq!(send_image.capability.as_str(), CAP_MESSAGES_WRITE);
+        assert_eq!(send_image.idempotency, IdempotencyClass::None);
+        assert_eq!(
+            send_image
+                .input_schema
+                .get("required")
+                .and_then(Value::as_array)
+                .and_then(|required| required.first())
+                .and_then(Value::as_str),
+            Some("media_id")
+        );
+
+        let send_file = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_SEND_FILE)
+            .expect("send_file operation should exist");
+        assert_eq!(send_file.capability.as_str(), CAP_MESSAGES_WRITE);
+        assert_eq!(send_file.idempotency, IdempotencyClass::None);
+    }
+
+    #[test]
     fn normalize_callback_event_prefers_room_stream_and_attachment_refs() {
         let connector = WeComConnector::new();
         let verifier = CapabilityVerifier::new(
@@ -1231,8 +1345,17 @@ mod tests {
         );
 
         assert_eq!(event.topic, "wecom.event.change_contact.create_user");
+        assert!(event.stream_key.is_none());
         assert_eq!(event.ordering, Some(OrderingPolicy::Unordered));
         assert_eq!(event.data.principal.kind, "user");
         assert_eq!(event.data.principal.id, "bob");
+        assert!(event.data.payload["conversation"].is_null());
+        assert!(
+            event
+                .data
+                .resource_uris
+                .iter()
+                .any(|uri| uri == "wecom:user:bob")
+        );
     }
 }

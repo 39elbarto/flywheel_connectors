@@ -370,11 +370,6 @@ fn parse_prefix(raw: &str) -> IrcPrefix {
 
 fn primary_target(kind: IrcEventKind, params: &[String], trailing: Option<&str>) -> Option<String> {
     match kind {
-        IrcEventKind::Privmsg
-        | IrcEventKind::Notice
-        | IrcEventKind::Part
-        | IrcEventKind::Mode
-        | IrcEventKind::Topic => params.first().cloned(),
         IrcEventKind::Join => params
             .first()
             .cloned()

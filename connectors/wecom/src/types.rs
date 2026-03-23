@@ -41,6 +41,16 @@ pub struct WeComStateModel {
 pub enum WeComMessageKind {
     Text,
     Markdown,
+    Image,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WeComMessagePayload {
+    Text { content: String },
+    Markdown { content: String },
+    Image { media_id: String },
+    File { media_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,9 +63,10 @@ pub struct WeComMessageTargets {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WeComMessageRequest {
     targets: WeComMessageTargets,
-    content: String,
     safe: bool,
-    kind: WeComMessageKind,
+    enable_duplicate_check: bool,
+    duplicate_check_interval: Option<u32>,
+    payload: WeComMessagePayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,35 +390,68 @@ impl WeComMessageTargets {
 
 impl WeComMessageRequest {
     pub fn from_value(input: &Value, kind: WeComMessageKind) -> FcpResult<Self> {
+        let payload = match kind {
+            WeComMessageKind::Text => WeComMessagePayload::Text {
+                content: required_string(input, "content")?.to_string(),
+            },
+            WeComMessageKind::Markdown => WeComMessagePayload::Markdown {
+                content: required_string(input, "content")?.to_string(),
+            },
+            WeComMessageKind::Image => WeComMessagePayload::Image {
+                media_id: required_string(input, "media_id")?.to_string(),
+            },
+            WeComMessageKind::File => WeComMessagePayload::File {
+                media_id: required_string(input, "media_id")?.to_string(),
+            },
+        };
+
         Ok(Self {
             targets: WeComMessageTargets::from_value(input)?,
-            content: required_string(input, "content")?.to_string(),
-            safe: input.get("safe").and_then(Value::as_bool).unwrap_or(false),
-            kind,
+            safe: optional_bool_like(input, "safe")?.unwrap_or(false),
+            enable_duplicate_check: optional_bool_like(input, "enable_duplicate_check")?
+                .unwrap_or(false),
+            duplicate_check_interval: optional_u32(input, "duplicate_check_interval")?,
+            payload,
         })
     }
 
     #[must_use]
     pub fn to_body(&self, agent_id: u64) -> Value {
-        match self.kind {
-            WeComMessageKind::Text => json!({
-                "touser": self.targets.touser(),
-                "toparty": self.targets.toparty(),
-                "totag": self.targets.totag(),
-                "msgtype": "text",
-                "agentid": agent_id,
-                "text": { "content": self.content },
-                "safe": i32::from(self.safe),
-            }),
-            WeComMessageKind::Markdown => json!({
-                "touser": self.targets.touser(),
-                "toparty": self.targets.toparty(),
-                "totag": self.targets.totag(),
-                "msgtype": "markdown",
-                "agentid": agent_id,
-                "markdown": { "content": self.content },
-            }),
+        let mut body = json!({
+            "touser": self.targets.touser(),
+            "toparty": self.targets.toparty(),
+            "totag": self.targets.totag(),
+            "agentid": agent_id,
+            "enable_duplicate_check": i32::from(self.enable_duplicate_check),
+        });
+
+        if let Some(interval) = self.duplicate_check_interval {
+            body["duplicate_check_interval"] = json!(interval);
         }
+
+        match &self.payload {
+            WeComMessagePayload::Text { content } => {
+                body["msgtype"] = json!("text");
+                body["text"] = json!({ "content": content });
+                body["safe"] = json!(i32::from(self.safe));
+            }
+            WeComMessagePayload::Markdown { content } => {
+                body["msgtype"] = json!("markdown");
+                body["markdown"] = json!({ "content": content });
+            }
+            WeComMessagePayload::Image { media_id } => {
+                body["msgtype"] = json!("image");
+                body["image"] = json!({ "media_id": media_id });
+                body["safe"] = json!(i32::from(self.safe));
+            }
+            WeComMessagePayload::File { media_id } => {
+                body["msgtype"] = json!("file");
+                body["file"] = json!({ "media_id": media_id });
+                body["safe"] = json!(i32::from(self.safe));
+            }
+        }
+
+        body
     }
 }
 
@@ -570,6 +614,47 @@ fn optional_trimmed_string(input: &Value, field: &str) -> String {
         .unwrap_or_default()
 }
 
+fn optional_bool_like(input: &Value, field: &str) -> FcpResult<Option<bool>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+
+    if let Some(boolean) = value.as_bool() {
+        return Ok(Some(boolean));
+    }
+    if let Some(integer) = value.as_i64() {
+        return match integer {
+            0 => Ok(Some(false)),
+            1 => Ok(Some(true)),
+            _ => Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must be a boolean or 0/1"),
+            }),
+        };
+    }
+
+    Err(FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("{field} must be a boolean or 0/1"),
+    })
+}
+
+fn optional_u32(input: &Value, field: &str) -> FcpResult<Option<u32>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+
+    let integer = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("{field} must be a non-negative integer"),
+    })?;
+    let integer = u32::try_from(integer).map_err(|_| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("{field} must fit into a 32-bit integer"),
+    })?;
+    Ok(Some(integer))
+}
+
 fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
     value
         .get(field)
@@ -660,6 +745,60 @@ mod tests {
         )
         .expect_err("one target is required");
         assert!(matches!(error, FcpError::InvalidRequest { code: 1005, .. }));
+    }
+
+    #[test]
+    fn text_message_request_includes_duplicate_check_fields() {
+        let request = WeComMessageRequest::from_value(
+            &json!({
+                "touser": "zhangsan",
+                "content": "hello",
+                "safe": 1,
+                "enable_duplicate_check": true,
+                "duplicate_check_interval": 300,
+            }),
+            WeComMessageKind::Text,
+        )
+        .expect("text request should parse");
+
+        let body = request.to_body(1_000_002_u64);
+        assert_eq!(body["msgtype"], "text");
+        assert_eq!(body["safe"], 1);
+        assert_eq!(body["enable_duplicate_check"], 1);
+        assert_eq!(body["duplicate_check_interval"], 300);
+        assert_eq!(body["text"]["content"], "hello");
+    }
+
+    #[test]
+    fn image_message_request_requires_media_id() {
+        let error = WeComMessageRequest::from_value(
+            &json!({
+                "touser": "zhangsan",
+            }),
+            WeComMessageKind::Image,
+        )
+        .expect_err("image request must require media_id");
+        assert!(matches!(error, FcpError::InvalidRequest { code: 1005, .. }));
+    }
+
+    #[test]
+    fn file_message_request_builds_media_payload() {
+        let request = WeComMessageRequest::from_value(
+            &json!({
+                "touser": "zhangsan",
+                "media_id": "MEDIA123",
+                "safe": false,
+                "enable_duplicate_check": 1,
+            }),
+            WeComMessageKind::File,
+        )
+        .expect("file request should parse");
+
+        let body = request.to_body(1_000_002_u64);
+        assert_eq!(body["msgtype"], "file");
+        assert_eq!(body["file"]["media_id"], "MEDIA123");
+        assert_eq!(body["safe"], 0);
+        assert_eq!(body["enable_duplicate_check"], 1);
     }
 
     #[test]

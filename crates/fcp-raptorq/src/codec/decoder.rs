@@ -12,7 +12,7 @@
 //! - Same received symbols in same order produce identical decode results
 
 use super::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
-use super::systematic::{ConstraintMatrix, SystematicParams};
+use super::systematic::{ConstraintMatrix, SystematicParamError, SystematicParams};
 
 use std::collections::{BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -184,6 +184,14 @@ pub enum DecodeError {
         /// Actual size found.
         actual: usize,
     },
+    /// The number of symbols provided is not supported.
+    #[error("unsupported source block size K={requested}; supported range is 1..={max_supported}")]
+    UnsupportedSourceBlockSize {
+        /// The requested number of source symbols.
+        requested: usize,
+        /// The maximum supported number of source symbols (56,403).
+        max_supported: usize,
+    },
     /// Received symbol has mismatched equation vectors.
     #[error(
         "symbol equation arity mismatch for ESI {esi}: {columns} columns vs {coefficients} coefficients"
@@ -244,6 +252,7 @@ impl DecodeError {
             Self::SymbolSizeMismatch { .. }
             | Self::SymbolEquationArityMismatch { .. }
             | Self::ColumnIndexOutOfRange { .. }
+            | Self::UnsupportedSourceBlockSize { .. }
             | Self::CorruptDecodedOutput { .. } => DecodeFailureClass::Unrecoverable,
         }
     }
@@ -1227,14 +1236,24 @@ pub struct InactivationDecoder {
 
 impl InactivationDecoder {
     /// Create a new decoder for the given parameters.
-    #[must_use]
-    pub fn new(k: usize, symbol_size: usize, seed: u64) -> Self {
-        let params = SystematicParams::for_source_block(k, symbol_size);
-        Self {
+    ///
+    /// # Errors
+    /// Returns `DecodeError::UnsupportedSourceBlockSize` if `k` exceeds 56,403.
+    pub fn new(k: usize, symbol_size: usize, seed: u64) -> Result<Self, DecodeError> {
+        let params = SystematicParams::try_for_source_block(k, symbol_size).map_err(|err| match err {
+            SystematicParamError::UnsupportedSourceBlockSize {
+                requested,
+                max_supported,
+            } => DecodeError::UnsupportedSourceBlockSize {
+                requested,
+                max_supported,
+            },
+        })?;
+        Ok(Self {
             params,
             seed,
             dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
-        }
+        })
     }
 
     /// Returns the encoding parameters.
@@ -2468,7 +2487,7 @@ mod tests {
     #[test]
     fn all_source_equations_returns_identity_map() {
         let k = 8;
-        let decoder = InactivationDecoder::new(k, 32, 42);
+        let decoder = InactivationDecoder::new(k, 32, 42).unwrap();
         let equations = decoder.all_source_equations();
 
         assert_eq!(equations.len(), k, "should return exactly K equations");
@@ -2485,7 +2504,7 @@ mod tests {
     #[test]
     fn source_equation_matches_all_source_equations() {
         let k = 12;
-        let decoder = InactivationDecoder::new(k, 16, 99);
+        let decoder = InactivationDecoder::new(k, 16, 99).unwrap();
         let all = decoder.all_source_equations();
 
         for esi in 0..k as u32 {
@@ -2501,7 +2520,7 @@ mod tests {
     #[should_panic(expected = "source ESI must be < K")]
     fn source_equation_panics_on_esi_ge_k() {
         let k = 4;
-        let decoder = InactivationDecoder::new(k, 16, 42);
+        let decoder = InactivationDecoder::new(k, 16, 42).unwrap();
         let _ = decoder.source_equation(k as u32); // ESI == K should panic
     }
 

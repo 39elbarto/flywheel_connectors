@@ -669,25 +669,33 @@ impl Sandbox for LinuxSandbox {
                     rlim_cur: memory_limit_bytes,
                     rlim_max: memory_limit_bytes,
                 };
-                libc::setrlimit(libc::RLIMIT_DATA, &limit_data);
+                if libc::setrlimit(libc::RLIMIT_DATA, &limit_data) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 let limit_cpu = libc::rlimit {
                     rlim_cur: cpu_seconds,
                     rlim_max: cpu_seconds + 5,
                 };
-                libc::setrlimit(libc::RLIMIT_CPU, &limit_cpu);
+                if libc::setrlimit(libc::RLIMIT_CPU, &limit_cpu) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 let limit_fd = libc::rlimit {
                     rlim_cur: 1024,
                     rlim_max: 4096,
                 };
-                libc::setrlimit(libc::RLIMIT_NOFILE, &limit_fd);
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limit_fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 let limit_core = libc::rlimit {
                     rlim_cur: 0,
                     rlim_max: 0,
                 };
-                libc::setrlimit(libc::RLIMIT_CORE, &limit_core);
+                if libc::setrlimit(libc::RLIMIT_CORE, &limit_core) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 // Landlock requires PR_SET_NO_NEW_PRIVS if we lack CAP_SYS_ADMIN
                 libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
@@ -722,12 +730,13 @@ impl Sandbox for LinuxSandbox {
                     let attr = LandlockRulesetAttr {
                         handled_access_fs: all_fs_access,
                     };
-                    let ruleset_fd = libc::syscall(
+                    let raw_fd = libc::syscall(
                         libc::SYS_landlock_create_ruleset,
                         &attr as *const _,
                         std::mem::size_of::<LandlockRulesetAttr>(),
                         0,
-                    ) as i32;
+                    );
+                    let ruleset_fd = i32::try_from(raw_fd).unwrap_or(-1);
 
                     if ruleset_fd >= 0 {
                         // Add rules
@@ -921,8 +930,9 @@ fn check_landlock_available() -> bool {
             std::mem::size_of::<LandlockRulesetAttr>(),
             0,
         );
-        if fd >= 0 {
-            libc::close(fd as i32);
+        let fd_i32 = i32::try_from(fd).unwrap_or(-1);
+        if fd_i32 >= 0 {
+            libc::close(fd_i32);
             true
         } else {
             false
@@ -1047,7 +1057,9 @@ fn apply_landlock(policy: &CompiledPolicy) -> Result<(), SandboxError> {
         )));
     }
 
-    let ruleset_fd = ruleset_fd as i32;
+    let ruleset_fd = i32::try_from(ruleset_fd).map_err(|_| {
+        SandboxError::SyscallFailed("landlock_create_ruleset returned invalid fd".into())
+    })?;
 
     // Add rules for readonly paths
     for path in &policy.readonly_paths {

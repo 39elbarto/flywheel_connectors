@@ -17,7 +17,6 @@ fcp-core = { path = "../fcp-core" }
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }
-asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat", features = ["tokio-io", "hyper-bridge"] }
 
 # Async runtime
 async-trait = "0.1"

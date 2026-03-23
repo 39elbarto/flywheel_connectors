@@ -10,8 +10,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use asupersync_tokio_compat::hyper_bridge::AsupersyncExecutor;
-use asupersync_tokio_compat::io::TokioIo;
 use axum::{
     Json, Router,
     body::Body,
@@ -24,6 +22,7 @@ use axum::{
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use fcp_async_core::hyper_bridge::{HyperExecutor, HyperIo};
 use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
@@ -665,8 +664,8 @@ async fn handle_accept_error(err: std::io::Error) {
     fcp_async_core::time::sleep(Duration::from_secs(1)).await;
 }
 
-fn hyper_executor() -> AsupersyncExecutor {
-    AsupersyncExecutor::with_spawn_fn(|future| {
+fn hyper_executor() -> HyperExecutor {
+    HyperExecutor::with_spawn_fn(|future| {
         std::mem::drop(task::spawn(future));
     })
 }
@@ -703,7 +702,7 @@ async fn serve_tcp(
             futures_util::future::Either::Left((result, _)) => match result {
                 Ok((stream, addr)) => {
                     tracing::debug!(transport = "tcp", remote_addr = %addr, "accepted connection");
-                    spawn_http_connection(TokioIo::new(stream), app.clone());
+                    spawn_http_connection(HyperIo::new(stream), app.clone());
                 }
                 Err(err) => handle_accept_error(err).await,
             },
@@ -735,7 +734,7 @@ async fn serve_unix(
             futures_util::future::Either::Left((result, _)) => match result {
                 Ok((stream, addr)) => {
                     tracing::debug!(transport = "unix", remote_addr = ?addr, "accepted connection");
-                    spawn_http_connection(TokioIo::new(stream), app.clone());
+                    spawn_http_connection(HyperIo::new(stream), app.clone());
                 }
                 Err(err) => handle_accept_error(err).await,
             },
@@ -2222,7 +2221,7 @@ async fn signal_handler_loop(
     shutdown_tx: fcp_async_core::channel::watch::Sender<bool>,
 ) {
     // On non-Unix platforms, wait for Ctrl+C through the native asupersync
-    // signal shim instead of the tokio bridge.
+    // signal shim instead of a compatibility bridge.
     if let Err(err) = asupersync::signal::ctrl_c().await {
         tracing::error!(
             event = "signal_registration_failed",

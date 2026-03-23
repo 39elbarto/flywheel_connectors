@@ -347,25 +347,33 @@ impl Sandbox for MacOsSandbox {
                     rlim_cur: memory_limit_bytes,
                     rlim_max: memory_limit_bytes,
                 };
-                libc::setrlimit(libc::RLIMIT_DATA, &memory_limit);
+                if libc::setrlimit(libc::RLIMIT_DATA, &memory_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 let cpu_limit = libc::rlimit {
                     rlim_cur: cpu_seconds,
                     rlim_max: cpu_seconds + 5,
                 };
-                libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
+                if libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 let fd_limit = libc::rlimit {
                     rlim_cur: 1024,
                     rlim_max: 4096,
                 };
-                libc::setrlimit(libc::RLIMIT_NOFILE, &fd_limit);
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &fd_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 let core_limit = libc::rlimit {
                     rlim_cur: 0,
                     rlim_max: 0,
                 };
-                libc::setrlimit(libc::RLIMIT_CORE, &core_limit);
+                if libc::setrlimit(libc::RLIMIT_CORE, &core_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
 
                 // Apply sandbox
                 let mut errorbuf: *mut i8 = std::ptr::null_mut();

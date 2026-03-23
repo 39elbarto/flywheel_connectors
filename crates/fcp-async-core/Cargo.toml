@@ -13,8 +13,9 @@ workspace = true
 
 [dependencies]
 asupersync = { path = "/dp/asupersync", default-features = false, features = ["tracing-integration", "tls", "tls-native-roots"] }
-asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat", features = ["tokio-io"] }
 fcp-async-core-macros = { path = "../fcp-async-core-macros" }
 futures-util.workspace = true
+hyper = "1.8.1"
+pin-project-lite = "0.2"
 thiserror.workspace = true
 tokio = { version = "1", default-features = false, features = ["io-std", "rt"] }

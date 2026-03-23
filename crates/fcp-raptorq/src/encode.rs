@@ -63,6 +63,13 @@ impl RaptorQEncoder {
         }
 
         let symbol_size = validated_symbol_size(config)?;
+        let k = payload.len().div_ceil(symbol_size);
+        if k > 56403 {
+            return Err(EncodeError::UnsupportedSourceBlockSize {
+                requested: k,
+                max_supported: 56403,
+            });
+        }
 
         // Split payload into symbol-sized chunks, zero-padding the last one
         let source_symbols: Vec<Vec<u8>> = payload

@@ -59,6 +59,15 @@ pub enum EncodeError {
         /// Reason the configuration is invalid.
         reason: String,
     },
+
+    /// The number of symbols needed for the payload exceeds the supported maximum (56,403).
+    #[error("unsupported source block size K={requested}; supported range is 1..={max_supported}")]
+    UnsupportedSourceBlockSize {
+        /// The requested number of source symbols.
+        requested: usize,
+        /// The maximum supported number of source symbols (56,403).
+        max_supported: usize,
+    },
 }
 
 /// `RaptorQ` decode errors.
@@ -125,6 +134,15 @@ pub enum DecodeError {
     Runtime {
         /// Runtime failure reason.
         reason: String,
+    },
+
+    /// The number of symbols provided is not supported.
+    #[error("unsupported source block size K={requested}; supported range is 1..={max_supported}")]
+    UnsupportedSourceBlockSize {
+        /// The requested number of source symbols.
+        requested: usize,
+        /// The maximum supported number of source symbols (56,403).
+        max_supported: usize,
     },
 }
 
@@ -579,9 +597,12 @@ mod tests {
     #[test]
     fn decode_error_runtime_display_exact() {
         let err = DecodeError::Runtime {
-            reason: "tokio join failed".into(),
+            reason: "async task join failed".into(),
         };
-        assert_eq!(err.to_string(), "decode runtime failure: tokio join failed");
+        assert_eq!(
+            err.to_string(),
+            "decode runtime failure: async task join failed"
+        );
     }
 
     #[test]

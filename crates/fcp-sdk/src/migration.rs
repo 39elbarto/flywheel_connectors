@@ -1,7 +1,7 @@
 //! Connector migration framework for the `AsyncSuperSync` transition.
 //!
 //! This module provides shared helpers that all connectors use when migrating
-//! from direct `tokio` usage to the `fcp-async-core` substrate. It eliminates
+//! from legacy runtime-specific code to the `fcp-async-core` substrate. It eliminates
 //! duplicated runtime bootstrap, retry loop, and error mapping code across
 //! connector crates.
 //!

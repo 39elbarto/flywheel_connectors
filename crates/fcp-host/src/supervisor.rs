@@ -853,19 +853,41 @@ impl ResourceUsage {
     #[allow(clippy::cast_precision_loss)]
     pub fn utilization(&self, limits: &ResourceLimits) -> ResourceUtilization {
         ResourceUtilization {
-            memory: limits
-                .memory_bytes
-                .map(|l| self.memory_bytes as f64 / l as f64),
-            cpu: limits
-                .cpu_seconds
-                .map(|l| (self.cpu_millis as f64 / 1000.0) / l as f64),
-            fds: limits.max_fds.map(|l| self.open_fds as f64 / l as f64),
-            processes: limits
-                .max_processes
-                .map(|l| self.process_count as f64 / l as f64),
-            file_size: limits
-                .max_file_size_bytes
-                .map(|l| self.file_size_bytes as f64 / l as f64),
+            memory: limits.memory_bytes.map(|l| {
+                if l == 0 {
+                    0.0
+                } else {
+                    self.memory_bytes as f64 / l as f64
+                }
+            }),
+            cpu: limits.cpu_seconds.map(|l| {
+                if l == 0 {
+                    0.0
+                } else {
+                    (self.cpu_millis as f64 / 1000.0) / l as f64
+                }
+            }),
+            fds: limits.max_fds.map(|l| {
+                if l == 0 {
+                    0.0
+                } else {
+                    self.open_fds as f64 / l as f64
+                }
+            }),
+            processes: limits.max_processes.map(|l| {
+                if l == 0 {
+                    0.0
+                } else {
+                    self.process_count as f64 / l as f64
+                }
+            }),
+            file_size: limits.max_file_size_bytes.map(|l| {
+                if l == 0 {
+                    0.0
+                } else {
+                    self.file_size_bytes as f64 / l as f64
+                }
+            }),
         }
     }
 }

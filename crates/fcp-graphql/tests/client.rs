@@ -1,17 +1,21 @@
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 
-use asupersync_tokio_compat::io::TokioIo;
+use asupersync::Cx;
+use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::net::websocket::{CloseReason, Message, ServerWebSocket, WebSocketAcceptor};
 use chrono::Utc;
-use fcp_async_core::net::TcpListener;
+use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_async_core::task;
 use fcp_testkit::LogCapture;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::accept_async;
-use tokio_tungstenite::tungstenite::Message;
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -251,6 +255,81 @@ impl TestContext {
             .expect("structured test log entry");
         self.capture.assert_valid();
     }
+}
+
+type TestServerWebSocket = ServerWebSocket<TcpStream>;
+
+async fn read_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+    const MAX_HEADERS: usize = 16 * 1024;
+
+    let mut buf = Vec::with_capacity(1024);
+    let mut temp = [0u8; 256];
+
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before websocket handshake completed",
+            ));
+        }
+
+        buf.extend_from_slice(&temp[..read]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_test_websocket(mut stream: TcpStream) -> TestServerWebSocket {
+    let request = read_http_headers(&mut stream)
+        .await
+        .expect("read websocket handshake");
+    WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept websocket")
+}
+
+fn expect_text_message(message: Message, context: &str) -> String {
+    match message {
+        Message::Text(text) => text,
+        other => panic!("expected text frame for {context}, got {other:?}"),
+    }
+}
+
+async fn recv_text(ws: &mut TestServerWebSocket, context: &str) -> String {
+    let message = ws
+        .recv(&Cx::for_testing())
+        .await
+        .expect(context)
+        .unwrap_or_else(|| panic!("{context} missing"));
+    expect_text_message(message, context)
+}
+
+async fn send_json(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
+    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn close_test_websocket(ws: &mut TestServerWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
 }
 
 #[fcp_async_core::runtime::test]
@@ -843,27 +922,23 @@ async fn subscription_receives_next_message() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
+        let mut ws = accept_test_websocket(stream).await;
 
-        let init = ws.next().await.expect("init message").expect("init ok");
-        let init_text = init.into_text().expect("init text");
+        let init_text = recv_text(&mut ws, "init message").await;
         let init_value: serde_json::Value = serde_json::from_str(&init_text).expect("init json");
         assert_eq!(
             init_value.get("type").and_then(serde_json::Value::as_str),
             Some("connection_init")
         );
 
-        let ack = serde_json::json!({ "type": "connection_ack" });
-        ws.send(Message::Text(ack.to_string().into()))
-            .await
-            .expect("ack send");
+        send_json(
+            &mut ws,
+            serde_json::json!({ "type": "connection_ack" }),
+            "ack send",
+        )
+        .await;
 
-        let subscribe = ws
-            .next()
-            .await
-            .expect("subscribe message")
-            .expect("subscribe ok");
-        let subscribe_text = subscribe.into_text().expect("subscribe text");
+        let subscribe_text = recv_text(&mut ws, "subscribe message").await;
         let subscribe_value: serde_json::Value =
             serde_json::from_str(&subscribe_text).expect("subscribe json");
         assert_eq!(
@@ -873,21 +948,25 @@ async fn subscription_receives_next_message() {
             Some("subscribe")
         );
 
-        let next = serde_json::json!({
-            "type": "next",
-            "id": "1",
-            "payload": {
-                "data": { "viewer": { "id": "sub-1" } }
-            }
-        });
-        ws.send(Message::Text(next.to_string().into()))
-            .await
-            .expect("next send");
+        send_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "next",
+                "id": "1",
+                "payload": {
+                    "data": { "viewer": { "id": "sub-1" } }
+                }
+            }),
+            "next send",
+        )
+        .await;
 
-        let complete = serde_json::json!({ "type": "complete", "id": "1" });
-        ws.send(Message::Text(complete.to_string().into()))
-            .await
-            .expect("complete send");
+        send_json(
+            &mut ws,
+            serde_json::json!({ "type": "complete", "id": "1" }),
+            "complete send",
+        )
+        .await;
     });
 
     let url = format!("ws://{}", addr);
@@ -916,10 +995,9 @@ async fn subscription_reconnects_after_disconnect() {
     let server_task = task::spawn(async move {
         for connection_idx in 0..2 {
             let (stream, _) = listener.accept().await.expect("accept");
-            let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
+            let mut ws = accept_test_websocket(stream).await;
 
-            let init = ws.next().await.expect("init message").expect("init ok");
-            let init_text = init.into_text().expect("init text");
+            let init_text = recv_text(&mut ws, "init message").await;
             let init_value: serde_json::Value =
                 serde_json::from_str(&init_text).expect("init payload");
             assert_eq!(
@@ -927,20 +1005,14 @@ async fn subscription_reconnects_after_disconnect() {
                 Some("connection_init")
             );
 
-            ws.send(Message::Text(
-                serde_json::json!({ "type": "connection_ack" })
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .expect("ack send");
+            send_json(
+                &mut ws,
+                serde_json::json!({ "type": "connection_ack" }),
+                "ack send",
+            )
+            .await;
 
-            let subscribe = ws
-                .next()
-                .await
-                .expect("subscribe message")
-                .expect("subscribe ok");
-            let subscribe_text = subscribe.into_text().expect("subscribe text");
+            let subscribe_text = recv_text(&mut ws, "subscribe message").await;
             let subscribe_value: serde_json::Value =
                 serde_json::from_str(&subscribe_text).expect("subscribe payload");
             assert_eq!(
@@ -951,28 +1023,29 @@ async fn subscription_reconnects_after_disconnect() {
             );
 
             if connection_idx == 0 {
-                ws.close(None).await.expect("close first connection");
+                close_test_websocket(&mut ws).await;
                 continue;
             }
 
-            let next = serde_json::json!({
-                "type": "next",
-                "id": "1",
-                "payload": {
-                    "data": { "viewer": { "id": "reconnect-1" } }
-                }
-            });
-            ws.send(Message::Text(next.to_string().into()))
-                .await
-                .expect("next send");
+            send_json(
+                &mut ws,
+                serde_json::json!({
+                    "type": "next",
+                    "id": "1",
+                    "payload": {
+                        "data": { "viewer": { "id": "reconnect-1" } }
+                    }
+                }),
+                "next send",
+            )
+            .await;
 
-            ws.send(Message::Text(
-                serde_json::json!({ "type": "complete", "id": "1" })
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .expect("complete send");
+            send_json(
+                &mut ws,
+                serde_json::json!({ "type": "complete", "id": "1" }),
+                "complete send",
+            )
+            .await;
         }
     });
 
@@ -1018,24 +1091,18 @@ async fn subscription_disconnect_without_reconnect_emits_error() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
+        let mut ws = accept_test_websocket(stream).await;
 
-        let _init = ws.next().await.expect("init message").expect("init ok");
-        ws.send(Message::Text(
-            serde_json::json!({ "type": "connection_ack" })
-                .to_string()
-                .into(),
-        ))
-        .await
-        .expect("ack send");
+        let _init = recv_text(&mut ws, "init message").await;
+        send_json(
+            &mut ws,
+            serde_json::json!({ "type": "connection_ack" }),
+            "ack send",
+        )
+        .await;
 
-        let _subscribe = ws
-            .next()
-            .await
-            .expect("subscribe message")
-            .expect("subscribe ok");
-
-        ws.close(None).await.expect("close connection");
+        let _subscribe = recv_text(&mut ws, "subscribe message").await;
+        close_test_websocket(&mut ws).await;
     });
 
     let url = format!("ws://{}", addr);
@@ -1078,29 +1145,24 @@ async fn subscription_drop_sends_complete_frame() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
+        let mut ws = accept_test_websocket(stream).await;
 
-        let _init = ws.next().await.expect("init message").expect("init ok");
-        ws.send(Message::Text(
-            serde_json::json!({ "type": "connection_ack" })
-                .to_string()
-                .into(),
-        ))
+        let _init = recv_text(&mut ws, "init message").await;
+        send_json(
+            &mut ws,
+            serde_json::json!({ "type": "connection_ack" }),
+            "ack send",
+        )
+        .await;
+
+        let _subscribe = recv_text(&mut ws, "subscribe message").await;
+
+        let complete_text = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            recv_text(&mut ws, "complete frame"),
+        )
         .await
-        .expect("ack send");
-
-        let _subscribe = ws
-            .next()
-            .await
-            .expect("subscribe message")
-            .expect("subscribe ok");
-
-        let complete = fcp_async_core::time::timeout(Duration::from_secs(2), ws.next())
-            .await
-            .expect("complete timeout")
-            .expect("complete frame")
-            .expect("complete frame ok");
-        let complete_text = complete.into_text().expect("complete text");
+        .expect("complete timeout");
         let complete_value: serde_json::Value =
             serde_json::from_str(&complete_text).expect("complete payload");
         assert_eq!(
@@ -1729,10 +1791,9 @@ async fn subscription_with_init_payload() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
+        let mut ws = accept_test_websocket(stream).await;
 
-        let init = ws.next().await.expect("init message").expect("init ok");
-        let init_text = init.into_text().expect("init text");
+        let init_text = recv_text(&mut ws, "init message").await;
         let init_value: serde_json::Value = serde_json::from_str(&init_text).expect("init json");
 
         // Verify the init_payload is included
@@ -1743,32 +1804,32 @@ async fn subscription_with_init_payload() {
         let payload = init_value.get("payload").expect("payload present");
         assert_eq!(payload["token"], "my-auth-token");
 
-        ws.send(Message::Text(
-            serde_json::json!({"type": "connection_ack"})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .expect("ack send");
+        send_json(
+            &mut ws,
+            serde_json::json!({"type": "connection_ack"}),
+            "ack send",
+        )
+        .await;
 
-        let _subscribe = ws.next().await.expect("subscribe").expect("subscribe ok");
+        let _subscribe = recv_text(&mut ws, "subscribe").await;
 
-        let next = serde_json::json!({
-            "type": "next",
-            "id": "1",
-            "payload": { "data": {"viewer": {"id": "init-payload-1"}} }
-        });
-        ws.send(Message::Text(next.to_string().into()))
-            .await
-            .expect("next send");
+        send_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "next",
+                "id": "1",
+                "payload": { "data": {"viewer": {"id": "init-payload-1"}} }
+            }),
+            "next send",
+        )
+        .await;
 
-        ws.send(Message::Text(
-            serde_json::json!({"type": "complete", "id": "1"})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .expect("complete send");
+        send_json(
+            &mut ws,
+            serde_json::json!({"type": "complete", "id": "1"}),
+            "complete send",
+        )
+        .await;
     });
 
     let url = format!("ws://{}", addr);

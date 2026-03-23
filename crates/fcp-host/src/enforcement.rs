@@ -752,6 +752,7 @@ impl EnforcementCheck for PolicyCeilingCheck {
         // Check connector allow list for this zone.
         if let Some(allowed_connectors) = config.zone_allowed_connectors.get(&ctx.zone_id)
             && !allowed_connectors.contains(&ctx.connector_id)
+            && !allowed_connectors.contains("*")
         {
             return CheckOutcome::Deny {
                 reason_code: "CONNECTOR_NOT_IN_ZONE_POLICY".into(),
@@ -765,6 +766,7 @@ impl EnforcementCheck for PolicyCeilingCheck {
         // Check operation allow list for this zone.
         if let Some(allowed_ops) = config.zone_allowed_operations.get(&ctx.zone_id)
             && !allowed_ops.contains(&ctx.operation)
+            && !allowed_ops.contains("*")
         {
             return CheckOutcome::Deny {
                 reason_code: "OPERATION_NOT_IN_ZONE_POLICY".into(),
@@ -2106,6 +2108,25 @@ mod tests {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
         config.add_zone_operation("zone-prod", "send_message");
+        let outcome = PolicyCeilingCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn policy_ceiling_allow_connector_wildcard() {
+        let ctx = test_context();
+        let mut config = EnforcementConfig::default();
+        config.add_zone_connector("zone-prod", "*");
+        let outcome = PolicyCeilingCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn policy_ceiling_allow_operation_wildcard() {
+        let ctx = test_context();
+        let mut config = EnforcementConfig::default();
+        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
+        config.add_zone_operation("zone-prod", "*");
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }

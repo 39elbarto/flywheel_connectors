@@ -8,11 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use fcp_async_core::raptorq::decoder::{
-    DecodeError as AsupersyncDecodeError, InactivationDecoder, ReceivedSymbol,
-};
 use fcp_async_core::{AsyncError, Deadline, ExecutionContext};
 
+use crate::codec::decoder::{InactivationDecoder, ReceivedSymbol};
 use crate::config::RaptorQConfig;
 use crate::error::DecodeError;
 use crate::oti::ObjectTransmissionInformation;
@@ -129,7 +127,18 @@ impl RaptorQDecoder {
             });
         }
 
-        let decoder = InactivationDecoder::new(k, symbol_size, 0);
+        let decoder = InactivationDecoder::new(k, symbol_size, 0).map_err(|e| match e {
+            crate::codec::decoder::DecodeError::UnsupportedSourceBlockSize {
+                requested,
+                max_supported,
+            } => DecodeError::UnsupportedSourceBlockSize {
+                requested,
+                max_supported,
+            },
+            _ => DecodeError::Runtime {
+                reason: e.to_string(),
+            },
+        })?;
         let params = decoder.params();
         let k_prime = params.k_prime;
 
@@ -168,7 +177,7 @@ impl RaptorQDecoder {
             symbols.push(ReceivedSymbol::source(esi as u32, vec![0u8; symbol_size]));
         }
 
-        match decoder.decode(&symbols) {
+        match decoder.decode(symbols) {
             Ok(result) => {
                 // Reconstruct payload from first K source symbols
                 let mut payload = Vec::with_capacity(transfer_len);
@@ -190,20 +199,21 @@ impl RaptorQDecoder {
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    fn map_decode_error(error: AsupersyncDecodeError, received: u32, needed: u32) -> DecodeError {
+    fn map_decode_error(error: crate::codec::decoder::DecodeError, received: u32, needed: u32) -> DecodeError {
+        use crate::codec::decoder::DecodeError as InnerError;
         match error {
-            AsupersyncDecodeError::InsufficientSymbols { .. }
-            | AsupersyncDecodeError::SingularMatrix { .. } => {
+            InnerError::InsufficientSymbols { .. }
+            | InnerError::SingularMatrix { .. } => {
                 DecodeError::InsufficientSymbols { received, needed }
             }
-            AsupersyncDecodeError::SymbolSizeMismatch { expected, actual } => {
+            InnerError::SymbolSizeMismatch { expected, actual } => {
                 DecodeError::InvalidSymbol {
                     reason: format!(
                         "symbol size mismatch: expected {expected} bytes, got {actual} bytes"
                     ),
                 }
             }
-            AsupersyncDecodeError::SymbolEquationArityMismatch {
+            InnerError::SymbolEquationArityMismatch {
                 esi,
                 columns,
                 coefficients,
@@ -212,7 +222,7 @@ impl RaptorQDecoder {
                     "symbol equation mismatch for ESI {esi}: {columns} columns vs {coefficients} coefficients"
                 ),
             },
-            AsupersyncDecodeError::ColumnIndexOutOfRange {
+            InnerError::ColumnIndexOutOfRange {
                 esi,
                 column,
                 max_valid,
@@ -221,7 +231,13 @@ impl RaptorQDecoder {
                     "symbol ESI {esi} referenced out-of-range column {column} (max valid {max_valid})"
                 ),
             },
-            AsupersyncDecodeError::CorruptDecodedOutput {
+            InnerError::UnsupportedSourceBlockSize { requested, max_supported } => {
+                DecodeError::UnsupportedSourceBlockSize {
+                    requested,
+                    max_supported,
+                }
+            }
+            InnerError::CorruptDecodedOutput {
                 esi, byte_index, ..
             } => DecodeError::InvalidSymbol {
                 reason: format!(

@@ -21,9 +21,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat", features = ["tokio-io"] }
+asupersync = { path = "/dp/asupersync", default-features = false }
 chrono = { workspace = true }
 fcp-testkit = { workspace = true }
 pretty_assertions = { workspace = true }
-tokio-tungstenite = { workspace = true }
 wiremock = { workspace = true }

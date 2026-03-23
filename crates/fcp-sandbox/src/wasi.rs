@@ -1002,13 +1002,13 @@ impl WasiRuntime {
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
 
-        // Set fuel to ensure async execution can yield to the tokio runtime
+        // Set fuel so async execution yields back to the host executor.
         if self.config.max_fuel > 0 {
             store
                 .set_fuel(self.config.max_fuel)
                 .map_err(|e| WasiError::EngineCreation(format!("failed to set fuel: {e}")))?;
         } else {
-            // Unbounded execution still needs fuel to yield back to tokio
+            // Unbounded execution still needs fuel so long-running guests yield.
             store
                 .set_fuel(u64::MAX)
                 .map_err(|e| WasiError::EngineCreation(format!("failed to set fuel: {e}")))?;

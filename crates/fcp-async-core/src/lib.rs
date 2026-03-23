@@ -1878,7 +1878,6 @@ pub mod io {
         AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
         ReadLine, read_line,
     };
-    pub use asupersync_tokio_compat::io::AsupersyncIo;
 
     /// Tokio-style line reader backed by Asupersync's stream-based implementation.
     #[derive(Debug)]
@@ -1913,18 +1912,6 @@ pub mod io {
         }
     }
 
-    /// Return stdin as an async-core reader through the Tokio compatibility bridge.
-    #[must_use]
-    pub fn stdin() -> AsupersyncIo<tokio::io::Stdin> {
-        AsupersyncIo::new(tokio::io::stdin())
-    }
-
-    /// Return stdout as an async-core writer through the Tokio compatibility bridge.
-    #[must_use]
-    pub fn stdout() -> AsupersyncIo<tokio::io::Stdout> {
-        AsupersyncIo::new(tokio::io::stdout())
-    }
-
     /// Extension trait that preserves the Tokio-style `read_line` method shape.
     pub trait AsyncBufReadExt: AsyncBufRead + Unpin {
         /// Read bytes until a newline is found, appending them to `buf`.
@@ -1945,6 +1932,142 @@ pub mod io {
     }
 
     impl<T> AsyncBufReadExt for T where T: AsyncBufRead + Unpin + ?Sized {}
+}
+
+/// Native Hyper runtime adapters for async-core I/O types.
+pub mod hyper_bridge {
+    use std::future::Future;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use pin_project_lite::pin_project;
+
+    pin_project! {
+        /// Wrap an async-core I/O type so Hyper can drive it directly.
+        pub struct HyperIo<T> {
+            #[pin]
+            inner: T,
+        }
+    }
+
+    impl<T> HyperIo<T> {
+        /// Construct a new Hyper-compatible wrapper.
+        pub const fn new(inner: T) -> Self {
+            Self { inner }
+        }
+
+        /// Borrow the wrapped I/O type.
+        pub const fn inner(&self) -> &T {
+            &self.inner
+        }
+
+        /// Mutably borrow the wrapped I/O type.
+        pub const fn inner_mut(&mut self) -> &mut T {
+            &mut self.inner
+        }
+
+        /// Consume the wrapper and return the wrapped I/O type.
+        pub fn into_inner(self) -> T {
+            self.inner
+        }
+    }
+
+    impl<T> hyper::rt::Read for HyperIo<T>
+    where
+        T: crate::io::AsyncRead,
+    {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            mut hyper_buf: hyper::rt::ReadBufCursor<'_>,
+        ) -> Poll<io::Result<()>> {
+            let remaining = hyper_buf.remaining();
+            if remaining == 0 {
+                return Poll::Ready(Ok(()));
+            }
+
+            let mut scratch = vec![0_u8; remaining];
+            let mut read_buf = crate::io::ReadBuf::new(&mut scratch);
+            match self.project().inner.poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => {
+                    hyper_buf.put_slice(read_buf.filled());
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    impl<T> hyper::rt::Write for HyperIo<T>
+    where
+        T: crate::io::AsyncWrite,
+    {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.project().inner.poll_write(cx, buf)
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bufs: &[io::IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            self.project().inner.poll_write_vectored(cx, bufs)
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            self.inner.is_write_vectored()
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.project().inner.poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.project().inner.poll_shutdown(cx)
+        }
+    }
+
+    /// Hyper executor backed by `fcp_async_core::task::spawn`.
+    #[derive(Clone)]
+    pub struct HyperExecutor {
+        spawn_fn: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
+    }
+
+    impl std::fmt::Debug for HyperExecutor {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("HyperExecutor")
+                .field("has_spawn_fn", &true)
+                .finish()
+        }
+    }
+
+    impl HyperExecutor {
+        /// Create an executor with a custom spawn function.
+        pub fn with_spawn_fn<F>(spawn_fn: F) -> Self
+        where
+            F: Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync + 'static,
+        {
+            Self {
+                spawn_fn: Arc::new(spawn_fn),
+            }
+        }
+    }
+
+    impl<F> hyper::rt::Executor<F> for HyperExecutor
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        fn execute(&self, future: F) {
+            (self.spawn_fn)(Box::pin(future));
+        }
+    }
 }
 
 /// Async process re-exports.
@@ -6573,13 +6696,6 @@ mod tests {
             assert_eq!(lines.next_line().await.unwrap().unwrap(), "beta");
             assert!(lines.next_line().await.unwrap().is_none());
         });
-    }
-
-    #[test]
-    fn io_async_write_trait_is_exported() {
-        fn assert_async_write<W: io::AsyncWrite>() {}
-
-        assert_async_write::<io::AsupersyncIo<tokio::io::Stdout>>();
     }
 
     #[test]

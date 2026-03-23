@@ -70,7 +70,14 @@ impl EmailGenericClient {
         stream.set_read_timeout(Some(self.imap_timeout()))?;
         stream.set_write_timeout(Some(self.imap_timeout()))?;
         if self.config.imap.tls {
-            let tls = TlsConnector::new()?.connect(&self.config.imap.host, stream)?;
+            let tls = TlsConnector::new()?
+                .connect(&self.config.imap.host, stream)
+                .map_err(|error| match error {
+                    native_tls::HandshakeError::Failure(error) => EmailGenericError::Tls(error),
+                    native_tls::HandshakeError::WouldBlock(_) => {
+                        EmailGenericError::Imap("IMAP TLS handshake would block".into())
+                    }
+                })?;
             Ok(BufReader::new(ImapStream::Tls(tls)))
         } else {
             Ok(BufReader::new(ImapStream::Plain(stream)))
@@ -221,21 +228,21 @@ impl EmailGenericClient {
             self.config
                 .smtp
                 .from_address
-                .parse()
+                .parse::<lettre::Address>()
                 .map_err(|error| EmailGenericError::Address(error.to_string()))?,
         );
         let mut builder = Message::builder().from(from).subject(subject);
         for recipient in to {
             builder = builder.to(
                 recipient
-                    .parse()
+                    .parse::<Mailbox>()
                     .map_err(|error| EmailGenericError::Address(error.to_string()))?,
             );
         }
         for recipient in cc {
             builder = builder.cc(
                 recipient
-                    .parse()
+                    .parse::<Mailbox>()
                     .map_err(|error| EmailGenericError::Address(error.to_string()))?,
             );
         }
@@ -318,4 +325,3 @@ mod tests {
         );
     }
 }
-

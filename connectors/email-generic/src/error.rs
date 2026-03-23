@@ -48,10 +48,12 @@ impl EmailGenericError {
                 retryable: true,
                 retry_after: None,
             },
-            Self::Tls(error) | Self::Address(error) => FcpError::Internal {
+            Self::Tls(error) => FcpError::Internal {
+                message: error.to_string(),
+            },
+            Self::Address(error) => FcpError::Internal {
                 message: error.to_string(),
             },
         }
     }
 }
-

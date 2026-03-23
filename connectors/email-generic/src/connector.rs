@@ -163,7 +163,7 @@ impl EmailGenericConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this to search mailbox content and return matching UIDs.".into(),
                     common_mistakes: vec![],
-                    examples: vec!['{"mailbox":"INBOX","query":"deploy"}'.into()],
+                    examples: vec!["{\"mailbox\":\"INBOX\",\"query\":\"deploy\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_MAILBOXES)],
                 },
                 rate_limit: None,
@@ -191,7 +191,10 @@ impl EmailGenericConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this to send an email from the configured account.".into(),
                     common_mistakes: vec!["At least one recipient is required.".into()],
-                    examples: vec!['{"to":["ops@example.com"],"subject":"Deploy status","body":"Green"}'.into()],
+                    examples: vec![
+                        "{\"to\":[\"ops@example.com\"],\"subject\":\"Deploy status\",\"body\":\"Green\"}"
+                            .into(),
+                    ],
                     related: vec![CapabilityId::from_static(OP_HEALTH)],
                 },
                 rate_limit: None,
@@ -506,4 +509,3 @@ mod tests {
         assert_eq!(response.result.expect("result")["status"], "ok");
     }
 }
-

@@ -184,7 +184,9 @@ impl HueConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this to toggle a specific light or set brightness.".into(),
                     common_mistakes: vec!["Brightness should be in the Hue API's 0-100 percentage range.".into()],
-                    examples: vec!['{"light_id":"light-1","on":true,"brightness":50.0}'.into()],
+                    examples: vec![
+                        "{\"light_id\":\"light-1\",\"on\":true,\"brightness\":50.0}".into(),
+                    ],
                     related: vec![CapabilityId::from_static(OP_LIST_LIGHTS)],
                 },
                 rate_limit: None,
@@ -209,7 +211,7 @@ impl HueConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this to activate a preconfigured Hue scene.".into(),
                     common_mistakes: vec![],
-                    examples: vec!['{"scene_id":"scene-1"}'.into()],
+                    examples: vec!["{\"scene_id\":\"scene-1\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_SCENES)],
                 },
                 rate_limit: None,
@@ -504,4 +506,3 @@ mod tests {
         assert!(response.result.is_some());
     }
 }
-

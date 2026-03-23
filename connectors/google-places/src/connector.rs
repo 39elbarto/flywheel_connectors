@@ -136,7 +136,9 @@ impl GooglePlacesConnector {
                     common_mistakes: vec![
                         "Use Google Places resource names like places/abc123 for get_place, not raw map URLs.".into(),
                     ],
-                    examples: vec!['{"query":"coffee near Bryant Park","max_result_count":5}'.into()],
+                    examples: vec![
+                        "{\"query\":\"coffee near Bryant Park\",\"max_result_count\":5}".into(),
+                    ],
                     related: vec![CapabilityId::from_static(OP_GET_PLACE)],
                 },
                 rate_limit: None,
@@ -163,7 +165,7 @@ impl GooglePlacesConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this while narrowing down an in-progress place search.".into(),
                     common_mistakes: vec![],
-                    examples: vec!['{"input":"sushi soho london"}'.into()],
+                    examples: vec!["{\"input\":\"sushi soho london\"}".into()],
                     related: vec![CapabilityId::from_static(OP_SEARCH_TEXT)],
                 },
                 rate_limit: None,
@@ -190,7 +192,9 @@ impl GooglePlacesConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this after selecting a specific place resource.".into(),
                     common_mistakes: vec!["Pass a resource name like places/abc123.".into()],
-                    examples: vec!['{"place":"places/ChIJN1t_tDeuEmsRUsoyG83frY4"}'.into()],
+                    examples: vec![
+                        "{\"place\":\"places/ChIJN1t_tDeuEmsRUsoyG83frY4\"}".into(),
+                    ],
                     related: vec![CapabilityId::from_static(OP_SEARCH_TEXT)],
                 },
                 rate_limit: None,
@@ -526,4 +530,3 @@ mod tests {
         assert!(operations.iter().any(|operation| operation.id.as_str() == OP_GET_PLACE));
     }
 }
-

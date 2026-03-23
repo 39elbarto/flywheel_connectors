@@ -39,5 +39,6 @@ uuid.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
+fcp-crypto = { path = "../../crates/fcp-crypto" }
 wiremock.workspace = true
-

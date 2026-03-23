@@ -128,7 +128,7 @@ impl SynologyChatConnector {
                     common_mistakes: vec![
                         "This connector currently models outbound webhook delivery, not the full incoming webhook gateway path.".into()
                     ],
-                    examples: vec!['{"text":"Hello from Flywheel"}'.into()],
+                    examples: vec!["{\"text\":\"Hello from Flywheel\"}".into()],
                     related: vec![CapabilityId::from_static(OP_HEALTH)],
                 },
                 rate_limit: None,
@@ -416,4 +416,3 @@ mod tests {
         assert_eq!(response.result.expect("result")["status"], "ok");
     }
 }
-

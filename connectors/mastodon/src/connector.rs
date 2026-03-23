@@ -1239,8 +1239,9 @@ mod tests {
         for op_name in &read_ops {
             let op = ops
                 .iter()
-                .find(|o| o.id.as_str() == *op_name)
-                .unwrap_or_else(|| panic!("Missing op: {op_name}"));
+                .find(|o| o.id.as_str() == *op_name);
+            assert!(op.is_some(), "Missing op: {}", op_name);
+            let op = op.unwrap();
             assert_eq!(
                 op.capability.as_str(),
                 CAP_READ,
@@ -1261,8 +1262,9 @@ mod tests {
         for op_name in &write_ops {
             let op = ops
                 .iter()
-                .find(|o| o.id.as_str() == *op_name)
-                .unwrap_or_else(|| panic!("Missing op: {op_name}"));
+                .find(|o| o.id.as_str() == *op_name);
+            assert!(op.is_some(), "Missing op: {}", op_name);
+            let op = op.unwrap();
             assert_eq!(
                 op.capability.as_str(),
                 CAP_WRITE,

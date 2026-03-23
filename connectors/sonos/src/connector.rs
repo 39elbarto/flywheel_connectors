@@ -241,7 +241,7 @@ impl SonosConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this to set speaker volume directly.".into(),
                     common_mistakes: vec!["Volume should be in the 0-100 range.".into()],
-                    examples: vec!['{"volume":18}'.into()],
+                    examples: vec!["{\"volume\":18}".into()],
                     related: vec![CapabilityId::from_static(OP_GET_STATUS)],
                 },
                 rate_limit: None,
@@ -523,4 +523,3 @@ mod tests {
         assert!(response.result.is_some());
     }
 }
-

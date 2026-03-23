@@ -405,7 +405,6 @@ impl BlueBubblesClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let password = self.password.clone();
-        let guid = guid.to_string();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
@@ -490,7 +489,6 @@ impl BlueBubblesClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let password = self.password.clone();
-        let chat_guid = chat_guid.to_string();
         let params = params.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {

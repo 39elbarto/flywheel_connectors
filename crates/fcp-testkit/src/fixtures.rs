@@ -215,9 +215,336 @@ pub mod config {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stateful Fixture Packs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Canonical seeded stateful fixture packs for local non-mock acceptance suites.
+pub mod stateful {
+    use crate::database_helpers::{
+        FixtureCleanupCheck, FixtureMutationRecord, FixtureSeedRecord, FixtureStartupProbe,
+        FixtureStartupProbeKind, SeededStatefulFixturePack, StatefulFixtureFamily,
+    };
+
+    /// Build a seeded relational fixture pack.
+    #[must_use]
+    pub fn relational_fixture_pack(
+        engine: &str,
+        host: &str,
+        port: u16,
+        database: &str,
+    ) -> SeededStatefulFixturePack {
+        let target = format!("{host}:{port}/{database}");
+        SeededStatefulFixturePack::new(
+            &format!("{engine}-relational-local-pack"),
+            StatefulFixtureFamily::Relational,
+            engine,
+        )
+        .with_startup_probe(FixtureStartupProbe::new(
+            "probe-relational-ready",
+            FixtureStartupProbeKind::SqlPing,
+            &target,
+            5_000,
+            "local relational engine accepts a health query before the suite starts",
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "users",
+            "user-1",
+            serde_json::json!({
+                "id": 1,
+                "email": "alice@example.com",
+                "name": "Alice",
+            }),
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "projects",
+            "project-1",
+            serde_json::json!({
+                "id": "project-1",
+                "owner_id": 1,
+                "slug": "starter",
+            }),
+        ))
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "update",
+                "users",
+                "user-1",
+                "connector updates a seeded relational row against the local engine",
+            )
+            .with_before(serde_json::json!({
+                "id": 1,
+                "email": "alice@example.com",
+                "name": "Alice",
+            }))
+            .with_after(serde_json::json!({
+                "id": 1,
+                "email": "alice+updated@example.com",
+                "name": "Alice Updated",
+            })),
+        )
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "insert",
+                "sessions",
+                "session-1",
+                "connector inserts a session row that teardown removes deterministically",
+            )
+            .with_after(serde_json::json!({
+                "id": "session-1",
+                "user_id": 1,
+                "status": "active",
+            })),
+        )
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-users",
+            "users",
+            "query_row_digest",
+            "seeded relational rows return to their original digest",
+        ))
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-sessions",
+            "sessions",
+            "row_count",
+            "temporary session rows inserted by the run are removed",
+        ))
+    }
+
+    /// Build a seeded embedded-state fixture pack.
+    #[must_use]
+    pub fn embedded_fixture_pack(engine: &str, path: &str) -> SeededStatefulFixturePack {
+        SeededStatefulFixturePack::new(
+            &format!("{engine}-embedded-local-pack"),
+            StatefulFixtureFamily::Embedded,
+            engine,
+        )
+        .with_startup_probe(FixtureStartupProbe::new(
+            "probe-embedded-path",
+            FixtureStartupProbeKind::PathExists,
+            path,
+            1_000,
+            "fixture path exists before the connector opens the embedded engine",
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "notes",
+            "note-1",
+            serde_json::json!({
+                "id": "note-1",
+                "title": "Welcome",
+                "body": "Seeded embedded record",
+            }),
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "settings",
+            "workspace",
+            serde_json::json!({
+                "sync": true,
+                "region": "us-east-1",
+            }),
+        ))
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "update",
+                "notes",
+                "note-1",
+                "connector updates a seeded embedded record without mocks",
+            )
+            .with_after(serde_json::json!({
+                "id": "note-1",
+                "title": "Welcome",
+                "body": "Updated embedded record",
+            })),
+        )
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "insert",
+                "exports",
+                "export-1",
+                "connector emits a temporary export record that teardown removes",
+            )
+            .with_after(serde_json::json!({
+                "id": "export-1",
+                "status": "pending",
+            })),
+        )
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-notes",
+            "notes",
+            "query_row_digest",
+            "seeded embedded records return to their original digest",
+        ))
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-exports",
+            "exports",
+            "row_count",
+            "temporary export rows created during the run are removed",
+        ))
+    }
+
+    /// Build a seeded object/blob fixture pack.
+    #[must_use]
+    pub fn object_blob_fixture_pack(
+        engine: &str,
+        bucket: &str,
+        root_prefix: &str,
+    ) -> SeededStatefulFixturePack {
+        let target = format!("{bucket}/{root_prefix}");
+        SeededStatefulFixturePack::new(
+            &format!("{engine}-object-local-pack"),
+            StatefulFixtureFamily::ObjectBlob,
+            engine,
+        )
+        .with_startup_probe(FixtureStartupProbe::new(
+            "probe-object-prefix",
+            FixtureStartupProbeKind::NamespaceList,
+            &target,
+            5_000,
+            "local object store lists the fixture bucket or prefix before the suite starts",
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "objects",
+            "incoming/welcome.txt",
+            serde_json::json!({
+                "bucket": bucket,
+                "key": "incoming/welcome.txt",
+                "content_type": "text/plain",
+                "body": "hello from fixture storage",
+            }),
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "objects",
+            "reports/daily.json",
+            serde_json::json!({
+                "bucket": bucket,
+                "key": "reports/daily.json",
+                "content_type": "application/json",
+                "body": {"ok": true, "count": 1},
+            }),
+        ))
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "put",
+                "objects",
+                "tmp/session-1.json",
+                "connector uploads a temporary object via the real local store",
+            )
+            .with_after(serde_json::json!({
+                "bucket": bucket,
+                "key": "tmp/session-1.json",
+                "content_type": "application/json",
+                "body": {"run": 1},
+            })),
+        )
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "delete",
+                "objects",
+                "incoming/welcome.txt",
+                "connector can delete and restore seeded objects during verification",
+            )
+            .with_before(serde_json::json!({
+                "bucket": bucket,
+                "key": "incoming/welcome.txt",
+            })),
+        )
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-object-seeds",
+            "objects",
+            "object_digest",
+            "seeded objects return to their original digest after teardown",
+        ))
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-object-temp-prefix",
+            "objects",
+            "prefix_empty",
+            "temporary object prefixes created during the run are empty",
+        ))
+    }
+
+    /// Build a seeded key-value fixture pack closely related to database acceptance work.
+    #[must_use]
+    pub fn key_value_fixture_pack(
+        engine: &str,
+        namespace: &str,
+        path: &str,
+    ) -> SeededStatefulFixturePack {
+        let target = format!("{namespace}@{path}");
+        SeededStatefulFixturePack::new(
+            &format!("{engine}-kv-local-pack"),
+            StatefulFixtureFamily::KeyValue,
+            engine,
+        )
+        .with_startup_probe(FixtureStartupProbe::new(
+            "probe-kv-namespace",
+            FixtureStartupProbeKind::PathExists,
+            &target,
+            1_000,
+            "key-value namespace backing store exists before the connector opens it",
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "kv",
+            "feature_flags/beta_access",
+            serde_json::json!({
+                "namespace": namespace,
+                "value": true,
+            }),
+        ))
+        .with_seed(FixtureSeedRecord::new(
+            "kv",
+            "leases/connector-1",
+            serde_json::json!({
+                "namespace": namespace,
+                "owner": "fixture",
+                "ttl_secs": 60,
+            }),
+        ))
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "put",
+                "kv",
+                "jobs/job-1",
+                "connector writes a temporary key that teardown later removes",
+            )
+            .with_after(serde_json::json!({
+                "namespace": namespace,
+                "status": "queued",
+            })),
+        )
+        .with_mutation(
+            FixtureMutationRecord::new(
+                "update",
+                "kv",
+                "feature_flags/beta_access",
+                "connector updates a seeded flag and teardown restores the original value",
+            )
+            .with_before(serde_json::json!({
+                "namespace": namespace,
+                "value": true,
+            }))
+            .with_after(serde_json::json!({
+                "namespace": namespace,
+                "value": false,
+            })),
+        )
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-kv-seeds",
+            "kv",
+            "value_digest",
+            "seeded key-value entries return to their original digest",
+        ))
+        .with_cleanup_check(FixtureCleanupCheck::new(
+            "cleanup-kv-temp",
+            "kv",
+            "key_absent",
+            "temporary keys created during the run are absent after teardown",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database_helpers::{StatefulFixtureFamily, assert_stateful_fixture_pack_complete};
 
     // ---- Connector fixtures ----
 
@@ -608,5 +935,49 @@ mod tests {
         let s = serde_json::to_string(&v).unwrap();
         let d: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v, d);
+    }
+
+    #[test]
+    fn relational_stateful_fixture_pack_is_local_non_mock() {
+        let pack = stateful::relational_fixture_pack("postgres", "127.0.0.1", 5432, "fcp_test");
+
+        assert_eq!(pack.family, StatefulFixtureFamily::Relational);
+        assert_eq!(pack.suite_class, "local_non_mock");
+        assert_stateful_fixture_pack_complete(&pack);
+    }
+
+    #[test]
+    fn embedded_stateful_fixture_pack_uses_path_probe() {
+        let pack = stateful::embedded_fixture_pack("sqlite", "/tmp/fcp/sqlite/test.db");
+
+        assert_eq!(pack.family, StatefulFixtureFamily::Embedded);
+        assert_eq!(pack.startup_probes[0].target, "/tmp/fcp/sqlite/test.db");
+        assert_stateful_fixture_pack_complete(&pack);
+    }
+
+    #[test]
+    fn object_blob_stateful_fixture_pack_tracks_object_cleanup() {
+        let pack = stateful::object_blob_fixture_pack("minio", "fixture-bucket", "runs/run-1");
+
+        assert_eq!(pack.family, StatefulFixtureFamily::ObjectBlob);
+        assert!(
+            pack.cleanup_checks
+                .iter()
+                .any(|cleanup_check| cleanup_check.method == "prefix_empty")
+        );
+        assert_stateful_fixture_pack_complete(&pack);
+    }
+
+    #[test]
+    fn key_value_stateful_fixture_pack_tracks_seeded_flags() {
+        let pack = stateful::key_value_fixture_pack("sled", "fixture", "/tmp/fcp/sled");
+
+        assert_eq!(pack.family, StatefulFixtureFamily::KeyValue);
+        assert!(
+            pack.seeded_state
+                .iter()
+                .any(|seed| seed.identifier == "feature_flags/beta_access")
+        );
+        assert_stateful_fixture_pack_complete(&pack);
     }
 }

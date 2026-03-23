@@ -18,6 +18,9 @@
 //! assert_evidence_no_secrets(&collector, &["sk-test-", "Bearer "]);
 //! ```
 
+use crate::database_helpers::{
+    CleanupVerificationResult, FixtureMutationRecord, FixtureSeedRecord,
+};
 use serde_json::{Value, json};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,6 +38,12 @@ pub struct EvidenceCollector {
     pub decisions: Vec<DecisionEvidence>,
     /// Recorded structured log lines.
     pub log_lines: Vec<Value>,
+    /// Recorded seeded state for truthful local fixture runs.
+    pub seeded_state: Vec<FixtureSeedRecord>,
+    /// Recorded state mutations exercised during the run.
+    pub mutations: Vec<FixtureMutationRecord>,
+    /// Recorded cleanup verification results from teardown.
+    pub cleanup_verifications: Vec<CleanupVerificationResult>,
 }
 
 /// A recorded audit event.
@@ -146,10 +155,47 @@ impl EvidenceCollector {
         self.log_lines.push(line);
     }
 
+    /// Record seeded state for a truthful local fixture.
+    pub fn record_seeded_state(&mut self, resource: &str, identifier: &str, payload: Value) {
+        self.seeded_state
+            .push(FixtureSeedRecord::new(resource, identifier, payload));
+    }
+
+    /// Record a state mutation exercised during the run.
+    pub fn record_mutation(&mut self, mutation: FixtureMutationRecord) {
+        self.mutations.push(mutation);
+    }
+
+    /// Record a cleanup verification result from teardown.
+    pub fn record_cleanup_verification(
+        &mut self,
+        check_id: &str,
+        resource: &str,
+        method: &str,
+        expected_state: &str,
+        observed: Value,
+        passed: bool,
+    ) {
+        self.cleanup_verifications
+            .push(CleanupVerificationResult::new(
+                check_id,
+                resource,
+                method,
+                expected_state,
+                observed,
+                passed,
+            ));
+    }
+
     /// Total evidence artifacts collected.
     #[must_use]
     pub fn total_artifacts(&self) -> usize {
-        self.audit_events.len() + self.receipts.len() + self.decisions.len()
+        self.audit_events.len()
+            + self.receipts.len()
+            + self.decisions.len()
+            + self.seeded_state.len()
+            + self.mutations.len()
+            + self.cleanup_verifications.len()
     }
 
     /// Check if any evidence was collected.
@@ -166,6 +212,9 @@ impl EvidenceCollector {
             "receipts": self.receipts.len(),
             "decisions": self.decisions.len(),
             "log_lines": self.log_lines.len(),
+            "seeded_state": self.seeded_state.len(),
+            "mutations": self.mutations.len(),
+            "cleanup_verifications": self.cleanup_verifications.len(),
             "total_artifacts": self.total_artifacts(),
         })
     }
@@ -328,6 +377,100 @@ pub fn assert_decision_recorded(
         } else {
             "denied"
         }
+    );
+}
+
+/// Assert that a seeded resource was recorded.
+///
+/// # Panics
+///
+/// Panics if the seeded resource is missing.
+pub fn assert_seeded_state_recorded(
+    collector: &EvidenceCollector,
+    resource: &str,
+    identifier: &str,
+) {
+    assert!(
+        collector
+            .seeded_state
+            .iter()
+            .any(|seed| seed.resource == resource && seed.identifier == identifier),
+        "expected seeded state for '{resource}/{identifier}', found: {:?}",
+        collector
+            .seeded_state
+            .iter()
+            .map(|seed| format!("{}/{}", seed.resource, seed.identifier))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Assert that a mutation was recorded.
+///
+/// # Panics
+///
+/// Panics if the mutation is missing.
+pub fn assert_mutation_recorded(
+    collector: &EvidenceCollector,
+    operation: &str,
+    resource: &str,
+    identifier: &str,
+) {
+    assert!(
+        collector.mutations.iter().any(|mutation| {
+            mutation.operation == operation
+                && mutation.resource == resource
+                && mutation.identifier == identifier
+        }),
+        "expected mutation '{operation}' for '{resource}/{identifier}', found: {:?}",
+        collector
+            .mutations
+            .iter()
+            .map(|mutation| format!(
+                "{}:{}/{}",
+                mutation.operation, mutation.resource, mutation.identifier
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Assert that all cleanup verifications passed.
+///
+/// # Panics
+///
+/// Panics if any cleanup verification failed.
+pub fn assert_cleanup_verifications_passed(collector: &EvidenceCollector) {
+    let failed: Vec<&str> = collector
+        .cleanup_verifications
+        .iter()
+        .filter(|verification| !verification.passed)
+        .map(|verification| verification.check_id.as_str())
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "expected cleanup verification to pass, but these checks failed: {failed:?}"
+    );
+}
+
+/// Assert that every mutation has at least one cleanup verification for the same resource.
+///
+/// # Panics
+///
+/// Panics if any mutation lacks teardown verification.
+pub fn assert_mutations_have_cleanup_verifications(collector: &EvidenceCollector) {
+    let missing: Vec<String> = collector
+        .mutations
+        .iter()
+        .filter(|mutation| {
+            !collector
+                .cleanup_verifications
+                .iter()
+                .any(|verification| verification.resource == mutation.resource)
+        })
+        .map(|mutation| format!("{}/{}", mutation.resource, mutation.identifier))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "expected cleanup verification for every mutation, missing: {missing:?}"
     );
 }
 
@@ -494,5 +637,66 @@ mod tests {
         let mut collector = EvidenceCollector::new();
         collector.record_log_line(json!({"level": "info", "msg": "test"}));
         assert_eq!(collector.log_lines.len(), 1);
+    }
+
+    #[test]
+    fn collector_records_seeded_state_and_mutations() {
+        let mut collector = EvidenceCollector::new();
+        collector.record_seeded_state("users", "user-1", json!({"id": 1}));
+        collector.record_mutation(
+            FixtureMutationRecord::new(
+                "update",
+                "users",
+                "user-1",
+                "connector updates the seeded user row",
+            )
+            .with_after(json!({"id": 1, "name": "Alice Updated"})),
+        );
+        collector.record_cleanup_verification(
+            "cleanup-users",
+            "users",
+            "query_row_digest",
+            "seed digest matches the original payload",
+            json!({"digest_match": true}),
+            true,
+        );
+
+        assert_eq!(collector.seeded_state.len(), 1);
+        assert_eq!(collector.mutations.len(), 1);
+        assert_eq!(collector.cleanup_verifications.len(), 1);
+        assert_seeded_state_recorded(&collector, "users", "user-1");
+        assert_mutation_recorded(&collector, "update", "users", "user-1");
+        assert_cleanup_verifications_passed(&collector);
+        assert_mutations_have_cleanup_verifications(&collector);
+    }
+
+    #[test]
+    #[should_panic(expected = "cleanup verification to pass")]
+    fn cleanup_verifications_fail_when_any_check_fails() {
+        let mut collector = EvidenceCollector::new();
+        collector.record_cleanup_verification(
+            "cleanup-temp-objects",
+            "objects",
+            "prefix_empty",
+            "temporary objects are removed",
+            json!({"remaining_keys": ["tmp/run-1.json"]}),
+            false,
+        );
+
+        assert_cleanup_verifications_passed(&collector);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing")]
+    fn mutations_require_cleanup_verification() {
+        let mut collector = EvidenceCollector::new();
+        collector.record_mutation(FixtureMutationRecord::new(
+            "put",
+            "objects",
+            "tmp/run-1.json",
+            "connector uploads a temporary object",
+        ));
+
+        assert_mutations_have_cleanup_verifications(&collector);
     }
 }

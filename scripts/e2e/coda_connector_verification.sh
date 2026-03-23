@@ -43,7 +43,7 @@ run_logged() {
 
   echo "[coda-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit 1
     "$@"
   ) >"${log_path}" 2>&1
 }
@@ -56,7 +56,7 @@ run_capture_stdout() {
 
   echo "[coda-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit 1
     "$@"
   ) >"${stdout_path}" 2>"${log_path}"
 }
@@ -79,6 +79,7 @@ promote_overall_status() {
 
 classify_manifest_failure() {
   local log_path="$1"
+  # shellcheck disable=SC2016
   if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
     echo "infra_blocked"
   else

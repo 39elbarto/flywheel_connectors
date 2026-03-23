@@ -15,7 +15,7 @@ Usage: scripts/ci/asupersync_tokio_guard.sh [options]
 Validates ASUPERSYNC Tokio-prohibition guardrails for flywheel_connectors-1ud0u.
 
 Options:
-  --ledger <path>   Exception ledger JSON path
+  --ledger <path>   Guardrail policy JSON path
   --report <path>   Output report JSON path
   --ci              CI mode: non-zero exit on any failure, machine-readable output
   -h, --help        Show this help
@@ -251,25 +251,25 @@ if [[ "${PASSED}" != "true" ]]; then
   echo "" >&2
 
   if (( MISSING_DEP_COUNT > 0 )); then
-    echo "MISSING DEPENDENCY EXCEPTIONS (${MISSING_DEP_COUNT}):" >&2
-    echo "  These crates use forbidden Tokio dependencies without a ledger exception." >&2
-    echo "  Fix: Add an exception to ${LEDGER_PATH} or remove the dependency." >&2
+    echo "FORBIDDEN DEPENDENCY VIOLATIONS (${MISSING_DEP_COUNT}):" >&2
+    echo "  These crates still depend on forbidden Tokio-related crates." >&2
+    echo "  Fix: remove the dependency; the guardrail is zero-tolerance." >&2
     jq -r '.[] | "  - \(.crate) depends on \(.dependency) (\(.kind))"' "${MISSING_DEP_EXCEPTIONS_JSON}" >&2
     echo "" >&2
   fi
 
   if (( EXPIRED_DEP_COUNT > 0 )); then
-    echo "EXPIRED DEPENDENCY EXCEPTIONS (${EXPIRED_DEP_COUNT}):" >&2
-    echo "  These exceptions have passed their deadline. The dependency must be removed." >&2
-    echo "  Fix: Complete the migration for the crate or extend the deadline with justification." >&2
+    echo "STALE LEGACY EXCEPTION ENTRIES (${EXPIRED_DEP_COUNT}):" >&2
+    echo "  Legacy exception records remain in the policy file and must be deleted." >&2
+    echo "  Fix: remove the stale records or complete the underlying migration immediately." >&2
     jq -r '.[] | "  - \(.crate)/\(.dependency) expired \(.expires_on) (owner: \(.owner_bead))"' "${EXPIRED_DEP_EXCEPTIONS_JSON}" >&2
     echo "" >&2
   fi
 
   if (( FAILED_INVARIANT_COUNT > 0 )); then
     echo "FAILED SOURCE INVARIANTS (${FAILED_INVARIANT_COUNT}):" >&2
-    echo "  These pattern counts exceed the allowed maximum. New Tokio usage was introduced." >&2
-    echo "  Fix: Remove the new tokio references or update the max_count in the ledger with justification." >&2
+    echo "  These pattern counts exceed the allowed maximum. Tokio usage is still present." >&2
+    echo "  Fix: remove the remaining Tokio references; the guardrail is zero-tolerance." >&2
     jq -r '[.source_invariants[] | select(.status != "pass")] | .[] | "  - \(.id): count=\(.count) max=\(.max_count) (over_limit=\(.over_limit), expired=\(.expired))"' "${REPORT_PATH}" >&2
     echo "" >&2
   fi

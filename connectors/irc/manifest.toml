@@ -1,0 +1,62 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.irc"
+name = "IRC"
+version = "0.1.0"
+description = "IRC connector for bounded connect, join, message send, transcript sampling, and health verification"
+archetype = "operational"
+homepage = "https://datatracker.ietf.org/doc/html/rfc2812"
+
+# Scope notes:
+# - This first slice uses short-lived IRC sessions per operation.
+# - Long-lived event streams, SASL negotiation, DCC, and bouncer management are deferred.
+
+[zones]
+home = "z:community"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:community", "z:project:*"]
+allowed_targets = ["z:community", "z:project:*", "z:public"]
+tailscale_tag = "tag:fcp-community"
+
+[capabilities]
+required = ["network.dns", "network.outbound", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+[provides.operations.messages_send]
+summary = "Send an IRC PRIVMSG"
+capability = "irc.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.channels_join]
+summary = "Join an IRC channel"
+capability = "irc.channels.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.transcript_sample]
+summary = "Open a short IRC session and collect a bounded transcript sample"
+capability = "irc.messages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health]
+summary = "Verify IRC connectivity and registration flow"
+capability = "irc.health.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 30
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

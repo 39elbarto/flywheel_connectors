@@ -1,0 +1,63 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.nostr"
+name = "Nostr Relay"
+version = "0.1.0"
+description = "Nostr relay connector for signed public-note publishing, event queries, relay inspection, and health verification"
+archetype = "operational"
+homepage = "https://github.com/nostr-protocol/nips"
+
+# Scope notes:
+# - This first slice publishes signed public notes (kind 1 by default) and reads public events.
+# - Bech32 key input, encrypted DMs (NIP-04/NIP-17), profile publishing, and long-lived relay
+#   subscriptions are explicit non-goals for this initial connector.
+
+[zones]
+home = "z:community"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:community", "z:project:*"]
+allowed_targets = ["z:community", "z:project:*", "z:public"]
+tailscale_tag = "tag:fcp-community"
+
+[capabilities]
+required = ["network.dns", "network.outbound", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+[provides.operations.notes_publish]
+summary = "Publish a signed Nostr note to configured relays"
+capability = "nostr.notes.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.events_query]
+summary = "Query public Nostr events from configured relays"
+capability = "nostr.events.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.relays_list]
+summary = "List configured Nostr relays"
+capability = "nostr.relays.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health]
+summary = "Verify relay connectivity and signing identity"
+capability = "nostr.health.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 30
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

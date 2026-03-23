@@ -1,0 +1,43 @@
+[package]
+name = "fcp-nostr"
+description = "Nostr relay connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_nostr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-nostr"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-core.workspace = true
+fcp-async-core.workspace = true
+fcp-sdk.workspace = true
+fcp-streaming.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+secp256k1 = { version = "0.29", features = ["rand", "hashes", "global-context"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true

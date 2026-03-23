@@ -1237,9 +1237,7 @@ mod tests {
             OP_HEALTH,
         ];
         for op_name in &read_ops {
-            let op = ops
-                .iter()
-                .find(|o| o.id.as_str() == *op_name);
+            let op = ops.iter().find(|o| o.id.as_str() == *op_name);
             assert!(op.is_some(), "Missing op: {}", op_name);
             let op = op.unwrap();
             assert_eq!(
@@ -1260,9 +1258,7 @@ mod tests {
             OP_STATUSES_BOOST,
         ];
         for op_name in &write_ops {
-            let op = ops
-                .iter()
-                .find(|o| o.id.as_str() == *op_name);
+            let op = ops.iter().find(|o| o.id.as_str() == *op_name);
             assert!(op.is_some(), "Missing op: {}", op_name);
             let op = op.unwrap();
             assert_eq!(

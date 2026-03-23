@@ -33,7 +33,7 @@ pub struct SynologyChatMessageRequest {
     bot_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SynologyChatPayload {
     payload: Map<String, Value>,
 }
@@ -46,6 +46,9 @@ pub struct SynologyChatClient {
 }
 
 impl SynologyChatDispatchResult {
+    /// # Panics
+    ///
+    /// Panics if the dispatch result cannot be serialized into JSON.
     #[must_use]
     pub fn into_json(self) -> Value {
         serde_json::to_value(self).expect("SynologyChatDispatchResult must serialize")
@@ -135,7 +138,7 @@ impl SynologyChatClient {
     }
 
     #[must_use]
-    pub fn target(&self) -> &SynologyChatDeliveryTarget {
+    pub const fn target(&self) -> &SynologyChatDeliveryTarget {
         &self.target
     }
 
@@ -187,22 +190,26 @@ impl SynologyChatClient {
                 raw_body: None,
             });
         }
-        match serde_json::from_str::<Value>(&body) {
-            Ok(json_body) => Ok(SynologyChatDispatchResult {
-                status: "ok",
-                http_status: status.as_u16(),
-                response_kind: SynologyChatResponseKind::Json,
-                body: Some(json_body),
-                raw_body: None,
-            }),
-            Err(_) => Ok(SynologyChatDispatchResult {
-                status: "ok",
-                http_status: status.as_u16(),
-                response_kind: SynologyChatResponseKind::Text,
-                body: None,
-                raw_body: Some(body),
-            }),
-        }
+        serde_json::from_str::<Value>(&body).map_or_else(
+            |_| {
+                Ok(SynologyChatDispatchResult {
+                    status: "ok",
+                    http_status: status.as_u16(),
+                    response_kind: SynologyChatResponseKind::Text,
+                    body: None,
+                    raw_body: Some(body),
+                })
+            },
+            |json_body| {
+                Ok(SynologyChatDispatchResult {
+                    status: "ok",
+                    http_status: status.as_u16(),
+                    response_kind: SynologyChatResponseKind::Json,
+                    body: Some(json_body),
+                    raw_body: None,
+                })
+            },
+        )
     }
 }
 

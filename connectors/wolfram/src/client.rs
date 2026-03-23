@@ -21,13 +21,12 @@ impl WolframClient {
     /// Create a new Wolfram Alpha client.
     #[must_use]
     pub fn new(config: &WolframConfig) -> Self {
-        let base_url = if config.base_url.starts_with("http://")
-            || config.base_url.starts_with("https://")
-        {
-            config.base_url.clone()
-        } else {
-            format!("https://{}", config.base_url)
-        };
+        let base_url =
+            if config.base_url.starts_with("http://") || config.base_url.starts_with("https://") {
+                config.base_url.clone()
+            } else {
+                format!("https://{}", config.base_url)
+            };
         Self {
             base_url,
             timeout: std::time::Duration::from_millis(config.timeout_ms),
@@ -54,11 +53,7 @@ impl WolframClient {
     }
 
     /// Perform a full query against the Wolfram Alpha API.
-    pub async fn query(
-        &self,
-        input: &str,
-        app_id: &str,
-    ) -> Result<QueryResult, WolframError> {
+    pub async fn query(&self, input: &str, app_id: &str) -> Result<QueryResult, WolframError> {
         if input.is_empty() {
             return Err(WolframError::InvalidInput {
                 message: "Query input cannot be empty".into(),
@@ -94,10 +89,7 @@ impl WolframClient {
         let body: serde_json::Value = resp.json().await.map_err(WolframError::Http)?;
 
         // Wolfram wraps the result in a "queryresult" key
-        let query_result = body
-            .get("queryresult")
-            .cloned()
-            .unwrap_or(body);
+        let query_result = body.get("queryresult").cloned().unwrap_or(body);
 
         serde_json::from_value(query_result).map_err(|e| WolframError::Serialization(e.to_string()))
     }
@@ -275,10 +267,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/v1/spoken"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("The answer is 4"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("The answer is 4"))
             .mount(&server)
             .await;
 

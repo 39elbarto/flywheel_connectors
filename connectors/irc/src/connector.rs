@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 
 use crate::client::with_irc_session;
 use crate::types::{
-    IrcConfig, CAP_CHANNELS_WRITE, CAP_HEALTH_READ, CAP_MESSAGES_READ, CAP_MESSAGES_WRITE,
-    DEFAULT_SAMPLE_LINES, OP_HEALTH, OP_JOIN_CHANNEL, OP_SAMPLE_TRANSCRIPT, OP_SEND_MESSAGE,
+    CAP_CHANNELS_WRITE, CAP_HEALTH_READ, CAP_MESSAGES_READ, CAP_MESSAGES_WRITE,
+    DEFAULT_SAMPLE_LINES, IrcConfig, OP_HEALTH, OP_JOIN_CHANNEL, OP_SAMPLE_TRANSCRIPT,
+    OP_SEND_MESSAGE,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -622,7 +623,12 @@ mod tests {
         let result = connector.doctor();
         assert!(!result.passed);
         assert!(!result.checks.is_empty());
-        assert!(result.checks.iter().any(|c| c.name == "configuration" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "configuration" && !c.passed)
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -657,9 +663,24 @@ mod tests {
             .unwrap();
         let result = connector.doctor();
         assert!(result.passed);
-        assert!(result.checks.iter().any(|c| c.name == "configuration" && c.passed));
-        assert!(result.checks.iter().any(|c| c.name == "server_configured" && c.passed));
-        assert!(result.checks.iter().any(|c| c.name == "nick_configured" && c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "configuration" && c.passed)
+        );
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "server_configured" && c.passed)
+        );
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "nick_configured" && c.passed)
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -697,7 +718,8 @@ mod tests {
             .unwrap();
         let shutdown_req: ShutdownRequest = serde_json::from_value(json!({
             "type": "shutdown"
-        })).unwrap();
+        }))
+        .unwrap();
         connector.shutdown(shutdown_req).await.unwrap();
         assert!(connector.state.is_none());
         assert!(connector.verifier.is_none());
@@ -796,14 +818,12 @@ mod tests {
 
     #[test]
     fn doctor_result_from_checks_all_pass() {
-        let checks = vec![
-            DoctorCheck {
-                name: "test".into(),
-                passed: true,
-                message: None,
-                critical: true,
-            },
-        ];
+        let checks = vec![DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }];
         let result = DoctorResult::from_checks(checks);
         assert!(result.passed);
     }

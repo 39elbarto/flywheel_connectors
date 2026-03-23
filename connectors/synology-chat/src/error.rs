@@ -51,7 +51,7 @@ impl SynologyChatError {
     }
 
     #[must_use]
-    pub fn retry_after(&self) -> Option<Duration> {
+    pub const fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::Api {
                 retry_after_ms: Some(retry_after_ms),

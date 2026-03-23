@@ -17,8 +17,10 @@ use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConf
 use fcp_sdk::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracing::info;
 
 use crate::client::MatrixClient;
+use crate::error::MatrixError;
 use crate::types::{
     CreateRoomRequest, Event, InvitedSyncRoom, JoinedSyncRoom, LeftSyncRoom, MatrixAuth,
     SyncResponse,
@@ -117,9 +119,88 @@ struct SyncProjection {
 }
 
 #[derive(Debug, Default)]
+struct MatrixSyncTelemetry {
+    successful_syncs: u64,
+    failed_syncs: u64,
+    last_status: Option<String>,
+    last_error: Option<String>,
+    last_duration_ms: Option<u64>,
+    last_used_since: Option<String>,
+    last_next_batch: Option<String>,
+    last_persisted: Option<bool>,
+    last_room_summary_count: usize,
+    last_message_event_count: usize,
+    last_membership_change_count: usize,
+    last_state_change_count: usize,
+}
+
+#[derive(Debug, Default)]
 struct MatrixSyncState {
     last_sync_token: Option<String>,
     rooms: BTreeMap<String, MatrixRoomSummary>,
+    telemetry: MatrixSyncTelemetry,
+}
+
+fn auth_mode_label(auth: &MatrixAuth) -> &'static str {
+    match auth {
+        MatrixAuth::AccessToken { .. } => "access_token",
+        MatrixAuth::CredentialId { .. } => "credential_id",
+    }
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    matches!(host, Some("localhost" | "127.0.0.1" | "::1"))
+}
+
+fn homeserver_transport_policy(homeserver_url: &str) -> (bool, String) {
+    match reqwest::Url::parse(homeserver_url) {
+        Ok(url) if url.scheme() == "https" => (
+            true,
+            format!(
+                "Homeserver transport uses HTTPS for {}",
+                url.host_str().unwrap_or("<unknown-host>")
+            ),
+        ),
+        Ok(url) if url.scheme() == "http" && is_loopback_host(url.host_str()) => (
+            true,
+            format!(
+                "Loopback HTTP is acceptable for deterministic verification against {}",
+                url.host_str().unwrap_or("localhost")
+            ),
+        ),
+        Ok(url) if url.scheme() == "http" => (
+            false,
+            format!(
+                "Remote homeserver '{}' is configured over plain HTTP; use HTTPS for non-local verification",
+                url.host_str().unwrap_or("<unknown-host>")
+            ),
+        ),
+        Ok(url) => (
+            false,
+            format!(
+                "Unsupported homeserver transport scheme '{}'; use HTTPS or loopback HTTP",
+                url.scheme()
+            ),
+        ),
+        Err(error) => (
+            false,
+            format!("Homeserver URL is not parseable for diagnostics: {error}"),
+        ),
+    }
+}
+
+fn doctor_check(
+    name: &str,
+    passed: bool,
+    message: impl Into<String>,
+    critical: bool,
+) -> serde_json::Value {
+    json!({
+        "name": name,
+        "passed": passed,
+        "message": message.into(),
+        "critical": critical,
+    })
 }
 
 /// Matrix connector.
@@ -157,28 +238,243 @@ impl MatrixConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
-    /// Run diagnostics.
-    #[must_use]
-    pub fn doctor(&self) -> serde_json::Value {
-        let configured = self.config.is_some();
-        let client_ok = self.client.is_some();
-        let runtime_ok = self.runtime.is_some();
-        let sync_state = self
+    fn provisioning_snapshot(&self) -> Option<serde_json::Value> {
+        self.config.as_ref().map(|config| {
+            let (transport_ok, transport_message) =
+                homeserver_transport_policy(&config.homeserver_url);
+            json!({
+                "auth_mode": auth_mode_label(&config.auth),
+                "homeserver_url": config.homeserver_url.clone(),
+                "transport_policy_ok": transport_ok,
+                "transport_policy_message": transport_message,
+                "credential_injection_required": matches!(&config.auth, MatrixAuth::CredentialId { .. }),
+                "sync_delivery_model": "manual_sync_only",
+                "retry_config": self.retry_config.clone(),
+            })
+        })
+    }
+
+    fn sync_observability_snapshot(&self) -> serde_json::Value {
+        let state = self
             .sync_state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let passed = configured && client_ok && runtime_ok;
+        let telemetry = &state.telemetry;
+        json!({
+            "last_sync_token": state.last_sync_token.clone(),
+            "tracked_rooms": state.rooms.len(),
+            "total_sync_calls": telemetry.successful_syncs + telemetry.failed_syncs,
+            "successful_syncs": telemetry.successful_syncs,
+            "failed_syncs": telemetry.failed_syncs,
+            "last_status": telemetry.last_status.clone(),
+            "last_error": telemetry.last_error.clone(),
+            "last_duration_ms": telemetry.last_duration_ms,
+            "last_used_since": telemetry.last_used_since.clone(),
+            "last_next_batch": telemetry.last_next_batch.clone(),
+            "last_persisted": telemetry.last_persisted,
+            "last_room_summary_count": telemetry.last_room_summary_count,
+            "last_message_event_count": telemetry.last_message_event_count,
+            "last_membership_change_count": telemetry.last_membership_change_count,
+            "last_state_change_count": telemetry.last_state_change_count,
+        })
+    }
+
+    fn observability_payload(&self) -> serde_json::Value {
+        json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "runtime_initialized": self.runtime.is_some(),
+            "handshaken": self.verifier.is_some(),
+            "manifest_hash": Self::manifest_hash(),
+            "provisioning": self.provisioning_snapshot(),
+            "sync_tracking": self.sync_observability_snapshot(),
+            "operator_guidance": {
+                "dedicated_environment": "Use a non-production homeserver account and disposable rooms when verifying create, join, leave, send_message, and media mutations.",
+                "sync_model": "This connector does not run a background receive loop. Invoke matrix.sync explicitly to advance the in-memory cursor and inspect room deltas.",
+                "credential_injection": "credential_id mode requires the host or egress proxy to inject a bearer token before self_check can prove live readiness.",
+                "redaction": "Do not log raw access tokens or decoded media bytes. Prefer room IDs, event IDs, and retry metadata in diagnostics.",
+                "verification_commands": [
+                    "rch exec -- cargo check -p fcp-matrix --all-targets",
+                    "rch exec -- cargo test -p fcp-matrix"
+                ]
+            }
+        })
+    }
+
+    fn attach_self_check_details(&self, mut report: SelfCheckReport) -> SelfCheckReport {
+        report.details = Some(self.observability_payload());
+        report
+    }
+
+    fn classify_self_check_error(error: &MatrixError) -> SelfCheckReport {
+        match error {
+            MatrixError::Unauthorized(message) => SelfCheckReport::failed(
+                "token_invalid_or_expired",
+                format!("Matrix homeserver rejected the bearer token: {message}"),
+            ),
+            MatrixError::Forbidden(message) => {
+                SelfCheckReport::failed("homeserver_forbidden", message.clone())
+            }
+            MatrixError::NotFound(message) => {
+                SelfCheckReport::failed("homeserver_endpoint_not_found", message.clone())
+            }
+            MatrixError::RateLimited { retry_after_ms } => SelfCheckReport::degraded(
+                "homeserver_rate_limited",
+                format!(
+                    "Matrix homeserver throttled the readiness probe; retry after {retry_after_ms}ms"
+                ),
+            ),
+            other if other.is_retryable() => {
+                SelfCheckReport::degraded("self_check_retryable", other.to_string())
+            }
+            other => SelfCheckReport::failed("self_check_failed", other.to_string()),
+        }
+    }
+
+    fn record_sync_success(
+        &self,
+        used_since: Option<&str>,
+        next_batch: &str,
+        persist: bool,
+        projection: &SyncProjection,
+        duration: Duration,
+    ) {
+        let mut state = self
+            .sync_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.telemetry.successful_syncs = state.telemetry.successful_syncs.saturating_add(1);
+        state.telemetry.last_status = Some("success".into());
+        state.telemetry.last_error = None;
+        state.telemetry.last_duration_ms =
+            Some(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        state.telemetry.last_used_since = used_since.map(ToOwned::to_owned);
+        state.telemetry.last_next_batch = Some(next_batch.to_string());
+        state.telemetry.last_persisted = Some(persist);
+        state.telemetry.last_room_summary_count = projection.room_summaries.len();
+        state.telemetry.last_message_event_count = projection.message_events.len();
+        state.telemetry.last_membership_change_count = projection.membership_changes.len();
+        state.telemetry.last_state_change_count = projection.state_changes.len();
+    }
+
+    fn record_sync_failure(
+        &self,
+        used_since: Option<&str>,
+        persist: bool,
+        error: &MatrixError,
+        duration: Duration,
+    ) {
+        let mut state = self
+            .sync_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.telemetry.failed_syncs = state.telemetry.failed_syncs.saturating_add(1);
+        state.telemetry.last_status = Some("failed".into());
+        state.telemetry.last_error = Some(error.to_string());
+        state.telemetry.last_duration_ms =
+            Some(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        state.telemetry.last_used_since = used_since.map(ToOwned::to_owned);
+        state.telemetry.last_next_batch = None;
+        state.telemetry.last_persisted = Some(persist);
+        state.telemetry.last_room_summary_count = 0;
+        state.telemetry.last_message_event_count = 0;
+        state.telemetry.last_membership_change_count = 0;
+        state.telemetry.last_state_change_count = 0;
+    }
+
+    /// Run diagnostics.
+    #[must_use]
+    pub fn doctor(&self) -> serde_json::Value {
+        let mut checks = Vec::new();
+
+        let configured = self.config.is_some();
+        checks.push(doctor_check(
+            "configuration",
+            configured,
+            if configured {
+                "Configuration loaded"
+            } else {
+                "Not configured - run configure first"
+            },
+            true,
+        ));
+
+        let client_ok = self.client.is_some();
+        checks.push(doctor_check(
+            "client_initialized",
+            client_ok,
+            if client_ok {
+                "Matrix client initialized"
+            } else {
+                "Matrix client missing; re-run configure"
+            },
+            true,
+        ));
+
+        let runtime_ok = self.runtime.is_some();
+        checks.push(doctor_check(
+            "runtime",
+            runtime_ok,
+            if runtime_ok {
+                "ConnectorRuntime initialized"
+            } else {
+                "ConnectorRuntime missing; re-run configure"
+            },
+            true,
+        ));
+
+        if let Some(config) = &self.config {
+            let (transport_ok, transport_message) =
+                homeserver_transport_policy(&config.homeserver_url);
+            checks.push(doctor_check(
+                "homeserver_transport",
+                transport_ok,
+                transport_message,
+                true,
+            ));
+            checks.push(doctor_check(
+                "auth_mode",
+                true,
+                format!("Auth mode: {}", auth_mode_label(&config.auth)),
+                false,
+            ));
+            let credential_injection_required =
+                matches!(&config.auth, MatrixAuth::CredentialId { .. });
+            checks.push(doctor_check(
+                "credential_injection",
+                !credential_injection_required,
+                if credential_injection_required {
+                    "Host or egress proxy must inject a bearer token before self_check can prove readiness"
+                } else {
+                    "Bearer token configured directly"
+                },
+                false,
+            ));
+            checks.push(doctor_check(
+                "sync_delivery_model",
+                true,
+                "No background receive loop is running; use matrix.sync to advance the in-memory cursor explicitly",
+                false,
+            ));
+        }
+
+        let passed = checks.iter().all(|check| {
+            !check["critical"].as_bool().unwrap_or(false)
+                || check["passed"].as_bool().unwrap_or(false)
+        });
+
+        info!(
+            event = "matrix.doctor",
+            status = if passed { "pass" } else { "fail" },
+            check_count = checks.len(),
+            "Matrix doctor checks completed"
+        );
+
         json!({
             "passed": passed,
-            "checks": [
-                { "name": "configuration", "passed": configured, "critical": true },
-                { "name": "client_initialized", "passed": client_ok, "critical": true },
-                { "name": "runtime", "passed": runtime_ok, "critical": true },
-            ],
-            "sync_tracking": {
-                "last_sync_token": sync_state.last_sync_token,
-                "tracked_rooms": sync_state.rooms.len(),
-            }
+            "checks": checks,
+            "sync_tracking": self.sync_observability_snapshot(),
+            "details": self.observability_payload(),
         })
     }
 
@@ -965,45 +1261,77 @@ impl FcpConnector for MatrixConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
-        let mut snapshot = if self.config.is_some() {
-            HealthSnapshot::ready()
+        let mut snapshot = if self.config.is_none() {
+            HealthSnapshot::degraded("not configured")
+        } else if self.client.is_none() || self.runtime.is_none() {
+            HealthSnapshot::degraded("connector runtime incomplete")
+        } else if let Some(config) = &self.config {
+            let (transport_ok, transport_message) =
+                homeserver_transport_policy(&config.homeserver_url);
+            if !transport_ok {
+                HealthSnapshot::degraded(transport_message)
+            } else if self
+                .client
+                .as_ref()
+                .is_some_and(MatrixClient::is_secretless)
+            {
+                HealthSnapshot::degraded("credential injection required")
+            } else {
+                HealthSnapshot::ready()
+            }
         } else {
             HealthSnapshot::degraded("not configured")
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(self.observability_payload());
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
+        let Some(config) = &self.config else {
+            return Ok(self.attach_self_check_details(SelfCheckReport::degraded(
                 "not_configured",
                 "Connector is not configured",
-            ));
+            )));
+        };
+        let (transport_ok, transport_message) = homeserver_transport_policy(&config.homeserver_url);
+        if !transport_ok {
+            return Ok(self.attach_self_check_details(SelfCheckReport::failed(
+                "homeserver_transport_invalid",
+                transport_message,
+            )));
+        }
+        let Some(client) = &self.client else {
+            return Ok(self.attach_self_check_details(SelfCheckReport::failed(
+                "client_missing",
+                "Matrix client not initialized; re-run configure",
+            )));
+        };
+        if self.runtime.is_none() {
+            return Ok(self.attach_self_check_details(SelfCheckReport::failed(
+                "runtime_missing",
+                "ConnectorRuntime not initialized; re-run configure",
+            )));
         };
         if client.is_secretless() {
-            return Ok(SelfCheckReport::degraded(
+            return Ok(self.attach_self_check_details(SelfCheckReport::degraded(
                 "credential_injection_required",
-                "Configured with empty token; egress proxy injection required",
-            ));
+                "Configured in credential_id mode; the host or egress proxy must inject a bearer token before live readiness can be proven",
+            )));
         }
-        match client.health_check().await {
-            Ok(()) => Ok(SelfCheckReport::ok()),
-            Err(err) => {
-                if err.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        err.to_string(),
-                    ))
-                } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        err.to_string(),
-                    ))
-                }
-            }
-        }
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => Self::classify_self_check_error(&err),
+        };
+        let report = self.attach_self_check_details(report);
+        info!(
+            event = "matrix.self_check",
+            status = ?report.status,
+            reason_code = report.reason_code.as_deref().unwrap_or("ok"),
+            "Matrix self_check completed"
+        );
+        Ok(report)
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
@@ -1154,10 +1482,19 @@ impl MatrixConnector {
                         .clone()
                 });
 
-                let response = client
-                    .sync(used_since.as_deref(), timeout_ms)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
+                let sync_started = Instant::now();
+                let response = match client.sync(used_since.as_deref(), timeout_ms).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        self.record_sync_failure(
+                            used_since.as_deref(),
+                            persist,
+                            &error,
+                            sync_started.elapsed(),
+                        );
+                        return Err(error.to_fcp_error());
+                    }
+                };
                 let projection = project_sync_response(&response);
                 let tracked_state = if persist {
                     {
@@ -1177,6 +1514,24 @@ impl MatrixConnector {
                         &projection.tracked_updates,
                     )
                 };
+                let duration = sync_started.elapsed();
+                self.record_sync_success(
+                    used_since.as_deref(),
+                    &response.next_batch,
+                    persist,
+                    &projection,
+                    duration,
+                );
+                info!(
+                    event = "matrix.sync",
+                    persisted = persist,
+                    duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                    room_summaries = projection.room_summaries.len(),
+                    message_events = projection.message_events.len(),
+                    membership_changes = projection.membership_changes.len(),
+                    state_changes = projection.state_changes.len(),
+                    "Matrix sync cycle completed"
+                );
 
                 json!({
                     "used_since": used_since,
@@ -1293,6 +1648,48 @@ impl MatrixConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn configure_and_handshake_read(c: &mut MatrixConnector, homeserver_url: &str) {
+        c.configure(json!({
+            "homeserver_url": homeserver_url,
+            "auth": { "mode": "access_token", "access_token": "tok" }
+        }))
+        .await
+        .unwrap();
+        c.handshake(HandshakeRequest {
+            protocol_version: "2.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key: [0u8; 32],
+            nonce: [0u8; 32],
+            capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    fn sync_invoke_request(connector: &MatrixConnector, input: serde_json::Value) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_sync"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::from_static(OP_SYNC),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
 
     #[test]
     fn operations_count() {
@@ -1444,6 +1841,52 @@ mod tests {
         .unwrap();
         let h = c.health().await;
         assert!(matches!(h.status, HealthState::Ready));
+        assert_eq!(
+            h.details
+                .as_ref()
+                .and_then(|details| details["provisioning"]["auth_mode"].as_str()),
+            Some("access_token")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_degrades_for_secretless_runtime() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "credential_id", "credential_id": "cred_1" }
+        }))
+        .await
+        .unwrap();
+
+        let h = c.health().await;
+        assert!(matches!(
+            h.status,
+            HealthState::Degraded { ref reason } if reason == "credential injection required"
+        ));
+        assert_eq!(
+            h.details.as_ref().and_then(|details| {
+                details["provisioning"]["credential_injection_required"].as_bool()
+            }),
+            Some(true)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_degrades_for_remote_http_homeserver() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "http://matrix.example.test",
+            "auth": { "mode": "access_token", "access_token": "tok" }
+        }))
+        .await
+        .unwrap();
+
+        let h = c.health().await;
+        assert!(matches!(
+            h.status,
+            HealthState::Degraded { ref reason } if reason.contains("plain HTTP")
+        ));
     }
 
     #[test]
@@ -1451,6 +1894,7 @@ mod tests {
         let c = MatrixConnector::new();
         let d = c.doctor();
         assert!(!d["passed"].as_bool().unwrap());
+        assert_eq!(d["details"]["configured"].as_bool(), Some(false));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1464,6 +1908,36 @@ mod tests {
         .unwrap();
         let d = c.doctor();
         assert!(d["passed"].as_bool().unwrap());
+        assert_eq!(
+            d["details"]["provisioning"]["auth_mode"].as_str(),
+            Some("access_token")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_surfaces_secretless_guidance_without_failing() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "credential_id", "credential_id": "cred_1" }
+        }))
+        .await
+        .unwrap();
+
+        let d = c.doctor();
+        assert!(d["passed"].as_bool().unwrap());
+        assert_eq!(
+            d["details"]["provisioning"]["credential_injection_required"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            d["details"]["provisioning"]["sync_delivery_model"].as_str(),
+            Some("manual_sync_only")
+        );
+        assert!(d["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"].as_str() == Some("credential_injection")
+                && check["passed"].as_bool() == Some(false)
+        }));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1502,6 +1976,37 @@ mod tests {
         let c = MatrixConnector::new();
         let r = c.self_check().await.unwrap();
         assert_eq!(r.status, SelfCheckStatus::Degraded);
+        assert_eq!(r.reason_code.as_deref(), Some("not_configured"));
+        assert_eq!(
+            r.details
+                .as_ref()
+                .and_then(|details| details["configured"].as_bool()),
+            Some(false)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_secretless_runtime_requires_injection() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "credential_id", "credential_id": "cred_1" }
+        }))
+        .await
+        .unwrap();
+
+        let report = c.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("credential_injection_required")
+        );
+        assert_eq!(
+            report.details.as_ref().and_then(|details| {
+                details["provisioning"]["credential_injection_required"].as_bool()
+            }),
+            Some(true)
+        );
     }
 
     #[test]
@@ -1722,7 +2227,168 @@ mod tests {
 
         let report = c.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Failed);
-        assert_eq!(report.reason_code.as_deref(), Some("self_check_failed"));
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("token_invalid_or_expired")
+        );
+        assert!(
+            report
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Unrecognised access token."))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sync_records_success_telemetry() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
+            .and(wiremock::matchers::query_param("timeout", "1000"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "next_batch": "batch_2",
+                    "rooms": {
+                        "join": {
+                            "!room:matrix.org": {
+                                "state": {
+                                    "events": [
+                                        {
+                                            "event_id": "$state1",
+                                            "type": "m.room.name",
+                                            "state_key": "",
+                                            "sender": "@bot:matrix.org",
+                                            "origin_server_ts": 100,
+                                            "content": { "name": "General" },
+                                            "room_id": "!room:matrix.org"
+                                        },
+                                        {
+                                            "event_id": "$member1",
+                                            "type": "m.room.member",
+                                            "state_key": "@alice:matrix.org",
+                                            "sender": "@alice:matrix.org",
+                                            "origin_server_ts": 110,
+                                            "content": { "membership": "join", "displayname": "Alice" },
+                                            "room_id": "!room:matrix.org"
+                                        }
+                                    ]
+                                },
+                                "timeline": {
+                                    "events": [
+                                        {
+                                            "event_id": "$msg1",
+                                            "type": "m.room.message",
+                                            "sender": "@alice:matrix.org",
+                                            "origin_server_ts": 120,
+                                            "content": { "msgtype": "m.text", "body": "Hello" },
+                                            "room_id": "!room:matrix.org"
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let mut c = MatrixConnector::new();
+        configure_and_handshake_read(&mut c, &mock.uri()).await;
+
+        let response = c
+            .invoke(sync_invoke_request(&c, json!({ "timeout_ms": 1000 })))
+            .await
+            .unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["next_batch"].as_str(), Some("batch_2"));
+
+        let doctor = c.doctor();
+        assert_eq!(
+            doctor["sync_tracking"]["successful_syncs"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(doctor["sync_tracking"]["failed_syncs"].as_u64(), Some(0));
+        assert_eq!(
+            doctor["sync_tracking"]["last_status"].as_str(),
+            Some("success")
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_next_batch"].as_str(),
+            Some("batch_2")
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_room_summary_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_message_event_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_membership_change_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_state_change_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_persisted"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sync_records_failure_telemetry() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
+            .and(wiremock::matchers::query_param("since", "batch_1"))
+            .and(wiremock::matchers::query_param("timeout", "1000"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(429)
+                    .insert_header("retry-after", "60")
+                    .set_body_string("rate limited"),
+            )
+            .mount(&mock)
+            .await;
+
+        let mut c = MatrixConnector::new();
+        configure_and_handshake_read(&mut c, &mock.uri()).await;
+
+        let error = c
+            .invoke(sync_invoke_request(
+                &c,
+                json!({ "since": "batch_1", "timeout_ms": 1000, "persist": false }),
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FcpError::RateLimited { .. }));
+
+        let doctor = c.doctor();
+        assert_eq!(
+            doctor["sync_tracking"]["successful_syncs"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(doctor["sync_tracking"]["failed_syncs"].as_u64(), Some(1));
+        assert_eq!(
+            doctor["sync_tracking"]["last_status"].as_str(),
+            Some("failed")
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_used_since"].as_str(),
+            Some("batch_1")
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_persisted"].as_bool(),
+            Some(false)
+        );
+        assert!(
+            doctor["sync_tracking"]["last_error"]
+                .as_str()
+                .is_some_and(|message| message.contains("Rate limited"))
+        );
     }
 
     #[fcp_async_core::runtime::test]

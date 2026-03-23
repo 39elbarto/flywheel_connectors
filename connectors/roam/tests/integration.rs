@@ -62,11 +62,54 @@ async fn lifecycle_handshake_before_configure_fails() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn lifecycle_handshake_requires_session_id() {
+    let server = MockServer::start().await;
+    let mut c = RoamConnector::new();
+    c.handle_configure(json!({
+        "access_token": "tok",
+        "base_url": &server.uri(),
+        "graph_name": "g"
+    }))
+    .await
+    .unwrap();
+
+    let error = c.handle_handshake(json!({})).await.unwrap_err();
+    match error {
+        fcp_core::FcpError::InvalidRequest { code, message } => {
+            assert_eq!(code, 1003);
+            assert_eq!(message, "Missing session_id");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
     c.handle_shutdown(json!({})).await.unwrap();
-    assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
+    let health = c.handle_health().await.unwrap();
+    assert_eq!(health["status"], "unconfigured");
+    assert_eq!(health["handshaken"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_reconfigure_clears_handshake_state() {
+    let server = MockServer::start().await;
+    let mut c = setup_connector(&server.uri()).await;
+
+    c.handle_configure(json!({
+        "access_token": "test-token-2",
+        "base_url": server.uri(),
+        "graph_name": "reconfigured-graph"
+    }))
+    .await
+    .unwrap();
+
+    let health = c.handle_health().await.unwrap();
+    assert_eq!(health["status"], "degraded");
+    assert_eq!(health["configured"], true);
+    assert_eq!(health["handshaken"], false);
 }
 
 #[fcp_async_core::runtime::test]

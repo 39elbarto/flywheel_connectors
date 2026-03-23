@@ -197,7 +197,9 @@ mod tests {
         let err = IrcError::io("irc connect", &source);
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::External { service, retryable, .. } => {
+            FcpError::External {
+                service, retryable, ..
+            } => {
                 assert_eq!(service, "irc");
                 assert!(retryable);
             }
@@ -240,7 +242,12 @@ mod tests {
         let err = IrcError::Tls("certificate expired".into());
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::External { service, message, retryable, .. } => {
+            FcpError::External {
+                service,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "irc");
                 assert!(message.contains("TLS"));
                 assert!(retryable);
@@ -274,7 +281,10 @@ mod tests {
 
     #[test]
     fn display_formatting() {
-        let io = IrcError::Io { context: "read".into(), message: "broken pipe".into() };
+        let io = IrcError::Io {
+            context: "read".into(),
+            message: "broken pipe".into(),
+        };
         assert_eq!(io.to_string(), "I/O error: read \u{2014} broken pipe");
 
         let proto = IrcError::Protocol("nick in use".into());

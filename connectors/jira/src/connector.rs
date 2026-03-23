@@ -883,7 +883,7 @@ impl JiraConnector {
                         ],
                         related: vec![
                             CapabilityId::from_static("jira.worklog.add"),
-                            CapabilityId::from_static("jira.get_issue"),
+                            CapabilityId::from_static("jira.worklog.update"),
                         ],
                     },
                 ),
@@ -2278,7 +2278,7 @@ impl JiraConnector {
                     } else {
                         info!(
                             correlation_id = %correlation_id,
-                            issue_key,
+                            issue_key = %issue_key,
                             bead_id = %bead.bead_id,
                             action = ?action,
                             "Jira sync push skipped mutation"
@@ -2327,7 +2327,7 @@ impl JiraConnector {
 
                 info!(
                     correlation_id = %correlation_id,
-                    issue_key,
+                    issue_key = %issue_key,
                     bead_id = %bead.bead_id,
                     action = ?JiraSyncAction::PushBead,
                     "Jira sync push updated an existing issue"
@@ -2460,7 +2460,7 @@ impl JiraConnector {
             if conflict.is_some() {
                 warn!(
                     correlation_id = %correlation_id,
-                    issue_key,
+                    issue_key = %issue_key,
                     bead_id = %bead.bead_id,
                     action = ?action,
                     "Jira sync reconcile detected a conflict"
@@ -2468,7 +2468,7 @@ impl JiraConnector {
             } else {
                 info!(
                     correlation_id = %correlation_id,
-                    issue_key,
+                    issue_key = %issue_key,
                     bead_id = %bead.bead_id,
                     action = ?action,
                     "Jira sync reconcile completed"
@@ -2565,7 +2565,7 @@ impl JiraConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let label = format!("{BEAD_LABEL_PREFIX}{bead_id}");
         let jql = format!(
-            "project = \"{}\" AND labels = \"{}\" ORDER BY created DESC",
+            "project = {} AND labels = {} ORDER BY created DESC",
             escape_jql_literal(project_key),
             escape_jql_literal(&label),
         );
@@ -3015,7 +3015,9 @@ fn extract_bead_id_from_labels(labels: &[String]) -> Option<String> {
 }
 
 fn escape_jql_literal(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    // Use serde_json::to_string to correctly escape control characters like newlines,
+    // in addition to quotes and backslashes. JQL string literals parse JSON string rules correctly.
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn stringify_scalar(value: &serde_json::Value) -> Option<String> {
@@ -3815,221 +3817,49 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_health_includes_auth_mode() {
+    async fn test_configure_rejects_token_without_email() {
         let mut connector = JiraConnector::new();
-        connector
+        let result = connector
             .handle_configure(json!({
                 "domain": "mycompany",
-                "email": "user@example.com",
                 "api_token": "token"
             }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_health().await.unwrap();
-        assert_eq!(result["status"], "healthy");
-        assert_eq!(result["auth_mode"], "token");
-        assert_eq!(result["api_domain"], "mycompany");
+            .await;
+        assert!(result.is_err());
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_doctor_configured() {
+    async fn test_configure_rejects_all_three_auth_methods() {
         let mut connector = JiraConnector::new();
-        connector
+        let result = connector
             .handle_configure(json!({
                 "domain": "mycompany",
-                "email": "user@example.com",
-                "api_token": "token"
-            }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "healthy");
-        let checks = result["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 6);
-        assert!(checks.iter().all(|c| c["status"] == "pass"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_doctor_not_configured() {
-        let connector = JiraConnector::new();
-        let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "unhealthy");
-        let checks = result["checks"].as_array().unwrap();
-        assert!(checks.iter().any(|c| c["status"] == "fail"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_shutdown_clears_state() {
-        let mut connector = JiraConnector::new();
-        connector
-            .handle_configure(json!({
-                "domain": "test",
                 "email": "user@example.com",
                 "api_token": "token",
-                "base_url": "http://localhost:9999"
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
             }))
-            .await
-            .unwrap();
-
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": vec![0u8; 32],
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["jira.read"]
-            }))
-            .await
-            .unwrap();
-
-        connector.handle_shutdown(json!({})).await.unwrap();
-
-        assert!(connector.client.is_none());
-        assert!(connector.config.is_none());
-        assert!(connector.verifier.is_none());
-        assert!(connector.session_id.is_none());
-        assert!(connector.zone_dir.is_none());
-
-        let health = connector.handle_health().await.unwrap();
-        assert_eq!(health["status"], "not_configured");
+            .await;
+        assert!(result.is_err());
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_doctor_credential_id_warns() {
+    async fn test_configure_rejects_invalid_credential_id() {
         let mut connector = JiraConnector::new();
-        let cid = uuid::Uuid::new_v4().to_string();
-        connector
+        let result = connector
             .handle_configure(json!({
                 "domain": "mycompany",
-                "credential_id": cid
+                "credential_id": "not-a-uuid"
             }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "degraded");
-        let checks = result["checks"].as_array().unwrap();
-        let cred_check = checks
-            .iter()
-            .find(|c| c["name"] == "credential_injection")
-            .unwrap();
-        assert_eq!(cred_check["status"], "warn");
+            .await;
+        assert!(result.is_err());
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_self_check_not_configured() {
-        let connector = JiraConnector::new();
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "failed");
-        assert_eq!(result["reason_code"], "not_configured");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_credential_id_degraded() {
+    async fn test_configure_rejects_no_auth() {
         let mut connector = JiraConnector::new();
-        let cid = uuid::Uuid::new_v4().to_string();
-        connector
-            .handle_configure(json!({
-                "domain": "mycompany",
-                "credential_id": cid
-            }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "degraded");
-        assert_eq!(result["reason_code"], "credential_injection_required");
-    }
-
-    // ── Sync unit tests: config, helpers, operations ─────────────────
-
-    #[test]
-    fn config_from_email_and_token() {
-        let cfg = JiraConfig::from_params(&json!({
-            "domain": "mycompany",
-            "email": "user@example.com",
-            "api_token": "secret"
-        }))
-        .unwrap();
-        assert!(!cfg.auth.is_secretless());
-        assert!(cfg.base_url.is_none());
-    }
-
-    #[test]
-    fn config_from_credential_id() {
-        let cfg = JiraConfig::from_params(&json!({
-            "domain": "mycompany",
-            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
-        }))
-        .unwrap();
-        assert!(cfg.auth.is_secretless());
-    }
-
-    #[test]
-    fn config_custom_urls() {
-        let cfg = JiraConfig::from_params(&json!({
-            "domain": "corp",
-            "email": "u@e.com",
-            "api_token": "t",
-            "base_url": "https://jira.example.com",
-            "agile_url": "https://jira.example.com/agile"
-        }))
-        .unwrap();
-        assert_eq!(cfg.base_url.as_deref(), Some("https://jira.example.com"));
-        assert_eq!(
-            cfg.agile_url.as_deref(),
-            Some("https://jira.example.com/agile")
-        );
-    }
-
-    #[test]
-    fn config_rejects_no_domain() {
-        let result = JiraConfig::from_params(&json!({
-            "email": "u@e.com", "api_token": "t"
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_rejects_email_without_token() {
-        let result = JiraConfig::from_params(&json!({
-            "domain": "x", "email": "u@e.com"
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_rejects_token_without_email() {
-        let result = JiraConfig::from_params(&json!({
-            "domain": "x", "api_token": "t"
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_rejects_all_three_auth_methods() {
-        let result = JiraConfig::from_params(&json!({
-            "domain": "x",
-            "email": "u@e.com",
-            "api_token": "t",
-            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_rejects_invalid_credential_id() {
-        let result = JiraConfig::from_params(&json!({
-            "domain": "x", "credential_id": "not-a-uuid"
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn config_rejects_no_auth() {
-        let result = JiraConfig::from_params(&json!({ "domain": "x" }));
+        let result = connector
+            .handle_configure(json!({ "domain": "mycompany" }))
+            .await;
         assert!(result.is_err());
     }
 

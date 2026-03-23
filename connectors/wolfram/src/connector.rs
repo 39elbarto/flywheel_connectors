@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
-    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
@@ -36,9 +36,7 @@ impl DoctorResult {
     /// The overall result passes when all critical checks pass.
     #[must_use]
     pub fn from_checks(checks: Vec<DoctorCheck>) -> Self {
-        let passed = checks
-            .iter()
-            .all(|c| !c.critical || c.passed);
+        let passed = checks.iter().all(|c| !c.critical || c.passed);
         Self { passed, checks }
     }
 }
@@ -275,9 +273,9 @@ impl WolframConnector {
             }));
         }
 
-        let all_critical_pass = checks
-            .iter()
-            .all(|c| !c["critical"].as_bool().unwrap_or(false) || c["passed"].as_bool().unwrap_or(false));
+        let all_critical_pass = checks.iter().all(|c| {
+            !c["critical"].as_bool().unwrap_or(false) || c["passed"].as_bool().unwrap_or(false)
+        });
 
         Ok(json!({
             "status": if all_critical_pass { "healthy" } else { "unhealthy" },
@@ -306,12 +304,15 @@ impl WolframConnector {
         }
 
         // Validate base URL
-        let url_ok = config.base_url.contains("wolframalpha.com")
-            || config.base_url.contains("wolfram.com");
+        let url_ok =
+            config.base_url.contains("wolframalpha.com") || config.base_url.contains("wolfram.com");
         if !url_ok {
             let mut report = SelfCheckReport::failed(
                 "base_url_mismatch",
-                format!("Base URL '{}' does not match Wolfram Alpha", config.base_url),
+                format!(
+                    "Base URL '{}' does not match Wolfram Alpha",
+                    config.base_url
+                ),
             );
             report.details = Some(json!({"base_url": config.base_url}));
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
@@ -401,24 +402,23 @@ impl WolframConnector {
                     code: 1003,
                     message: format!("Invalid capability token: {e}"),
                 })?;
-            let required_cap = required_capability_for_operation(operation)
-                .ok_or_else(|| FcpError::InvalidRequest {
+            let required_cap = required_capability_for_operation(operation).ok_or_else(|| {
+                FcpError::InvalidRequest {
                     code: 1003,
                     message: format!("Unknown operation: {operation}"),
-                })?;
-            let op_id = OperationId::from_static(
-                match operation {
-                    "wolfram.query" => "wolfram.query",
-                    "wolfram.short_answer" => "wolfram.short_answer",
-                    "wolfram.spoken_result" => "wolfram.spoken_result",
-                    _ => {
-                        return Err(FcpError::InvalidRequest {
-                            code: 1003,
-                            message: format!("Unknown operation: {operation}"),
-                        })
-                    }
-                },
-            );
+                }
+            })?;
+            let op_id = OperationId::from_static(match operation {
+                "wolfram.query" => "wolfram.query",
+                "wolfram.short_answer" => "wolfram.short_answer",
+                "wolfram.spoken_result" => "wolfram.spoken_result",
+                _ => {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Unknown operation: {operation}"),
+                    });
+                }
+            });
             verifier.verify(&cap_token, &required_cap, &op_id, &[])?;
         }
 
@@ -456,18 +456,14 @@ impl WolframConnector {
                     message: format!("Failed to serialize query result: {e}"),
                 })
             }
-            "wolfram.short_answer" => {
-                client.short_answer(query, app_id).await.map_err(|e| {
-                    use fcp_sdk::migration::ConnectorErrorMapping;
-                    e.to_fcp_error()
-                })
-            }
-            "wolfram.spoken_result" => {
-                client.spoken_result(query, app_id).await.map_err(|e| {
-                    use fcp_sdk::migration::ConnectorErrorMapping;
-                    e.to_fcp_error()
-                })
-            }
+            "wolfram.short_answer" => client.short_answer(query, app_id).await.map_err(|e| {
+                use fcp_sdk::migration::ConnectorErrorMapping;
+                e.to_fcp_error()
+            }),
+            "wolfram.spoken_result" => client.spoken_result(query, app_id).await.map_err(|e| {
+                use fcp_sdk::migration::ConnectorErrorMapping;
+                e.to_fcp_error()
+            }),
             _ => Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Unknown operation: {operation}"),
@@ -621,10 +617,10 @@ fn required_capability_for_operation(operation: &str) -> Option<CapabilityId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{InstanceId, ZoneId};
-    use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_crypto::cose::CapabilityTokenBuilder;
     use chrono::{Duration, Utc};
+    use fcp_core::{InstanceId, ZoneId};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -771,8 +767,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn self_check_ok() {
-        let (connector, _key) =
-            setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
+        let (connector, _key) = setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
         let result = connector.handle_self_check().await.expect("self_check");
         assert_eq!(result["status"], "ok");
     }
@@ -863,8 +858,7 @@ mod tests {
 
         // Use the server URI without the protocol for configure
         let base_url = server.uri();
-        let (connector, signing_key) =
-            setup_connector(&base_url, &["wolfram.query"]).await;
+        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
 
         // Override the client to use the mock server with protocol
         let token = generate_token(&signing_key, "wolfram.query", &["wolfram.query"]);
@@ -889,8 +883,7 @@ mod tests {
             .await;
 
         let base_url = server.uri();
-        let (connector, signing_key) =
-            setup_connector(&base_url, &["wolfram.query"]).await;
+        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
         let token = generate_token(&signing_key, "wolfram.query", &["wolfram.short_answer"]);
         let result = connector
             .handle_invoke(json!({
@@ -913,8 +906,7 @@ mod tests {
             .await;
 
         let base_url = server.uri();
-        let (connector, signing_key) =
-            setup_connector(&base_url, &["wolfram.query"]).await;
+        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
         let token = generate_token(&signing_key, "wolfram.query", &["wolfram.spoken_result"]);
         let result = connector
             .handle_invoke(json!({
@@ -974,7 +966,11 @@ mod tests {
         let connector = WolframConnector::new();
         let introspection = connector.handle_introspect();
         assert_eq!(introspection.operations.len(), 3);
-        let op_ids: Vec<&str> = introspection.operations.iter().map(|o| o.id.as_ref()).collect();
+        let op_ids: Vec<&str> = introspection
+            .operations
+            .iter()
+            .map(|o| o.id.as_ref())
+            .collect();
         assert!(op_ids.contains(&"wolfram.query"));
         assert!(op_ids.contains(&"wolfram.short_answer"));
         assert!(op_ids.contains(&"wolfram.spoken_result"));
@@ -985,7 +981,11 @@ mod tests {
         let connector = WolframConnector::new();
         let result = connector.doctor();
         assert!(!result.passed, "unconfigured connector should fail doctor");
-        let config_check = result.checks.iter().find(|c| c.name == "configuration").unwrap();
+        let config_check = result
+            .checks
+            .iter()
+            .find(|c| c.name == "configuration")
+            .unwrap();
         assert!(!config_check.passed);
         assert!(config_check.critical);
     }
@@ -1041,15 +1041,28 @@ mod tests {
             },
         ];
         let result = DoctorResult::from_checks(checks);
-        assert!(result.passed, "should pass when only non-critical check fails");
+        assert!(
+            result.passed,
+            "should pass when only non-critical check fails"
+        );
     }
 
     #[test]
     fn all_operations_are_safe() {
         let ops = wolfram_operations();
         for op in &ops {
-            assert_eq!(op.safety_tier, SafetyTier::Safe, "op {} should be safe", op.id);
-            assert_eq!(op.risk_level, RiskLevel::Low, "op {} should be low risk", op.id);
+            assert_eq!(
+                op.safety_tier,
+                SafetyTier::Safe,
+                "op {} should be safe",
+                op.id
+            );
+            assert_eq!(
+                op.risk_level,
+                RiskLevel::Low,
+                "op {} should be low risk",
+                op.id
+            );
         }
     }
 
@@ -1057,7 +1070,12 @@ mod tests {
     fn all_operations_are_idempotent() {
         let ops = wolfram_operations();
         for op in &ops {
-            assert_eq!(op.idempotency, IdempotencyClass::Strict, "op {} should be strict", op.id);
+            assert_eq!(
+                op.idempotency,
+                IdempotencyClass::Strict,
+                "op {} should be strict",
+                op.id
+            );
         }
     }
 
@@ -1065,8 +1083,16 @@ mod tests {
     fn all_operations_have_schemas() {
         let ops = wolfram_operations();
         for op in &ops {
-            assert!(op.input_schema.is_object(), "op {} missing input schema", op.id);
-            assert!(op.output_schema.is_object(), "op {} missing output schema", op.id);
+            assert!(
+                op.input_schema.is_object(),
+                "op {} missing input schema",
+                op.id
+            );
+            assert!(
+                op.output_schema.is_object(),
+                "op {} missing output schema",
+                op.id
+            );
         }
     }
 }

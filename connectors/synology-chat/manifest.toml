@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.synology-chat"
 name = "Synology Chat"
 version = "0.1.0"
-description = "Synology Chat incoming-webhook connector for self-hosted chat delivery and health checks"
+description = "Synology Chat webhook connector for self-hosted chat delivery, forwarded outgoing-webhook normalization, and health checks"
 archetype = "operational"
 homepage = "https://www.synology.com"
 
@@ -44,6 +44,16 @@ idempotency = "none"
 
 [provides.operations.send_payload.ai_hints]
 when_to_use = "When you need advanced webhook payload control for cards or attachments"
+
+[provides.operations.ingest_outgoing_webhook]
+summary = "Validate and normalize a host-forwarded Synology Chat outgoing-webhook payload"
+capability = "synology_chat.webhook"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.ingest_outgoing_webhook.ai_hints]
+when_to_use = "When fcp-host forwards an outgoing-webhook payload and you need stable channel, thread, sender, and attachment metadata"
 
 [provides.operations.health]
 summary = "Report Synology Chat connector configuration and delivery target"

@@ -2,7 +2,6 @@
 //!
 //! Implements the FcpConnector trait with Telegram-specific operations.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,205 +22,14 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use crate::client::{SendMediaOptions, SendMessageOptions, TelegramClient, TelegramError};
+use crate::client::TelegramClient;
+use crate::error::TelegramError;
 use crate::limits::{MEDIA_CAPTION_MAX_CHARS, MESSAGE_TEXT_MAX_CHARS};
-use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
+use crate::types::*;
 
-const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
-const MIN_POLL_TIMEOUT_SECS: i32 = 1;
-const MAX_POLL_TIMEOUT_SECS: i32 = 50;
-const MIN_POLL_LEASE_TTL_SECS: u64 = 10;
 const TELEGRAM_POLL_CURSOR_FILE: &str = "telegram_poll_cursor.json";
 const TELEGRAM_POLL_LEASE_FILE: &str = "telegram_poll_lease.json";
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-const KNOWN_ALLOWED_UPDATES: &[&str] = &[
-    "message",
-    "edited_message",
-    "channel_post",
-    "edited_channel_post",
-    "inline_query",
-    "chosen_inline_result",
-    "callback_query",
-    "shipping_query",
-    "pre_checkout_query",
-    "poll",
-    "poll_answer",
-    "my_chat_member",
-    "chat_member",
-    "chat_join_request",
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TelegramAuthConfig {
-    BotToken,
-    CredentialId(CredentialId),
-}
-
-/// Telegram connector configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct TelegramConfig {
-    /// Bot credential (required)
-    #[serde(default)]
-    pub credential: Option<String>,
-
-    /// Credential object reference for secretless setups.
-    #[serde(default)]
-    pub credential_id: Option<CredentialId>,
-
-    /// Custom API base URL (optional)
-    #[serde(default)]
-    pub base_url: Option<String>,
-
-    /// Polling timeout in seconds
-    #[serde(default = "default_poll_timeout")]
-    pub poll_timeout: i32,
-
-    /// Allowed updates filter
-    #[serde(default)]
-    pub allowed_updates: Vec<String>,
-}
-
-fn default_poll_timeout() -> i32 {
-    30
-}
-
-impl TelegramConfig {
-    fn resolve_auth_mode(&self) -> FcpResult<TelegramAuthConfig> {
-        let token = self
-            .credential
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
-
-        match (token, self.credential_id) {
-            (Some(_), None) => Ok(TelegramAuthConfig::BotToken),
-            (None, Some(id)) => Ok(TelegramAuthConfig::CredentialId(id)),
-            (Some(_), Some(_)) => Err(FcpError::InvalidRequest {
-                code: 1004,
-                message: "Provide exactly one of credential or credential_id".into(),
-            }),
-            (None, None) => Err(FcpError::InvalidRequest {
-                code: 1004,
-                message: "Missing required credential or credential_id in configuration".into(),
-            }),
-        }
-    }
-
-    fn normalize_base_url(&self) -> FcpResult<String> {
-        let raw = self
-            .base_url
-            .as_deref()
-            .unwrap_or(DEFAULT_TELEGRAM_BASE_URL)
-            .trim();
-
-        if raw.is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: "base_url cannot be empty".into(),
-            });
-        }
-
-        let parsed = Url::parse(raw).map_err(|e| FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("Invalid base_url: {e}"),
-        })?;
-        if !matches!(parsed.scheme(), "https" | "http") {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: "base_url must use http or https".into(),
-            });
-        }
-        if parsed.host_str().is_none() {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: "base_url must include a host".into(),
-            });
-        }
-
-        Ok(raw.trim_end_matches('/').to_string())
-    }
-
-    fn validate_runtime_settings(&self) -> FcpResult<()> {
-        if !(MIN_POLL_TIMEOUT_SECS..=MAX_POLL_TIMEOUT_SECS).contains(&self.poll_timeout) {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: format!(
-                    "poll_timeout must be between {MIN_POLL_TIMEOUT_SECS} and {MAX_POLL_TIMEOUT_SECS} seconds"
-                ),
-            });
-        }
-
-        let mut seen = HashSet::new();
-        for update in &self.allowed_updates {
-            if update.trim().is_empty() {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "allowed_updates entries must not be empty".into(),
-                });
-            }
-            if !seen.insert(update.clone()) {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("allowed_updates contains duplicate value: {update}"),
-                });
-            }
-            if !KNOWN_ALLOWED_UPDATES.contains(&update.as_str()) {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("allowed_updates contains unsupported type: {update}"),
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn auth_label(&self) -> &'static str {
-        if self.credential_id.is_some() {
-            "credential_id"
-        } else {
-            "bot_token"
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DoctorResult {
-    status: DoctorStatus,
-    checks: Vec<DoctorCheck>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum DoctorStatus {
-    Healthy,
-    Degraded,
-    Unhealthy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DoctorCheck {
-    name: String,
-    passed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-    critical: bool,
-}
-
-impl DoctorResult {
-    #[must_use]
-    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
-        let status = if checks.iter().any(|c| c.critical && !c.passed) {
-            DoctorStatus::Unhealthy
-        } else if checks.iter().any(|c| !c.passed) {
-            DoctorStatus::Degraded
-        } else {
-            DoctorStatus::Healthy
-        };
-
-        Self { status, checks }
-    }
-}
 
 fn current_unix_timestamp_secs() -> u64 {
     SystemTime::now()
@@ -253,13 +61,6 @@ where
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TelegramPollingCursorState {
-    offset: Option<i64>,
-    last_poll_count: usize,
-    updated_at: u64,
 }
 
 #[derive(Debug, Default)]
@@ -322,14 +123,6 @@ impl PollingCursor for TelegramPollingCursor {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TelegramPollLeaseRecord {
-    holder_instance_id: String,
-    lease_seq: u64,
-    updated_at: u64,
-    expires_at: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2401,7 +2194,10 @@ mod tests {
             .await
             .expect("handshake should succeed");
 
-        assert_eq!(handshake["manifest_hash"], TelegramConnector::manifest_hash());
+        assert_eq!(
+            handshake["manifest_hash"],
+            TelegramConnector::manifest_hash()
+        );
 
         connector
             .handle_shutdown(json!({}))

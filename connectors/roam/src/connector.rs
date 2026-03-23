@@ -435,7 +435,9 @@ impl RoamConnector {
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(json!({}))
     }
 
@@ -454,9 +456,15 @@ impl RoamConnector {
         let session_id = params
             .get("session_id")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing session_id".into(),
+            })?
+            .to_string();
 
-        self.session_id = session_id;
+        self.session_id = Some(session_id);
         self.base.set_handshaken(true);
 
         Ok(json!({
@@ -520,13 +528,13 @@ impl RoamConnector {
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let provisioning = self.config.as_ref().map(RoamConfig::provisioning_readiness);
         let report = match (&self.config, &self.client, provisioning.as_ref()) {
-            (None, _, _) | (_, None, _) => Self::attach_self_check_details(
+            (None, _, _) | (_, None, _) => self.attach_self_check_details(
                 SelfCheckReport::degraded("not_configured", "Connector is not configured"),
                 provisioning.as_ref(),
                 None,
             ),
             (Some(_), Some(_), Some(readiness)) if !readiness.network_ok => {
-                Self::attach_self_check_details(
+                self.attach_self_check_details(
                     SelfCheckReport::failed(
                         "network_constraints_invalid",
                         readiness.network_message.clone(),
@@ -536,7 +544,7 @@ impl RoamConnector {
                 )
             }
             (Some(_), Some(_), Some(readiness)) if readiness.requires_credential_injection => {
-                Self::attach_self_check_details(
+                self.attach_self_check_details(
                     SelfCheckReport::degraded(
                         "credential_injection_required",
                         "credential_id mode requires host-side Roam secret injection; skipping live probe",
@@ -558,14 +566,14 @@ impl RoamConnector {
                         "page_count": page_count,
                         "response": response,
                     });
-                    Self::attach_self_check_details(
+                    self.attach_self_check_details(
                         SelfCheckReport::ok(),
                         provisioning.as_ref(),
                         Some(&live_probe),
                     )
                 }
                 Err(RoamError::Unauthorized) | Err(RoamError::Forbidden) => {
-                    Self::attach_self_check_details(
+                    self.attach_self_check_details(
                         SelfCheckReport::failed(
                             "auth_invalid",
                             "Roam credentials were rejected by the live probe",
@@ -583,19 +591,19 @@ impl RoamConnector {
                         "retry_after_ms": error.retry_after().map(|duration| duration.as_millis() as u64),
                         "error": error.to_string(),
                     });
-                    Self::attach_self_check_details(
+                    self.attach_self_check_details(
                         SelfCheckReport::degraded("self_check_retryable", error.to_string()),
                         provisioning.as_ref(),
                         Some(&live_probe),
                     )
                 }
-                Err(error) => Self::attach_self_check_details(
+                Err(error) => self.attach_self_check_details(
                     SelfCheckReport::failed("self_check_failed", error.to_string()),
                     provisioning.as_ref(),
                     None,
                 ),
             },
-            (Some(_), Some(_), None) => Self::attach_self_check_details(
+            (Some(_), Some(_), None) => self.attach_self_check_details(
                 SelfCheckReport::failed(
                     "provisioning_unavailable",
                     "Provisioning readiness could not be computed",
@@ -691,6 +699,7 @@ impl RoamConnector {
         }
         self.client = None;
         self.config = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))

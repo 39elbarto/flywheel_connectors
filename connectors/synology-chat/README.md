@@ -16,9 +16,9 @@
 
 ## Purpose
 
-This document fixes the accepted first V3 slice for `fcp.synology-chat` so follow-on work converges on the connector that actually exists today instead of a broader idea of a full Synology Chat integration with inbound webhook hosting, event normalization, richer reply semantics, and self-hosted deployment guidance already solved.
+This document fixes the accepted first V3 slice for `fcp.synology-chat` and records the first inbound follow-on that now exists, so later work stays aligned with the connector that actually ships instead of assuming a full bidirectional bot runtime already exists.
 
-The current connector is an outbound incoming-webhook client for Synology Chat. It can send plain text, forward a raw webhook payload, and report configuration and health details. It is not yet an outgoing-webhook receiver, slash-command handler, bot platform runtime, or inbound message bridge.
+The current connector is still centered on outbound incoming-webhook delivery, but it now also supports explicit host-forwarded outgoing-webhook normalization. It can send plain text, forward a raw webhook payload, normalize one forwarded outgoing-webhook payload into stable channel or thread or sender metadata, and report configuration and health details. It is still not an outgoing-webhook receiver, slash-command handler, bot platform runtime, or background inbound bridge.
 
 ## Current Runtime Snapshot
 
@@ -26,6 +26,7 @@ The current crate exposes these operations:
 
 - `synology_chat.send_message`
 - `synology_chat.send_payload`
+- `synology_chat.ingest_outgoing_webhook`
 - `synology_chat.health`
 
 Important implementation truths from `connector.rs`, `client.rs`, `types.rs`, and `manifest.toml`:
@@ -38,12 +39,13 @@ Important implementation truths from `connector.rs`, `client.rs`, `types.rs`, an
 - `bot_name` is currently translated to the outbound payload field `username`.
 - `send_payload` requires a JSON object and forwards it directly to the webhook endpoint for advanced card or attachment shapes.
 - Delivery is an outbound `POST` with JSON to the configured incoming webhook URL.
+- `ingest_outgoing_webhook` accepts a parsed outgoing-webhook payload forwarded by the host, verifies the configured `outgoing_token`, and emits stable channel, thread, sender, message, and attachment metadata without hosting the listener inside the connector.
 - Non-success HTTP status codes are surfaced as API errors with the provider body preserved.
 - Successful empty responses are normalized to `{ "status": "ok" }`; successful non-JSON bodies are wrapped as `{ "status": "ok", "body": "<raw>" }`.
-- `health` reports configured target details, manifest hash, `allow_insecure_ssl`, and whether `outgoing_token` is present, but it does not perform a live delivery probe.
-- `self_check()` is also configuration-centric: it reports normalized URL and settings but does not call the webhook endpoint.
+- `health` reports configured target details, manifest hash, `allow_insecure_ssl`, whether `outgoing_token` is present, and whether the receive path is still disabled or ready for host-forwarded outgoing-webhook ingest, but it does not perform a live delivery probe.
+- `self_check()` is also configuration-centric: it reports normalized URL and settings, including whether reply semantics are still outbound-only or upgraded to outgoing-webhook response mode, but it does not call the webhook endpoint.
 - A `doctor()` helper exists internally and reports configuration state plus the normalized incoming URL, but it is not yet exposed as an FCP operation.
-- The connector stores a `ConnectorRuntime`, but this first slice does not use it for any streaming or inbound server lifecycle.
+- The connector stores a `ConnectorRuntime`, but it still does not use it for any streaming or inbound server lifecycle.
 - `simulate()` always returns allowed, and `subscribe()` / `unsubscribe()` return `StreamingNotSupported`.
 
 ## Accepted First Slice
@@ -58,13 +60,14 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 
 ## Service Inventory
 
-| Surface | Status in first slice | Notes |
+| Surface | Current status | Notes |
 |---------|-----------------------|-------|
 | Plain-text outbound delivery | In scope | Implemented as `send_message` against a configured incoming webhook URL. |
 | Raw webhook payload passthrough | In scope | Implemented as `send_payload` for cards or attachment-shaped JSON. |
+| Forwarded outgoing-webhook normalization | In scope | Implemented as `ingest_outgoing_webhook` for host-forwarded payloads with token verification and stable channel or thread or attachment metadata. |
 | Configuration and health reporting | In scope | Implemented without a live webhook round-trip. |
 | Incoming webhook hosting | Out of scope | No HTTP listener or outgoing-webhook receive path exists. |
-| Inbound event normalization | Out of scope | No room, thread, or sender identity mapping exists. |
+| Inbound event normalization | Partially in scope | Host-forwarded outgoing-webhook payloads are normalized, but there is still no listener, replay buffer, or background ingress runtime. |
 | Slash commands, bots, or interactive replies | Out of scope | No command or callback runtime exists. |
 | Dedicated file upload flow | Out of scope | Raw payload passthrough exists, but there is no explicit upload or file lifecycle surface. |
 | Persistent sync or subscription model | Out of scope | No background runtime or event stream exists. |
@@ -73,8 +76,8 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 
 - One connector instance maps to one Synology Chat incoming webhook URL.
 - In practice, the incoming webhook URL is the primary credential and capability boundary for outbound delivery.
-- `outgoing_token` exists in config and is surfaced in health and self-check output, but it is not used to authenticate any receive path in the current runtime.
-- The first slice does not implement incoming webhook validation, outgoing-webhook token verification, slash-command signing, or multi-webhook routing.
+- `outgoing_token` now gates `synology_chat.ingest_outgoing_webhook`; without it, the receive path remains disabled and the connector stays outbound-only.
+- The runtime still does not implement incoming webhook validation, slash-command signing, or multi-webhook routing.
 - The connector is scoped to `z:work` and `z:project:*` targets rather than community or public zones.
 - Host-level placement is intentionally operator-configured because deployments may be public, private, or tailnet-addressed.
 
@@ -84,8 +87,8 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 - The reqwest client uses the configured request timeout and may optionally disable certificate verification with `allow_insecure_ssl`.
 - The connector does not listen on a socket or expose any inbound service surface.
 - `health` and `self_check()` do not currently prove remote webhook reachability; they only prove that configuration was parsed and stored.
-- There is no replay buffer, retry queue, dedupe key, webhook signature verifier, or persistent local state in the accepted slice.
-- The current implementation is strictly request-response outbound delivery.
+- There is no replay buffer, retry queue, dedupe key, or persistent local state in the current runtime.
+- The current implementation is still request-response only: outbound delivery plus explicit host-forwarded ingest, with no connector-hosted listener or event stream.
 
 ## Capability Families
 
@@ -93,6 +96,7 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 |-----------|---------|
 | `synology_chat.write` | Send messages or raw webhook payloads through the configured incoming webhook |
 | `synology_chat.read` | Inspect configuration and health metadata |
+| `synology_chat.webhook` | Validate and normalize a host-forwarded outgoing-webhook payload |
 
 ## Accepted Operation Inventory
 
@@ -100,15 +104,14 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 |-----------|----------------|------------|------------|-----------|-------------|-------|
 | `synology_chat.send_message` | HTTP `POST` JSON webhook body with `text`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Outbound plain-text message delivery only. The connector does not model inbound reply semantics. |
 | `synology_chat.send_payload` | HTTP `POST` arbitrary JSON object | `synology_chat.write` | `Risky` | `Medium` | `None` | Passes a raw webhook payload through directly for richer provider-specific payloads. |
+| `synology_chat.ingest_outgoing_webhook` | local payload normalization for one host-forwarded outgoing webhook request | `synology_chat.webhook` | `Safe` | `Low` | `Strict` | Verifies the configured `outgoing_token`, normalizes channel or thread or sender metadata, and exposes attachment hints without hosting a listener. |
 | `synology_chat.health` | local configuration report | `synology_chat.read` | `Safe` | `Low` | `Strict` | Returns configured URL and settings, but does not perform a live webhook probe. |
 
 ## Explicit Non-Goals
 
-The accepted first Synology Chat slice does not include:
+The current Synology Chat runtime still does not include:
 
 - hosting an outgoing webhook receiver
-- verifying `outgoing_token` on inbound requests
-- inbound message or thread normalization
 - slash commands, bot callbacks, or interactive response flows
 - durable retries, dedupe, or delivery receipts
 - multi-webhook routing or tenant multiplexing
@@ -117,9 +120,9 @@ The accepted first Synology Chat slice does not include:
 
 These are excluded on purpose:
 
-- The current runtime is an outbound webhook client, not a full bidirectional Synology Chat integration.
-- The presence of `outgoing_token` and `ConnectorRuntime` could mislead follow-on work into assuming an inbound surface already exists when it does not.
-- Self-hosted deployment guidance and inbound webhook behavior deserve explicit follow-on design instead of being silently implied by the first contract.
+- The current runtime is not a full bidirectional Synology Chat integration; it adds explicit forwarded ingest without silently implying a hosted listener.
+- `outgoing_token` now powers one normalization path, but `ConnectorRuntime` still does not imply a general inbound server or bot runtime.
+- Self-hosted deployment guidance and richer inbound behavior still deserve explicit follow-on design instead of being silently implied by the current contract.
 
 ## Implementation Notes For `flywheel_connectors-j05nu.1.16.2`
 
@@ -127,7 +130,7 @@ These are excluded on purpose:
 - Keep the distinction between outbound incoming-webhook delivery and any future inbound outgoing-webhook receive path explicit in types and capabilities.
 - Keep `allow_insecure_ssl` visible and deliberate because it weakens the transport boundary for self-hosted operators.
 - Preserve provider response detail in error mapping; HTTP status plus provider body is important for operator diagnosis.
-- Do not silently convert `outgoing_token` into an active security guarantee until there is an actual receive surface that uses it.
+- Keep `outgoing_token` scoped to the explicit forwarded ingest path; do not silently widen it into a general inbound runtime guarantee.
 - Keep `send_message` and `send_payload` distinct: one is a constrained ergonomic helper, the other is a raw provider passthrough.
 - If live health probes are added later, make that a deliberate expansion of the contract instead of changing `health` semantics invisibly.
 
@@ -135,8 +138,8 @@ These are excluded on purpose:
 
 This contract is grounded in the current connector implementation and the published Synology Chat product surface:
 
-- `connectors/synology-chat/src/connector.rs` defines the current operation inventory, capability mapping, health behavior, and unused-but-present doctor/runtime surfaces.
+- `connectors/synology-chat/src/connector.rs` defines the current operation inventory, capability mapping, health behavior, forwarded outgoing-webhook normalization, and doctor/runtime surfaces.
 - `connectors/synology-chat/src/client.rs` defines the outbound webhook HTTP behavior and response normalization.
 - `connectors/synology-chat/src/types.rs` defines the current config surface and validation rules.
-- `connectors/synology-chat/manifest.toml` defines the work-zone posture, outbound-only capabilities, and intentionally operator-configured network placement.
-- Synology's published Chat specs confirm that incoming and outgoing webhooks exist at the product level, but the current connector only implements the incoming-webhook outbound half.
+- `connectors/synology-chat/manifest.toml` defines the work-zone posture, capability families, and intentionally operator-configured network placement.
+- Synology's published Chat specs confirm that incoming and outgoing webhooks exist at the product level; the current connector implements incoming-webhook outbound delivery plus explicit host-forwarded outgoing-webhook normalization, but still not a hosted listener.

@@ -59,4 +59,4 @@ id = "matrix.upload_media"
 id = "matrix.download_media"
 
 [provisioning]
-note = "Requires a Matrix homeserver account with an access token. Create via Element or any Matrix client, then extract the token from settings."
+note = "Requires a non-production Matrix homeserver account plus either a bearer access token or a credential_id that the host/egress proxy will inject at runtime. Use disposable rooms for verification, prefer HTTPS for live homeservers, and invoke matrix.sync explicitly because the connector does not run a background receive loop."

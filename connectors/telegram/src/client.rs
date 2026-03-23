@@ -5,7 +5,6 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
@@ -13,6 +12,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::instrument;
 
+use crate::error::TelegramError;
 use crate::types::*;
 
 /// Telegram Bot API client.
@@ -410,204 +410,6 @@ impl TelegramClient {
     }
 }
 
-/// Options for sending messages.
-#[derive(Debug, Default, Clone)]
-pub struct SendMessageOptions {
-    pub parse_mode: Option<String>,
-    pub reply_to_message_id: Option<i64>,
-    pub message_thread_id: Option<i64>,
-}
-
-#[allow(dead_code)] // Helper methods for future use
-impl SendMessageOptions {
-    /// Set parse mode to HTML.
-    #[must_use]
-    pub fn html(mut self) -> Self {
-        self.parse_mode = Some("HTML".into());
-        self
-    }
-
-    /// Set parse mode to MarkdownV2.
-    #[must_use]
-    pub fn markdown_v2(mut self) -> Self {
-        self.parse_mode = Some("MarkdownV2".into());
-        self
-    }
-
-    /// Set reply to a specific message.
-    #[must_use]
-    pub fn reply_to_message_id(mut self, id: i64) -> Self {
-        self.reply_to_message_id = Some(id);
-        self
-    }
-}
-
-/// Options for sending media.
-#[derive(Debug, Default, Clone)]
-pub struct SendMediaOptions {
-    pub caption: Option<String>,
-    pub parse_mode: Option<String>,
-    pub reply_to_message_id: Option<i64>,
-}
-
-/// Request body for send media methods.
-///
-/// Telegram expects the media field name to vary by type (photo, document, etc.).
-/// We use a custom serializer to emit the correct field name.
-#[derive(Debug)]
-struct SendMediaRequest {
-    chat_id: String,
-    media_field: String,
-    media_value: String,
-    caption: Option<String>,
-    parse_mode: Option<String>,
-    reply_to_message_id: Option<i64>,
-}
-
-impl Serialize for SendMediaRequest {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-        let mut count = 2; // chat_id + media field
-        if self.caption.is_some() {
-            count += 1;
-        }
-        if self.parse_mode.is_some() {
-            count += 1;
-        }
-        if self.reply_to_message_id.is_some() {
-            count += 1;
-        }
-        let mut map = serializer.serialize_map(Some(count))?;
-        map.serialize_entry("chat_id", &self.chat_id)?;
-        map.serialize_entry(&self.media_field, &self.media_value)?;
-        if let Some(ref caption) = self.caption {
-            map.serialize_entry("caption", caption)?;
-        }
-        if let Some(ref parse_mode) = self.parse_mode {
-            map.serialize_entry("parse_mode", parse_mode)?;
-        }
-        if let Some(reply_to) = self.reply_to_message_id {
-            map.serialize_entry("reply_to_message_id", &reply_to)?;
-        }
-        map.end()
-    }
-}
-
-/// Telegram API errors.
-#[derive(Debug, thiserror::Error)]
-pub enum TelegramError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-
-    #[error("Telegram API error ({code}): {description}")]
-    Api { code: i32, description: String },
-
-    #[error("Invalid chat ID: {0}")]
-    InvalidChatId(String),
-}
-
-impl TelegramError {
-    /// Check if this error is retryable.
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Http(e) => e.is_timeout() || e.is_connect(),
-            Self::Api { code, .. } => {
-                // 429 = rate limited, 500+ = server errors
-                *code == 429 || *code >= 500
-            }
-            Self::InvalidChatId(_) => false,
-        }
-    }
-
-    /// Get the suggested retry delay.
-    #[must_use]
-    pub fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::Api { code, .. } if *code == 429 => Some(Duration::from_secs(30)),
-            _ => None,
-        }
-    }
-
-    /// Convert to FCP error.
-    #[must_use]
-    pub fn to_fcp_error(&self) -> FcpError {
-        match self {
-            Self::Http(e) => FcpError::External {
-                service: "telegram".into(),
-                message: e.to_string(),
-                status_code: e.status().map(|s| s.as_u16()),
-                retryable: self.is_retryable(),
-                retry_after: self.retry_after(),
-            },
-            Self::Api { code, description } => {
-                if *code == 429 {
-                    FcpError::RateLimited {
-                        retry_after_ms: 30_000,
-                        violation: None,
-                    }
-                } else if *code == 401 {
-                    FcpError::Unauthorized {
-                        code: 2001,
-                        message: description.clone(),
-                    }
-                } else if *code == 403 {
-                    FcpError::CapabilityDenied {
-                        capability: "telegram.api".into(),
-                        reason: description.clone(),
-                    }
-                } else {
-                    FcpError::External {
-                        service: "telegram".into(),
-                        message: description.clone(),
-                        status_code: Some(u16::try_from(*code).unwrap_or(0)),
-                        retryable: self.is_retryable(),
-                        retry_after: self.retry_after(),
-                    }
-                }
-            }
-            Self::InvalidChatId(msg) => FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid chat ID: {msg}"),
-            },
-        }
-    }
-}
-
-impl fcp_sdk::migration::ConnectorErrorMapping for TelegramError {
-    fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
-        use fcp_async_core::AsyncError;
-        match error {
-            AsyncError::Timeout { timeout_ms } => Self::Api {
-                code: 408,
-                description: format!("deadline exceeded after {timeout_ms}ms"),
-            },
-            AsyncError::Cancelled => Self::Api {
-                code: 0,
-                description: "request cancelled".into(),
-            },
-            other => Self::Api {
-                code: 0,
-                description: other.to_string(),
-            },
-        }
-    }
-
-    fn to_fcp_error(&self) -> FcpError {
-        Self::to_fcp_error(self)
-    }
-
-    fn is_retryable(&self) -> bool {
-        Self::is_retryable(self)
-    }
-
-    fn retry_after(&self) -> Option<Duration> {
-        Self::retry_after(self)
-    }
-}
-
 /// Normalize chat ID, handling various formats.
 fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
     let trimmed = id.trim();
@@ -668,6 +470,7 @@ fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::FcpError;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

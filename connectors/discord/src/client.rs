@@ -185,7 +185,10 @@ mod tests {
         // Both should redact identically in Debug
         let dbg1 = format!("{client1:?}");
         let dbg2 = format!("{client2:?}");
-        assert_eq!(dbg1, dbg2, "Debug output should be identical regardless of credential");
+        assert_eq!(
+            dbg1, dbg2,
+            "Debug output should be identical regardless of credential"
+        );
         assert!(!dbg1.contains("token_alpha"));
         assert!(!dbg2.contains("token_beta"));
     }
@@ -194,7 +197,10 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn deref_allows_api_calls() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{header, method, path}};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
 
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -230,7 +236,10 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn into_api_client_preserves_functionality() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{header, method, path}};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
 
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))

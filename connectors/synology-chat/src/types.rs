@@ -29,12 +29,14 @@ pub enum SynologyChatDeliveryMode {
 #[serde(rename_all = "snake_case")]
 pub enum SynologyChatReceivePath {
     Disabled,
+    ForwardedOutgoingWebhook,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SynologyChatReplySemantics {
     OutboundOnly,
+    OutgoingWebhookResponse,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -90,10 +92,10 @@ impl SynologyChatConfig {
 
     fn normalize(&mut self) {
         self.incoming_url = self.incoming_url.trim().to_string();
-        self.outgoing_token = self
-            .outgoing_token
-            .take()
-            .and_then(|token| normalize_optional_secret(token));
+        let outgoing_token = self.outgoing_token.take();
+        self.outgoing_token = outgoing_token
+            .as_deref()
+            .and_then(normalize_optional_secret);
     }
 
     pub fn validate(&self) -> FcpResult<()> {
@@ -151,7 +153,7 @@ impl SynologyChatConfig {
     }
 
     #[must_use]
-    pub fn outgoing_token_configured(&self) -> bool {
+    pub const fn outgoing_token_configured(&self) -> bool {
         self.outgoing_token.is_some()
     }
 
@@ -170,6 +172,9 @@ impl SynologyChatConfig {
         self.incoming_url.clone()
     }
 
+    /// # Panics
+    ///
+    /// Panics if `incoming_url` was not validated before building the delivery target.
     #[must_use]
     pub fn delivery_target(&self) -> SynologyChatDeliveryTarget {
         let parsed = self
@@ -180,10 +185,10 @@ impl SynologyChatConfig {
             .expect("incoming_url must already have a host")
             .to_string();
         let port = parsed.port_or_known_default();
-        let origin = match port {
-            Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
-            None => format!("{}://{host}", parsed.scheme()),
-        };
+        let origin = port.map_or_else(
+            || format!("{}://{host}", parsed.scheme()),
+            |port| format!("{}://{host}:{port}", parsed.scheme()),
+        );
         let path_hint = redact_path(parsed.path());
         let incoming_url_redacted = format!("{origin}{path_hint}");
         SynologyChatDeliveryTarget {
@@ -199,18 +204,27 @@ impl SynologyChatConfig {
 
     #[must_use]
     pub fn state_model(&self) -> SynologyChatStateModel {
+        let outgoing_token_configured = self.outgoing_token_configured();
         SynologyChatStateModel {
             delivery_target: self.delivery_target(),
             request_timeout_ms: self.request_timeout_ms,
             allow_insecure_ssl: self.allow_insecure_ssl,
-            outgoing_token_configured: self.outgoing_token_configured(),
-            receive_path: SynologyChatReceivePath::Disabled,
-            reply_semantics: SynologyChatReplySemantics::OutboundOnly,
+            outgoing_token_configured,
+            receive_path: if outgoing_token_configured {
+                SynologyChatReceivePath::ForwardedOutgoingWebhook
+            } else {
+                SynologyChatReceivePath::Disabled
+            },
+            reply_semantics: if outgoing_token_configured {
+                SynologyChatReplySemantics::OutgoingWebhookResponse
+            } else {
+                SynologyChatReplySemantics::OutboundOnly
+            },
         }
     }
 }
 
-fn normalize_optional_secret(value: String) -> Option<String> {
+fn normalize_optional_secret(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
@@ -342,5 +356,23 @@ mod tests {
             SynologyChatReplySemantics::OutboundOnly
         );
         assert_eq!(state_model.receive_path, SynologyChatReceivePath::Disabled);
+    }
+
+    #[test]
+    fn state_model_enables_forwarded_receive_path_when_outgoing_token_is_configured() {
+        let config = SynologyChatConfig::from_value(serde_json::json!({
+            "incoming_url": "https://nas.example.com/hooks/abcd1234efgh5678",
+            "outgoing_token": "shared-secret"
+        }))
+        .expect("config should parse");
+        let state_model = config.state_model();
+        assert_eq!(
+            state_model.reply_semantics,
+            SynologyChatReplySemantics::OutgoingWebhookResponse
+        );
+        assert_eq!(
+            state_model.receive_path,
+            SynologyChatReceivePath::ForwardedOutgoingWebhook
+        );
     }
 }

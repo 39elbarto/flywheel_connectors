@@ -15,9 +15,11 @@ use wiremock::{
 
 const CAP_READ: &str = "synology_chat.read";
 const CAP_WRITE: &str = "synology_chat.write";
+const CAP_WEBHOOK: &str = "synology_chat.webhook";
 
 const OP_SEND_MESSAGE: &str = "synology_chat.send_message";
 const OP_SEND_PAYLOAD: &str = "synology_chat.send_payload";
+const OP_INGEST_OUTGOING_WEBHOOK: &str = "synology_chat.ingest_outgoing_webhook";
 const OP_HEALTH: &str = "synology_chat.health";
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
@@ -84,12 +86,24 @@ async fn setup_connector(
     incoming_url: &str,
     capabilities: &[&str],
 ) -> (SynologyChatConnector, Ed25519SigningKey) {
+    setup_connector_with_options(incoming_url, None, capabilities).await
+}
+
+async fn setup_connector_with_options(
+    incoming_url: &str,
+    outgoing_token: Option<&str>,
+    capabilities: &[&str],
+) -> (SynologyChatConnector, Ed25519SigningKey) {
     let mut connector = SynologyChatConnector::new();
+    let mut config = json!({
+        "incoming_url": incoming_url,
+        "request_timeout_ms": 2_000
+    });
+    if let Some(token) = outgoing_token {
+        config["outgoing_token"] = json!(token);
+    }
     connector
-        .configure(json!({
-            "incoming_url": incoming_url,
-            "request_timeout_ms": 2_000
-        }))
+        .configure(config)
         .await
         .expect("configure should succeed");
     let signing_key = Ed25519SigningKey::generate();
@@ -196,8 +210,8 @@ async fn self_check_reports_configured_metadata() {
     );
     assert_eq!(details["allow_insecure_ssl"], true);
     assert_eq!(details["outgoing_token_configured"], true);
-    assert_eq!(details["reply_semantics"], "outbound_only");
-    assert_eq!(details["receive_path"], "disabled");
+    assert_eq!(details["reply_semantics"], "outgoing_webhook_response");
+    assert_eq!(details["receive_path"], "forwarded_outgoing_webhook");
 }
 
 #[fcp_async_core::runtime::test]
@@ -350,4 +364,103 @@ async fn invoke_health_reports_runtime_configuration() {
     );
     assert_eq!(result["outgoing_token_configured"], false);
     assert_eq!(result["reply_semantics"], "outbound_only");
+}
+
+#[fcp_async_core::runtime::test]
+async fn ingest_outgoing_webhook_normalizes_channel_thread_and_attachment_context() {
+    let server = MockServer::start().await;
+    let (connector, signing_key) = setup_connector_with_options(
+        &format!("{}/webhook", server.uri()),
+        Some("shared-secret"),
+        &[CAP_WEBHOOK],
+    )
+    .await;
+
+    let result = invoke_ok(
+        &connector,
+        OP_INGEST_OUTGOING_WEBHOOK,
+        json!({
+            "payload": {
+                "token": "shared-secret",
+                "channel_id": "34",
+                "channel_type": "1",
+                "channel_name": "Labb",
+                "user_id": "4",
+                "username": "mikael",
+                "post_id": "146028888128",
+                "thread_id": "0",
+                "timestamp": "1646827836131",
+                "text": "Tjena",
+                "trigger_word": "Tjena",
+                "file_url": "https://nas.example.com/files/report.pdf"
+            }
+        }),
+        CAP_WEBHOOK,
+        &signing_key,
+    )
+    .await;
+
+    let event = &result["event"];
+    assert_eq!(
+        event["delivery_id"],
+        "synology-chat:34:146028888128:1646827836131"
+    );
+    assert_eq!(event["channel"]["id"], "34");
+    assert_eq!(event["channel"]["type"], "1");
+    assert_eq!(event["channel"]["name"], "Labb");
+    assert_eq!(event["thread"]["is_threaded"], false);
+    assert!(event["thread"]["id"].is_null());
+    assert_eq!(event["sender"]["user_id"], "4");
+    assert_eq!(event["sender"]["username"], "mikael");
+    assert_eq!(event["message"]["post_id"], "146028888128");
+    assert_eq!(event["message"]["text"], "Tjena");
+    assert_eq!(event["message"]["trigger_word"], "Tjena");
+    assert_eq!(event["message"]["timestamp_ms"], 1_646_827_836_131i64);
+    assert_eq!(event["attachments"][0]["kind"], "external_file");
+    assert_eq!(
+        event["attachments"][0]["url"],
+        "https://nas.example.com/files/report.pdf"
+    );
+    assert_eq!(event["reply"]["mode"], "outgoing_webhook_response");
+}
+
+#[fcp_async_core::runtime::test]
+async fn ingest_outgoing_webhook_rejects_token_mismatch() {
+    let server = MockServer::start().await;
+    let (connector, signing_key) = setup_connector_with_options(
+        &format!("{}/webhook", server.uri()),
+        Some("shared-secret"),
+        &[CAP_WEBHOOK],
+    )
+    .await;
+
+    let error = connector
+        .invoke(invoke_request(
+            &connector,
+            OP_INGEST_OUTGOING_WEBHOOK,
+            json!({
+                "payload": {
+                    "token": "wrong-secret",
+                    "channel_id": "34",
+                    "channel_type": "1",
+                    "user_id": "4",
+                    "username": "mikael",
+                    "post_id": "146028888128",
+                    "thread_id": "0",
+                    "timestamp": "1646827836131",
+                    "text": "Tjena"
+                }
+            }),
+            capability_token(&signing_key, CAP_WEBHOOK, &[OP_INGEST_OUTGOING_WEBHOOK]),
+        ))
+        .await
+        .expect_err("token mismatch should fail");
+
+    match error {
+        FcpError::Unauthorized { code, message } => {
+            assert_eq!(code, 2001);
+            assert!(message.contains("token verification failed"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

@@ -60,6 +60,13 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.relays_health]
+summary = "Score relay health with latency and NIP support metrics"
+capability = "nostr.health.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
 [sandbox]
 profile = "strict"
 memory_mb = 96

@@ -213,6 +213,106 @@ impl SynologyChatClient {
     }
 }
 
+/// Stringify a JSON value that might be a string or integer.
+fn stringify_json_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Normalize an inbound webhook payload into a stable event envelope.
+///
+/// This function converts a raw Synology Chat outgoing-webhook callback
+/// into a [`NormalizedInboundEvent`] with stringified identifiers and
+/// optional token verification.
+///
+/// # Token verification
+///
+/// If `configured_token` is `Some`, the payload's `token` field is compared
+/// against it. The result is recorded in `token_verified`:
+/// - `Some(true)` if tokens match
+/// - `Some(false)` if tokens mismatch or payload token is missing
+/// - `None` if no `configured_token` is provided (verification skipped)
+pub fn normalize_inbound_event(
+    payload: &crate::types::InboundWebhookPayload,
+    configured_token: Option<&str>,
+    raw: serde_json::Value,
+) -> (crate::types::NormalizedInboundEvent, crate::types::TokenVerification) {
+    use crate::types::{NormalizedInboundEvent, TokenVerification};
+
+    let channel_id = payload.channel_id.as_ref().and_then(stringify_json_value);
+    let sender_id = payload.user_id.as_ref().and_then(stringify_json_value);
+    let timestamp = payload.timestamp.as_ref().and_then(stringify_json_value);
+    let thread_id = payload.thread_id.as_ref().and_then(stringify_json_value);
+    let is_threaded = thread_id
+        .as_deref()
+        .is_some_and(|tid| !tid.is_empty() && tid != "0");
+
+    let (token_verified, verification) = match (configured_token, payload.token.as_deref()) {
+        (Some(expected), Some(actual)) => {
+            if expected == actual {
+                (Some(true), TokenVerification::Verified)
+            } else {
+                (Some(false), TokenVerification::Mismatch)
+            }
+        }
+        (Some(_), None) => (Some(false), TokenVerification::MissingFromPayload),
+        (None, _) => (None, TokenVerification::NotConfigured),
+    };
+
+    let event = NormalizedInboundEvent {
+        event_type: "inbound_webhook".to_string(),
+        channel_id,
+        channel_name: payload
+            .channel_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        sender_id,
+        sender_name: payload
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        text: payload
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        timestamp,
+        trigger_word: payload
+            .trigger_word
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        is_threaded,
+        thread_id,
+        file_url: payload
+            .file_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        token_verified,
+        raw,
+    };
+
+    (event, verification)
+}
+
 fn parse_retry_after_ms(value: &str) -> Option<u64> {
     value
         .trim()
@@ -372,5 +472,242 @@ mod tests {
             }
             other => panic!("expected Api, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalize_inbound_event_full_payload() {
+        use crate::types::{InboundWebhookPayload, TokenVerification};
+
+        let payload = InboundWebhookPayload {
+            user_id: Some(json!(4)),
+            username: Some("mikael".into()),
+            post_id: Some(json!("146028888128")),
+            channel_id: Some(json!(34)),
+            channel_name: Some("Labb".into()),
+            channel_type: Some(json!(1)),
+            text: Some("Tjena".into()),
+            timestamp: Some(json!("1646827836131")),
+            token: Some("shared-secret".into()),
+            trigger_word: Some("Tjena".into()),
+            thread_id: Some(json!("0")),
+            file_url: None,
+        };
+
+        let raw = serde_json::to_value(&json!({
+            "user_id": 4, "username": "mikael", "text": "Tjena"
+        }))
+        .unwrap();
+
+        let (event, verification) =
+            normalize_inbound_event(&payload, Some("shared-secret"), raw.clone());
+
+        assert_eq!(event.event_type, "inbound_webhook");
+        assert_eq!(event.channel_id.as_deref(), Some("34"));
+        assert_eq!(event.channel_name.as_deref(), Some("Labb"));
+        assert_eq!(event.sender_id.as_deref(), Some("4"));
+        assert_eq!(event.sender_name.as_deref(), Some("mikael"));
+        assert_eq!(event.text.as_deref(), Some("Tjena"));
+        assert_eq!(event.timestamp.as_deref(), Some("1646827836131"));
+        assert_eq!(event.trigger_word.as_deref(), Some("Tjena"));
+        assert!(!event.is_threaded);
+        assert_eq!(event.thread_id.as_deref(), Some("0"));
+        assert_eq!(event.token_verified, Some(true));
+        assert_eq!(verification, TokenVerification::Verified);
+    }
+
+    #[test]
+    fn normalize_inbound_event_token_mismatch() {
+        use crate::types::{InboundWebhookPayload, TokenVerification};
+
+        let payload = InboundWebhookPayload {
+            user_id: Some(json!(4)),
+            username: Some("mikael".into()),
+            post_id: None,
+            channel_id: Some(json!(34)),
+            channel_name: None,
+            channel_type: None,
+            text: Some("Hello".into()),
+            timestamp: None,
+            token: Some("wrong-token".into()),
+            trigger_word: None,
+            thread_id: None,
+            file_url: None,
+        };
+
+        let (event, verification) =
+            normalize_inbound_event(&payload, Some("correct-token"), json!({}));
+
+        assert_eq!(event.token_verified, Some(false));
+        assert_eq!(verification, TokenVerification::Mismatch);
+    }
+
+    #[test]
+    fn normalize_inbound_event_token_missing_from_payload() {
+        use crate::types::{InboundWebhookPayload, TokenVerification};
+
+        let payload = InboundWebhookPayload {
+            user_id: None,
+            username: None,
+            post_id: None,
+            channel_id: None,
+            channel_name: None,
+            channel_type: None,
+            text: Some("Hello".into()),
+            timestamp: None,
+            token: None,
+            trigger_word: None,
+            thread_id: None,
+            file_url: None,
+        };
+
+        let (event, verification) =
+            normalize_inbound_event(&payload, Some("configured-token"), json!({}));
+
+        assert_eq!(event.token_verified, Some(false));
+        assert_eq!(verification, TokenVerification::MissingFromPayload);
+    }
+
+    #[test]
+    fn normalize_inbound_event_no_configured_token() {
+        use crate::types::{InboundWebhookPayload, TokenVerification};
+
+        let payload = InboundWebhookPayload {
+            user_id: Some(json!("user-99")),
+            username: Some("alice".into()),
+            post_id: None,
+            channel_id: Some(json!("chan-1")),
+            channel_name: Some("general".into()),
+            channel_type: None,
+            text: Some("Hi there".into()),
+            timestamp: Some(json!(1646827836131_i64)),
+            token: Some("some-token".into()),
+            trigger_word: None,
+            thread_id: None,
+            file_url: None,
+        };
+
+        let (event, verification) = normalize_inbound_event(&payload, None, json!({}));
+
+        assert_eq!(event.token_verified, None);
+        assert_eq!(verification, TokenVerification::NotConfigured);
+        assert_eq!(event.channel_id.as_deref(), Some("chan-1"));
+        assert_eq!(event.sender_id.as_deref(), Some("user-99"));
+    }
+
+    #[test]
+    fn normalize_inbound_event_minimal_payload() {
+        use crate::types::{InboundWebhookPayload, TokenVerification};
+
+        let payload = InboundWebhookPayload {
+            user_id: None,
+            username: None,
+            post_id: None,
+            channel_id: None,
+            channel_name: None,
+            channel_type: None,
+            text: None,
+            timestamp: None,
+            token: None,
+            trigger_word: None,
+            thread_id: None,
+            file_url: None,
+        };
+
+        let (event, verification) = normalize_inbound_event(&payload, None, json!({}));
+
+        assert_eq!(event.event_type, "inbound_webhook");
+        assert!(event.channel_id.is_none());
+        assert!(event.channel_name.is_none());
+        assert!(event.sender_id.is_none());
+        assert!(event.sender_name.is_none());
+        assert!(event.text.is_none());
+        assert!(event.timestamp.is_none());
+        assert!(!event.is_threaded);
+        assert!(event.thread_id.is_none());
+        assert!(event.token_verified.is_none());
+        assert_eq!(verification, TokenVerification::NotConfigured);
+    }
+
+    #[test]
+    fn normalize_inbound_event_threaded_message() {
+        use crate::types::InboundWebhookPayload;
+
+        let payload = InboundWebhookPayload {
+            user_id: Some(json!(7)),
+            username: Some("bob".into()),
+            post_id: Some(json!("post-123")),
+            channel_id: Some(json!(42)),
+            channel_name: Some("dev".into()),
+            channel_type: Some(json!(1)),
+            text: Some("Reply in thread".into()),
+            timestamp: Some(json!("1700000000000")),
+            token: None,
+            trigger_word: None,
+            thread_id: Some(json!("thread-456")),
+            file_url: Some("https://nas.local/file.pdf".into()),
+        };
+
+        let (event, _verification) = normalize_inbound_event(&payload, None, json!({}));
+
+        assert!(event.is_threaded);
+        assert_eq!(event.thread_id.as_deref(), Some("thread-456"));
+        assert_eq!(event.file_url.as_deref(), Some("https://nas.local/file.pdf"));
+        assert_eq!(event.text.as_deref(), Some("Reply in thread"));
+    }
+
+    #[test]
+    fn normalize_inbound_event_trims_whitespace() {
+        use crate::types::InboundWebhookPayload;
+
+        let payload = InboundWebhookPayload {
+            user_id: None,
+            username: Some("  alice  ".into()),
+            post_id: None,
+            channel_id: None,
+            channel_name: Some("  general  ".into()),
+            channel_type: None,
+            text: Some("  hello  ".into()),
+            timestamp: None,
+            token: None,
+            trigger_word: Some("  hello  ".into()),
+            thread_id: None,
+            file_url: Some("  https://example.com/file  ".into()),
+        };
+
+        let (event, _) = normalize_inbound_event(&payload, None, json!({}));
+
+        assert_eq!(event.sender_name.as_deref(), Some("alice"));
+        assert_eq!(event.channel_name.as_deref(), Some("general"));
+        assert_eq!(event.text.as_deref(), Some("hello"));
+        assert_eq!(event.trigger_word.as_deref(), Some("hello"));
+        assert_eq!(event.file_url.as_deref(), Some("https://example.com/file"));
+    }
+
+    #[test]
+    fn normalize_inbound_event_empty_strings_become_none() {
+        use crate::types::InboundWebhookPayload;
+
+        let payload = InboundWebhookPayload {
+            user_id: None,
+            username: Some("".into()),
+            post_id: None,
+            channel_id: None,
+            channel_name: Some("   ".into()),
+            channel_type: None,
+            text: Some("".into()),
+            timestamp: None,
+            token: None,
+            trigger_word: Some("  ".into()),
+            thread_id: None,
+            file_url: Some("".into()),
+        };
+
+        let (event, _) = normalize_inbound_event(&payload, None, json!({}));
+
+        assert!(event.sender_name.is_none());
+        assert!(event.channel_name.is_none());
+        assert!(event.text.is_none());
+        assert!(event.trigger_word.is_none());
+        assert!(event.file_url.is_none());
     }
 }

@@ -1,12 +1,13 @@
 //! Nostr relay client: crypto, WebSocket relay communication, and `ConnectorRuntime` integration.
 
-use std::collections::BTreeSet;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::collections::{BTreeSet, HashSet};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fcp_core::{FcpError, FcpResult};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_streaming::{StreamError, WsClient, WsConnection, WsMessage};
 use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey, schnorr::Signature};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -269,6 +270,110 @@ impl RelayQueryState {
     }
 }
 
+// ─── Relay health scoring ────────────────────────────────────────────────
+
+/// Per-relay health score with latency and NIP support information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayHealthScore {
+    pub relay_url: String,
+    pub reachable: bool,
+    pub latency_ms: Option<u64>,
+    pub supports_nip04: bool,
+    pub supports_nip44: bool,
+    pub last_checked: String,
+}
+
+impl RelayHealthScore {
+    /// Create a score for an unreachable relay.
+    #[must_use]
+    pub fn unreachable(relay_url: &str, last_checked: String) -> Self {
+        Self {
+            relay_url: relay_url.to_string(),
+            reachable: false,
+            latency_ms: None,
+            supports_nip04: false,
+            supports_nip44: false,
+            last_checked,
+        }
+    }
+}
+
+// ─── Dedup tracker (cross-relay) ────────────────────────────────────────
+
+/// Tracks seen event IDs across relay queries with bounded capacity.
+///
+/// When at capacity, new insertions are silently dropped and `overflow_count`
+/// is incremented.
+pub struct DedupTracker {
+    seen: HashSet<String>,
+    max_capacity: usize,
+    overflow_count: usize,
+}
+
+impl DedupTracker {
+    /// Create a new tracker with the given maximum capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_capacity` is zero.
+    #[must_use]
+    pub fn new(max_capacity: usize) -> Self {
+        assert!(max_capacity > 0, "DedupTracker max_capacity must be > 0");
+        Self {
+            seen: HashSet::with_capacity(max_capacity.min(1024)),
+            max_capacity,
+            overflow_count: 0,
+        }
+    }
+
+    /// Insert an event ID. Returns `true` if the ID was newly inserted
+    /// (not a duplicate), `false` if already seen or at capacity.
+    pub fn insert(&mut self, event_id: &str) -> bool {
+        if self.seen.contains(event_id) {
+            return false;
+        }
+        if self.seen.len() >= self.max_capacity {
+            self.overflow_count = self.overflow_count.saturating_add(1);
+            return false;
+        }
+        self.seen.insert(event_id.to_string())
+    }
+
+    /// Returns the number of unique event IDs tracked.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Returns `true` if no event IDs have been tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Returns the number of insertions dropped due to capacity overflow.
+    #[must_use]
+    pub const fn overflow_count(&self) -> usize {
+        self.overflow_count
+    }
+
+    /// Returns `true` if the tracker has seen this event ID.
+    #[must_use]
+    pub fn contains(&self, event_id: &str) -> bool {
+        self.seen.contains(event_id)
+    }
+}
+
+impl std::fmt::Debug for DedupTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DedupTracker")
+            .field("tracked", &self.seen.len())
+            .field("max_capacity", &self.max_capacity)
+            .field("overflow_count", &self.overflow_count)
+            .finish()
+    }
+}
+
 // ─── Nostr relay client (per-relay) ──────────────────────────────────────
 
 pub struct NostrRelayClient<'a> {
@@ -415,6 +520,108 @@ impl<'a> NostrRelayClient<'a> {
         let _ = ws.send_json(&json!(["CLOSE", sub_id])).await;
         let _ = ws.close().await;
         Ok(())
+    }
+
+    /// Score a relay's health: latency, reachability, and NIP-04/NIP-44 support.
+    ///
+    /// This connects to the relay, measures connection latency, then issues
+    /// a bounded REQ for kind=4 (NIP-04 encrypted DM) events to probe whether
+    /// the relay indexes that event kind. NIP-44 support is inferred from
+    /// kind=1059 (gift-wrapped) events.
+    ///
+    /// # Errors
+    ///
+    /// Does not return errors; unreachable relays get a score with
+    /// `reachable: false`.
+    pub async fn score_relay_health(&self) -> RelayHealthScore {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last_checked = now.to_string();
+
+        // Measure connection latency
+        let connect_start = Instant::now();
+        let mut ws = match self.connect_once("nostr health score connect").await {
+            Ok(ws) => ws,
+            Err(_) => {
+                return RelayHealthScore::unreachable(self.relay.as_str(), last_checked);
+            }
+        };
+        let latency_ms = connect_start.elapsed().as_millis();
+        let latency_ms = u64::try_from(latency_ms).unwrap_or(u64::MAX);
+
+        // Probe NIP-04 support: REQ for kind=4, limit=1
+        let sub_nip04 = format!("fcp-nip04-{}", Uuid::new_v4().simple());
+        let nip04_filter = json!({"kinds": [4], "limit": 1});
+        let supports_nip04 = self
+            .probe_kind_support(&mut ws, &sub_nip04, &nip04_filter)
+            .await;
+
+        // Probe NIP-44 support: REQ for kind=1059 (gift-wrapped), limit=1
+        let sub_nip44 = format!("fcp-nip44-{}", Uuid::new_v4().simple());
+        let nip44_filter = json!({"kinds": [1059], "limit": 1});
+        let supports_nip44 = self
+            .probe_kind_support(&mut ws, &sub_nip44, &nip44_filter)
+            .await;
+
+        let _ = ws.close().await;
+
+        RelayHealthScore {
+            relay_url: self.relay.as_str().to_string(),
+            reachable: true,
+            latency_ms: Some(latency_ms),
+            supports_nip04,
+            supports_nip44,
+            last_checked,
+        }
+    }
+
+    /// Probe whether a relay responds to a REQ without a NOTICE rejection.
+    ///
+    /// Returns `true` if the relay sends EOSE (with or without events),
+    /// `false` if it sends NOTICE or the connection drops.
+    async fn probe_kind_support(
+        &self,
+        ws: &mut WsConnection,
+        sub_id: &str,
+        filter: &Value,
+    ) -> bool {
+        if ws
+            .send_json(&json!(["REQ", sub_id, filter]))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+
+        // Read frames until EOSE or NOTICE (with timeout)
+        loop {
+            let message = match self.recv(ws, "nostr probe recv").await {
+                Ok(Some(msg)) => msg,
+                _ => return false,
+            };
+            let Ok(frame) = parse_ws_message(&message, self.relay) else {
+                return false;
+            };
+            match frame {
+                RelayFrame::Eose { sub_id: ref sid } if sid == sub_id => {
+                    let _ = ws.send_json(&json!(["CLOSE", sub_id])).await;
+                    return true;
+                }
+                RelayFrame::Event {
+                    sub_id: ref sid, ..
+                } if sid == sub_id => {
+                    // Relay is returning events of this kind - it supports them
+                    // Continue reading until EOSE
+                }
+                RelayFrame::Notice { .. } => {
+                    let _ = ws.send_json(&json!(["CLOSE", sub_id])).await;
+                    return false;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Verify that a relay accepts WebSocket connections.
@@ -599,6 +806,22 @@ impl NostrClient {
             "filter": filter,
             "results": per_relay,
         }))
+    }
+
+    /// Score relay health across all configured relays.
+    ///
+    /// Returns a JSON object with per-relay health scores including latency
+    /// and NIP support information.
+    pub async fn relay_health_scores(&self) -> Value {
+        let mut scores = Vec::with_capacity(self.relay_count());
+        for relay in self.relay_clients() {
+            scores.push(relay.score_relay_health().await);
+        }
+        json!({
+            "public_key_hex": self.public_key_hex(),
+            "relay_scores": scores,
+            "scored_count": scores.len(),
+        })
     }
 
     /// Gather per-relay connectivity details.
@@ -878,5 +1101,151 @@ mod tests {
             retry_after: None,
         };
         assert!(!is_retryable_relay_error(&err));
+    }
+
+    // ── RelayHealthScore tests ──────────────────────────────────────────
+
+    #[test]
+    fn relay_health_score_unreachable_has_correct_defaults() {
+        let score = RelayHealthScore::unreachable("wss://down.example.com", "1700000000".into());
+        assert!(!score.reachable);
+        assert!(score.latency_ms.is_none());
+        assert!(!score.supports_nip04);
+        assert!(!score.supports_nip44);
+        assert_eq!(score.relay_url, "wss://down.example.com");
+        assert_eq!(score.last_checked, "1700000000");
+    }
+
+    #[test]
+    fn relay_health_score_serializes_to_json() {
+        let score = RelayHealthScore {
+            relay_url: "wss://relay.example.com".into(),
+            reachable: true,
+            latency_ms: Some(42),
+            supports_nip04: true,
+            supports_nip44: false,
+            last_checked: "1700000001".into(),
+        };
+        let json = serde_json::to_value(&score).unwrap();
+        assert_eq!(json["relay_url"], "wss://relay.example.com");
+        assert_eq!(json["reachable"], true);
+        assert_eq!(json["latency_ms"], 42);
+        assert_eq!(json["supports_nip04"], true);
+        assert_eq!(json["supports_nip44"], false);
+        assert_eq!(json["last_checked"], "1700000001");
+    }
+
+    #[test]
+    fn relay_health_score_deserializes_from_json() {
+        let json = json!({
+            "relay_url": "wss://relay.example.com",
+            "reachable": true,
+            "latency_ms": 55,
+            "supports_nip04": false,
+            "supports_nip44": true,
+            "last_checked": "1700000002"
+        });
+        let score: RelayHealthScore = serde_json::from_value(json).unwrap();
+        assert!(score.reachable);
+        assert_eq!(score.latency_ms, Some(55));
+        assert!(!score.supports_nip04);
+        assert!(score.supports_nip44);
+    }
+
+    #[test]
+    fn relay_health_score_unreachable_serialization_roundtrip() {
+        let score = RelayHealthScore::unreachable("wss://lost.example.com", "1700000003".into());
+        let json = serde_json::to_value(&score).unwrap();
+        let deserialized: RelayHealthScore = serde_json::from_value(json).unwrap();
+        assert!(!deserialized.reachable);
+        assert!(deserialized.latency_ms.is_none());
+        assert_eq!(deserialized.relay_url, "wss://lost.example.com");
+    }
+
+    // ── DedupTracker tests ──────────────────────────────────────────────
+
+    #[test]
+    fn dedup_tracker_inserts_new_ids() {
+        let mut tracker = DedupTracker::new(100);
+        assert!(tracker.insert("abc"));
+        assert!(tracker.insert("def"));
+        assert_eq!(tracker.len(), 2);
+        assert!(!tracker.is_empty());
+    }
+
+    #[test]
+    fn dedup_tracker_rejects_duplicate_ids() {
+        let mut tracker = DedupTracker::new(100);
+        assert!(tracker.insert("abc"));
+        assert!(!tracker.insert("abc"));
+        assert_eq!(tracker.len(), 1);
+    }
+
+    #[test]
+    fn dedup_tracker_respects_capacity_limit() {
+        let mut tracker = DedupTracker::new(3);
+        assert!(tracker.insert("a"));
+        assert!(tracker.insert("b"));
+        assert!(tracker.insert("c"));
+        // At capacity now - new inserts should be dropped
+        assert!(!tracker.insert("d"));
+        assert!(!tracker.insert("e"));
+        assert_eq!(tracker.len(), 3);
+        assert_eq!(tracker.overflow_count(), 2);
+    }
+
+    #[test]
+    fn dedup_tracker_contains_works() {
+        let mut tracker = DedupTracker::new(100);
+        tracker.insert("abc");
+        assert!(tracker.contains("abc"));
+        assert!(!tracker.contains("xyz"));
+    }
+
+    #[test]
+    fn dedup_tracker_empty_initially() {
+        let tracker = DedupTracker::new(10);
+        assert!(tracker.is_empty());
+        assert_eq!(tracker.len(), 0);
+        assert_eq!(tracker.overflow_count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_capacity must be > 0")]
+    fn dedup_tracker_panics_on_zero_capacity() {
+        let _ = DedupTracker::new(0);
+    }
+
+    #[test]
+    fn dedup_tracker_debug_output() {
+        let mut tracker = DedupTracker::new(5);
+        tracker.insert("a");
+        tracker.insert("b");
+        let debug = format!("{tracker:?}");
+        assert!(debug.contains("tracked"));
+        assert!(debug.contains("max_capacity"));
+        assert!(debug.contains("overflow_count"));
+    }
+
+    #[test]
+    fn dedup_tracker_overflow_count_saturates() {
+        let mut tracker = DedupTracker::new(1);
+        tracker.insert("only");
+        // Flood with overflow insertions - should not panic
+        for i in 0..1000 {
+            tracker.insert(&format!("overflow_{i}"));
+        }
+        assert_eq!(tracker.len(), 1);
+        assert_eq!(tracker.overflow_count(), 1000);
+    }
+
+    #[test]
+    fn dedup_tracker_duplicate_at_capacity_does_not_overflow() {
+        let mut tracker = DedupTracker::new(2);
+        tracker.insert("a");
+        tracker.insert("b");
+        // Re-inserting existing should return false but NOT increment overflow
+        assert!(!tracker.insert("a"));
+        assert_eq!(tracker.overflow_count(), 0);
     }
 }

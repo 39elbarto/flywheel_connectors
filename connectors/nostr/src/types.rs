@@ -1,7 +1,7 @@
 //! Nostr connector types, configuration, and input-parsing helpers.
 
 use fcp_core::{FcpError, FcpResult};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ─── Operation / capability constants ────────────────────────────────────
@@ -9,6 +9,7 @@ pub const OP_PUBLISH_NOTE: &str = "nostr.notes.publish";
 pub const OP_QUERY_EVENTS: &str = "nostr.events.query";
 pub const OP_LIST_RELAYS: &str = "nostr.relays.list";
 pub const OP_HEALTH: &str = "nostr.health";
+pub const OP_RELAYS_HEALTH: &str = "nostr.relays.health";
 
 pub const CAP_NOTES_WRITE: &str = "nostr.notes.write";
 pub const CAP_EVENTS_READ: &str = "nostr.events.read";
@@ -18,6 +19,92 @@ pub const CAP_HEALTH_READ: &str = "nostr.health.read";
 pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_QUERY_LIMIT: u64 = 25;
 pub const NIP01_KIND_TEXT: u64 = 1;
+
+// ─── NIP-04 / NIP-44 DM event constants and types ───────────────────────
+
+/// NIP-04 encrypted direct message event kind.
+pub const NIP04_KIND_ENCRYPTED_DM: u64 = 4;
+
+/// NIP-44 gift-wrapped event kind (used for newer encrypted DMs).
+pub const NIP44_KIND_GIFT_WRAP: u64 = 1059;
+
+/// NIP-44 sealed event kind (inner layer of gift wrap).
+pub const NIP44_KIND_SEAL: u64 = 13;
+
+/// Represents an encrypted DM event following the NIP-04 format.
+///
+/// The `content` field holds the NIP-04 encrypted payload (base64 + IV).
+/// The connector does not encrypt or decrypt content - that is the responsibility
+/// of the calling agent or upstream NIP-04 library.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncryptedDmEvent {
+    /// The hex-encoded x-only public key of the DM recipient.
+    pub recipient_pubkey: String,
+    /// The encrypted content in NIP-04 format (base64 ciphertext + "?iv=" + base64 IV).
+    pub content: String,
+    /// The event kind (must be 4 for NIP-04 DMs).
+    pub kind: u64,
+}
+
+impl EncryptedDmEvent {
+    /// Create a new NIP-04 encrypted DM event envelope.
+    #[must_use]
+    pub fn new(recipient_pubkey: String, content: String) -> Self {
+        Self {
+            recipient_pubkey,
+            content,
+            kind: NIP04_KIND_ENCRYPTED_DM,
+        }
+    }
+
+    /// Validate the DM event fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the recipient pubkey is malformed or content is empty.
+    pub fn validate(&self) -> FcpResult<()> {
+        if self.recipient_pubkey.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "recipient_pubkey must not be empty".into(),
+            });
+        }
+        if self.recipient_pubkey.len() != 64
+            || !self
+                .recipient_pubkey
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "recipient_pubkey must be a 64-character hex-encoded x-only public key"
+                    .into(),
+            });
+        }
+        if self.content.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "encrypted DM content must not be empty".into(),
+            });
+        }
+        if self.kind != NIP04_KIND_ENCRYPTED_DM {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!(
+                    "EncryptedDmEvent kind must be {} (NIP-04), got {}",
+                    NIP04_KIND_ENCRYPTED_DM, self.kind
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Build the Nostr tags array for this DM event: `[["p", recipient_pubkey]]`.
+    #[must_use]
+    pub fn tags(&self) -> Value {
+        serde_json::json!([["p", self.recipient_pubkey]])
+    }
+}
 
 // ─── Configuration ───────────────────────────────────────────────────────
 
@@ -575,5 +662,150 @@ mod tests {
     #[test]
     fn u64_field_rejects_negative() {
         assert!(u64_field(&json!({"limit": -1}), "limit").is_err());
+    }
+
+    // ── NIP-04 DM event type tests ─────────────────────────────────────
+
+    #[test]
+    fn nip04_kind_constant_is_4() {
+        assert_eq!(NIP04_KIND_ENCRYPTED_DM, 4);
+    }
+
+    #[test]
+    fn nip44_kind_constants() {
+        assert_eq!(NIP44_KIND_GIFT_WRAP, 1059);
+        assert_eq!(NIP44_KIND_SEAL, 13);
+    }
+
+    #[test]
+    fn encrypted_dm_event_new_sets_kind_4() {
+        let dm = EncryptedDmEvent::new(
+            "aaaa".repeat(16),
+            "encrypted_content?iv=base64iv".into(),
+        );
+        assert_eq!(dm.kind, NIP04_KIND_ENCRYPTED_DM);
+        assert_eq!(dm.recipient_pubkey.len(), 64);
+    }
+
+    #[test]
+    fn encrypted_dm_event_serializes() {
+        let dm = EncryptedDmEvent::new(
+            "bbbb".repeat(16),
+            "ciphertext?iv=nonce".into(),
+        );
+        let json = serde_json::to_value(&dm).unwrap();
+        assert_eq!(json["kind"], 4);
+        assert_eq!(json["content"], "ciphertext?iv=nonce");
+        assert_eq!(json["recipient_pubkey"], "bbbb".repeat(16));
+    }
+
+    #[test]
+    fn encrypted_dm_event_deserializes() {
+        let json = json!({
+            "recipient_pubkey": "cccc".repeat(16),
+            "content": "encrypted_payload",
+            "kind": 4
+        });
+        let dm: EncryptedDmEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(dm.kind, 4);
+        assert_eq!(dm.content, "encrypted_payload");
+    }
+
+    #[test]
+    fn encrypted_dm_event_roundtrip() {
+        let original = EncryptedDmEvent::new(
+            "dddd".repeat(16),
+            "test_payload?iv=abc".into(),
+        );
+        let json = serde_json::to_value(&original).unwrap();
+        let deserialized: EncryptedDmEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn encrypted_dm_event_validate_valid() {
+        let dm = EncryptedDmEvent::new(
+            "eeee".repeat(16),
+            "valid_content".into(),
+        );
+        assert!(dm.validate().is_ok());
+    }
+
+    #[test]
+    fn encrypted_dm_event_validate_empty_pubkey() {
+        let dm = EncryptedDmEvent {
+            recipient_pubkey: "".into(),
+            content: "content".into(),
+            kind: 4,
+        };
+        let err = dm.validate().unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn encrypted_dm_event_validate_short_pubkey() {
+        let dm = EncryptedDmEvent {
+            recipient_pubkey: "aabb".into(),
+            content: "content".into(),
+            kind: 4,
+        };
+        let err = dm.validate().unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("64-character hex"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encrypted_dm_event_validate_non_hex_pubkey() {
+        let dm = EncryptedDmEvent {
+            recipient_pubkey: "zzzz".repeat(16),
+            content: "content".into(),
+            kind: 4,
+        };
+        assert!(dm.validate().is_err());
+    }
+
+    #[test]
+    fn encrypted_dm_event_validate_empty_content() {
+        let dm = EncryptedDmEvent {
+            recipient_pubkey: "aaaa".repeat(16),
+            content: "   ".into(),
+            kind: 4,
+        };
+        assert!(dm.validate().is_err());
+    }
+
+    #[test]
+    fn encrypted_dm_event_validate_wrong_kind() {
+        let dm = EncryptedDmEvent {
+            recipient_pubkey: "aaaa".repeat(16),
+            content: "content".into(),
+            kind: 1,
+        };
+        let err = dm.validate().unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("kind must be 4"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encrypted_dm_event_tags_has_p_tag() {
+        let dm = EncryptedDmEvent::new(
+            "ffff".repeat(16),
+            "payload".into(),
+        );
+        let tags = dm.tags();
+        assert_eq!(tags, json!([["p", "ffff".repeat(16)]]));
+    }
+
+    #[test]
+    fn op_relays_health_constant() {
+        assert_eq!(OP_RELAYS_HEALTH, "nostr.relays.health");
     }
 }

@@ -260,6 +260,84 @@ fn looks_secret(segment: &str) -> bool {
         && segment.bytes().any(|byte| byte.is_ascii_digit())
 }
 
+/// Inbound webhook payload from Synology Chat.
+///
+/// This represents the flexible shape of an incoming webhook callback
+/// from Synology Chat (outgoing webhook integration). All fields are
+/// optional because different Synology Chat versions and configurations
+/// may include varying subsets.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboundWebhookPayload {
+    /// The user ID who sent the message.
+    pub user_id: Option<serde_json::Value>,
+    /// The username who sent the message.
+    pub username: Option<String>,
+    /// The post ID.
+    pub post_id: Option<serde_json::Value>,
+    /// The channel ID.
+    pub channel_id: Option<serde_json::Value>,
+    /// Channel name.
+    pub channel_name: Option<String>,
+    /// Channel type (1 = group, 2 = DM, etc.).
+    pub channel_type: Option<serde_json::Value>,
+    /// The message text.
+    pub text: Option<String>,
+    /// Timestamp (milliseconds since epoch, as string or integer).
+    pub timestamp: Option<serde_json::Value>,
+    /// Token for verification against configured `outgoing_token`.
+    pub token: Option<String>,
+    /// Trigger word that matched.
+    pub trigger_word: Option<String>,
+    /// Thread ID (\"0\" or empty means top-level).
+    pub thread_id: Option<serde_json::Value>,
+    /// File URL attachment.
+    pub file_url: Option<String>,
+}
+
+/// Normalized inbound event produced by `synology_chat.webhook.normalize`.
+#[derive(Debug, Clone, Serialize)]
+pub struct NormalizedInboundEvent {
+    /// The event type, always `"inbound_webhook"`.
+    pub event_type: String,
+    /// Channel identifier (stringified).
+    pub channel_id: Option<String>,
+    /// Channel display name.
+    pub channel_name: Option<String>,
+    /// Sender user identifier (stringified).
+    pub sender_id: Option<String>,
+    /// Sender display name.
+    pub sender_name: Option<String>,
+    /// Message text.
+    pub text: Option<String>,
+    /// Timestamp (stringified, milliseconds since epoch).
+    pub timestamp: Option<String>,
+    /// Trigger word that matched.
+    pub trigger_word: Option<String>,
+    /// Whether the message is in a thread.
+    pub is_threaded: bool,
+    /// Thread ID if threaded.
+    pub thread_id: Option<String>,
+    /// File URL if present.
+    pub file_url: Option<String>,
+    /// Token verification result.
+    pub token_verified: Option<bool>,
+    /// Original raw payload for passthrough.
+    pub raw: serde_json::Value,
+}
+
+/// Result of token verification for an inbound webhook payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenVerification {
+    /// Token matched the configured `outgoing_token`.
+    Verified,
+    /// Token did not match the configured `outgoing_token`.
+    Mismatch,
+    /// No token was provided in the payload.
+    MissingFromPayload,
+    /// No `outgoing_token` is configured, so verification was skipped.
+    NotConfigured,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +451,102 @@ mod tests {
         assert_eq!(
             state_model.receive_path,
             SynologyChatReceivePath::ForwardedOutgoingWebhook
+        );
+    }
+
+    #[test]
+    fn inbound_webhook_payload_deserializes_from_json() {
+        let payload: InboundWebhookPayload = serde_json::from_value(serde_json::json!({
+            "user_id": 4,
+            "username": "mikael",
+            "post_id": "146028888128",
+            "channel_id": 34,
+            "channel_name": "Labb",
+            "channel_type": 1,
+            "text": "Tjena",
+            "timestamp": "1646827836131",
+            "token": "shared-secret",
+            "trigger_word": "Tjena",
+            "thread_id": "0",
+            "file_url": "https://nas.local/file.pdf"
+        }))
+        .expect("payload should deserialize");
+
+        assert_eq!(payload.username.as_deref(), Some("mikael"));
+        assert_eq!(payload.text.as_deref(), Some("Tjena"));
+        assert_eq!(payload.token.as_deref(), Some("shared-secret"));
+        assert_eq!(payload.trigger_word.as_deref(), Some("Tjena"));
+        assert_eq!(payload.file_url.as_deref(), Some("https://nas.local/file.pdf"));
+    }
+
+    #[test]
+    fn inbound_webhook_payload_handles_missing_optional_fields() {
+        let payload: InboundWebhookPayload =
+            serde_json::from_value(serde_json::json!({})).expect("empty payload should deserialize");
+
+        assert!(payload.user_id.is_none());
+        assert!(payload.username.is_none());
+        assert!(payload.post_id.is_none());
+        assert!(payload.channel_id.is_none());
+        assert!(payload.channel_name.is_none());
+        assert!(payload.text.is_none());
+        assert!(payload.timestamp.is_none());
+        assert!(payload.token.is_none());
+        assert!(payload.trigger_word.is_none());
+        assert!(payload.thread_id.is_none());
+        assert!(payload.file_url.is_none());
+    }
+
+    #[test]
+    fn inbound_webhook_payload_accepts_string_ids() {
+        let payload: InboundWebhookPayload = serde_json::from_value(serde_json::json!({
+            "user_id": "user-99",
+            "channel_id": "chan-1",
+            "post_id": "post-42",
+            "timestamp": "1700000000000"
+        }))
+        .expect("string IDs should deserialize");
+
+        assert!(payload.user_id.is_some());
+        assert!(payload.channel_id.is_some());
+    }
+
+    #[test]
+    fn normalized_inbound_event_serializes_correctly() {
+        let event = NormalizedInboundEvent {
+            event_type: "inbound_webhook".into(),
+            channel_id: Some("34".into()),
+            channel_name: Some("Labb".into()),
+            sender_id: Some("4".into()),
+            sender_name: Some("mikael".into()),
+            text: Some("Tjena".into()),
+            timestamp: Some("1646827836131".into()),
+            trigger_word: Some("Tjena".into()),
+            is_threaded: false,
+            thread_id: None,
+            file_url: None,
+            token_verified: Some(true),
+            raw: serde_json::json!({}),
+        };
+
+        let serialized = serde_json::to_value(&event).expect("event should serialize");
+        assert_eq!(serialized["event_type"], "inbound_webhook");
+        assert_eq!(serialized["channel_id"], "34");
+        assert_eq!(serialized["sender_name"], "mikael");
+        assert_eq!(serialized["token_verified"], true);
+        assert_eq!(serialized["is_threaded"], false);
+    }
+
+    #[test]
+    fn token_verification_variants_are_distinct() {
+        assert_ne!(TokenVerification::Verified, TokenVerification::Mismatch);
+        assert_ne!(TokenVerification::Verified, TokenVerification::MissingFromPayload);
+        assert_ne!(TokenVerification::Verified, TokenVerification::NotConfigured);
+        assert_ne!(TokenVerification::Mismatch, TokenVerification::MissingFromPayload);
+        assert_ne!(TokenVerification::Mismatch, TokenVerification::NotConfigured);
+        assert_ne!(
+            TokenVerification::MissingFromPayload,
+            TokenVerification::NotConfigured
         );
     }
 }

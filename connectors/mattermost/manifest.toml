@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:83032732650d5dd374f8edfd3c299ec224d6ab8d8c16003af596fb0021cf7003"
+interface_hash = "blake3-256:fcp.interface.v2:bc27ff97696c469eb98f6964560fe9855597aec56df05865c7a570829e197997"
 
 [connector]
 id = "fcp.mattermost"
@@ -582,4 +582,160 @@ require_sni = true
 
 [provides.operations."mattermost.delete_post".rate_limit]
 max = 10
+per_ms = 60000
+
+[provides.operations."mattermost.get_reactions_for_post"]
+description = "Get all emoji reactions for a post"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.get_reactions_for_post".input_schema]
+required = ["post_id"]
+type = "object"
+
+[provides.operations."mattermost.get_reactions_for_post".input_schema.properties.post_id]
+description = "Post ID whose reactions should be listed"
+type = "string"
+
+[provides.operations."mattermost.get_reactions_for_post".output_schema]
+type = "array"
+
+[provides.operations."mattermost.get_reactions_for_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.create_group_channel"]
+description = "Create or fetch a group direct-message channel for three or more users"
+capability = "mattermost.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.create_group_channel".input_schema]
+required = ["user_ids"]
+type = "object"
+
+[provides.operations."mattermost.create_group_channel".input_schema.properties.user_ids]
+description = "Three or more unique Mattermost user IDs"
+type = "array"
+
+[provides.operations."mattermost.create_group_channel".output_schema]
+type = "object"
+
+[provides.operations."mattermost.create_group_channel".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.create_group_channel".rate_limit]
+max = 10
+per_ms = 60000
+
+[provides.operations."mattermost.update_post"]
+description = "Patch an existing post's text, props, or file attachments"
+capability = "mattermost.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.update_post".input_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."mattermost.update_post".input_schema.properties.id]
+description = "Post ID to update"
+type = "string"
+
+[provides.operations."mattermost.update_post".output_schema]
+type = "object"
+
+[provides.operations."mattermost.update_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.update_post".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."mattermost.pin_post"]
+description = "Pin a post so it appears in the channel's pinned messages list"
+capability = "mattermost.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.pin_post".input_schema]
+required = ["post_id"]
+type = "object"
+
+[provides.operations."mattermost.pin_post".input_schema.properties.post_id]
+description = "Post ID to pin"
+type = "string"
+
+[provides.operations."mattermost.pin_post".output_schema]
+type = "object"
+
+[provides.operations."mattermost.pin_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.pin_post".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."mattermost.unpin_post"]
+description = "Unpin a post from the channel's pinned messages list"
+capability = "mattermost.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."mattermost.unpin_post".input_schema]
+required = ["post_id"]
+type = "object"
+
+[provides.operations."mattermost.unpin_post".input_schema.properties.post_id]
+description = "Post ID to unpin"
+type = "string"
+
+[provides.operations."mattermost.unpin_post".output_schema]
+type = "object"
+
+[provides.operations."mattermost.unpin_post".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443, 8065]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+require_sni = true
+
+[provides.operations."mattermost.unpin_post".rate_limit]
+max = 60
 per_ms = 60000

@@ -55,6 +55,16 @@ idempotency = "strict"
 [provides.operations.ingest_outgoing_webhook.ai_hints]
 when_to_use = "When fcp-host forwards an outgoing-webhook payload and you need stable channel, thread, sender, and attachment metadata"
 
+[provides.operations.webhook_normalize]
+summary = "Normalize a raw inbound Synology Chat webhook payload into a stable event envelope"
+capability = "synology_chat.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.webhook_normalize.ai_hints]
+when_to_use = "When you need to normalize any inbound Synology Chat webhook payload into a stable event shape with optional token verification"
+
 [provides.operations.health]
 summary = "Report Synology Chat connector configuration and delivery target"
 capability = "synology_chat.read"

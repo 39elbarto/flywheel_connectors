@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use crate::client::NostrClient;
 use crate::types::{
     CAP_EVENTS_READ, CAP_HEALTH_READ, CAP_NOTES_WRITE, CAP_RELAYS_READ, NostrConfig, OP_HEALTH,
-    OP_LIST_RELAYS, OP_PUBLISH_NOTE, OP_QUERY_EVENTS, build_filter, note_kind, note_tags,
-    required_string,
+    OP_LIST_RELAYS, OP_PUBLISH_NOTE, OP_QUERY_EVENTS, OP_RELAYS_HEALTH, build_filter, note_kind,
+    note_tags, required_string,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -222,6 +222,23 @@ impl NostrConnector {
                 ],
                 &[CAP_RELAYS_READ, CAP_NOTES_WRITE],
             ),
+            operation(
+                OP_RELAYS_HEALTH,
+                "Score relay health with latency and NIP support metrics",
+                "Connect to each configured relay, measure connection latency, and probe for NIP-04 (encrypted DM) and NIP-44 (gift-wrapped) event kind support. Returns per-relay health scores. This is a more detailed alternative to the basic `nostr.health` operation.",
+                CAP_HEALTH_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                json!({ "type": "object" }),
+                "Use when you need detailed per-relay metrics including latency and NIP support, rather than just reachability.",
+                &[
+                    "This operation probes relay kind support by issuing bounded REQs; some relays may rate-limit probing.",
+                    "NIP-44 support is inferred from kind=1059 (gift-wrapped) event indexing, not direct NIP-44 negotiation.",
+                    "Latency measures WebSocket connection time only, not query round-trip time.",
+                ],
+                &[CAP_RELAYS_READ, CAP_NOTES_WRITE, CAP_EVENTS_READ],
+            ),
         ]
     }
 
@@ -240,6 +257,7 @@ impl NostrConnector {
                 "public_key_hex": client.public_key_hex(),
             }),
             OP_HEALTH => client.health_details().await?,
+            OP_RELAYS_HEALTH => client.relay_health_scores().await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -431,7 +449,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         OP_PUBLISH_NOTE => CAP_NOTES_WRITE,
         OP_QUERY_EVENTS => CAP_EVENTS_READ,
         OP_LIST_RELAYS => CAP_RELAYS_READ,
-        OP_HEALTH => CAP_HEALTH_READ,
+        OP_HEALTH | OP_RELAYS_HEALTH => CAP_HEALTH_READ,
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -458,7 +476,7 @@ fn validate_simulation_input(
             let _ = build_filter(input, client.default_query_limit)?;
             Ok(())
         }
-        OP_LIST_RELAYS | OP_HEALTH => Ok(()),
+        OP_LIST_RELAYS | OP_HEALTH | OP_RELAYS_HEALTH => Ok(()),
         _ => Err(FcpError::InvalidRequest {
             code: 1004,
             message: format!("unknown operation: {operation}"),
@@ -700,14 +718,15 @@ mod tests {
     }
 
     #[test]
-    fn introspect_has_four_operations() {
+    fn introspect_has_five_operations() {
         let intro = NostrConnector::new().introspect();
-        assert_eq!(intro.operations.len(), 4);
+        assert_eq!(intro.operations.len(), 5);
         let ids: Vec<_> = intro.operations.iter().map(|op| op.id.as_str()).collect();
         assert!(ids.contains(&OP_PUBLISH_NOTE));
         assert!(ids.contains(&OP_QUERY_EVENTS));
         assert!(ids.contains(&OP_LIST_RELAYS));
         assert!(ids.contains(&OP_HEALTH));
+        assert!(ids.contains(&OP_RELAYS_HEALTH));
     }
 
     #[test]
@@ -958,5 +977,76 @@ mod tests {
             },
         ]);
         assert!(result.passed);
+    }
+
+    // ── Relay health operation tests ────────────────────────────────────
+
+    #[test]
+    fn required_capability_relays_health() {
+        let cap = required_capability(OP_RELAYS_HEALTH).unwrap();
+        assert_eq!(cap.as_str(), CAP_HEALTH_READ);
+    }
+
+    #[test]
+    fn introspect_relays_health_operation_properties() {
+        let intro = NostrConnector::new().introspect();
+        let op = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_RELAYS_HEALTH)
+            .expect("relays.health operation should exist");
+        assert_eq!(op.capability.as_str(), CAP_HEALTH_READ);
+        assert!(matches!(op.risk_level, RiskLevel::Low));
+        assert!(matches!(op.safety_tier, SafetyTier::Safe));
+        assert!(matches!(op.idempotency, IdempotencyClass::Strict));
+        assert!(
+            op.description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("NIP-04")
+        );
+        assert!(
+            op.description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("NIP-44")
+        );
+    }
+
+    #[test]
+    fn introspect_relays_health_has_related_caps() {
+        let intro = NostrConnector::new().introspect();
+        let op = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_RELAYS_HEALTH)
+            .unwrap();
+        let related: Vec<_> = op
+            .ai_hints
+            .related
+            .iter()
+            .map(CapabilityId::as_str)
+            .collect();
+        assert!(related.contains(&CAP_RELAYS_READ));
+        assert!(related.contains(&CAP_EVENTS_READ));
+    }
+
+    #[test]
+    fn simulate_relays_health_denies_when_not_configured() {
+        let connector = NostrConnector::new();
+        let response = fcp_async_core::runtime::block_on_sync(async {
+            connector
+                .simulate(SimulateRequest::new(
+                    ConnectorId::from_static("fcp.nostr"),
+                    OperationId::from_static(OP_RELAYS_HEALTH),
+                    ZoneId::community(),
+                    json!({}),
+                    CapabilityToken::test_token(),
+                ))
+                .await
+        })
+        .expect("runtime should complete");
+        let response = response.expect("simulate should succeed");
+        assert!(!response.would_succeed);
     }
 }

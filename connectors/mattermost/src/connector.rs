@@ -504,6 +504,7 @@ impl MattermostConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         self.stop_socket_mode().await;
+        *self.subscribed_topics.write().await = Vec::new();
         self.shutdown()?;
         Ok(json!({"status": "shutdown_accepted"}))
     }
@@ -2818,6 +2819,33 @@ mod tests {
         assert_eq!(health["details"]["streaming"]["socket_connected"], true);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn handle_shutdown_clears_stream_subscription_state() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok_123"
+            }))
+            .unwrap();
+        *connector.subscribed_topics.write().await = vec!["mattermost.posted".to_string()];
+        *connector.socket_running.write().await = true;
+        *connector.socket_connected.write().await = true;
+
+        let response = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(response["status"], "shutdown_accepted");
+        assert!(connector.subscribed_topics.read().await.is_empty());
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"]["state"], "starting");
+        assert_eq!(health["details"]["streaming"]["socket_running"], false);
+        assert_eq!(health["details"]["streaming"]["socket_connected"], false);
+        assert_eq!(
+            health["details"]["streaming"]["subscribed_topics"],
+            json!([])
+        );
+    }
+
     #[test]
     fn delete_requires_approval() {
         let ops = operations_info();
@@ -3312,7 +3340,8 @@ mod tests {
 
     #[test]
     fn manifest_lists_extended_post_and_group_operations() {
-        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        let manifest_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
         let manifest = std::fs::read_to_string(&manifest_path)
             .expect("mattermost manifest.toml should be readable");
 

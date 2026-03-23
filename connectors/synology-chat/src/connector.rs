@@ -16,8 +16,12 @@ use fcp_sdk::prelude::*;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::client::{SynologyChatClient, SynologyChatMessageRequest, SynologyChatPayload};
-use crate::types::{SynologyChatConfig, SynologyChatStateModel};
+use crate::client::{
+    SynologyChatClient, SynologyChatMessageRequest, SynologyChatPayload, normalize_inbound_event,
+};
+use crate::types::{
+    InboundWebhookPayload, SynologyChatConfig, SynologyChatStateModel, TokenVerification,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const CAP_READ: &str = "synology_chat.read";
@@ -26,6 +30,7 @@ const CAP_WEBHOOK: &str = "synology_chat.webhook";
 const OP_SEND_MESSAGE: &str = "synology_chat.send_message";
 const OP_SEND_PAYLOAD: &str = "synology_chat.send_payload";
 const OP_INGEST_OUTGOING_WEBHOOK: &str = "synology_chat.ingest_outgoing_webhook";
+const OP_WEBHOOK_NORMALIZE: &str = "synology_chat.webhook.normalize";
 const OP_HEALTH: &str = "synology_chat.health";
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -264,6 +269,63 @@ impl SynologyChatConnector {
                 requires_approval: Some(ApprovalMode::None),
             },
             OperationInfo {
+                id: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                summary: "Normalize a raw inbound Synology Chat webhook payload".into(),
+                description: Some(
+                    "Accept a raw inbound Synology Chat webhook payload and return a normalized event envelope. If outgoing_token is configured, token verification is performed and the result is included. Unlike ingest_outgoing_webhook, this operation does not reject on token mismatch — it reports the verification status and lets the caller decide.".into(),
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["payload"],
+                    "properties": {
+                        "payload": {
+                            "type": "object",
+                            "properties": {
+                                "user_id": {},
+                                "username": { "type": "string" },
+                                "post_id": {},
+                                "channel_id": {},
+                                "channel_name": { "type": "string" },
+                                "channel_type": {},
+                                "text": { "type": "string" },
+                                "timestamp": {},
+                                "token": { "type": "string" },
+                                "trigger_word": { "type": "string" },
+                                "thread_id": {},
+                                "file_url": { "type": "string" }
+                            }
+                        }
+                    }
+                }),
+                output_schema: json!({
+                    "type": "object",
+                    "required": ["event"],
+                    "properties": {
+                        "event": { "type": "object" },
+                        "token_verification": { "type": "string" }
+                    }
+                }),
+                capability: CapabilityId::from_static(CAP_READ),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: "Use this to normalize any inbound Synology Chat webhook payload into a stable event shape, with optional token verification.".into(),
+                    common_mistakes: vec![
+                        "Passing the raw HTTP body instead of the parsed JSON payload object".into(),
+                    ],
+                    examples: vec![
+                        "{\"payload\":{\"token\":\"abc\",\"channel_id\":34,\"user_id\":4,\"username\":\"mikael\",\"text\":\"Hello\"}}".into(),
+                    ],
+                    related: vec![
+                        CapabilityId::from_static(OP_INGEST_OUTGOING_WEBHOOK),
+                        CapabilityId::from_static(OP_HEALTH),
+                    ],
+                },
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            },
+            OperationInfo {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report connector health".into(),
                 description: Some("Return configured webhook target details.".into()),
@@ -291,7 +353,7 @@ impl SynologyChatConnector {
         let required_cap = match req.operation.as_str() {
             OP_SEND_MESSAGE | OP_SEND_PAYLOAD => CapabilityId::from_static(CAP_WRITE),
             OP_INGEST_OUTGOING_WEBHOOK => CapabilityId::from_static(CAP_WEBHOOK),
-            OP_HEALTH => CapabilityId::from_static(CAP_READ),
+            OP_WEBHOOK_NORMALIZE | OP_HEALTH => CapabilityId::from_static(CAP_READ),
             operation => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -340,6 +402,7 @@ impl SynologyChatConnector {
                     .into_json()
             }
             OP_INGEST_OUTGOING_WEBHOOK => normalize_outgoing_webhook(&req.input, state)?,
+            OP_WEBHOOK_NORMALIZE => invoke_webhook_normalize(&req.input, state)?,
             OP_HEALTH => json!({
                 "status": "ok",
                 "delivery_target": &state.model.delivery_target,
@@ -502,6 +565,43 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
                 },
             },
         }
+    }))
+}
+
+fn invoke_webhook_normalize(input: &Value, state: &SynologyChatState) -> FcpResult<Value> {
+    let payload_value = input
+        .get("payload")
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "Missing payload".into(),
+        })?;
+
+    let payload: InboundWebhookPayload = serde_json::from_value(payload_value.clone())
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Invalid inbound webhook payload: {error}"),
+        })?;
+
+    let (event, verification) = normalize_inbound_event(
+        &payload,
+        state.outgoing_token.as_deref(),
+        payload_value.clone(),
+    );
+
+    let verification_str = match verification {
+        TokenVerification::Verified => "verified",
+        TokenVerification::Mismatch => "mismatch",
+        TokenVerification::MissingFromPayload => "missing_from_payload",
+        TokenVerification::NotConfigured => "not_configured",
+    };
+
+    let event_value = serde_json::to_value(&event).map_err(|error| FcpError::Internal {
+        message: format!("Failed to serialize normalized event: {error}"),
+    })?;
+
+    Ok(json!({
+        "event": event_value,
+        "token_verification": verification_str,
     }))
 }
 
@@ -867,7 +967,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
         OP_SEND_MESSAGE | OP_SEND_PAYLOAD => Ok(CapabilityId::from_static(CAP_WRITE)),
         OP_INGEST_OUTGOING_WEBHOOK => Ok(CapabilityId::from_static(CAP_WEBHOOK)),
-        OP_HEALTH => Ok(CapabilityId::from_static(CAP_READ)),
+        OP_WEBHOOK_NORMALIZE | OP_HEALTH => Ok(CapabilityId::from_static(CAP_READ)),
         _ => Err(FcpError::InvalidRequest {
             code: 1004,
             message: format!("Unknown operation: {operation}"),
@@ -1006,6 +1106,7 @@ mod tests {
                 OP_SEND_MESSAGE.to_string(),
                 OP_SEND_PAYLOAD.to_string(),
                 OP_INGEST_OUTGOING_WEBHOOK.to_string(),
+                OP_WEBHOOK_NORMALIZE.to_string(),
                 OP_HEALTH.to_string()
             ]
         );
@@ -1027,5 +1128,366 @@ mod tests {
         }))
         .expect("user IDs should parse");
         assert_eq!(user_ids, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_webhook_normalize_returns_normalized_event() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi",
+                "outgoing_token": "shared-secret"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("webhook-normalize-1"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                zone_id: ZoneId::work(),
+                input: json!({
+                    "payload": {
+                        "token": "shared-secret",
+                        "channel_id": 34,
+                        "user_id": 4,
+                        "username": "mikael",
+                        "text": "Tjena",
+                        "timestamp": "1646827836131",
+                        "trigger_word": "Tjena",
+                        "thread_id": "0"
+                    }
+                }),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect("webhook normalize should succeed");
+
+        let result = response.result.expect("result");
+        assert_eq!(result["token_verification"], "verified");
+        let event = &result["event"];
+        assert_eq!(event["event_type"], "inbound_webhook");
+        assert_eq!(event["channel_id"], "34");
+        assert_eq!(event["sender_id"], "4");
+        assert_eq!(event["sender_name"], "mikael");
+        assert_eq!(event["text"], "Tjena");
+        assert_eq!(event["timestamp"], "1646827836131");
+        assert_eq!(event["trigger_word"], "Tjena");
+        assert_eq!(event["is_threaded"], false);
+        assert_eq!(event["token_verified"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_webhook_normalize_token_mismatch_reports_status() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi",
+                "outgoing_token": "correct-token"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("webhook-normalize-mismatch"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                zone_id: ZoneId::work(),
+                input: json!({
+                    "payload": {
+                        "token": "wrong-token",
+                        "text": "Hello"
+                    }
+                }),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect("webhook normalize should succeed even on mismatch");
+
+        let result = response.result.expect("result");
+        assert_eq!(result["token_verification"], "mismatch");
+        assert_eq!(result["event"]["token_verified"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_webhook_normalize_no_token_configured() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("webhook-normalize-notoken"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                zone_id: ZoneId::work(),
+                input: json!({
+                    "payload": {
+                        "channel_id": "chan-1",
+                        "username": "alice",
+                        "text": "Hi there"
+                    }
+                }),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect("webhook normalize should succeed");
+
+        let result = response.result.expect("result");
+        assert_eq!(result["token_verification"], "not_configured");
+        let event = &result["event"];
+        assert_eq!(event["event_type"], "inbound_webhook");
+        assert_eq!(event["channel_id"], "chan-1");
+        assert_eq!(event["sender_name"], "alice");
+        assert_eq!(event["text"], "Hi there");
+        assert!(event["token_verified"].is_null());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_webhook_normalize_minimal_payload() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("webhook-normalize-minimal"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                zone_id: ZoneId::work(),
+                input: json!({ "payload": {} }),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect("webhook normalize should succeed with empty payload");
+
+        let result = response.result.expect("result");
+        assert_eq!(result["token_verification"], "not_configured");
+        let event = &result["event"];
+        assert_eq!(event["event_type"], "inbound_webhook");
+        assert!(event["channel_id"].is_null());
+        assert!(event["sender_id"].is_null());
+        assert!(event["text"].is_null());
+        assert_eq!(event["is_threaded"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_webhook_normalize_missing_payload_field_errors() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let error = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("webhook-normalize-nopayload"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                zone_id: ZoneId::work(),
+                input: json!({}),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect_err("should fail without payload");
+
+        match error {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1005);
+                assert!(message.contains("Missing payload"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_webhook_normalize_threaded_message() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("webhook-normalize-threaded"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                zone_id: ZoneId::work(),
+                input: json!({
+                    "payload": {
+                        "channel_id": 42,
+                        "user_id": 7,
+                        "username": "bob",
+                        "text": "Reply in thread",
+                        "thread_id": "thread-456",
+                        "file_url": "https://nas.local/file.pdf"
+                    }
+                }),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect("webhook normalize should succeed");
+
+        let result = response.result.expect("result");
+        let event = &result["event"];
+        assert_eq!(event["is_threaded"], true);
+        assert_eq!(event["thread_id"], "thread-456");
+        assert_eq!(event["file_url"], "https://nas.local/file.pdf");
+        assert_eq!(event["sender_name"], "bob");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_webhook_normalize_preserves_raw_payload() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let input_payload = json!({
+            "text": "Hello",
+            "custom_field": "custom_value",
+            "nested": { "key": 42 }
+        });
+
+        let response = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("webhook-normalize-raw"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
+                zone_id: ZoneId::work(),
+                input: json!({ "payload": input_payload }),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect("webhook normalize should succeed");
+
+        let result = response.result.expect("result");
+        let raw = &result["event"]["raw"];
+        assert_eq!(raw["text"], "Hello");
+        assert_eq!(raw["custom_field"], "custom_value");
+        assert_eq!(raw["nested"]["key"], 42);
     }
 }

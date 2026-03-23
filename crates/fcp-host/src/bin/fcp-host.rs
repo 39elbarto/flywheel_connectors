@@ -525,12 +525,22 @@ impl ConnectorRegistry for SubprocessRegistry {
                 .get(id)
                 .map(|entry| Arc::clone(&entry.connector))
         }?;
-        connector.self_check().await.ok()
+        Some(match connector.self_check().await {
+            Ok(report) => report,
+            Err(error) => runtime_self_check_failure_report(&error),
+        })
     }
 
     fn version(&self) -> u64 {
         self.version.load(Ordering::SeqCst)
     }
+}
+
+fn runtime_self_check_failure_report(error: &HostError) -> SelfCheckReport {
+    SelfCheckReport::failed(
+        "self_check_runtime",
+        format!("connector self_check failed: {error}"),
+    )
 }
 
 fn configured_subprocess_archetype(config: &ConnectorConfig) -> ConnectorArchetype {
@@ -4751,6 +4761,22 @@ mod tests {
 
     fn invoke_response_with_metrics(metrics: Vec<UsageMetric>) -> InvokeResponse {
         InvokeResponse::ok(RequestId::random(), json!({"ok": true})).with_usage_metrics(metrics)
+    }
+
+    #[test]
+    fn runtime_self_check_failure_report_marks_runtime_errors_as_failed() {
+        let report = runtime_self_check_failure_report(&HostError::RegistryError(
+            "subprocess exited".into(),
+        ));
+
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("self_check_runtime"));
+        assert!(
+            report
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("subprocess exited"))
+        );
     }
 
     #[fcp_async_core::runtime::test]

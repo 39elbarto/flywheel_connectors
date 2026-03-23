@@ -572,7 +572,7 @@ impl RoamConnector {
                         Some(&live_probe),
                     )
                 }
-                Err(RoamError::Unauthorized) | Err(RoamError::Forbidden) => {
+                Err(RoamError::Unauthorized | RoamError::Forbidden) => {
                     self.attach_self_check_details(
                         SelfCheckReport::failed(
                             "auth_invalid",

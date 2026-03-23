@@ -447,7 +447,7 @@ impl RestartTracker {
         u32::try_from(
             self.history
                 .iter()
-                .filter(|event| window_start.map_or(true, |start| event.timestamp >= start))
+                .filter(|event| window_start.is_none_or(|start| event.timestamp >= start))
                 .count(),
         )
         .unwrap_or(u32::MAX)

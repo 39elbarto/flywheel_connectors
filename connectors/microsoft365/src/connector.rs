@@ -3889,8 +3889,7 @@ fn build_operations() -> Vec<OperationInfo> {
                 "properties": {
                     "user_id": { "type": "string" },
                     "start_datetime": { "type": "string" },
-                    "end_datetime": { "type": "string" },
-                    "calendar_id": { "type": "string" }
+                    "end_datetime": { "type": "string" }
                 }
             }),
             json!({ "type": "object", "properties": { "events": { "type": "array" } } }),
@@ -4968,6 +4967,28 @@ mod tests {
         assert!(op_ids.contains(&"m365.delta.sync"));
 
         assert_eq!(ops.len(), 43);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_calendar_list_events_contract_stays_primary_calendar_only() {
+        let connector = M365Connector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let list_events = ops
+            .iter()
+            .find(|op| op["id"] == "m365.calendar.list_events")
+            .expect("m365.calendar.list_events operation should exist");
+        let properties = list_events["input_schema"]["properties"]
+            .as_object()
+            .expect("input schema properties object");
+
+        assert!(
+            !properties.contains_key("calendar_id"),
+            "list_events should remain primary-calendar scoped until runtime support exists"
+        );
+        assert!(properties.contains_key("user_id"));
+        assert!(properties.contains_key("start_datetime"));
+        assert!(properties.contains_key("end_datetime"));
     }
 
     #[test]

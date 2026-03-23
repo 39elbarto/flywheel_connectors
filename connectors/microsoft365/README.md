@@ -25,7 +25,7 @@ Important runtime truths that the contract must preserve:
 - `folder_id` is only a routing selector on mail list/thread operations. There is no standalone folder discovery or folder CRUD operation yet.
 - When `folder_id` is omitted, mail reads currently route to `/{user_scope}/messages`; the connector does not inject an explicit inbox folder.
 - `m365.calendar.list_events` uses `/{user_scope}/calendarView` only when both `start_datetime` and `end_datetime` are provided. Otherwise it falls back to `/{user_scope}/events`.
-- `calendar_id` appears in the declared schema but is not wired through the runtime or client yet. The contract should therefore stay at primary-calendar scope until `flywheel_connectors-j05nu.7.2` reconciles that drift.
+- The first Outlook/Exchange slice stays at primary-calendar scope. Non-primary `calendar_id` routing is intentionally out of the public contract until the runtime and client support it end to end.
 - Mailbox rules are not currently implemented at all.
 
 ## First-Slice Scope
@@ -134,7 +134,7 @@ These are excluded on purpose:
 ## Implementation Notes For `flywheel_connectors-j05nu.7.2`
 
 - Keep the contract anchored to the existing `fcp.microsoft365` connector unless there is an explicit parent-level decision to split crates and identifiers.
-- Reconcile schema/runtime drift around `calendar_id`. Either implement non-primary calendar routing truthfully or remove the field from the first-slice public contract.
+- Keep the first-slice calendar contract truthful: do not advertise `calendar_id` until non-primary calendar routing is implemented end to end.
 - Reconcile the mail-folder story. The contract should not describe `folder_id` as a full folder service when the runtime only treats it as an optional path selector.
 - Make mailbox-wide versus folder-scoped message listing explicit. The current runtime does not hardcode `inbox` when `folder_id` is absent.
 - Preserve the degraded readiness model for `credential_id` deployments and make operator guidance explicit in health, doctor, and self-check outputs.

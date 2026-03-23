@@ -72,6 +72,14 @@ impl NostrConfig {
                 message: "secret_key_hex must not be empty".into(),
             });
         }
+        if self.secret_key_hex.len() != 64
+            || !self.secret_key_hex.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "secret_key_hex must be exactly 64 hex characters".into(),
+            });
+        }
         if self.request_timeout_ms == 0 {
             return Err(FcpError::InvalidRequest {
                 code: 1001,
@@ -376,7 +384,7 @@ mod tests {
     fn config_validates_zero_timeout() {
         let config: NostrConfig = serde_json::from_value(json!({
             "relay_urls": ["wss://relay.example.com"],
-            "secret_key_hex": "aaaa",
+            "secret_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
             "request_timeout_ms": 0
         }))
         .unwrap();
@@ -390,7 +398,7 @@ mod tests {
     fn config_validates_zero_query_limit() {
         let config: NostrConfig = serde_json::from_value(json!({
             "relay_urls": ["wss://relay.example.com"],
-            "secret_key_hex": "aaaa",
+            "secret_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
             "default_query_limit": 0
         }))
         .unwrap();
@@ -398,6 +406,38 @@ mod tests {
             config.validate(),
             Err(FcpError::InvalidRequest { .. })
         ));
+    }
+
+    #[test]
+    fn config_validates_secret_key_hex_length() {
+        let config: NostrConfig = serde_json::from_value(json!({
+            "relay_urls": ["wss://relay.example.com"],
+            "secret_key_hex": "aaaa"
+        }))
+        .unwrap();
+        let err = config.validate().unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("64 hex characters"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_validates_secret_key_hex_non_hex_chars() {
+        let config: NostrConfig = serde_json::from_value(json!({
+            "relay_urls": ["wss://relay.example.com"],
+            "secret_key_hex": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        }))
+        .unwrap();
+        let err = config.validate().unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("64 hex characters"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]

@@ -254,12 +254,13 @@ pub struct RelayQueryState {
 
 impl RelayQueryState {
     pub fn push_event(&mut self, event: Value) {
-        if let Some(event_id) = event.get("id").and_then(Value::as_str) {
-            if !self.seen_event_ids.insert(event_id.to_string()) {
-                return;
-            }
+        let Some(id) = event.get("id").and_then(Value::as_str) else {
+            tracing::warn!("skipping event without id field");
+            return;
+        };
+        if self.seen_event_ids.insert(id.to_string()) {
+            self.events.push(event);
         }
-        self.events.push(event);
     }
 
     #[must_use]
@@ -789,11 +790,11 @@ mod tests {
     }
 
     #[test]
-    fn relay_query_state_no_id_always_appends() {
+    fn relay_query_state_no_id_skipped() {
         let mut state = RelayQueryState::default();
         state.push_event(json!({"content": "no id 1"}));
         state.push_event(json!({"content": "no id 2"}));
-        assert_eq!(state.into_events().len(), 2);
+        assert_eq!(state.into_events().len(), 0);
     }
 
     #[test]

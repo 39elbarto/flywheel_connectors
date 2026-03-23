@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:51f0b423e00f008be5d4937d2e81bd4a4fc33f0e9e81438cbc0d4e6abf2b63cf"
+interface_hash = "blake3-256:fcp.interface.v2:3bc0a10ecf2d559efd130204115fdb7aa4652e4f00524cd24820caa07dac0426"
 
 [connector]
 id = "fcp.microsoft365"
@@ -333,10 +333,6 @@ idempotency = "strict"
 [provides.operations."m365.calendar.list_events".input_schema]
 required = ["user_id"]
 type = "object"
-
-[provides.operations."m365.calendar.list_events".input_schema.properties.calendar_id]
-description = "Specific calendar ID (default: primary)"
-type = "string"
 
 [provides.operations."m365.calendar.list_events".input_schema.properties.end_datetime]
 description = "ISO 8601 end of time range"

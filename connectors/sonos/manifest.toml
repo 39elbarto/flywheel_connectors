@@ -1,0 +1,89 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.sonos"
+name = "Sonos"
+version = "0.1.0"
+description = "Local Sonos speaker connector for transport status, transport controls, and volume control"
+archetype = "operational"
+homepage = "https://sonos.com"
+
+[zones]
+home = "z:owner"
+allowed_sources = ["z:owner", "z:private", "z:home", "z:infra"]
+allowed_targets = ["z:owner", "z:home", "z:infra"]
+tailscale_tag = "tag:fcp-home"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+# Sonos devices are local-network resources selected at configuration time, so
+# host-level constraints are intentionally deferred to runtime configuration.
+
+[provides.operations.health]
+summary = "Report Sonos device health and identity"
+capability = "sonos.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to confirm the Sonos speaker endpoint is reachable"
+
+[provides.operations.get_status]
+summary = "Get current Sonos transport and volume state"
+capability = "sonos.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_status.ai_hints]
+when_to_use = "When you need to inspect playback state before sending transport commands"
+
+[provides.operations.play]
+summary = "Start or resume playback"
+capability = "sonos.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.pause]
+summary = "Pause playback"
+capability = "sonos.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.next]
+summary = "Skip to the next track"
+capability = "sonos.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.previous]
+summary = "Go to the previous track"
+capability = "sonos.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.set_volume]
+summary = "Set Sonos volume"
+capability = "sonos.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
+

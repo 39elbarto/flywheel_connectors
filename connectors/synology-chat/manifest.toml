@@ -1,0 +1,55 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.synology-chat"
+name = "Synology Chat"
+version = "0.1.0"
+description = "Synology Chat incoming-webhook connector for self-hosted chat delivery and health checks"
+archetype = "operational"
+homepage = "https://www.synology.com"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work", "z:project:*"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+# Synology Chat deployments are operator-configured and may live on public,
+# private, or tailnet addresses, so host-level constraints are intentionally
+# left to runtime configuration instead of being hardcoded here.
+
+[provides.operations.send_message]
+summary = "Send a Synology Chat message through an incoming webhook"
+capability = "synology_chat.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.send_message.ai_hints]
+when_to_use = "When you need to deliver a chat message into a Synology Chat webhook target"
+
+[provides.operations.health]
+summary = "Report Synology Chat connector configuration and delivery target"
+capability = "synology_chat.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to confirm the Synology Chat connector is configured"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
+

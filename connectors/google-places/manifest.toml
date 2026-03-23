@@ -1,0 +1,99 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.google-places"
+name = "Google Places"
+version = "0.1.0"
+description = "Google Places API (New) connector for text search, autocomplete, place details, and read-only health checks"
+archetype = "read-only"
+homepage = "https://developers.google.com/maps/documentation/places/web-service"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:private", "z:work"]
+tailscale_tag = "tag:fcp-private"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+[provides.operations.search_text]
+summary = "Search for places by free-form text query"
+capability = "google_places.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.search_text.network_constraints]
+host_allow = ["places.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.search_text.ai_hints]
+when_to_use = "When you need a ranked set of places for a natural-language query"
+
+[provides.operations.autocomplete]
+summary = "Get autocomplete predictions for an in-progress place query"
+capability = "google_places.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.autocomplete.network_constraints]
+host_allow = ["places.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.autocomplete.ai_hints]
+when_to_use = "When you want suggestion-style place predictions before selecting a specific place"
+
+[provides.operations.get_place]
+summary = "Get details for a single place resource"
+capability = "google_places.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_place.network_constraints]
+host_allow = ["places.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.get_place.ai_hints]
+when_to_use = "When you already know a place resource name and need structured details"
+
+[provides.operations.health]
+summary = "Report Google Places connector configuration and upstream target"
+capability = "google_places.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["places.googleapis.com"]
+port_allow = [443]
+require_tls = true
+deny_private_ranges = true
+max_redirects = 0
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to confirm the connector is configured for the Google Places API"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
+

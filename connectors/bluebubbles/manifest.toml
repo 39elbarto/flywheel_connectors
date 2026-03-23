@@ -1,0 +1,167 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.bluebubbles"
+name = "BlueBubbles"
+version = "0.1.0"
+description = "Dedicated BlueBubbles bridge connector for iMessage-compatible chat, message, and attachment workflows"
+archetype = "operational"
+homepage = "https://bluebubbles.app"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:private"]
+allowed_targets = ["z:private"]
+tailscale_tag = "tag:fcp-private"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.privileged"]
+
+[provides.operations.send_message]
+summary = "Send a message through BlueBubbles"
+capability = "imessage.send"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.send_message.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.send_message.ai_hints]
+when_to_use = "When you need to send an iMessage through a local BlueBubbles bridge"
+
+[provides.operations.get_chats]
+summary = "List BlueBubbles chats"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_chats.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.get_chats.ai_hints]
+when_to_use = "When you need to browse or search bridge-exposed chats"
+
+[provides.operations.get_chat]
+summary = "Get one BlueBubbles chat"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_chat.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.get_chat.ai_hints]
+when_to_use = "When you need metadata for a single BlueBubbles chat"
+
+[provides.operations.get_messages]
+summary = "Get messages from a BlueBubbles chat"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_messages.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.get_messages.ai_hints]
+when_to_use = "When you need to read recent message history from a bridge chat"
+
+[provides.operations.sync_events]
+summary = "Sync BlueBubbles events"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.sync_events.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.sync_events.ai_hints]
+when_to_use = "When you need a polling-friendly view of bridge activity"
+
+[provides.operations.download_attachment]
+summary = "Download a BlueBubbles attachment"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.download_attachment.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.download_attachment.ai_hints]
+when_to_use = "When you need attachment bytes for a bridge-backed message"
+
+[provides.operations.mark_read]
+summary = "Mark a bridge chat as read"
+capability = "imessage.send"
+risk = "low"
+safety_tier = "safe"
+idempotency = "best_effort"
+
+[provides.operations.mark_read.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.mark_read.ai_hints]
+when_to_use = "When you want to mark a bridge-exposed conversation as read"
+
+[provides.operations.get_server_info]
+summary = "Get BlueBubbles server info"
+capability = "imessage.admin"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_server_info.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.get_server_info.ai_hints]
+when_to_use = "When you need to confirm the local BlueBubbles bridge is reachable"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
+

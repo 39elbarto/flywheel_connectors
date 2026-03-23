@@ -1,0 +1,419 @@
+//! Synology Chat connector implementation.
+
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use fcp_core::{
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
+    ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest,
+};
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::prelude::*;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+use crate::client::SynologyChatClient;
+use crate::types::SynologyChatConfig;
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const CAP_READ: &str = "synology_chat.read";
+const CAP_WRITE: &str = "synology_chat.write";
+const OP_SEND_MESSAGE: &str = "synology_chat.send_message";
+const OP_HEALTH: &str = "synology_chat.health";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    name: String,
+    passed: bool,
+    message: String,
+    critical: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorResult {
+    passed: bool,
+    checks: Vec<DoctorCheck>,
+}
+
+impl DoctorResult {
+    fn new(checks: Vec<DoctorCheck>) -> Self {
+        let passed = checks.iter().all(|check| !check.critical || check.passed);
+        Self { passed, checks }
+    }
+}
+
+#[derive(Debug)]
+struct SynologyChatState {
+    config: SynologyChatConfig,
+    client: SynologyChatClient,
+    runtime: ConnectorRuntime,
+}
+
+#[derive(Debug)]
+pub struct SynologyChatConnector {
+    base: BaseConnector,
+    state: Option<SynologyChatState>,
+    started_at: Instant,
+    verifier: Option<CapabilityVerifier>,
+}
+
+impl SynologyChatConnector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base: BaseConnector::new(ConnectorId::from_static("fcp.synology-chat")),
+            state: None,
+            started_at: Instant::now(),
+            verifier: None,
+        }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    pub fn doctor(&self) -> DoctorResult {
+        let mut checks = vec![DoctorCheck {
+            name: "configured".into(),
+            passed: self.state.is_some(),
+            message: if self.state.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Connector is not configured".into()
+            },
+            critical: true,
+        }];
+
+        if let Some(state) = &self.state {
+            checks.push(DoctorCheck {
+                name: "incoming_url".into(),
+                passed: true,
+                message: state.config.normalized_incoming_url(),
+                critical: false,
+            });
+        }
+
+        DoctorResult::new(checks)
+    }
+
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
+        vec![
+            OperationInfo {
+                id: OperationId::from_static(OP_SEND_MESSAGE),
+                summary: "Send a Synology Chat message".into(),
+                description: Some("Deliver a message through a Synology Chat incoming webhook.".into()),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {
+                        "text": { "type": "string" },
+                        "user_id": { "type": "string" },
+                        "bot_name": { "type": "string" }
+                    }
+                }),
+                output_schema: json!({ "type": "object" }),
+                capability: CapabilityId::from_static(CAP_WRITE),
+                risk_level: RiskLevel::Medium,
+                safety_tier: SafetyTier::Risky,
+                idempotency: IdempotencyClass::None,
+                ai_hints: AgentHint {
+                    when_to_use: "Use this to deliver a message to a Synology Chat webhook target.".into(),
+                    common_mistakes: vec![
+                        "This connector currently models outbound webhook delivery, not the full incoming webhook gateway path.".into()
+                    ],
+                    examples: vec!['{"text":"Hello from Flywheel"}'.into()],
+                    related: vec![CapabilityId::from_static(OP_HEALTH)],
+                },
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            },
+            OperationInfo {
+                id: OperationId::from_static(OP_HEALTH),
+                summary: "Report connector health".into(),
+                description: Some("Return configured webhook target details.".into()),
+                input_schema: json!({ "type": "object" }),
+                output_schema: json!({ "type": "object" }),
+                capability: CapabilityId::from_static(CAP_READ),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: "Use this before attempting outbound delivery.".into(),
+                    common_mistakes: vec![],
+                    examples: vec!["{}".into()],
+                    related: vec![CapabilityId::from_static(OP_SEND_MESSAGE)],
+                },
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            },
+        ]
+    }
+
+    async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        self.base.check_ready()?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let required_cap = match req.operation.as_str() {
+            OP_SEND_MESSAGE => CapabilityId::from_static(CAP_WRITE),
+            OP_HEALTH => CapabilityId::from_static(CAP_READ),
+            operation => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
+        let output = match req.operation.as_str() {
+            OP_SEND_MESSAGE => {
+                let text = req
+                    .input
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .ok_or(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing text".into(),
+                    })?;
+                let user_id = req.input.get("user_id").and_then(|value| value.as_str());
+                let bot_name = req.input.get("bot_name").and_then(|value| value.as_str());
+                state
+                    .client
+                    .send_message(text, user_id, bot_name)
+                    .await
+                    .map_err(|error| error.to_fcp_error())?
+            }
+            OP_HEALTH => json!({
+                "status": "ok",
+                "incoming_url": state.client.incoming_url(),
+                "allow_insecure_ssl": state.config.allow_insecure_ssl,
+                "manifest_hash": Self::manifest_hash(),
+            }),
+            _ => unreachable!(),
+        };
+        Ok(InvokeResponse::ok(req.id, output))
+    }
+}
+
+impl Default for SynologyChatConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl FcpConnector for SynologyChatConnector {
+    fn id(&self) -> &ConnectorId {
+        &self.base.id
+    }
+
+    async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let config = SynologyChatConfig::from_value(config)?;
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default()
+                .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
+        );
+        let client = SynologyChatClient::from_config(&config).map_err(|error| error.to_fcp_error())?;
+        self.state = Some(SynologyChatState {
+            config,
+            client,
+            runtime,
+        });
+        self.base.set_configured(true);
+        Ok(())
+    }
+
+    async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        self.base.set_handshaken(true);
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+        Ok(HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted: req
+                .capabilities_requested
+                .into_iter()
+                .map(|capability| CapabilityGrant {
+                    capability,
+                    operation: None,
+                })
+                .collect(),
+            session_id: SessionId::new(),
+            manifest_hash: Self::manifest_hash(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        })
+    }
+
+    async fn health(&self) -> HealthSnapshot {
+        let mut snapshot = if self.state.is_some() {
+            HealthSnapshot::ready()
+        } else {
+            HealthSnapshot::degraded("not configured")
+        };
+        snapshot.uptime_ms =
+            u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
+            "configured": self.state.is_some(),
+            "incoming_url": self.state.as_ref().map(|state| state.config.normalized_incoming_url()),
+            "manifest_hash": Self::manifest_hash(),
+        }));
+        snapshot
+    }
+
+    async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        let Some(state) = &self.state else {
+            return Ok(SelfCheckReport::degraded(
+                "not_configured",
+                "Connector is not configured",
+            ));
+        };
+        let report = SelfCheckReport::ok();
+        Ok(SelfCheckReport {
+            details: Some(json!({
+                "incoming_url": state.config.normalized_incoming_url(),
+                "request_timeout_ms": state.config.request_timeout_ms,
+                "allow_insecure_ssl": state.config.allow_insecure_ssl,
+                "outgoing_token_configured": state.config.outgoing_token.is_some(),
+            })),
+            ..report
+        })
+    }
+
+    fn metrics(&self) -> ConnectorMetrics {
+        self.base.metrics()
+    }
+
+    async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        if let Some(state) = &self.state {
+            state.runtime.shutdown();
+        }
+        Ok(())
+    }
+
+    fn introspect(&self) -> Introspection {
+        Introspection {
+            operations: Self::operations_info(),
+            events: Vec::new(),
+            resource_types: Vec::new(),
+            auth_caps: None,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+        }
+    }
+
+    async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        let result = self.invoke_inner(req).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        Ok(SimulateResponse::allowed(req.id))
+    }
+
+    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        Err(FcpError::StreamingNotSupported)
+    }
+
+    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
+        Err(FcpError::StreamingNotSupported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+
+    use super::*;
+
+    fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+        HandshakeRequest {
+            protocol_version: "2.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key,
+            nonce: [4u8; 32],
+            capabilities_requested: vec![
+                CapabilityId::from_static(CAP_READ),
+                CapabilityId::from_static(CAP_WRITE),
+            ],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        }
+    }
+
+    fn capability_token(signing_key: &Ed25519SigningKey, capability: &'static str, operation: &'static str) -> CapabilityToken {
+        let now = Utc::now();
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .sign(signing_key)
+            .expect("token should sign");
+        CapabilityToken { raw }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_health_returns_configured_surface() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi?token=abc"
+            }))
+            .await
+            .expect("configure should succeed");
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+        let response = connector
+            .invoke(InvokeRequest {
+                r#type: "invoke".into(),
+                id: RequestId::new("synology-health"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_HEALTH),
+                zone_id: ZoneId::work(),
+                input: json!({}),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_HEALTH),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            })
+            .await
+            .expect("health should succeed");
+        assert_eq!(response.result.expect("result")["status"], "ok");
+    }
+}
+

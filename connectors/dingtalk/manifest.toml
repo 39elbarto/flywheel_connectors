@@ -1,0 +1,65 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.dingtalk"
+name = "DingTalk Enterprise Robot"
+version = "0.1.0"
+description = "Tenant-scoped DingTalk robot connector for DM or group sends, link or file delivery, media upload, and health verification"
+archetype = "operational"
+homepage = "https://open.dingtalk.com/"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work", "z:project:*"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+[provides.operations.messages_send_text]
+summary = "Send a DingTalk text or markdown message"
+capability = "dingtalk.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_send_link]
+summary = "Send a DingTalk link message"
+capability = "dingtalk.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_send_file]
+summary = "Send a DingTalk file message with a prior media_id"
+capability = "dingtalk.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.media_upload]
+summary = "Upload media to DingTalk"
+capability = "dingtalk.media.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.health]
+summary = "Verify DingTalk credentials and token issuance"
+capability = "dingtalk.health.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 30
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

@@ -1,0 +1,65 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.qq"
+name = "QQ Bot"
+version = "0.1.0"
+description = "Tencent QQ bot connector for channel, group, and C2C sends plus gateway discovery and health verification"
+archetype = "operational"
+homepage = "https://bot.q.qq.com/wiki/"
+
+[zones]
+home = "z:community"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:community", "z:project:*"]
+allowed_targets = ["z:community", "z:project:*"]
+tailscale_tag = "tag:fcp-community"
+
+[capabilities]
+required = ["network.dns", "network.outbound", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+[provides.operations.messages_send_channel]
+summary = "Send a QQ channel message"
+capability = "qq.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_send_group]
+summary = "Send a QQ group message"
+capability = "qq.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_send_c2c]
+summary = "Send a QQ direct C2C message"
+capability = "qq.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.gateway_get]
+summary = "Get the QQ gateway websocket URL"
+capability = "qq.gateway.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health]
+summary = "Verify QQ credentials and gateway discovery"
+capability = "qq.health.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 30
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

@@ -1,0 +1,66 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.apple-reminders"
+name = "Apple Reminders"
+version = "0.1.0"
+description = "macOS-local Apple Reminders connector for list inventory, reminder inventory, reminder creation, and completion"
+archetype = "local"
+homepage = "https://support.apple.com/guide/reminders/welcome/mac"
+
+[zones]
+home = "z:owner"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:owner", "z:private"]
+tailscale_tag = "tag:fcp-owner"
+
+[capabilities]
+required = []
+optional = []
+forbidden = ["network.listen", "network.outbound", "system.privileged"]
+
+[provides.operations.health]
+summary = "Report Apple Reminders connector health and platform support"
+capability = "apple_reminders.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_lists]
+summary = "List reminder lists"
+capability = "apple_reminders.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_reminders]
+summary = "List reminders in a list or across all lists"
+capability = "apple_reminders.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.create_reminder]
+summary = "Create a reminder"
+capability = "apple_reminders.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.complete_reminder]
+summary = "Mark a reminder complete"
+capability = "apple_reminders.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = false
+deny_ptrace = true
+

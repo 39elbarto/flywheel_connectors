@@ -1,0 +1,79 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.wecom"
+name = "WeCom Enterprise Messaging"
+version = "0.1.0"
+description = "Tenant-scoped WeCom connector for enterprise bot messaging, media upload, directory lookups, and health verification"
+archetype = "operational"
+homepage = "https://developer.work.weixin.qq.com/"
+
+# Auth and scope model:
+# - One connector instance is bound to one WeCom tenant application.
+# - Authentication uses `corp_id`, `agent_id`, and `agent_secret`.
+# - The connector acts as the configured enterprise application; user impersonation,
+#   callback verification, and inbound webhook or websocket delivery are explicit non-goals
+#   for this first slice.
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work", "z:project:*"]
+tailscale_tag = "tag:fcp-work"
+
+[capabilities]
+required = ["network.dns", "network.outbound", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+[provides.operations.messages_send_text]
+summary = "Send a WeCom text message"
+capability = "wecom.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.messages_send_markdown]
+summary = "Send a WeCom markdown message"
+capability = "wecom.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.media_upload]
+summary = "Upload temporary media to WeCom"
+capability = "wecom.media.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.users_get]
+summary = "Fetch a WeCom user profile"
+capability = "wecom.users.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.departments_list]
+summary = "List WeCom departments"
+capability = "wecom.departments.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health]
+summary = "Verify WeCom credentials and token issuance"
+capability = "wecom.health.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 30
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true

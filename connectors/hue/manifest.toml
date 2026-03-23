@@ -1,0 +1,84 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.hue"
+name = "Philips Hue"
+version = "0.1.0"
+description = "Local Philips Hue bridge connector for light inventory, light-state control, scene inventory, and scene recall"
+archetype = "operational"
+homepage = "https://developers.meethue.com"
+
+[zones]
+home = "z:owner"
+allowed_sources = ["z:owner", "z:private", "z:home", "z:infra"]
+allowed_targets = ["z:owner", "z:home", "z:infra"]
+tailscale_tag = "tag:fcp-home"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+# Hue bridges are local-network resources chosen at configuration time, so the
+# exact host allowlist is intentionally deferred to runtime configuration.
+
+[provides.operations.health]
+summary = "Report Hue bridge health and configuration"
+capability = "hue.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.health.ai_hints]
+when_to_use = "When you need to confirm the Hue bridge connector is configured"
+
+[provides.operations.list_lights]
+summary = "List Hue light resources"
+capability = "hue.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_lights.ai_hints]
+when_to_use = "When you need the current bridge light inventory before issuing control operations"
+
+[provides.operations.list_scenes]
+summary = "List Hue scenes"
+capability = "hue.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_scenes.ai_hints]
+when_to_use = "When you want to inspect available scenes before recall"
+
+[provides.operations.set_light_state]
+summary = "Set a Hue light's on/off and optional brightness state"
+capability = "hue.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.set_light_state.ai_hints]
+when_to_use = "When you want to change a specific Hue light's power state or brightness"
+
+[provides.operations.recall_scene]
+summary = "Recall a Hue scene"
+capability = "hue.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.recall_scene.ai_hints]
+when_to_use = "When you want the Hue bridge to activate a scene"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
+

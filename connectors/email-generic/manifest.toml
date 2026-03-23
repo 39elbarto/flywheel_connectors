@@ -1,0 +1,63 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.email-generic"
+name = "Generic Email"
+version = "0.1.0"
+description = "Generic email connector covering IMAP mailbox inventory/search and SMTP message sending"
+archetype = "operational"
+homepage = "https://datatracker.ietf.org/doc/html/rfc3501"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:private", "z:work"]
+tailscale_tag = "tag:fcp-private"
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "system.privileged", "network.listen"]
+
+# IMAP and SMTP hosts are operator-configured and may point at public, private,
+# or tailnet infrastructure, so the host allowlist is intentionally deferred to
+# runtime configuration.
+
+[provides.operations.health]
+summary = "Report connector configuration and IMAP reachability"
+capability = "email_generic.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_mailboxes]
+summary = "List IMAP mailboxes"
+capability = "email_generic.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.search_messages]
+summary = "Search IMAP messages and return matching UIDs"
+capability = "email_generic.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.send_message]
+summary = "Send an email through SMTP"
+capability = "email_generic.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = true
+deny_ptrace = true
+

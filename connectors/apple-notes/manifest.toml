@@ -1,0 +1,66 @@
+[format]
+type = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.apple-notes"
+name = "Apple Notes"
+version = "0.1.0"
+description = "macOS-local Apple Notes connector for note inventory, note search, note retrieval, and note creation"
+archetype = "local"
+homepage = "https://support.apple.com/guide/notes/welcome/mac"
+
+[zones]
+home = "z:owner"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:owner", "z:private"]
+tailscale_tag = "tag:fcp-owner"
+
+[capabilities]
+required = []
+optional = []
+forbidden = ["network.listen", "network.outbound", "system.privileged"]
+
+[provides.operations.health]
+summary = "Report Apple Notes connector health and platform support"
+capability = "apple_notes.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_notes]
+summary = "List Apple Notes note summaries"
+capability = "apple_notes.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.search_notes]
+summary = "Search Apple Notes by title/body substring"
+capability = "apple_notes.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_note]
+summary = "Get one Apple Note by note identifier"
+capability = "apple_notes.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.create_note]
+summary = "Create a new Apple Note"
+capability = "apple_notes.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+deny_exec = false
+deny_ptrace = true
+

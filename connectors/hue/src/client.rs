@@ -4,7 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
 use crate::error::{HueError, HueResult};
-use crate::types::HueConfig;
+use crate::types::{HueConfig, RecallSceneInput, SetLightStateInput};
 
 #[derive(Debug, Clone)]
 pub struct HueClient {
@@ -83,17 +83,14 @@ impl HueClient {
         Self::decode_response(response).await
     }
 
-    pub async fn set_light_state(
-        &self,
-        light_id: &str,
-        on: bool,
-        brightness: Option<f64>,
-    ) -> HueResult<Value> {
-        if light_id.trim().is_empty() {
-            return Err(HueError::Config("light_id must not be empty".into()));
-        }
-        let mut body = json!({ "on": { "on": on } });
-        if let Some(brightness) = brightness {
+    pub async fn set_light_state(&self, input: &SetLightStateInput) -> HueResult<Value> {
+        input.validate().map_err(|error| match error {
+            fcp_core::FcpError::InvalidRequest { message, .. } => HueError::Config(message),
+            other => HueError::Config(other.to_string()),
+        })?;
+        let light_id = input.light_id.trim();
+        let mut body = json!({ "on": { "on": input.on } });
+        if let Some(brightness) = input.brightness {
             body["dimming"] = json!({ "brightness": brightness });
         }
         let response = self
@@ -109,10 +106,12 @@ impl HueClient {
         Self::decode_response(response).await
     }
 
-    pub async fn recall_scene(&self, scene_id: &str) -> HueResult<Value> {
-        if scene_id.trim().is_empty() {
-            return Err(HueError::Config("scene_id must not be empty".into()));
-        }
+    pub async fn recall_scene(&self, input: &RecallSceneInput) -> HueResult<Value> {
+        input.validate().map_err(|error| match error {
+            fcp_core::FcpError::InvalidRequest { message, .. } => HueError::Config(message),
+            other => HueError::Config(other.to_string()),
+        })?;
+        let scene_id = input.scene_id.trim();
         let response = self
             .client
             .put(format!(
@@ -174,9 +173,43 @@ mod tests {
         }))
         .expect("config should parse");
         let client = HueClient::from_config(&config).expect("client should build");
+        let input = SetLightStateInput::from_value(json!({
+            "light_id": "light-1",
+            "on": true,
+            "brightness": 50.0
+        }))
+        .expect("input should parse");
         client
-            .set_light_state("light-1", true, Some(50.0))
+            .set_light_state(&input)
             .await
             .expect("set should succeed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn recall_scene_sends_expected_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/clip/v2/resource/scene/scene-1"))
+            .and(body_json(json!({
+                "recall": { "action": "active" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .mount(&server)
+            .await;
+
+        let config = HueConfig::from_value(json!({
+            "bridge_url": server.uri(),
+            "app_key": "app-key"
+        }))
+        .expect("config should parse");
+        let client = HueClient::from_config(&config).expect("client should build");
+        let input = RecallSceneInput::from_value(json!({
+            "scene_id": "scene-1"
+        }))
+        .expect("input should parse");
+        client
+            .recall_scene(&input)
+            .await
+            .expect("scene recall should succeed");
     }
 }

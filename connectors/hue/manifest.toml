@@ -23,6 +23,8 @@ forbidden = ["system.exec", "system.privileged", "network.listen"]
 
 # Hue bridges are local-network resources chosen at configuration time, so the
 # exact host allowlist is intentionally deferred to runtime configuration.
+# Production bridge access is expected to use HTTPS; plain HTTP is only used
+# for loopback test harnesses.
 
 [provides.operations.health]
 summary = "Report Hue bridge health and configuration"
@@ -81,4 +83,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

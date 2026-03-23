@@ -90,6 +90,9 @@ impl CloudflareConfig {
         if self.base_url.is_empty() {
             return Err("base_url cannot be empty".into());
         }
+        if self.request_timeout_ms == 0 {
+            return Err("request_timeout_ms must be greater than zero".into());
+        }
         match &self.auth {
             CloudflareAuth::ApiKey { api_key, email }
                 if !api_key.trim().is_empty() && email.trim().is_empty() =>
@@ -111,8 +114,14 @@ impl CloudflareConfig {
             })?;
         config.base_url = config.base_url.trim().to_string();
         config.account_id = config.account_id.trim().to_string();
-        if let CloudflareAuth::ApiKey { email, .. } = &mut config.auth {
-            *email = email.trim().to_string();
+        match &mut config.auth {
+            CloudflareAuth::ApiToken { api_token } => {
+                *api_token = api_token.trim().to_string();
+            }
+            CloudflareAuth::ApiKey { api_key, email } => {
+                *api_key = api_key.trim().to_string();
+                *email = email.trim().to_string();
+            }
         }
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
@@ -474,6 +483,79 @@ impl CloudflareConnector {
             });
         }
         Ok(value)
+    }
+
+    fn optional_bool(input: &serde_json::Value, key: &str) -> FcpResult<Option<bool>> {
+        match input.get(key) {
+            None => Ok(None),
+            Some(value) => value
+                .as_bool()
+                .map(Some)
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Field '{key}' must be a boolean"),
+                }),
+        }
+    }
+
+    fn optional_u32(input: &serde_json::Value, key: &str) -> FcpResult<Option<u32>> {
+        match input.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::Number(number)) => {
+                let raw = number.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Field '{key}' must be a non-negative integer"),
+                })?;
+                let parsed = u32::try_from(raw).map_err(|_| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Field '{key}' must fit within u32"),
+                })?;
+                Ok(Some(parsed))
+            }
+            Some(_) => Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be a non-negative integer"),
+            }),
+        }
+    }
+
+    fn optional_u16(input: &serde_json::Value, key: &str) -> FcpResult<Option<u16>> {
+        match input.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::Number(number)) => {
+                let raw = number.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Field '{key}' must be a non-negative integer"),
+                })?;
+                let parsed = u16::try_from(raw).map_err(|_| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Field '{key}' must fit within u16"),
+                })?;
+                Ok(Some(parsed))
+            }
+            Some(_) => Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be a non-negative integer"),
+            }),
+        }
+    }
+
+    fn optional_string(input: &serde_json::Value, key: &str) -> FcpResult<Option<String>> {
+        match input.get(key) {
+            None => Ok(None),
+            Some(serde_json::Value::String(value)) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed.to_string()))
+                }
+            }
+            Some(_) => Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be a string"),
+            }),
+        }
     }
 }
 
@@ -1052,15 +1134,16 @@ impl FcpConnector for CloudflareConnector {
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let cf = CloudflareConfig::from_value(config)?;
         let provisioning = cf.provisioning_readiness();
+        let timeout = Duration::from_millis(cf.request_timeout_ms);
         self.runtime = Some(ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_millis(cf.request_timeout_ms)),
+            ConnectorRuntimeConfig::default().with_request_timeout(timeout),
         ));
         let client = CloudflareClient::new(
             &cf.base_url,
             cf.auth.clone(),
             &cf.account_id,
             cf.retry.clone(),
+            timeout,
         )
         .await
         .map_err(|e| FcpError::Internal {
@@ -1343,22 +1426,10 @@ impl CloudflareConnector {
                     record_type: Self::require_str(&req.input, "type")?.into(),
                     name: Self::require_str(&req.input, "name")?.into(),
                     content: Self::require_str(&req.input, "content")?.into(),
-                    proxied: req.input.get("proxied").and_then(|v| v.as_bool()),
-                    ttl: req
-                        .input
-                        .get("ttl")
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as u32),
-                    priority: req
-                        .input
-                        .get("priority")
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as u16),
-                    comment: req
-                        .input
-                        .get("comment")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    proxied: Self::optional_bool(&req.input, "proxied")?,
+                    ttl: Self::optional_u32(&req.input, "ttl")?,
+                    priority: Self::optional_u16(&req.input, "priority")?,
+                    comment: Self::optional_string(&req.input, "comment")?,
                 };
                 let r = client
                     .create_dns_record(runtime, zid, &rec)
@@ -1375,17 +1446,9 @@ impl CloudflareConnector {
                     record_type: Self::require_str(&req.input, "type")?.into(),
                     name: Self::require_str(&req.input, "name")?.into(),
                     content: Self::require_str(&req.input, "content")?.into(),
-                    proxied: req.input.get("proxied").and_then(|v| v.as_bool()),
-                    ttl: req
-                        .input
-                        .get("ttl")
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as u32),
-                    comment: req
-                        .input
-                        .get("comment")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    proxied: Self::optional_bool(&req.input, "proxied")?,
+                    ttl: Self::optional_u32(&req.input, "ttl")?,
+                    comment: Self::optional_string(&req.input, "comment")?,
                 };
                 let r = client
                     .update_dns_record(runtime, zid, rid, &rec)
@@ -1600,7 +1663,7 @@ mod tests {
             let mut c = CloudflareConnector::new();
             c.configure(json!({
                 "mode":"api_key",
-                "api_key":"",
+                "api_key":" test-key ",
                 "email":" ops@example.com ",
                 "account_id":" account-123 ",
                 "base_url":" https://api.cloudflare.com/client/v4 "
@@ -1614,9 +1677,51 @@ mod tests {
         assert_eq!(config.account_id, "account-123");
         assert_eq!(config.base_url, "https://api.cloudflare.com/client/v4");
         match &config.auth {
-            CloudflareAuth::ApiKey { email, .. } => assert_eq!(email, "ops@example.com"),
+            CloudflareAuth::ApiKey { api_key, email } => {
+                assert_eq!(api_key, "test-key");
+                assert_eq!(email, "ops@example.com");
+            }
             CloudflareAuth::ApiToken { .. } => panic!("expected api_key auth"),
         }
+    }
+
+    #[test]
+    fn configure_trims_api_token_material() {
+        let configured = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = CloudflareConnector::new();
+            c.configure(json!({
+                "mode":"api_token",
+                "api_token":" token-123 ",
+                "account_id":" account-123 ",
+                "base_url":" https://api.cloudflare.com/client/v4 "
+            }))
+            .await
+            .map(|_| c)
+        })
+        .unwrap()
+        .unwrap();
+        match &configured.config.as_ref().unwrap().auth {
+            CloudflareAuth::ApiToken { api_token } => assert_eq!(api_token, "token-123"),
+            CloudflareAuth::ApiKey { .. } => panic!("expected api_token auth"),
+        }
+    }
+
+    #[test]
+    fn configure_zero_request_timeout_rejected() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = CloudflareConnector::new();
+                c.configure(json!({
+                    "mode":"api_token",
+                    "api_token":"t",
+                    "account_id":"a",
+                    "request_timeout_ms":0
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
     }
     #[test]
     fn configure_api_key_requires_email_when_key_present() {
@@ -1739,6 +1844,61 @@ mod tests {
             })
             .unwrap()
             .is_err()
+        );
+    }
+    #[test]
+    fn invoke_dns_create_rejects_invalid_optional_numeric_field() {
+        let error = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = CloudflareConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.handshake(handshake_req()).await.unwrap();
+            c.invoke(invoke_req(
+                OP_DNS_CREATE,
+                json!({
+                    "zone_id": "zone-123",
+                    "type": "A",
+                    "name": "example.com",
+                    "content": "1.2.3.4",
+                    "ttl": -1
+                }),
+            ))
+            .await
+        })
+        .unwrap()
+        .expect_err("negative ttl should be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("Field 'ttl' must be a non-negative integer")
+        );
+    }
+    #[test]
+    fn invoke_dns_update_rejects_invalid_optional_field_types() {
+        let error = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = CloudflareConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.handshake(handshake_req()).await.unwrap();
+            c.invoke(invoke_req(
+                OP_DNS_UPDATE,
+                json!({
+                    "zone_id": "zone-123",
+                    "record_id": "rec-456",
+                    "type": "A",
+                    "name": "example.com",
+                    "content": "1.2.3.4",
+                    "proxied": "true"
+                }),
+            ))
+            .await
+        })
+        .unwrap()
+        .expect_err("string proxied should be rejected");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("Field 'proxied' must be a boolean")
         );
     }
     #[test]

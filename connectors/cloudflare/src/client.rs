@@ -58,6 +58,7 @@ pub struct CloudflareClient {
     auth: CloudflareAuth,
     account_id: String,
     retry_config: HttpRetryConfig,
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for CloudflareClient {
@@ -66,6 +67,7 @@ impl std::fmt::Debug for CloudflareClient {
             .field("base_url", &self.base_url)
             .field("auth", &self.auth)
             .field("account_id", &self.account_id)
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
@@ -76,9 +78,10 @@ impl CloudflareClient {
         auth: CloudflareAuth,
         account_id: &str,
         retry_config: HttpRetryConfig,
+        timeout: Duration,
     ) -> CloudflareResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(timeout)
             .build()
             .map_err(CloudflareError::Http)?;
 
@@ -88,6 +91,7 @@ impl CloudflareClient {
             auth,
             account_id: account_id.to_string(),
             retry_config,
+            timeout,
         })
     }
 
@@ -731,6 +735,7 @@ mod tests {
                 },
                 "acc123",
                 HttpRetryConfig::default(),
+                Duration::from_secs(30),
             )
             .await
             .unwrap()
@@ -752,6 +757,7 @@ mod tests {
                 },
                 "acc123",
                 HttpRetryConfig::default(),
+                Duration::from_secs(30),
             )
             .await
             .unwrap()
@@ -767,6 +773,7 @@ mod tests {
                 },
                 "acc123",
                 HttpRetryConfig::default(),
+                Duration::from_secs(30),
             )
             .await
             .unwrap()
@@ -785,6 +792,7 @@ mod tests {
                 },
                 "acc123",
                 HttpRetryConfig::default(),
+                Duration::from_secs(30),
             )
             .await
             .unwrap()
@@ -827,11 +835,31 @@ mod tests {
                 },
                 "acc123",
                 HttpRetryConfig::default(),
+                Duration::from_secs(30),
             )
             .await
             .unwrap()
         })
         .unwrap();
         assert!(rt.is_secretless());
+    }
+
+    #[test]
+    fn client_uses_configured_timeout() {
+        let rt = fcp_async_core::runtime::block_on_sync(async {
+            CloudflareClient::new(
+                "https://api.cloudflare.com/client/v4",
+                CloudflareAuth::ApiToken {
+                    api_token: "token".into(),
+                },
+                "acc123",
+                HttpRetryConfig::default(),
+                Duration::from_millis(1_234),
+            )
+            .await
+            .unwrap()
+        })
+        .unwrap();
+        assert_eq!(rt.timeout, Duration::from_millis(1_234));
     }
 }

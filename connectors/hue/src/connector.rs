@@ -17,7 +17,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::HueClient;
-use crate::types::HueConfig;
+use crate::types::{HueConfig, RecallSceneInput, SetLightStateInput};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const CAP_READ: &str = "hue.read";
@@ -97,6 +97,24 @@ impl HueConnector {
                 name: "bridge_url".into(),
                 passed: true,
                 message: state.config.normalized_bridge_url(),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "app_key".into(),
+                passed: !state.config.app_key.trim().is_empty(),
+                message: "Application key configured".into(),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "transport".into(),
+                passed: true,
+                message: if state.config.uses_plain_http_for_local_testing() {
+                    "HTTP (loopback/test only)".into()
+                } else if state.config.allow_insecure_ssl {
+                    "HTTPS (certificate validation disabled)".into()
+                } else {
+                    "HTTPS".into()
+                },
                 critical: false,
             });
         }
@@ -243,6 +261,13 @@ impl HueConnector {
                 "status": "ok",
                 "bridge_url": state.client.bridge_url(),
                 "manifest_hash": Self::manifest_hash(),
+                "transport": if state.config.uses_plain_http_for_local_testing() {
+                    "http-loopback"
+                } else {
+                    "https"
+                },
+                "allow_insecure_ssl": state.config.allow_insecure_ssl,
+                "app_key_configured": true,
             }),
             OP_LIST_LIGHTS => state
                 .client
@@ -255,44 +280,18 @@ impl HueConnector {
                 .await
                 .map_err(|error| error.to_fcp_error())?,
             OP_SET_LIGHT_STATE => {
-                let light_id = req
-                    .input
-                    .get("light_id")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing light_id".into(),
-                    })?;
-                let on = req
-                    .input
-                    .get("on")
-                    .and_then(serde_json::Value::as_bool)
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing on".into(),
-                    })?;
-                let brightness = req
-                    .input
-                    .get("brightness")
-                    .and_then(serde_json::Value::as_f64);
+                let input = SetLightStateInput::from_value(req.input.clone())?;
                 state
                     .client
-                    .set_light_state(light_id, on, brightness)
+                    .set_light_state(&input)
                     .await
                     .map_err(|error| error.to_fcp_error())?
             }
             OP_RECALL_SCENE => {
-                let scene_id = req
-                    .input
-                    .get("scene_id")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing scene_id".into(),
-                    })?;
+                let input = RecallSceneInput::from_value(req.input.clone())?;
                 state
                     .client
-                    .recall_scene(scene_id)
+                    .recall_scene(&input)
                     .await
                     .map_err(|error| error.to_fcp_error())?
             }
@@ -368,6 +367,15 @@ impl FcpConnector for HueConnector {
             "configured": self.state.is_some(),
             "bridge_url": self.state.as_ref().map(|state| state.config.normalized_bridge_url()),
             "manifest_hash": Self::manifest_hash(),
+            "transport": self.state.as_ref().map(|state| {
+                if state.config.uses_plain_http_for_local_testing() {
+                    "http-loopback"
+                } else {
+                    "https"
+                }
+            }),
+            "allow_insecure_ssl": self.state.as_ref().map(|state| state.config.allow_insecure_ssl),
+            "app_key_configured": self.state.as_ref().map(|state| !state.config.app_key.trim().is_empty()),
         }));
         snapshot
     }
@@ -387,6 +395,13 @@ impl FcpConnector for HueConnector {
         Ok(SelfCheckReport {
             details: Some(json!({
                 "bridge_url": state.client.bridge_url(),
+                "transport": if state.config.uses_plain_http_for_local_testing() {
+                    "http-loopback"
+                } else {
+                    "https"
+                },
+                "allow_insecure_ssl": state.config.allow_insecure_ssl,
+                "app_key_configured": true,
                 "bridge_health": report,
             })),
             ..SelfCheckReport::ok()
@@ -545,16 +560,23 @@ mod tests {
     fn operations_catalog_contains_expected_entries() {
         let operations = HueConnector::operations_info();
         assert_eq!(operations.len(), 5);
-        assert!(
-            operations
-                .iter()
-                .any(|operation| operation.id.as_str() == OP_SET_LIGHT_STATE)
-        );
-        assert!(
-            operations
-                .iter()
-                .any(|operation| operation.id.as_str() == OP_RECALL_SCENE)
-        );
+        let set_light_state = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_SET_LIGHT_STATE)
+            .expect("set_light_state op should exist");
+        assert_eq!(set_light_state.capability.as_str(), CAP_WRITE);
+        assert_eq!(set_light_state.risk_level, RiskLevel::Medium);
+        assert_eq!(set_light_state.safety_tier, SafetyTier::Risky);
+        assert_eq!(set_light_state.idempotency, IdempotencyClass::BestEffort);
+
+        let recall_scene = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_RECALL_SCENE)
+            .expect("recall_scene op should exist");
+        assert_eq!(recall_scene.capability.as_str(), CAP_WRITE);
+        assert_eq!(recall_scene.risk_level, RiskLevel::Medium);
+        assert_eq!(recall_scene.safety_tier, SafetyTier::Risky);
+        assert_eq!(recall_scene.idempotency, IdempotencyClass::BestEffort);
     }
 
     #[fcp_async_core::runtime::test]

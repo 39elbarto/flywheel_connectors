@@ -284,7 +284,12 @@ impl CoverageEvaluation {
             .saturating_mul(10_000)
             .saturating_sub(max_allowed.saturating_mul(u64::from(self.total_symbols)));
 
-        let result = (numerator.saturating_add(max_allowed.saturating_sub(1))) / max_allowed;
+        // Defensive: max_allowed is guarded by the early return at line 270, but use
+        // checked_div to prevent panics if guards are ever refactored.
+        let result = numerator
+            .saturating_add(max_allowed.saturating_sub(1))
+            .checked_div(max_allowed)
+            .unwrap_or(0);
         u32::try_from(result).unwrap_or(u32::MAX)
     }
 }

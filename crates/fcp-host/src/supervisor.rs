@@ -394,13 +394,14 @@ impl RestartTracker {
         }
 
         // Prune events outside the window.
-        let window_start = now.checked_sub(self.config.restart_window).unwrap_or(now);
-        while self
-            .history
-            .front()
-            .is_some_and(|event| event.timestamp < window_start)
-        {
-            self.history.pop_front();
+        if let Some(window_start) = now.checked_sub(self.config.restart_window) {
+            while self
+                .history
+                .front()
+                .is_some_and(|event| event.timestamp < window_start)
+            {
+                self.history.pop_front();
+            }
         }
 
         // Check restart count within window.
@@ -442,11 +443,11 @@ impl RestartTracker {
     /// Restarts within the current window.
     #[must_use]
     pub fn restarts_in_window(&self, now: Instant) -> u32 {
-        let window_start = now.checked_sub(self.config.restart_window).unwrap_or(now);
+        let window_start = now.checked_sub(self.config.restart_window);
         u32::try_from(
             self.history
                 .iter()
-                .filter(|event| event.timestamp >= window_start)
+                .filter(|event| window_start.map_or(true, |start| event.timestamp >= start))
                 .count(),
         )
         .unwrap_or(u32::MAX)

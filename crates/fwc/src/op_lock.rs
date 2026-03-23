@@ -259,12 +259,13 @@ impl LockStore {
 
     fn load_data(&self) -> Result<LockData, String> {
         let path = self.data_path();
-        if !path.exists() {
-            return Ok(LockData::default());
+        match std::fs::read_to_string(&path) {
+            Ok(json) => {
+                serde_json::from_str(&json).map_err(|e| format!("lock store corrupted: {e}"))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LockData::default()),
+            Err(e) => Err(format!("failed to read lock store: {e}")),
         }
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read lock store: {e}"))?;
-        serde_json::from_str(&json).map_err(|e| format!("lock store corrupted: {e}"))
     }
 
     fn save_data(&self, data: &LockData) -> Result<(), String> {

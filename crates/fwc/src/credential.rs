@@ -260,8 +260,20 @@ impl FileBackend {
         &self.base_dir
     }
 
-    fn credential_path(&self, connector_id: &str) -> PathBuf {
-        self.base_dir.join(format!("{connector_id}.json"))
+    fn credential_path(&self, connector_id: &str) -> Result<PathBuf> {
+        // Reject path traversal attempts: connector_id must be a simple identifier
+        // with no directory separators, parent references, or null bytes.
+        if connector_id.is_empty()
+            || connector_id.contains('/')
+            || connector_id.contains('\\')
+            || connector_id.contains("..")
+            || connector_id.contains('\0')
+        {
+            anyhow::bail!(
+                "invalid connector_id '{connector_id}': must not contain path separators or traversal sequences"
+            );
+        }
+        Ok(self.base_dir.join(format!("{connector_id}.json")))
     }
 
     fn temp_path_for(path: &Path) -> PathBuf {
@@ -331,7 +343,7 @@ impl CredentialBackend for FileBackend {
             last_verified: entry.last_verified.clone(),
         };
         let json = serde_json::to_string_pretty(&disk)?;
-        let path = self.credential_path(&entry.connector_id);
+        let path = self.credential_path(&entry.connector_id)?;
 
         let temp_path = Self::temp_path_for(&path);
 
@@ -374,7 +386,7 @@ impl CredentialBackend for FileBackend {
     }
 
     fn get(&self, connector_id: &str) -> Result<Option<CredentialEntry>> {
-        let path = self.credential_path(connector_id);
+        let path = self.credential_path(connector_id)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -412,7 +424,7 @@ impl CredentialBackend for FileBackend {
     }
 
     fn remove(&self, connector_id: &str) -> Result<bool> {
-        let path = self.credential_path(connector_id);
+        let path = self.credential_path(connector_id)?;
         if !path.exists() {
             return Ok(false);
         }

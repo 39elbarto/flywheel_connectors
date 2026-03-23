@@ -22,6 +22,7 @@
 
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,6 +325,540 @@ impl PrerequisiteCheckBuilder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Local Harness Contracts
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Canonical local harness family for queue, browser, subprocess, and bridge fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalHarnessFamily {
+    /// Queue or pub-sub fixture driven through a real local broker.
+    Queue,
+    /// Browser session fixture driven through a real local browser target.
+    Browser,
+    /// Local process or CLI fixture driven through a real child process.
+    LocalProcess,
+    /// Bridge or daemon-backed fixture driven through a real local socket or RPC boundary.
+    Bridge,
+}
+
+/// Stable artifact kind for local harness evidence bundles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalHarnessArtifactKind {
+    /// Structured JSON payload.
+    Json,
+    /// JSON Lines event stream.
+    Jsonl,
+    /// Plain-text summary or stdout/stderr capture.
+    Text,
+    /// Replay script or equivalent command recipe.
+    Replay,
+    /// Directory or bundle root containing captured files.
+    Directory,
+}
+
+/// Artifact descriptor for local harness runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalHarnessArtifactDescriptor {
+    /// Stable artifact label within the run report.
+    pub label: String,
+    /// Artifact kind (`json`, `jsonl`, `text`, `replay`, etc.).
+    pub kind: LocalHarnessArtifactKind,
+    /// Expected file name or bundle-relative path hint.
+    pub path_hint: String,
+    /// Operator-facing description of the artifact.
+    pub description: String,
+}
+
+impl LocalHarnessArtifactDescriptor {
+    /// Build a canonical artifact descriptor.
+    #[must_use]
+    pub fn new(
+        label: &str,
+        kind: LocalHarnessArtifactKind,
+        path_hint: &str,
+        description: &str,
+    ) -> Self {
+        Self {
+            label: label.to_string(),
+            kind,
+            path_hint: path_hint.to_string(),
+            description: description.to_string(),
+        }
+    }
+}
+
+/// Existing helper seam that downstream local harness work should promote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalHarnessHelperReference {
+    /// Module or crate path that already owns the behavior.
+    pub symbol: String,
+    /// Short explanation of why this helper should be reused.
+    pub responsibility: String,
+}
+
+impl LocalHarnessHelperReference {
+    /// Build a helper reference entry.
+    #[must_use]
+    pub fn new(symbol: &str, responsibility: &str) -> Self {
+        Self {
+            symbol: symbol.to_string(),
+            responsibility: responsibility.to_string(),
+        }
+    }
+}
+
+/// Canonical scenario category for truthful local harness coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalHarnessScenarioKind {
+    /// Publish and consume through a real local queue or broker.
+    QueuePublishConsume,
+    /// Negative-ack or retry/redelivery path through a real local broker.
+    QueueRedelivery,
+    /// Browser navigation or session bootstrap over a real local bridge.
+    BrowserNavigate,
+    /// Browser download or artifact capture over a real local bridge.
+    BrowserDownloadCapture,
+    /// Local JSONL process round-trip over stdin/stdout.
+    LocalProcessJsonlRoundTrip,
+    /// Non-zero exit, stderr capture, and replay metadata for local processes.
+    LocalProcessExitFailure,
+    /// Bridge or daemon connect and message exchange.
+    BridgeConnectExchange,
+    /// Bridge reconnect and recovery after an injected failure.
+    BridgeReconnectRecovery,
+}
+
+impl LocalHarnessScenarioKind {
+    /// All canonical local harness scenarios.
+    pub const ALL: [Self; 8] = [
+        Self::QueuePublishConsume,
+        Self::QueueRedelivery,
+        Self::BrowserNavigate,
+        Self::BrowserDownloadCapture,
+        Self::LocalProcessJsonlRoundTrip,
+        Self::LocalProcessExitFailure,
+        Self::BridgeConnectExchange,
+        Self::BridgeReconnectRecovery,
+    ];
+
+    /// Stable scenario identifier.
+    #[must_use]
+    pub const fn scenario_id(self) -> &'static str {
+        match self {
+            Self::QueuePublishConsume => "queue.publish.consume",
+            Self::QueueRedelivery => "queue.redelivery.after_nack",
+            Self::BrowserNavigate => "browser.session.navigate",
+            Self::BrowserDownloadCapture => "browser.download.capture",
+            Self::LocalProcessJsonlRoundTrip => "local_process.jsonl.round_trip",
+            Self::LocalProcessExitFailure => "local_process.exit_failure.capture",
+            Self::BridgeConnectExchange => "bridge.connect.exchange",
+            Self::BridgeReconnectRecovery => "bridge.reconnect.recovery",
+        }
+    }
+
+    /// Harness family exercised by the scenario.
+    #[must_use]
+    pub const fn family(self) -> LocalHarnessFamily {
+        match self {
+            Self::QueuePublishConsume | Self::QueueRedelivery => LocalHarnessFamily::Queue,
+            Self::BrowserNavigate | Self::BrowserDownloadCapture => LocalHarnessFamily::Browser,
+            Self::LocalProcessJsonlRoundTrip | Self::LocalProcessExitFailure => {
+                LocalHarnessFamily::LocalProcess
+            }
+            Self::BridgeConnectExchange | Self::BridgeReconnectRecovery => {
+                LocalHarnessFamily::Bridge
+            }
+        }
+    }
+
+    /// Short operator-facing summary for the scenario.
+    #[must_use]
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::QueuePublishConsume => {
+                "verify publish and consume semantics over a real local queue or broker"
+            }
+            Self::QueueRedelivery => {
+                "verify nack or retry paths produce deterministic local redelivery evidence"
+            }
+            Self::BrowserNavigate => {
+                "verify browser session startup and navigation over a real local bridge"
+            }
+            Self::BrowserDownloadCapture => {
+                "verify download and artifact capture through the real browser boundary"
+            }
+            Self::LocalProcessJsonlRoundTrip => {
+                "verify stdin/stdout JSONL round-trips against a real child process"
+            }
+            Self::LocalProcessExitFailure => {
+                "verify stderr, exit status, and replay metadata on local process failure"
+            }
+            Self::BridgeConnectExchange => {
+                "verify bridge connect, message exchange, and clean disconnect"
+            }
+            Self::BridgeReconnectRecovery => {
+                "verify reconnect and recovery after a real local bridge failure"
+            }
+        }
+    }
+
+    const fn assertions(self) -> &'static [&'static str] {
+        match self {
+            Self::QueuePublishConsume => &[
+                "messages cross a real queue or broker boundary",
+                "receipts and replay metadata name the consumed delivery",
+            ],
+            Self::QueueRedelivery => &[
+                "negative acknowledgement or retry is visible in local broker state",
+                "redelivery is captured without substituting a fake in-memory queue",
+            ],
+            Self::BrowserNavigate => &[
+                "real browser or bridge session starts successfully",
+                "navigation or equivalent session command reaches the live local target",
+            ],
+            Self::BrowserDownloadCapture => &[
+                "downloads are written into a captured artifact directory",
+                "stdout or stderr or bridge logs explain failures without redaction leaks",
+            ],
+            Self::LocalProcessJsonlRoundTrip => &[
+                "real child process stdin and stdout are captured truthfully",
+                "replay metadata is sufficient to rerun the subprocess boundary",
+            ],
+            Self::LocalProcessExitFailure => &[
+                "non-zero exit status is captured as evidence rather than guessed",
+                "stderr is preserved for triage and attached to the run report",
+            ],
+            Self::BridgeConnectExchange => &[
+                "bridge connect and exchange events are observable in order",
+                "receipts and message counts can be asserted without fake peers",
+            ],
+            Self::BridgeReconnectRecovery => &[
+                "bridge reconnection attempts are visible in the evidence bundle",
+                "recovery can be replayed with the captured command and prerequisites",
+            ],
+        }
+    }
+}
+
+/// Serializable scenario manifest entry for local harness coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalHarnessScenarioDefinition {
+    /// Stable scenario identifier used by reports and playbooks.
+    pub scenario_id: String,
+    /// Canonical scenario kind.
+    pub kind: LocalHarnessScenarioKind,
+    /// Harness family exercised by the scenario.
+    pub family: LocalHarnessFamily,
+    /// Operator-facing summary of the behavior being covered.
+    pub summary: String,
+    /// Stable assertions this scenario must prove.
+    pub assertions: Vec<String>,
+}
+
+impl From<LocalHarnessScenarioKind> for LocalHarnessScenarioDefinition {
+    fn from(kind: LocalHarnessScenarioKind) -> Self {
+        Self {
+            scenario_id: kind.scenario_id().to_string(),
+            kind,
+            family: kind.family(),
+            summary: kind.summary().to_string(),
+            assertions: kind
+                .assertions()
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+        }
+    }
+}
+
+/// Canonical contract for a truthful local harness family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalHarnessContract {
+    /// Version marker for the contract itself.
+    pub contract_version: String,
+    /// Required suite class from the acceptance taxonomy.
+    pub suite_class: String,
+    /// Local harness family.
+    pub family: LocalHarnessFamily,
+    /// Transport truth being exercised.
+    pub transport: String,
+    /// Existing helpers that should be promoted rather than replaced.
+    pub promoted_helpers: Vec<LocalHarnessHelperReference>,
+    /// Run-level artifacts every compliant harness should emit.
+    pub artifacts: Vec<LocalHarnessArtifactDescriptor>,
+    /// Canonical required scenarios for this family.
+    pub scenarios: Vec<LocalHarnessScenarioDefinition>,
+}
+
+/// Return the stable scenario inventory for a local harness family.
+#[must_use]
+pub fn canonical_local_harness_inventory(
+    family: LocalHarnessFamily,
+) -> Vec<LocalHarnessScenarioDefinition> {
+    LocalHarnessScenarioKind::ALL
+        .into_iter()
+        .filter(|kind| kind.family() == family)
+        .map(LocalHarnessScenarioDefinition::from)
+        .collect()
+}
+
+/// Return the canonical queue harness contract.
+#[must_use]
+pub fn canonical_queue_harness_contract() -> LocalHarnessContract {
+    LocalHarnessContract {
+        contract_version: "local-harness-contract/v1".to_string(),
+        suite_class: "local_non_mock".to_string(),
+        family: LocalHarnessFamily::Queue,
+        transport: "local_broker".to_string(),
+        promoted_helpers: common_local_harness_helpers(),
+        artifacts: vec![
+            LocalHarnessArtifactDescriptor::new(
+                "logs-jsonl",
+                LocalHarnessArtifactKind::Jsonl,
+                "logs.jsonl",
+                "schema-valid event stream for queue or broker acceptance runs",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "report-json",
+                LocalHarnessArtifactKind::Json,
+                "report.json",
+                "machine-readable run report with broker scenario metadata",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "broker-state-json",
+                LocalHarnessArtifactKind::Json,
+                "broker-state.json",
+                "captured broker state, delivery ids, and subscription metadata",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "receipt-records",
+                LocalHarnessArtifactKind::Json,
+                "receipts.json",
+                "delivery receipts, ack or nack evidence, and replay identifiers",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "replay-sh",
+                LocalHarnessArtifactKind::Replay,
+                "replay.sh",
+                "deterministic replay command sequence for the queue boundary",
+            ),
+        ],
+        scenarios: canonical_local_harness_inventory(LocalHarnessFamily::Queue),
+    }
+}
+
+/// Return the canonical browser harness contract.
+#[must_use]
+pub fn canonical_browser_harness_contract() -> LocalHarnessContract {
+    LocalHarnessContract {
+        contract_version: "local-harness-contract/v1".to_string(),
+        suite_class: "local_non_mock".to_string(),
+        family: LocalHarnessFamily::Browser,
+        transport: "local_browser_bridge".to_string(),
+        promoted_helpers: common_local_harness_helpers(),
+        artifacts: vec![
+            LocalHarnessArtifactDescriptor::new(
+                "logs-jsonl",
+                LocalHarnessArtifactKind::Jsonl,
+                "logs.jsonl",
+                "schema-valid event stream for browser acceptance runs",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "report-json",
+                LocalHarnessArtifactKind::Json,
+                "report.json",
+                "machine-readable run report with browser scenario metadata",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "bridge-events-jsonl",
+                LocalHarnessArtifactKind::Jsonl,
+                "bridge-events.jsonl",
+                "ordered browser bridge events for reconnect and navigation triage",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "downloads",
+                LocalHarnessArtifactKind::Directory,
+                "downloads/",
+                "captured browser downloads or generated artifacts",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "screenshots",
+                LocalHarnessArtifactKind::Directory,
+                "screenshots/",
+                "optional screenshots or rendered evidence captured during the run",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "replay-sh",
+                LocalHarnessArtifactKind::Replay,
+                "replay.sh",
+                "deterministic replay command sequence for the browser boundary",
+            ),
+        ],
+        scenarios: canonical_local_harness_inventory(LocalHarnessFamily::Browser),
+    }
+}
+
+/// Return the canonical local-process harness contract.
+#[must_use]
+pub fn canonical_local_process_harness_contract() -> LocalHarnessContract {
+    LocalHarnessContract {
+        contract_version: "local-harness-contract/v1".to_string(),
+        suite_class: "local_non_mock".to_string(),
+        family: LocalHarnessFamily::LocalProcess,
+        transport: "child_process_stdio".to_string(),
+        promoted_helpers: {
+            let mut helpers = common_local_harness_helpers();
+            helpers.push(LocalHarnessHelperReference::new(
+                "fcp_e2e::ConnectorProcessRunner",
+                "real child-process JSONL runner with stderr capture for connector binaries",
+            ));
+            helpers.push(LocalHarnessHelperReference::new(
+                "fcp_e2e::SubprocessRunCapture",
+                "serializable process artifact capture for stdout or stderr or exit metadata",
+            ));
+            helpers
+        },
+        artifacts: vec![
+            LocalHarnessArtifactDescriptor::new(
+                "logs-jsonl",
+                LocalHarnessArtifactKind::Jsonl,
+                "logs.jsonl",
+                "schema-valid event stream for subprocess acceptance runs",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "report-json",
+                LocalHarnessArtifactKind::Json,
+                "report.json",
+                "machine-readable run report with subprocess scenario metadata",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "stdout-txt",
+                LocalHarnessArtifactKind::Text,
+                "stdout.txt",
+                "captured child-process stdout or primary output artifact",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "stderr-txt",
+                LocalHarnessArtifactKind::Text,
+                "stderr.txt",
+                "captured child-process stderr for triage and replay",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "receipts-json",
+                LocalHarnessArtifactKind::Json,
+                "receipts.json",
+                "captured receipt ids or subprocess evidence attached to the run",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "temp-dir",
+                LocalHarnessArtifactKind::Directory,
+                "tmp/",
+                "ephemeral working directory preserved for reproducible failure analysis",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "replay-sh",
+                LocalHarnessArtifactKind::Replay,
+                "replay.sh",
+                "deterministic replay command sequence for the subprocess boundary",
+            ),
+        ],
+        scenarios: canonical_local_harness_inventory(LocalHarnessFamily::LocalProcess),
+    }
+}
+
+/// Return the canonical bridge or daemon harness contract.
+#[must_use]
+pub fn canonical_bridge_harness_contract() -> LocalHarnessContract {
+    LocalHarnessContract {
+        contract_version: "local-harness-contract/v1".to_string(),
+        suite_class: "local_non_mock".to_string(),
+        family: LocalHarnessFamily::Bridge,
+        transport: "daemon_socket_or_rpc".to_string(),
+        promoted_helpers: {
+            let mut helpers = common_local_harness_helpers();
+            helpers.push(LocalHarnessHelperReference::new(
+                "fcp_testkit::BridgeConnectionTracker",
+                "ordered bridge or daemon event tracking for reconnect and exchange assertions",
+            ));
+            helpers.push(LocalHarnessHelperReference::new(
+                "fcp_testkit::PrerequisiteCheck",
+                "structured prerequisite reporting for local daemons, browsers, and bridges",
+            ));
+            helpers
+        },
+        artifacts: vec![
+            LocalHarnessArtifactDescriptor::new(
+                "logs-jsonl",
+                LocalHarnessArtifactKind::Jsonl,
+                "logs.jsonl",
+                "schema-valid event stream for bridge or daemon acceptance runs",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "report-json",
+                LocalHarnessArtifactKind::Json,
+                "report.json",
+                "machine-readable run report with bridge scenario metadata",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "bridge-events-jsonl",
+                LocalHarnessArtifactKind::Jsonl,
+                "bridge-events.jsonl",
+                "ordered bridge lifecycle events including reconnect and exchange steps",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "daemon-stdout-txt",
+                LocalHarnessArtifactKind::Text,
+                "daemon-stdout.txt",
+                "captured bridge or daemon stdout for reproducible replay",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "daemon-stderr-txt",
+                LocalHarnessArtifactKind::Text,
+                "daemon-stderr.txt",
+                "captured bridge or daemon stderr for failure triage",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "receipts-json",
+                LocalHarnessArtifactKind::Json,
+                "receipts.json",
+                "captured receipt ids, dedupe keys, or replay tokens for bridge flows",
+            ),
+            LocalHarnessArtifactDescriptor::new(
+                "replay-sh",
+                LocalHarnessArtifactKind::Replay,
+                "replay.sh",
+                "deterministic replay command sequence for the bridge boundary",
+            ),
+        ],
+        scenarios: canonical_local_harness_inventory(LocalHarnessFamily::Bridge),
+    }
+}
+
+fn common_local_harness_helpers() -> Vec<LocalHarnessHelperReference> {
+    vec![
+        LocalHarnessHelperReference::new(
+            "fcp_testkit::EvidenceCollector",
+            "shared evidence vocabulary for receipts, mutations, and cleanup verification",
+        ),
+        LocalHarnessHelperReference::new(
+            "fcp_testkit::LogRedactionScanner",
+            "artifact secret and PII scan for local harness evidence bundles",
+        ),
+        LocalHarnessHelperReference::new(
+            "fcp_e2e::E2eRunReport",
+            "machine-readable run envelope already used by shared E2E reporting",
+        ),
+        LocalHarnessHelperReference::new(
+            "fcp_e2e::E2eArtifactRecord",
+            "stable label or kind or description artifact vocabulary for report emission",
+        ),
+    ]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Assertions
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -589,5 +1124,68 @@ mod tests {
             tracker.events()[3].kind,
             BridgeEventKind::Disconnect
         ));
+    }
+
+    #[test]
+    fn local_process_contract_declares_stdio_artifacts() {
+        let contract = canonical_local_process_harness_contract();
+
+        assert_eq!(contract.suite_class, "local_non_mock");
+        assert_eq!(contract.family, LocalHarnessFamily::LocalProcess);
+        assert!(
+            contract
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.label == "stdout-txt")
+        );
+        assert!(
+            contract
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.label == "stderr-txt")
+        );
+        assert!(
+            contract
+                .promoted_helpers
+                .iter()
+                .any(|helper| helper.symbol == "fcp_e2e::ConnectorProcessRunner")
+        );
+    }
+
+    #[test]
+    fn bridge_contract_mentions_reconnect_artifacts() {
+        let contract = canonical_bridge_harness_contract();
+
+        assert_eq!(contract.family, LocalHarnessFamily::Bridge);
+        assert!(
+            contract
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.label == "bridge-events-jsonl")
+        );
+        assert!(
+            contract
+                .scenarios
+                .iter()
+                .any(|scenario| scenario.kind == LocalHarnessScenarioKind::BridgeReconnectRecovery)
+        );
+    }
+
+    #[test]
+    fn queue_inventory_filters_to_queue_scenarios() {
+        let scenarios = canonical_local_harness_inventory(LocalHarnessFamily::Queue);
+        assert_eq!(scenarios.len(), 2);
+        assert!(
+            scenarios
+                .iter()
+                .all(|scenario| scenario.family == LocalHarnessFamily::Queue)
+        );
+    }
+
+    #[test]
+    fn local_harness_artifact_kind_serializes_snake_case() {
+        let value = serde_json::to_value(LocalHarnessArtifactKind::Replay)
+            .expect("artifact kind should serialize");
+        assert_eq!(value, json!("replay"));
     }
 }

@@ -21,7 +21,7 @@
 use crate::database_helpers::{
     CleanupVerificationResult, FixtureMutationRecord, FixtureSeedRecord,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Evidence Collector

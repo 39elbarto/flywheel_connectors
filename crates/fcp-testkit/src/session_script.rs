@@ -33,9 +33,9 @@
 //!     .step(ScriptStep::send_message(json!({"type": "ping"})))
 //!     .step(ScriptStep::expect_message(json!({"type": "pong"})))
 //!     .step(ScriptStep::inject_fault(Fault::ConnectionDrop))
-//!     .step(ScriptStep::assert_health(StreamHealthState::Reconnecting))
+//!     .step(ScriptStep::assert_health(ScriptHealthState::Reconnecting))
 //!     .step(ScriptStep::wait(Duration::from_millis(500)))
-//!     .step(ScriptStep::assert_health(StreamHealthState::Connected))
+//!     .step(ScriptStep::assert_health(ScriptHealthState::Connected))
 //!     .step(ScriptStep::disconnect());
 //! ```
 
@@ -48,7 +48,7 @@ use std::time::Duration;
 // ---------------------------------------------------------------------------
 
 /// Transport protocol for a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     WebSocket,
@@ -75,7 +75,7 @@ impl std::fmt::Display for Transport {
 /// Health state used in script assertions.  Mirrors
 /// `fcp_streaming::StreamHealthState` but is self-contained so test scripts
 /// do not depend on the streaming crate at build time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptHealthState {
     Connected,
@@ -100,7 +100,7 @@ impl std::fmt::Display for ScriptHealthState {
 // ---------------------------------------------------------------------------
 
 /// Simulated fault that the harness injects into the session.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Fault {
     /// Drop the transport connection immediately.
@@ -123,9 +123,10 @@ pub enum Fault {
 // ---------------------------------------------------------------------------
 
 /// How to match an expected message against actual received data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum MessageMatcher {
+    // NOTE: intentionally no Eq — serde_json::Value does not impl Eq
     /// Exact JSON equality.
     Exact { body: serde_json::Value },
     /// JSON sub-object match (all specified keys must match; extra keys OK).
@@ -141,7 +142,7 @@ pub enum MessageMatcher {
 // ---------------------------------------------------------------------------
 
 /// Acknowledgement mode for received messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum AckMode {
     /// Automatically acknowledge after matching.
@@ -241,11 +242,11 @@ pub enum ScriptStep {
     },
 }
 
-fn default_expect_timeout() -> Duration {
+const fn default_expect_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
-fn default_ack_mode() -> AckMode {
+const fn default_ack_mode() -> AckMode {
     AckMode::Auto
 }
 
@@ -458,11 +459,12 @@ impl SessionScript {
         self.steps.len()
     }
 
-    /// True if no steps.
+    /// True if the script contains no steps.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +472,7 @@ impl SessionScript {
 // ---------------------------------------------------------------------------
 
 /// Outcome of executing a single script step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum StepOutcome {
     Pass,
@@ -551,6 +553,11 @@ impl SessionTranscript {
     ///
     /// Each entry becomes one JSON object per line with the fields expected by
     /// `fcp_conformance::schemas::validate_e2e_log_entry`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any entry cannot be serialized to JSON (should not happen
+    /// with well-formed transcript data).
     pub fn to_jsonl(&self) -> String {
         let mut lines = Vec::with_capacity(self.entries.len() + 2);
         // Header line
@@ -561,13 +568,15 @@ impl SessionTranscript {
             "phase": "setup",
             "correlation_id": self.run_id,
             "result": self.outcome.to_string(),
-            "duration_ms": self.total_duration.as_millis(),
+            "duration_ms": self.total_duration.as_millis() as u64,
             "assertions": {
                 "passed": self.summary.passed,
                 "failed": self.summary.failed
             }
         });
-        lines.push(serde_json::to_string(&header).unwrap_or_default());
+        lines.push(
+            serde_json::to_string(&header).expect("transcript header should serialize"),
+        );
 
         // Per-step lines
         for entry in &self.entries {
@@ -580,23 +589,25 @@ impl SessionTranscript {
                     .unwrap_or(&self.run_id),
                 "step_number": entry.step_index,
                 "result": entry.outcome.to_string(),
-                "duration_ms": entry.duration.as_millis(),
+                "duration_ms": entry.duration.as_millis() as u64,
                 "details": entry.detail,
             });
-            lines.push(serde_json::to_string(&line).unwrap_or_default());
+            lines.push(
+                serde_json::to_string(&line).expect("transcript entry should serialize"),
+            );
         }
         lines.join("\n")
     }
 
     /// True if every step passed.
     #[must_use]
-    pub fn all_passed(&self) -> bool {
-        self.outcome == StepOutcome::Pass
+    pub const fn all_passed(&self) -> bool {
+        matches!(self.outcome, StepOutcome::Pass)
     }
 }
 
 /// Map a script step to its E2E log phase.
-fn step_phase(step: &ScriptStep) -> &'static str {
+const fn step_phase(step: &ScriptStep) -> &'static str {
     match step {
         ScriptStep::Connect { .. } => "setup",
         ScriptStep::Disconnect => "teardown",

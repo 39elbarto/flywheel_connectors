@@ -544,7 +544,7 @@ pub mod stateful {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database_helpers::{StatefulFixtureFamily, assert_stateful_fixture_pack_complete};
+    use crate::database_helpers::{assert_stateful_fixture_pack_complete, StatefulFixtureFamily};
 
     // ---- Connector fixtures ----
 
@@ -878,12 +878,10 @@ mod tests {
     #[test]
     fn json_not_found_with_empty_resource() {
         let v = json::not_found("");
-        assert!(
-            v["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("not found")
-        );
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found"));
     }
 
     #[test]
@@ -960,11 +958,10 @@ mod tests {
         let pack = stateful::object_blob_fixture_pack("minio", "fixture-bucket", "runs/run-1");
 
         assert_eq!(pack.family, StatefulFixtureFamily::ObjectBlob);
-        assert!(
-            pack.cleanup_checks
-                .iter()
-                .any(|cleanup_check| cleanup_check.method == "prefix_empty")
-        );
+        assert!(pack
+            .cleanup_checks
+            .iter()
+            .any(|cleanup_check| cleanup_check.method == "prefix_empty"));
         assert_stateful_fixture_pack_complete(&pack);
     }
 
@@ -973,11 +970,10 @@ mod tests {
         let pack = stateful::key_value_fixture_pack("sled", "fixture", "/tmp/fcp/sled");
 
         assert_eq!(pack.family, StatefulFixtureFamily::KeyValue);
-        assert!(
-            pack.seeded_state
-                .iter()
-                .any(|seed| seed.identifier == "feature_flags/beta_access")
-        );
+        assert!(pack
+            .seeded_state
+            .iter()
+            .any(|seed| seed.identifier == "feature_flags/beta_access"));
         assert_stateful_fixture_pack_complete(&pack);
     }
 }

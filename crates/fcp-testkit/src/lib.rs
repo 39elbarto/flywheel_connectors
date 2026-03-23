@@ -61,9 +61,10 @@ mod http_fixture;
 mod log_scan;
 mod mock_server;
 pub mod readiness_helpers;
+pub mod session_script;
+pub mod streaming_fixture;
 pub mod supervisor_examples;
 mod tracing_config;
-pub mod session_script;
 pub mod webhook_helpers;
 
 pub use assertions::*;

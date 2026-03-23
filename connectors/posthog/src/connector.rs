@@ -13,12 +13,29 @@ use fcp_core::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
     client::{DEFAULT_BASE_URL, PostHogAuth, PostHogClient},
     error::PostHogError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/posthog_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/posthog_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 10] = [
+    "scripts/e2e/posthog_connector_verification.sh",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo run -q -p fwc -- manifest fix connectors/posthog/manifest.toml --check --json",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo fmt --manifest-path connectors/posthog/Cargo.toml --check",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo check -p fcp-posthog --all-targets",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-posthog --test integration health_unconfigured_includes_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-posthog --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-posthog --test integration self_check_ready_with_mock_posthog_api_and_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-posthog --test integration self_check_retryable_posthog_failure_reports_degraded -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-posthog --test integration introspection_emits_v3_compliance_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo clippy -p fcp-posthog --all-targets -- -D warnings",
+];
 
 /// Parsed and validated `PostHog` connector configuration.
 #[derive(Debug, Clone)]
@@ -108,6 +125,12 @@ impl PostHogConfig {
             network_ok,
             network_message,
             base_url: self.base_url.clone(),
+            project_id: self.project_id.clone(),
+            query_surface: true,
+            insights_surface: true,
+            feature_flags_surface: true,
+            write_surface: false,
+            host_policy_guidance: "Production verification must target the PostHog SaaS API or an approved self-hosted PostHog deployment over HTTPS. Localhost overrides are allowed only for deterministic test fixtures.",
         }
     }
 }
@@ -122,13 +145,42 @@ struct ProvisioningReadiness {
     network_ok: bool,
     network_message: String,
     base_url: String,
+    project_id: String,
+    query_surface: bool,
+    insights_surface: bool,
+    feature_flags_surface: bool,
+    write_surface: bool,
+    host_policy_guidance: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
 }
 
 /// Doctor check result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DoctorResult {
+    ready: bool,
     status: DoctorStatus,
     checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 /// Doctor status.
@@ -153,6 +205,18 @@ struct DoctorCheck {
 impl DoctorResult {
     #[must_use]
     fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        Self::from_checks_with_provisioning(checks, None)
+    }
+
+    #[must_use]
+    fn from_checks_with_provisioning(
+        checks: Vec<DoctorCheck>,
+        provisioning: Option<ProvisioningReadiness>,
+    ) -> Self {
+        let ready = checks
+            .iter()
+            .filter(|check| check.critical)
+            .all(|check| check.passed);
         let status = if checks.iter().any(|c| c.critical && !c.passed) {
             DoctorStatus::Unhealthy
         } else if checks.iter().any(|c| !c.passed) {
@@ -160,7 +224,59 @@ impl DoctorResult {
         } else {
             DoctorStatus::Healthy
         };
-        Self { status, checks }
+        Self {
+            ready,
+            status,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable PostHog project or sanitized self-hosted workspace before running verification.",
+            "Provide exactly one auth source: a PostHog API key for live probes or a credential_id when host-side injection is available.",
+            "Seed deterministic insights and feature flags if you need reproducible evidence beyond the default readiness probe.",
+        ],
+        dedicated_environment: "Run verification against disposable analytics data or a localhost/self-hosted PostHog fixture. HogQL queries can surface sensitive telemetry, so do not aim this harness at production without explicit redaction and approval.",
+        redaction_rules: vec![
+            "Never print raw PostHog API keys, Authorization headers, or injected credential material.",
+            "Treat project IDs, event names, insight definitions, feature flag keys, and HogQL query text as potentially sensitive metadata.",
+            "If a self-hosted base_url override is used, capture it in the evidence bundle but redact internal hostnames before sharing artifacts outside the owning team.",
+        ],
+        limitations: vec![
+            "This connector is read-only: HogQL event query, insight listing, and feature flag listing only.",
+            "It does not capture events, mutate insights, update feature flags, or manage persons/groups.",
+            "Credential-id mode can validate configuration shape but cannot prove live reachability until the host injects concrete secret material.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "health or self_check reports that the configured base_url violates PostHog host policy",
+                action: "Use the PostHog SaaS API, a compliant self-hosted PostHog deployment over HTTPS, or a localhost test override.",
+            },
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "self_check cannot perform a live probe because only credential_id is configured",
+                action: "Inject a concrete PostHog API key through the host or proxy, then rerun self_check and the verification script.",
+            },
+            RemediationHint {
+                code: "auth_invalid",
+                symptom: "the PostHog API returns 401 or 403 during self_check",
+                action: "Verify the API key is active for the target PostHog project and has read access to insights and feature flags.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "the live PostHog probe failed with rate limiting, timeout, or transient 5xx errors",
+                action: "Wait for the upstream to recover or relax retry and timeout settings before rerunning verification.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
@@ -185,6 +301,110 @@ impl PostHogConnector {
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    fn doctor(&self) -> DoctorResult {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(PostHogConfig::provisioning_readiness);
+        let handshaken = self.session_id.is_some();
+        let mut checks = vec![
+            DoctorCheck {
+                name: "configuration".into(),
+                passed: self.config.is_some(),
+                message: self.config.as_ref().map_or_else(
+                    || Some("Not configured; call configure before handshake or invoke".into()),
+                    |config| {
+                        Some(format!(
+                            "Configured for PostHog project {} via {}",
+                            config.project_id,
+                            config.auth.redacted_label()
+                        ))
+                    },
+                ),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "client_initialized".into(),
+                passed: self.client.is_some(),
+                message: if self.client.is_some() {
+                    None
+                } else {
+                    Some("API client not initialized; re-run configure".into())
+                },
+                critical: true,
+            },
+            DoctorCheck {
+                name: "handshake".into(),
+                passed: handshaken,
+                message: if handshaken {
+                    None
+                } else {
+                    Some("Handshake not completed".into())
+                },
+                critical: false,
+            },
+        ];
+
+        if let Some(readiness) = &provisioning {
+            checks.push(DoctorCheck {
+                name: "endpoint_policy".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "secret_material".into(),
+                passed: readiness.token_configured,
+                message: Some(if readiness.token_configured {
+                    "Concrete PostHog API key configured".into()
+                } else {
+                    "Secretless credential_id mode requires host-side secret injection before live verification".into()
+                }),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "surface_scope".into(),
+                passed: true,
+                message: Some("Read-only analytics surface: HogQL query, insight listing, and feature flag listing".into()),
+                critical: false,
+            });
+        }
+
+        DoctorResult::from_checks_with_provisioning(checks, provisioning)
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        provisioning: Option<&ProvisioningReadiness>,
+        live_probe: Option<&serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "handshaken": self.session_id.is_some(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
     }
 }
 
@@ -256,9 +476,20 @@ impl PostHogConnector {
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
+        let client_initialized = self.client.is_some();
         let handshaken = self.session_id.is_some();
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(PostHogConfig::provisioning_readiness);
+        let ready = configured
+            && client_initialized
+            && handshaken
+            && provisioning
+                .as_ref()
+                .is_none_or(|readiness| readiness.network_ok);
 
-        let status = if configured && handshaken {
+        let status = if ready {
             "healthy"
         } else if configured {
             "degraded"
@@ -269,91 +500,118 @@ impl PostHogConnector {
         Ok(json!({
             "status": status,
             "configured": configured,
+            "client_initialized": client_initialized,
             "handshaken": handshaken,
+            "ready": ready,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "details": {
+                "manifest_hash": Self::manifest_hash(),
+                "verification_script": VERIFICATION_SCRIPT_PATH,
+                "artifact_root_hint": ARTIFACT_ROOT_HINT,
+                "provisioning": provisioning,
+                "operator_guidance": operator_guidance(),
+            }
         }))
     }
 
     /// Handle the `doctor` method.
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured — call configure first".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: handshaken,
-            message: if handshaken {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-
-        let result = DoctorResult::from_checks(checks);
+        let result = self.doctor();
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        let Some(config) = &self.config else {
-            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
-            return Self::serialize_self_check_report(report);
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(PostHogConfig::provisioning_readiness);
+        let report = match (&self.config, &self.client, provisioning.as_ref()) {
+            (None, _, _) | (_, None, _) => self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                provisioning.as_ref(),
+                None,
+            ),
+            (Some(_), Some(_), Some(readiness)) if !readiness.network_ok => {
+                self.attach_self_check_details(
+                    SelfCheckReport::failed(
+                        "network_constraints_invalid",
+                        readiness.network_message.clone(),
+                    ),
+                    provisioning.as_ref(),
+                    None,
+                )
+            }
+            (Some(_), Some(_), Some(readiness)) if readiness.requires_credential_injection => {
+                self.attach_self_check_details(
+                    SelfCheckReport::degraded(
+                        "credential_injection_required",
+                        "credential_id mode requires host-side PostHog secret injection; skipping live probe",
+                    ),
+                    provisioning.as_ref(),
+                    None,
+                )
+            }
+            (Some(config), Some(client), Some(_)) => match client.list_insights().await {
+                Ok(response) => {
+                    let results_count = response
+                        .get("results")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, std::vec::Vec::len);
+                    let live_probe = json!({
+                        "probe": "posthog.insights.list",
+                        "base_url": config.base_url.clone(),
+                        "project_id": config.project_id.clone(),
+                        "results_count": results_count,
+                        "response": response,
+                    });
+                    self.attach_self_check_details(
+                        SelfCheckReport::ok(),
+                        provisioning.as_ref(),
+                        Some(&live_probe),
+                    )
+                }
+                Err(PostHogError::Unauthorized) | Err(PostHogError::Forbidden) => {
+                    self.attach_self_check_details(
+                        SelfCheckReport::failed(
+                            "auth_invalid",
+                            "PostHog credentials were rejected by the live probe",
+                        ),
+                        provisioning.as_ref(),
+                        None,
+                    )
+                }
+                Err(error) if error.is_retryable() => {
+                    let live_probe = json!({
+                        "probe": "posthog.insights.list",
+                        "base_url": config.base_url.clone(),
+                        "project_id": config.project_id.clone(),
+                        "retryable": true,
+                        "retry_after_ms": error.retry_after().map(|duration| duration.as_millis() as u64),
+                        "error": error.to_string(),
+                    });
+                    self.attach_self_check_details(
+                        SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                        provisioning.as_ref(),
+                        Some(&live_probe),
+                    )
+                }
+                Err(error) => self.attach_self_check_details(
+                    SelfCheckReport::failed("self_check_failed", error.to_string()),
+                    provisioning.as_ref(),
+                    None,
+                ),
+            },
+            (Some(_), Some(_), None) => self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "provisioning_unavailable",
+                    "Provisioning readiness could not be computed",
+                ),
+                None,
+                None,
+            ),
         };
-
-        let readiness = config.provisioning_readiness();
-        if !readiness.network_ok {
-            let mut report = SelfCheckReport::failed(
-                "network_constraints_invalid",
-                readiness.network_message.clone(),
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let Some(_client) = &self.client else {
-            let mut report = SelfCheckReport::failed(
-                "client_missing",
-                "API client not initialized; re-run configure",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        };
-
-        if readiness.requires_credential_injection {
-            let mut report = SelfCheckReport::degraded(
-                "credential_injection_required",
-                "credential_id mode requires egress proxy injection; skipping live probe",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let mut report = SelfCheckReport::ok();
-        report.details = Some(json!({ "provisioning": readiness }));
         Self::serialize_self_check_report(report)
     }
 
@@ -363,6 +621,11 @@ impl PostHogConnector {
             "connector_id": "fcp.posthog",
             "version": "0.1.0",
             "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.config.as_ref().map(PostHogConfig::provisioning_readiness),
+            "operator_guidance": operator_guidance(),
         }))
     }
 
@@ -1125,11 +1388,16 @@ mod tests {
     }
 
     #[test]
-    fn doctor_result_deserialize() {
-        let v = json!({"status": "degraded", "checks": [{"name": "a", "passed": false, "critical": false}]});
-        let r: DoctorResult = serde_json::from_value(v).unwrap();
-        assert_eq!(r.status, DoctorStatus::Degraded);
-        assert_eq!(r.checks.len(), 1);
+    fn doctor_result_serializes_guidance_fields() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: false,
+            message: None,
+            critical: false,
+        }]);
+        let v = serde_json::to_value(r).unwrap();
+        assert!(v["operator_guidance"]["prerequisites"].is_array());
+        assert_eq!(v["verification_script"], VERIFICATION_SCRIPT_PATH);
     }
 
     #[test]
@@ -1363,7 +1631,7 @@ mod tests {
     // ── DoctorResult additional coverage ────────────────────────────
 
     #[test]
-    fn doctor_result_serde_roundtrip_healthy() {
+    fn doctor_result_serde_healthy() {
         let r = DoctorResult::from_checks(vec![DoctorCheck {
             name: "cfg".into(),
             passed: true,
@@ -1371,8 +1639,8 @@ mod tests {
             critical: true,
         }]);
         let json = serde_json::to_value(&r).unwrap();
-        let back: DoctorResult = serde_json::from_value(json).unwrap();
-        assert_eq!(back.status, DoctorStatus::Healthy);
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["ready"], true);
     }
 
     #[test]

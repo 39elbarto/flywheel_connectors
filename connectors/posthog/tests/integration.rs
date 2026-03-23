@@ -17,6 +17,12 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_posthog::connector::PostHogConnector;
+use fcp_testkit::readiness_helpers::{
+    assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
+};
+
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/posthog_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/posthog_connector/<timestamp>";
 
 async fn setup_connector(mock_url: &str) -> PostHogConnector {
     let mut c = PostHogConnector::new();
@@ -67,6 +73,13 @@ async fn lifecycle_shutdown() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/projects/12345/insights"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": []
+        })))
+        .mount(&server)
+        .await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "ok");
@@ -115,6 +128,126 @@ async fn lifecycle_introspect() {
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
     assert_eq!(intro["operations"].as_array().unwrap().len(), 3);
+}
+
+#[fcp_async_core::runtime::test]
+async fn health_unconfigured_includes_guidance() {
+    let c = PostHogConnector::new();
+    let health = c.handle_health().await.unwrap();
+    assert_eq!(health["status"], "unconfigured");
+    assert_eq!(health["ready"], false);
+    assert_eq!(
+        health["details"]["verification_script"],
+        VERIFICATION_SCRIPT_PATH
+    );
+    assert_eq!(health["details"]["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert!(health["details"]["operator_guidance"]["prerequisites"].is_array());
+    println!(
+        "posthog_health_evidence={}",
+        serde_json::to_string_pretty(&health).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn doctor_unconfigured_reports_operator_guidance() {
+    let c = PostHogConnector::new();
+    let doctor = c.handle_doctor().await.unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], false);
+    assert_eq!(doctor["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert_eq!(
+        doctor["operator_guidance"]["artifact_root_hint"],
+        ARTIFACT_ROOT_HINT
+    );
+    println!(
+        "posthog_doctor_evidence={}",
+        serde_json::to_string_pretty(&doctor).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_ready_with_mock_posthog_api_and_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/projects/12345/insights"))
+        .and(header("Authorization", "Bearer phx_test_key_123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                {"id": 1, "name": "Weekly Active Users"},
+                {"id": 2, "name": "Signup Funnel"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let doctor = c.handle_doctor().await.unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], true);
+
+    let report = c.handle_self_check().await.unwrap();
+    assert_self_check_ready(&report);
+    assert_eq!(
+        report["details"]["verification_script"],
+        VERIFICATION_SCRIPT_PATH
+    );
+    assert_eq!(report["details"]["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert_eq!(report["details"]["provisioning"]["auth_mode"], "api_key");
+    assert_eq!(
+        report["details"]["live_probe"]["probe"],
+        "posthog.insights.list"
+    );
+    assert_eq!(report["details"]["live_probe"]["results_count"], 2);
+    println!(
+        "posthog_self_check_evidence={}",
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_retryable_posthog_failure_reports_degraded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/projects/12345/insights"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("retry-after", "3")
+                .set_body_string("temporary outage"),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let report = c.handle_self_check().await.unwrap();
+    assert_self_check_not_ready(&report);
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(report["reason_code"], "self_check_retryable");
+    assert_eq!(report["details"]["live_probe"]["retryable"], true);
+    assert_eq!(report["details"]["live_probe"]["retry_after_ms"], 3000);
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspection_emits_v3_compliance_evidence() {
+    let c = PostHogConnector::new();
+    let intro = c.handle_introspect().await.unwrap();
+    let ops = intro["operations"].as_array().expect("operations array");
+    assert_eq!(ops.len(), 3);
+    assert!(ops.iter().all(|op| {
+        op["ai_hints"]["examples"]
+            .as_array()
+            .is_some_and(|examples| !examples.is_empty())
+    }));
+    assert_eq!(intro["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert_eq!(intro["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert!(
+        intro["manifest_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    println!(
+        "posthog_introspection_evidence={}",
+        serde_json::to_string_pretty(&intro).unwrap()
+    );
 }
 
 // -- Events Query --

@@ -11,12 +11,29 @@ use fcp_core::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
     client::{DEFAULT_BASE_URL, RoamAuth, RoamClient},
     error::RoamError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/roam_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/roam_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 10] = [
+    "scripts/e2e/roam_connector_verification.sh",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo run -q -p fwc -- manifest fix connectors/roam/manifest.toml --check --json",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo fmt --manifest-path connectors/roam/Cargo.toml --check",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo check -p fcp-roam --all-targets",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-roam --test integration health_unconfigured_includes_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-roam --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-roam --test integration self_check_ready_with_mock_roam_api_and_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-roam --test integration self_check_retryable_roam_failure_reports_degraded -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-roam --test integration introspection_emits_v3_compliance_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo clippy -p fcp-roam --all-targets -- -D warnings",
+];
 
 /// Default graph name when none is provided.
 const DEFAULT_GRAPH_NAME: &str = "default";
@@ -106,6 +123,12 @@ impl RoamConfig {
             network_ok,
             network_message,
             base_url: self.base_url.clone(),
+            graph_name: self.graph_name.clone(),
+            pages_surface: true,
+            blocks_surface: true,
+            write_surface: true,
+            local_override_allowed: true,
+            host_policy_guidance: "Production verification must target https://api.roamresearch.com/api/graph. Localhost overrides are allowed only for deterministic bridge-style verification fixtures.",
         }
     }
 }
@@ -120,13 +143,42 @@ struct ProvisioningReadiness {
     network_ok: bool,
     network_message: String,
     base_url: String,
+    graph_name: String,
+    pages_surface: bool,
+    blocks_surface: bool,
+    write_surface: bool,
+    local_override_allowed: bool,
+    host_policy_guidance: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
 }
 
 /// Doctor check result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DoctorResult {
+    ready: bool,
     status: DoctorStatus,
     checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 /// Doctor status.
@@ -151,6 +203,18 @@ struct DoctorCheck {
 impl DoctorResult {
     #[must_use]
     fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        Self::from_checks_with_provisioning(checks, None)
+    }
+
+    #[must_use]
+    fn from_checks_with_provisioning(
+        checks: Vec<DoctorCheck>,
+        provisioning: Option<ProvisioningReadiness>,
+    ) -> Self {
+        let ready = checks
+            .iter()
+            .filter(|check| check.critical)
+            .all(|check| check.passed);
         let status = if checks.iter().any(|c| c.critical && !c.passed) {
             DoctorStatus::Unhealthy
         } else if checks.iter().any(|c| !c.passed) {
@@ -158,7 +222,59 @@ impl DoctorResult {
         } else {
             DoctorStatus::Healthy
         };
-        Self { status, checks }
+        Self {
+            ready,
+            status,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable Roam graph or localhost fixture before running verification.",
+            "Provide exactly one auth source: a Roam bearer token for live probes or a credential_id when host-side injection is available.",
+            "Seed deterministic pages and block trees before running write-oriented coverage so evidence stays reviewable.",
+        ],
+        dedicated_environment: "Prefer a disposable graph behind the official API or a localhost bridge fixture. Block creation mutates graph state, so never aim this harness at a live personal knowledge base without explicit approval.",
+        redaction_rules: vec![
+            "Never print raw Roam bearer tokens or injected credential material.",
+            "Treat graph names, page titles, block content, and query responses as potentially sensitive knowledge-base data.",
+            "If a localhost or internal base_url override is used, capture it in the evidence bundle but redact internal hostnames before sharing artifacts.",
+        ],
+        limitations: vec![
+            "This connector only covers page listing, page lookup, block listing, and block creation.",
+            "It does not expose Roam templates, graph settings, user/account administration, or streaming updates.",
+            "Credential-id mode can validate policy shape but cannot prove live reachability until the host injects concrete secret material.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "health or self_check reports that the configured base_url violates Roam host policy",
+                action: "Use https://api.roamresearch.com/api/graph or a localhost test override that mirrors the Roam graph API.",
+            },
+            RemediationHint {
+                code: "credential_injection_required",
+                symptom: "self_check cannot perform a live probe because only credential_id is configured",
+                action: "Inject a concrete Roam bearer token through the host or proxy, then rerun self_check and the verification script.",
+            },
+            RemediationHint {
+                code: "auth_invalid",
+                symptom: "the Roam API returns 401 or 403 during self_check",
+                action: "Verify the token still grants access to the target graph and that the graph_name is correct.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "the live Roam probe failed with rate limiting, timeout, or transient 5xx errors",
+                action: "Wait for the upstream to recover or use a localhost verification stub before rerunning verification.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
@@ -183,6 +299,110 @@ impl RoamConnector {
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    fn doctor(&self) -> DoctorResult {
+        let provisioning = self.config.as_ref().map(RoamConfig::provisioning_readiness);
+        let handshaken = self.session_id.is_some();
+        let mut checks = vec![
+            DoctorCheck {
+                name: "configuration".into(),
+                passed: self.config.is_some(),
+                message: self.config.as_ref().map_or_else(
+                    || Some("Not configured; call configure before handshake or invoke".into()),
+                    |config| {
+                        Some(format!(
+                            "Configured for Roam graph {} via {}",
+                            config.graph_name,
+                            config.auth.redacted_label()
+                        ))
+                    },
+                ),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "client_initialized".into(),
+                passed: self.client.is_some(),
+                message: if self.client.is_some() {
+                    None
+                } else {
+                    Some("API client not initialized; re-run configure".into())
+                },
+                critical: true,
+            },
+            DoctorCheck {
+                name: "handshake".into(),
+                passed: handshaken,
+                message: if handshaken {
+                    None
+                } else {
+                    Some("Handshake not completed".into())
+                },
+                critical: false,
+            },
+        ];
+
+        if let Some(readiness) = &provisioning {
+            checks.push(DoctorCheck {
+                name: "endpoint_policy".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "secret_material".into(),
+                passed: readiness.token_configured,
+                message: Some(if readiness.token_configured {
+                    "Concrete Roam bearer token configured".into()
+                } else {
+                    "Secretless credential_id mode requires host-side secret injection before live verification".into()
+                }),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "graph_scope".into(),
+                passed: true,
+                message: Some(
+                    "Connector scope: page listing, page lookup, block listing, and block creation"
+                        .into(),
+                ),
+                critical: false,
+            });
+        }
+
+        DoctorResult::from_checks_with_provisioning(checks, provisioning)
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        provisioning: Option<&ProvisioningReadiness>,
+        live_probe: Option<&serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "handshaken": self.session_id.is_some(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
     }
 }
 
@@ -254,9 +474,17 @@ impl RoamConnector {
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
+        let client_initialized = self.client.is_some();
         let handshaken = self.session_id.is_some();
+        let provisioning = self.config.as_ref().map(RoamConfig::provisioning_readiness);
+        let ready = configured
+            && client_initialized
+            && handshaken
+            && provisioning
+                .as_ref()
+                .is_none_or(|readiness| readiness.network_ok);
 
-        let status = if configured && handshaken {
+        let status = if ready {
             "healthy"
         } else if configured {
             "degraded"
@@ -267,91 +495,115 @@ impl RoamConnector {
         Ok(json!({
             "status": status,
             "configured": configured,
+            "client_initialized": client_initialized,
             "handshaken": handshaken,
+            "ready": ready,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "details": {
+                "manifest_hash": Self::manifest_hash(),
+                "verification_script": VERIFICATION_SCRIPT_PATH,
+                "artifact_root_hint": ARTIFACT_ROOT_HINT,
+                "provisioning": provisioning,
+                "operator_guidance": operator_guidance(),
+            }
         }))
     }
 
     /// Handle the `doctor` method.
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured — call configure first".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: handshaken,
-            message: if handshaken {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-
-        let result = DoctorResult::from_checks(checks);
+        let result = self.doctor();
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        let Some(config) = &self.config else {
-            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
-            return Self::serialize_self_check_report(report);
+        let provisioning = self.config.as_ref().map(RoamConfig::provisioning_readiness);
+        let report = match (&self.config, &self.client, provisioning.as_ref()) {
+            (None, _, _) | (_, None, _) => Self::attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                provisioning.as_ref(),
+                None,
+            ),
+            (Some(_), Some(_), Some(readiness)) if !readiness.network_ok => {
+                Self::attach_self_check_details(
+                    SelfCheckReport::failed(
+                        "network_constraints_invalid",
+                        readiness.network_message.clone(),
+                    ),
+                    provisioning.as_ref(),
+                    None,
+                )
+            }
+            (Some(_), Some(_), Some(readiness)) if readiness.requires_credential_injection => {
+                Self::attach_self_check_details(
+                    SelfCheckReport::degraded(
+                        "credential_injection_required",
+                        "credential_id mode requires host-side Roam secret injection; skipping live probe",
+                    ),
+                    provisioning.as_ref(),
+                    None,
+                )
+            }
+            (Some(config), Some(client), Some(_)) => match client.list_pages().await {
+                Ok(response) => {
+                    let page_count = response
+                        .get("pages")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, std::vec::Vec::len);
+                    let live_probe = json!({
+                        "probe": "roam.pages.list",
+                        "base_url": config.base_url.clone(),
+                        "graph_name": config.graph_name.clone(),
+                        "page_count": page_count,
+                        "response": response,
+                    });
+                    Self::attach_self_check_details(
+                        SelfCheckReport::ok(),
+                        provisioning.as_ref(),
+                        Some(&live_probe),
+                    )
+                }
+                Err(RoamError::Unauthorized) | Err(RoamError::Forbidden) => {
+                    Self::attach_self_check_details(
+                        SelfCheckReport::failed(
+                            "auth_invalid",
+                            "Roam credentials were rejected by the live probe",
+                        ),
+                        provisioning.as_ref(),
+                        None,
+                    )
+                }
+                Err(error) if error.is_retryable() => {
+                    let live_probe = json!({
+                        "probe": "roam.pages.list",
+                        "base_url": config.base_url.clone(),
+                        "graph_name": config.graph_name.clone(),
+                        "retryable": true,
+                        "retry_after_ms": error.retry_after().map(|duration| duration.as_millis() as u64),
+                        "error": error.to_string(),
+                    });
+                    Self::attach_self_check_details(
+                        SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                        provisioning.as_ref(),
+                        Some(&live_probe),
+                    )
+                }
+                Err(error) => Self::attach_self_check_details(
+                    SelfCheckReport::failed("self_check_failed", error.to_string()),
+                    provisioning.as_ref(),
+                    None,
+                ),
+            },
+            (Some(_), Some(_), None) => Self::attach_self_check_details(
+                SelfCheckReport::failed(
+                    "provisioning_unavailable",
+                    "Provisioning readiness could not be computed",
+                ),
+                None,
+                None,
+            ),
         };
-
-        let readiness = config.provisioning_readiness();
-        if !readiness.network_ok {
-            let mut report = SelfCheckReport::failed(
-                "network_constraints_invalid",
-                readiness.network_message.clone(),
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let Some(_client) = &self.client else {
-            let mut report = SelfCheckReport::failed(
-                "client_missing",
-                "API client not initialized; re-run configure",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        };
-
-        if readiness.requires_credential_injection {
-            let mut report = SelfCheckReport::degraded(
-                "credential_injection_required",
-                "credential_id mode requires egress proxy injection; skipping live probe",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let mut report = SelfCheckReport::ok();
-        report.details = Some(json!({ "provisioning": readiness }));
         Self::serialize_self_check_report(report)
     }
 
@@ -362,6 +614,11 @@ impl RoamConnector {
             "connector_id": "fcp.roam",
             "version": "0.1.0",
             "operations": serde_json::to_value(&ops).unwrap_or_default(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": self.config.as_ref().map(RoamConfig::provisioning_readiness),
+            "operator_guidance": operator_guidance(),
         }))
     }
 

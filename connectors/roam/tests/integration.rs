@@ -16,6 +16,12 @@ use wiremock::matchers::{body_partial_json, header, method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_roam::connector::RoamConnector;
+use fcp_testkit::readiness_helpers::{
+    assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
+};
+
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/roam_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/roam_connector/<timestamp>";
 
 async fn setup_connector(mock_url: &str) -> RoamConnector {
     let mut c = RoamConnector::new();
@@ -66,6 +72,13 @@ async fn lifecycle_shutdown() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex("/test-graph/q"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            [{"title": "Page 1", "uid": "p1"}]
+        ])))
+        .mount(&server)
+        .await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "ok");
@@ -75,7 +88,8 @@ async fn lifecycle_self_check() {
 async fn lifecycle_self_check_unconfigured() {
     let c = RoamConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_self_check_not_ready(&check);
+    assert_eq!(check["reason_code"], "not_configured");
 }
 
 #[fcp_async_core::runtime::test]
@@ -120,6 +134,119 @@ async fn lifecycle_handshake_capabilities() {
         .unwrap();
     let caps = hs["capabilities"].as_array().unwrap();
     assert_eq!(caps.len(), 3);
+}
+
+#[fcp_async_core::runtime::test]
+async fn health_unconfigured_includes_guidance() {
+    let c = RoamConnector::new();
+    let health = c.handle_health().await.unwrap();
+    assert_eq!(health["status"], "unconfigured");
+    assert_eq!(health["ready"], false);
+    assert_eq!(
+        health["details"]["verification_script"],
+        VERIFICATION_SCRIPT_PATH
+    );
+    assert_eq!(health["details"]["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert!(health["details"]["operator_guidance"]["prerequisites"].is_array());
+    println!(
+        "roam_health_evidence={}",
+        serde_json::to_string_pretty(&health).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn doctor_unconfigured_reports_operator_guidance() {
+    let c = RoamConnector::new();
+    let doctor = c.handle_doctor().await.unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], false);
+    assert_eq!(doctor["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert_eq!(
+        doctor["operator_guidance"]["artifact_root_hint"],
+        ARTIFACT_ROOT_HINT
+    );
+    println!(
+        "roam_doctor_evidence={}",
+        serde_json::to_string_pretty(&doctor).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_ready_with_mock_roam_api_and_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex("/test-graph/q"))
+        .and(header("Authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            [{"title": "Daily Notes", "uid": "dn1"}],
+            [{"title": "Project", "uid": "pr1"}]
+        ])))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let doctor = c.handle_doctor().await.unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], true);
+
+    let report = c.handle_self_check().await.unwrap();
+    assert_self_check_ready(&report);
+    assert_eq!(
+        report["details"]["verification_script"],
+        VERIFICATION_SCRIPT_PATH
+    );
+    assert_eq!(report["details"]["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert_eq!(
+        report["details"]["provisioning"]["auth_mode"],
+        "bearer_token"
+    );
+    assert_eq!(report["details"]["live_probe"]["probe"], "roam.pages.list");
+    assert_eq!(report["details"]["live_probe"]["page_count"], 2);
+    println!(
+        "roam_self_check_evidence={}",
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_retryable_roam_failure_reports_degraded() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex("/test-graph/q"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("retry-after", "4")
+                .set_body_string("temporary outage"),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let report = c.handle_self_check().await.unwrap();
+    assert_self_check_not_ready(&report);
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(report["reason_code"], "self_check_retryable");
+    assert_eq!(report["details"]["live_probe"]["retryable"], true);
+    assert_eq!(report["details"]["live_probe"]["retry_after_ms"], 4000);
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspection_emits_v3_compliance_evidence() {
+    let c = RoamConnector::new();
+    let intro = c.handle_introspect().await.unwrap();
+    let ops = intro["operations"].as_array().expect("operations array");
+    assert_eq!(ops.len(), 4);
+    assert_eq!(intro["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert_eq!(intro["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert!(
+        intro["manifest_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    println!(
+        "roam_introspection_evidence={}",
+        serde_json::to_string_pretty(&intro).unwrap()
+    );
 }
 
 // -- Pages List --

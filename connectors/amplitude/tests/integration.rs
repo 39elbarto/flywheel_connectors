@@ -16,6 +16,12 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_amplitude::connector::AmplitudeConnector;
+use fcp_testkit::readiness_helpers::{
+    assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
+};
+
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/amplitude_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/amplitude_connector/<timestamp>";
 
 async fn setup_connector(mock_url: &str) -> AmplitudeConnector {
     let mut c = AmplitudeConnector::new();
@@ -73,6 +79,14 @@ async fn lifecycle_shutdown() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cohorts"))
+        .and(header("Authorization", expected_auth_header().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cohorts": []
+        })))
+        .mount(&server)
+        .await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "ok");
@@ -81,6 +95,7 @@ async fn lifecycle_self_check() {
             .as_bool()
             .unwrap()
     );
+    assert_eq!(check["details"]["provisioning"]["auth_mode"], "basic_auth");
 }
 
 #[fcp_async_core::runtime::test]
@@ -155,6 +170,126 @@ async fn lifecycle_handshake_response() {
         .unwrap();
     assert_eq!(h["connector_id"], "fcp.amplitude");
     assert_eq!(h["protocol_version"], "2.0");
+}
+
+#[fcp_async_core::runtime::test]
+async fn health_unconfigured_includes_guidance() {
+    let c = AmplitudeConnector::new();
+    let health = c.handle_health().await.unwrap();
+    assert_eq!(health["status"], "unconfigured");
+    assert_eq!(health["ready"], false);
+    assert_eq!(
+        health["details"]["verification_script"],
+        VERIFICATION_SCRIPT_PATH
+    );
+    assert_eq!(health["details"]["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert!(health["details"]["operator_guidance"]["prerequisites"].is_array());
+    println!(
+        "amplitude_health_evidence={}",
+        serde_json::to_string_pretty(&health).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn doctor_unconfigured_reports_operator_guidance() {
+    let c = AmplitudeConnector::new();
+    let doctor = c.handle_doctor().await.unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], false);
+    assert_eq!(doctor["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert_eq!(
+        doctor["operator_guidance"]["artifact_root_hint"],
+        ARTIFACT_ROOT_HINT
+    );
+    println!(
+        "amplitude_doctor_evidence={}",
+        serde_json::to_string_pretty(&doctor).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_ready_with_mock_amplitude_api_and_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cohorts"))
+        .and(header("Authorization", expected_auth_header().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cohorts": [
+                {"id": 1, "name": "Power Users"},
+                {"id": 2, "name": "New Users"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let doctor = c.handle_doctor().await.unwrap();
+    assert_doctor_response_valid(&doctor);
+    assert_eq!(doctor["ready"], true);
+
+    let report = c.handle_self_check().await.unwrap();
+    assert_self_check_ready(&report);
+    assert_eq!(
+        report["details"]["verification_script"],
+        VERIFICATION_SCRIPT_PATH
+    );
+    assert_eq!(report["details"]["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert_eq!(report["details"]["provisioning"]["auth_mode"], "basic_auth");
+    assert_eq!(
+        report["details"]["live_probe"]["probe"],
+        "amplitude.cohorts.list"
+    );
+    assert_eq!(report["details"]["live_probe"]["cohorts_count"], 2);
+    println!(
+        "amplitude_self_check_evidence={}",
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_retryable_amplitude_failure_reports_degraded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cohorts"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "3")
+                .set_body_json(json!({"error": "Rate limit exceeded"})),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let report = c.handle_self_check().await.unwrap();
+    assert_self_check_not_ready(&report);
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(report["reason_code"], "self_check_retryable");
+    assert_eq!(report["details"]["live_probe"]["retryable"], true);
+    assert_eq!(report["details"]["live_probe"]["retry_after_ms"], 3000);
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspection_emits_v3_compliance_evidence() {
+    let c = AmplitudeConnector::new();
+    let intro = c.handle_introspect().await.unwrap();
+    let ops = intro["operations"].as_array().expect("operations array");
+    assert_eq!(ops.len(), 3);
+    assert!(ops.iter().all(|op| {
+        op["ai_hints"]["examples"]
+            .as_array()
+            .is_some_and(|examples| !examples.is_empty())
+    }));
+    assert_eq!(intro["verification_script"], VERIFICATION_SCRIPT_PATH);
+    assert_eq!(intro["artifact_root_hint"], ARTIFACT_ROOT_HINT);
+    assert!(
+        intro["manifest_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    println!(
+        "amplitude_introspection_evidence={}",
+        serde_json::to_string_pretty(&intro).unwrap()
+    );
 }
 
 // -- Charts Query --

@@ -1,5 +1,7 @@
 //! FCP `Amplitude` Connector implementation.
 
+#![allow(clippy::doc_markdown)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,12 +13,29 @@ use fcp_core::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
     client::{AmplitudeAuth, AmplitudeClient, DEFAULT_BASE_URL},
     error::AmplitudeError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/amplitude_connector_verification.sh";
+const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/amplitude_connector/<timestamp>";
+const VERIFY_COMMANDS: [&str; 10] = [
+    "scripts/e2e/amplitude_connector_verification.sh",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo run -q -p fwc -- manifest fix connectors/amplitude/manifest.toml --check --json",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo fmt --manifest-path connectors/amplitude/Cargo.toml --check",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo check -p fcp-amplitude --all-targets",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-amplitude --test integration health_unconfigured_includes_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-amplitude --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-amplitude --test integration self_check_ready_with_mock_amplitude_api_and_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-amplitude --test integration self_check_retryable_amplitude_failure_reports_degraded -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo test -p fcp-amplitude --test integration introspection_emits_v3_compliance_evidence -- --nocapture",
+    "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo clippy -p fcp-amplitude --all-targets -- -D warnings",
+];
 
 /// Parsed and validated `Amplitude` connector configuration.
 #[derive(Debug, Clone)]
@@ -68,30 +87,66 @@ impl AmplitudeConfig {
         let (network_ok, network_message) = base_url_policy(&self.base_url);
 
         ProvisioningReadiness {
+            auth_mode: "basic_auth",
             api_key_configured: true,
             secret_key_configured: true,
             network_ok,
             network_message,
             base_url: self.base_url.clone(),
+            charts_surface: true,
+            cohorts_surface: true,
+            events_export_surface: true,
+            write_surface: false,
+            host_policy_guidance: "Production verification must target https://analytics.amplitude.com or https://amplitude.com over HTTPS. Localhost overrides are allowed only for deterministic test fixtures.",
         }
     }
 }
 
 /// Provisioning readiness state for the `Amplitude` connector.
 #[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct ProvisioningReadiness {
+    auth_mode: &'static str,
     api_key_configured: bool,
     secret_key_configured: bool,
     network_ok: bool,
     network_message: String,
     base_url: String,
+    charts_surface: bool,
+    cohorts_surface: bool,
+    events_export_surface: bool,
+    write_surface: bool,
+    host_policy_guidance: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperatorGuidance {
+    prerequisites: Vec<&'static str>,
+    dedicated_environment: &'static str,
+    redaction_rules: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+    common_remediation: Vec<RemediationHint>,
+    rerun_commands: Vec<&'static str>,
+    artifact_root_hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemediationHint {
+    code: &'static str,
+    symptom: &'static str,
+    action: &'static str,
 }
 
 /// Doctor check result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DoctorResult {
+    ready: bool,
     status: DoctorStatus,
     checks: Vec<DoctorCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisioning: Option<ProvisioningReadiness>,
+    operator_guidance: OperatorGuidance,
+    verification_script: &'static str,
 }
 
 /// Doctor status.
@@ -114,8 +169,21 @@ struct DoctorCheck {
 }
 
 impl DoctorResult {
+    #[cfg(test)]
     #[must_use]
     fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        Self::from_checks_with_provisioning(checks, None)
+    }
+
+    #[must_use]
+    fn from_checks_with_provisioning(
+        checks: Vec<DoctorCheck>,
+        provisioning: Option<ProvisioningReadiness>,
+    ) -> Self {
+        let ready = checks
+            .iter()
+            .filter(|check| check.critical)
+            .all(|check| check.passed);
         let status = if checks.iter().any(|c| c.critical && !c.passed) {
             DoctorStatus::Unhealthy
         } else if checks.iter().any(|c| !c.passed) {
@@ -123,7 +191,54 @@ impl DoctorResult {
         } else {
             DoctorStatus::Healthy
         };
-        Self { status, checks }
+        Self {
+            ready,
+            status,
+            checks,
+            provisioning,
+            operator_guidance: operator_guidance(),
+            verification_script: VERIFICATION_SCRIPT_PATH,
+        }
+    }
+}
+
+fn operator_guidance() -> OperatorGuidance {
+    OperatorGuidance {
+        prerequisites: vec![
+            "Use a disposable Amplitude project or localhost fixture before running verification.",
+            "Provide both the Amplitude API key and secret key for a project with read access to charts, cohorts, and event export endpoints.",
+            "Seed deterministic chart IDs, cohort metadata, and event export fixtures before capturing evidence you plan to share.",
+        ],
+        dedicated_environment: "Prefer a disposable analytics workspace or a localhost fixture that mirrors the Amplitude export surface. Event exports and cohort metadata can contain sensitive behavioral analytics, so do not aim this harness at production without explicit approval and redaction.",
+        redaction_rules: vec![
+            "Never print raw Amplitude API keys, secret keys, Basic auth headers, or Authorization values.",
+            "Treat chart identifiers, cohort names, cohort sizes, and exported event payloads as potentially sensitive analytics metadata.",
+            "If a localhost or internal base_url override is used, capture it in the evidence bundle but redact internal hostnames before sharing artifacts.",
+        ],
+        limitations: vec![
+            "This connector is read-only: chart query, cohort listing, and event export only.",
+            "It does not ingest events, mutate cohorts, edit dashboards, manage experiments, or administer workspace settings.",
+            "Localhost overrides are supported only for deterministic verification fixtures; production targets must stay on approved HTTPS hosts.",
+        ],
+        common_remediation: vec![
+            RemediationHint {
+                code: "network_constraints_invalid",
+                symptom: "health or self_check reports that the configured base_url violates Amplitude host policy",
+                action: "Use https://analytics.amplitude.com, https://amplitude.com, or a localhost test override that mirrors the Amplitude API surface.",
+            },
+            RemediationHint {
+                code: "auth_invalid",
+                symptom: "the Amplitude API returns 401 or 403 during self_check",
+                action: "Verify the API key and secret key pair belongs to the intended Amplitude project and still has access to chart, cohort, and export reads.",
+            },
+            RemediationHint {
+                code: "self_check_retryable",
+                symptom: "the live Amplitude probe failed with rate limiting, timeout, or transient upstream errors",
+                action: "Wait for the upstream service to recover or rerun verification after the retry window expires.",
+            },
+        ],
+        rerun_commands: VERIFY_COMMANDS.to_vec(),
+        artifact_root_hint: ARTIFACT_ROOT_HINT,
     }
 }
 
@@ -148,6 +263,109 @@ impl AmplitudeConnector {
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
         }
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    fn doctor(&self) -> DoctorResult {
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(AmplitudeConfig::provisioning_readiness);
+        let handshaken = self.session_id.is_some();
+        let mut checks = vec![
+            DoctorCheck {
+                name: "configuration".into(),
+                passed: self.config.is_some(),
+                message: self.config.as_ref().map_or_else(
+                    || Some("Not configured; call configure before handshake or invoke".into()),
+                    |config| {
+                        Some(format!(
+                            "Configured for {} via {}",
+                            config.base_url,
+                            config.auth.redacted_label()
+                        ))
+                    },
+                ),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "client_initialized".into(),
+                passed: self.client.is_some(),
+                message: if self.client.is_some() {
+                    None
+                } else {
+                    Some("API client not initialized; re-run configure".into())
+                },
+                critical: true,
+            },
+            DoctorCheck {
+                name: "handshake".into(),
+                passed: handshaken,
+                message: if handshaken {
+                    None
+                } else {
+                    Some("Handshake not completed".into())
+                },
+                critical: false,
+            },
+        ];
+
+        if let Some(readiness) = &provisioning {
+            checks.push(DoctorCheck {
+                name: "endpoint_policy".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message.clone()),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "secret_material".into(),
+                passed: readiness.api_key_configured && readiness.secret_key_configured,
+                message: Some("Amplitude Basic auth credentials configured".into()),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "surface_scope".into(),
+                passed: true,
+                message: Some(
+                    "Read-only analytics surface: chart query, cohort list, and event export"
+                        .into(),
+                ),
+                critical: false,
+            });
+        }
+
+        DoctorResult::from_checks_with_provisioning(checks, provisioning)
+    }
+
+    fn attach_self_check_details(
+        &self,
+        mut report: SelfCheckReport,
+        provisioning: Option<&ProvisioningReadiness>,
+        live_probe: Option<&serde_json::Value>,
+    ) -> SelfCheckReport {
+        report.details = Some(json!({
+            "configured": self.config.is_some(),
+            "client_initialized": self.client.is_some(),
+            "handshaken": self.session_id.is_some(),
+            "manifest_hash": Self::manifest_hash(),
+            "verification_script": VERIFICATION_SCRIPT_PATH,
+            "artifact_root_hint": ARTIFACT_ROOT_HINT,
+            "provisioning": provisioning,
+            "live_probe": live_probe,
+            "operator_guidance": operator_guidance(),
+        }));
+        report
     }
 }
 
@@ -210,9 +428,20 @@ impl AmplitudeConnector {
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
+        let client_initialized = self.client.is_some();
         let handshaken = self.session_id.is_some();
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(AmplitudeConfig::provisioning_readiness);
+        let ready = configured
+            && client_initialized
+            && handshaken
+            && provisioning
+                .as_ref()
+                .is_none_or(|readiness| readiness.network_ok);
 
-        let status = if configured && handshaken {
+        let status = if ready {
             "healthy"
         } else if configured {
             "degraded"
@@ -223,82 +452,104 @@ impl AmplitudeConnector {
         Ok(json!({
             "status": status,
             "configured": configured,
+            "client_initialized": client_initialized,
             "handshaken": handshaken,
+            "ready": ready,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "details": {
+                "manifest_hash": Self::manifest_hash(),
+                "verification_script": VERIFICATION_SCRIPT_PATH,
+                "artifact_root_hint": ARTIFACT_ROOT_HINT,
+                "provisioning": provisioning,
+                "operator_guidance": operator_guidance(),
+            }
         }))
     }
 
     /// Handle the `doctor` method.
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured — call configure first".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: handshaken,
-            message: if handshaken {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-
-        let result = DoctorResult::from_checks(checks);
+        let result = self.doctor();
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        let Some(config) = &self.config else {
-            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
-            return Self::serialize_self_check_report(report);
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(AmplitudeConfig::provisioning_readiness);
+        let report = match (&self.config, &self.client, provisioning.as_ref()) {
+            (None, _, _) | (_, None, _) => self.attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                provisioning.as_ref(),
+                None,
+            ),
+            (Some(_), Some(_), Some(readiness)) if !readiness.network_ok => self
+                .attach_self_check_details(
+                    SelfCheckReport::failed(
+                        "network_constraints_invalid",
+                        readiness.network_message.clone(),
+                    ),
+                    provisioning.as_ref(),
+                    None,
+                ),
+            (Some(config), Some(client), Some(_)) => match client.list_cohorts().await {
+                Ok(response) => {
+                    let cohorts_count = response
+                        .get("cohorts")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, std::vec::Vec::len);
+                    let live_probe = json!({
+                        "probe": "amplitude.cohorts.list",
+                        "base_url": config.base_url.clone(),
+                        "cohorts_count": cohorts_count,
+                        "response": response,
+                    });
+                    self.attach_self_check_details(
+                        SelfCheckReport::ok(),
+                        provisioning.as_ref(),
+                        Some(&live_probe),
+                    )
+                }
+                Err(AmplitudeError::Unauthorized) | Err(AmplitudeError::Forbidden) => self
+                    .attach_self_check_details(
+                        SelfCheckReport::failed(
+                            "auth_invalid",
+                            "Amplitude credentials were rejected by the live probe",
+                        ),
+                        provisioning.as_ref(),
+                        None,
+                    ),
+                Err(error) if error.is_retryable() => {
+                    let live_probe = json!({
+                        "probe": "amplitude.cohorts.list",
+                        "base_url": config.base_url.clone(),
+                        "retryable": true,
+                        "retry_after_ms": error.retry_after().map(|duration| duration.as_millis() as u64),
+                        "error": error.to_string(),
+                    });
+                    self.attach_self_check_details(
+                        SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                        provisioning.as_ref(),
+                        Some(&live_probe),
+                    )
+                }
+                Err(error) => self.attach_self_check_details(
+                    SelfCheckReport::failed("self_check_failed", error.to_string()),
+                    provisioning.as_ref(),
+                    None,
+                ),
+            },
+            (Some(_), Some(_), None) => self.attach_self_check_details(
+                SelfCheckReport::failed(
+                    "provisioning_unavailable",
+                    "Provisioning readiness could not be computed",
+                ),
+                None,
+                None,
+            ),
         };
-
-        let readiness = config.provisioning_readiness();
-        if !readiness.network_ok {
-            let mut report = SelfCheckReport::failed(
-                "network_constraints_invalid",
-                readiness.network_message.clone(),
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let Some(_client) = &self.client else {
-            let mut report = SelfCheckReport::failed(
-                "client_missing",
-                "API client not initialized; re-run configure",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        };
-
-        let mut report = SelfCheckReport::ok();
-        report.details = Some(json!({ "provisioning": readiness }));
         Self::serialize_self_check_report(report)
     }
 
@@ -401,9 +652,30 @@ impl AmplitudeConnector {
             event_caps: None,
         };
 
-        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+        let mut value = serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize introspection: {e}"),
-        })
+        })?;
+        let object = value.as_object_mut().ok_or_else(|| FcpError::Internal {
+            message: "Amplitude introspection payload was not an object".into(),
+        })?;
+        object.insert("connector_id".into(), json!("fcp.amplitude"));
+        object.insert("version".into(), json!("0.1.0"));
+        object.insert("manifest_hash".into(), json!(Self::manifest_hash()));
+        object.insert(
+            "verification_script".into(),
+            json!(VERIFICATION_SCRIPT_PATH),
+        );
+        object.insert("artifact_root_hint".into(), json!(ARTIFACT_ROOT_HINT));
+        object.insert(
+            "provisioning".into(),
+            json!(
+                self.config
+                    .as_ref()
+                    .map(AmplitudeConfig::provisioning_readiness)
+            ),
+        );
+        object.insert("operator_guidance".into(), json!(operator_guidance()));
+        Ok(value)
     }
 
     /// Handle the `invoke` method.

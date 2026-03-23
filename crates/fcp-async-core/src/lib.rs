@@ -368,9 +368,7 @@ pub mod time {
 
     fn instant_from_time(time: Time) -> std::time::Instant {
         let epoch = *TIMER_EPOCH.get_or_init(std::time::Instant::now);
-        epoch
-            .checked_add(Duration::from_nanos(time.as_nanos()))
-            .unwrap_or(epoch)
+        super::saturating_instant_add(epoch, Duration::from_nanos(time.as_nanos()))
     }
 
     /// Sleep future abstraction owned by async-core.
@@ -438,6 +436,41 @@ pub mod time {
     }
 }
 
+fn duration_from_total_nanos(total_nanos: u128) -> Duration {
+    const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+    let seconds = total_nanos / NANOS_PER_SECOND;
+    let nanos = u32::try_from(total_nanos % NANOS_PER_SECOND).unwrap_or(u32::MAX);
+
+    Duration::new(u64::try_from(seconds).unwrap_or(u64::MAX), nanos)
+}
+
+fn saturating_instant_add(base: Instant, offset: Duration) -> Instant {
+    if let Some(target) = base.checked_add(offset) {
+        return target;
+    }
+
+    let mut low = 0_u128;
+    let mut high = offset.as_nanos();
+    let mut best = base;
+
+    while low <= high {
+        let mid = low + ((high - low) / 2);
+        let candidate = duration_from_total_nanos(mid);
+        if let Some(target) = base.checked_add(candidate) {
+            best = target;
+            low = mid.saturating_add(1);
+        } else {
+            if mid == 0 {
+                break;
+            }
+            high = mid - 1;
+        }
+    }
+
+    best
+}
+
 /// Absolute deadline wrapper used for deterministic timeout budgeting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Deadline {
@@ -450,7 +483,7 @@ impl Deadline {
     pub fn after(timeout: Duration) -> Self {
         let now = Instant::now();
         Self {
-            deadline_at: now.checked_add(timeout).unwrap_or(now),
+            deadline_at: saturating_instant_add(now, timeout),
         }
     }
 
@@ -2034,10 +2067,13 @@ pub mod hyper_bridge {
         }
     }
 
+    type SpawnFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+    type SpawnFn = Arc<dyn Fn(SpawnFuture) + Send + Sync>;
+
     /// Hyper executor backed by `fcp_async_core::task::spawn`.
     #[derive(Clone)]
     pub struct HyperExecutor {
-        spawn_fn: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
+        spawn_fn: SpawnFn,
     }
 
     impl std::fmt::Debug for HyperExecutor {
@@ -2052,7 +2088,7 @@ pub mod hyper_bridge {
         /// Create an executor with a custom spawn function.
         pub fn with_spawn_fn<F>(spawn_fn: F) -> Self
         where
-            F: Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync + 'static,
+            F: Fn(SpawnFuture) + Send + Sync + 'static,
         {
             Self {
                 spawn_fn: Arc::new(spawn_fn),
@@ -2296,9 +2332,7 @@ impl TaskGroup {
         self.cancellation.cancel();
 
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-        let deadline = std::time::Instant::now()
-            .checked_add(timeout)
-            .unwrap_or_else(std::time::Instant::now);
+        let deadline = saturating_instant_add(std::time::Instant::now(), timeout);
         let mut first_error: Option<AsyncError> = None;
 
         for (task_name, mut handle) in self.tasks.drain(..) {
@@ -2339,7 +2373,7 @@ impl Default for TaskGroup {
 #[cfg(test)]
 mod tests {
     use std::future;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use std::{
         sync::Arc,
         sync::atomic::{AtomicUsize, Ordering},
@@ -2349,6 +2383,23 @@ mod tests {
         AsyncError, CancellationToken, ContextScope, ExecutionContext, Instrumentation, TaskGroup,
         channel, io, runtime, task, time, tls, websocket,
     };
+
+    fn overflowing_duration_for(now: Instant) -> Option<Duration> {
+        let mut candidate = Duration::from_secs(1);
+
+        while now.checked_add(candidate).is_some() {
+            let Some(next) = candidate.checked_mul(2) else {
+                break;
+            };
+            candidate = next;
+        }
+
+        if now.checked_add(candidate).is_none() {
+            return Some(candidate);
+        }
+
+        now.checked_add(Duration::MAX).is_none().then_some(Duration::MAX)
+    }
 
     #[test]
     fn block_on_sync_executes_outside_tokio_runtime() {
@@ -2775,6 +2826,30 @@ mod tests {
             .await
             .expect_err("hung task should cause timeout");
         assert!(matches!(err, AsyncError::Timeout { .. }));
+    }
+
+    #[runtime::test]
+    async fn task_group_shutdown_overflowing_timeout_still_waits_for_graceful_exit() {
+        let Some(overflow) = overflowing_duration_for(Instant::now()) else {
+            return;
+        };
+        let mut group = TaskGroup::new();
+        let mut listener = group.subscribe_cancellation();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_clone = Arc::clone(&completed);
+
+        group.spawn("graceful-exit", async move {
+            listener.cancelled().await?;
+            time::sleep(Duration::from_millis(20)).await;
+            completed_clone.store(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        group
+            .shutdown(overflow)
+            .await
+            .expect("overflowing shutdown budget should not collapse to an immediate timeout");
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
     }
 
     #[runtime::test]
@@ -6163,6 +6238,29 @@ mod tests {
         let d = super::Deadline::after(Duration::from_secs(86400));
         assert!(!d.is_expired());
         assert!(d.remaining() > Duration::from_secs(86000));
+    }
+
+    #[test]
+    fn saturating_instant_add_overflow_stays_in_future() {
+        let base = Instant::now();
+        let Some(overflow) = overflowing_duration_for(base) else {
+            return;
+        };
+        let saturated = super::saturating_instant_add(base, overflow);
+
+        assert!(saturated > base);
+        assert!(saturated.checked_add(Duration::from_nanos(1)).is_none());
+    }
+
+    #[test]
+    fn deadline_after_overflowing_duration_keeps_positive_budget() {
+        let Some(overflow) = overflowing_duration_for(Instant::now()) else {
+            return;
+        };
+        let deadline = super::Deadline::after(overflow);
+
+        assert!(!deadline.is_expired());
+        assert!(deadline.remaining() > Duration::ZERO);
     }
 
     #[test]

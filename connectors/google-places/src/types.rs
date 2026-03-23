@@ -9,8 +9,7 @@ use url::Url;
 
 pub const DEFAULT_SEARCH_TEXT_FIELD_MASK: &str =
     "places.id,places.name,places.displayName,places.formattedAddress";
-pub const DEFAULT_AUTOCOMPLETE_FIELD_MASK: &str =
-    "suggestions.placePrediction.place,suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.queryPrediction.text.text";
+pub const DEFAULT_AUTOCOMPLETE_FIELD_MASK: &str = "suggestions.placePrediction.place,suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.queryPrediction.text.text";
 pub const DEFAULT_PLACE_DETAILS_FIELD_MASK: &str =
     "id,name,displayName,formattedAddress,types,googleMapsUri";
 
@@ -300,8 +299,14 @@ mod tests {
             config.normalized_base_url(),
             "https://places.googleapis.com"
         );
-        assert_eq!(config.search_text_field_mask, DEFAULT_SEARCH_TEXT_FIELD_MASK);
-        assert_eq!(config.autocomplete_field_mask, DEFAULT_AUTOCOMPLETE_FIELD_MASK);
+        assert_eq!(
+            config.search_text_field_mask,
+            DEFAULT_SEARCH_TEXT_FIELD_MASK
+        );
+        assert_eq!(
+            config.autocomplete_field_mask,
+            DEFAULT_AUTOCOMPLETE_FIELD_MASK
+        );
         assert_eq!(
             config.place_details_field_mask,
             DEFAULT_PLACE_DETAILS_FIELD_MASK

@@ -17,7 +17,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::GooglePlacesClient;
-use crate::types::GooglePlacesConfig;
+use crate::types::{AutocompleteInput, GetPlaceInput, GooglePlacesConfig, SearchTextInput};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const CAP_READ: &str = "google_places.read";
@@ -77,6 +77,12 @@ impl GooglePlacesConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    fn serialize_output<T: serde::Serialize>(value: T) -> FcpResult<serde_json::Value> {
+        serde_json::to_value(value).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize Google Places response: {error}"),
+        })
     }
 
     pub fn doctor(&self) -> DoctorResult {
@@ -226,79 +232,56 @@ impl GooglePlacesConnector {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let required_cap = CapabilityId::from_static(CAP_READ);
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        let InvokeRequest {
+            id,
+            operation,
+            input,
+            capability_token,
+            ..
+        } = req;
+        verifier.verify(&capability_token, &required_cap, &operation, &[])?;
 
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
-        let output = match req.operation.as_str() {
+        let output = match operation.as_str() {
             OP_SEARCH_TEXT => {
-                let query = req
-                    .input
-                    .get("query")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing query".into(),
-                    })?;
-                let max_result_count = req
-                    .input
-                    .get("max_result_count")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| u32::try_from(value).ok());
-                let open_now = req
-                    .input
-                    .get("open_now")
-                    .and_then(serde_json::Value::as_bool);
-                let field_mask = req.input.get("field_mask").and_then(|value| value.as_str());
-                state
-                    .client
-                    .search_text(query, max_result_count, open_now, field_mask)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?
+                let input = SearchTextInput::from_value(input)?;
+                Self::serialize_output(
+                    state
+                        .client
+                        .search_text(&input)
+                        .await
+                        .map_err(|error| error.to_fcp_error())?,
+                )?
             }
             OP_AUTOCOMPLETE => {
-                let input = req
-                    .input
-                    .get("input")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing input".into(),
-                    })?;
-                let session_token = req
-                    .input
-                    .get("session_token")
-                    .and_then(|value| value.as_str());
-                let field_mask = req.input.get("field_mask").and_then(|value| value.as_str());
-                state
-                    .client
-                    .autocomplete(input, session_token, field_mask)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?
+                let input = AutocompleteInput::from_value(input)?;
+                Self::serialize_output(
+                    state
+                        .client
+                        .autocomplete(&input)
+                        .await
+                        .map_err(|error| error.to_fcp_error())?,
+                )?
             }
             OP_GET_PLACE => {
-                let place = req
-                    .input
-                    .get("place")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing place".into(),
-                    })?;
-                let language_code = req
-                    .input
-                    .get("language_code")
-                    .and_then(|value| value.as_str());
-                let field_mask = req.input.get("field_mask").and_then(|value| value.as_str());
-                state
-                    .client
-                    .get_place(place, language_code, field_mask)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?
+                let input = GetPlaceInput::from_value(input)?;
+                Self::serialize_output(
+                    state
+                        .client
+                        .get_place(&input)
+                        .await
+                        .map_err(|error| error.to_fcp_error())?,
+                )?
             }
             OP_HEALTH => json!({
                 "status": "ok",
                 "base_url": state.client.base_url(),
                 "manifest_hash": Self::manifest_hash(),
+                "field_masks": {
+                    "search_text": state.config.search_text_field_mask.as_str(),
+                    "autocomplete": state.config.autocomplete_field_mask.as_str(),
+                    "place_details": state.config.place_details_field_mask.as_str(),
+                }
             }),
             operation => {
                 return Err(FcpError::InvalidRequest {
@@ -307,7 +290,7 @@ impl GooglePlacesConnector {
                 });
             }
         };
-        Ok(InvokeResponse::ok(req.id, output))
+        Ok(InvokeResponse::ok(id, output))
     }
 }
 
@@ -393,7 +376,11 @@ impl FcpConnector for GooglePlacesConnector {
         let details = json!({
             "base_url": state.config.normalized_base_url(),
             "request_timeout_ms": state.config.request_timeout_ms,
-            "field_mask": state.config.default_field_mask,
+            "field_masks": {
+                "search_text": state.config.search_text_field_mask.as_str(),
+                "autocomplete": state.config.autocomplete_field_mask.as_str(),
+                "place_details": state.config.place_details_field_mask.as_str(),
+            },
         });
         Ok(SelfCheckReport {
             details: Some(details),

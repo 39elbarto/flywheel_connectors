@@ -563,13 +563,21 @@ impl FcpConnector for WeComConnector {
         } else {
             HealthState::Starting
         };
-        let details = self.state.as_ref().map(|state| {
-            json!({
+        let details = if let Some(state) = self.state.as_ref() {
+            let token_cached = {
+                let cache = state.token_cache.lock().await;
+                cache
+                    .as_ref()
+                    .is_some_and(|cached| Instant::now() < cached.expires_at)
+            };
+            Some(json!({
                 "base_url": state.config.base_url,
                 "agent_id": state.config.agent_id,
-                "token_cached": false,
-            })
-        });
+                "token_cached": token_cached,
+            }))
+        } else {
+            None
+        };
         HealthSnapshot {
             status,
             uptime_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -811,6 +819,7 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_sdk::prelude::FcpConnector;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, method, path, query_param},
@@ -928,5 +937,62 @@ mod tests {
             .expect("upload should succeed");
 
         assert_eq!(output["media_id"], "MEDIA123");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_reflects_whether_token_is_cached() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cgi-bin/gettoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errcode": 0,
+                "errmsg": "ok",
+                "access_token": "token-123",
+                "expires_in": 7200
+            })))
+            .mount(&server)
+            .await;
+
+        let mut connector = WeComConnector::new();
+        connector
+            .configure(json!({
+                "base_url": server.uri(),
+                "corp_id": "corp",
+                "agent_id": 1_000_002_u64,
+                "agent_secret": "secret",
+                "request_timeout_ms": DEFAULT_TIMEOUT_MS
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let health_before = connector.health().await;
+        assert_eq!(
+            health_before
+                .details
+                .as_ref()
+                .and_then(|details| details.get("token_cached"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let report = connector
+            .self_check()
+            .await
+            .expect("self_check should return");
+        assert_eq!(
+            report.status,
+            fcp_core::SelfCheckStatus::Ok,
+            "self_check should populate the token cache"
+        );
+
+        let health_after = connector.health().await;
+        assert_eq!(
+            health_after
+                .details
+                .as_ref()
+                .and_then(|details| details.get("token_cached"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 }

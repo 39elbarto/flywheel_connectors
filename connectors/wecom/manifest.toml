@@ -6,13 +6,15 @@ schema_version = "2.1"
 id = "fcp.wecom"
 name = "WeCom Enterprise Messaging"
 version = "0.1.0"
-description = "Tenant-scoped WeCom connector for enterprise bot messaging, media upload, directory lookups, and health verification"
+description = "Tenant-scoped WeCom connector for enterprise app messaging, media upload, directory lookups, and health verification"
 archetype = "operational"
 homepage = "https://developer.work.weixin.qq.com/"
 
 # Auth and scope model:
 # - One connector instance is bound to one WeCom tenant application.
 # - Authentication uses `corp_id`, `agent_id`, and `agent_secret`.
+# - The operator provisions that application out of band and grants the app the
+#   tenant permissions needed for outbound messaging and directory reads.
 # - The connector acts as the configured enterprise application; user impersonation,
 #   callback verification, and inbound webhook or websocket delivery are explicit non-goals
 #   for this first slice.

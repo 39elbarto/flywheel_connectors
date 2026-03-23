@@ -54,12 +54,21 @@ const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AccessTokenResponse {
     #[serde(default)]
     pub access_token: String,
     #[serde(default)]
     pub expires_in: u64,
+}
+
+impl std::fmt::Debug for AccessTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +131,18 @@ mod tests {
         let resp: AccessTokenResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.access_token, "");
         assert_eq!(resp.expires_in, 0);
+    }
+
+    #[test]
+    fn access_token_response_debug_redacts_token() {
+        let resp = AccessTokenResponse {
+            access_token: "super_secret_token_value".into(),
+            expires_in: 7200,
+        };
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("super_secret_token_value"));
+        assert!(debug.contains("7200"));
     }
 
     #[test]

@@ -622,7 +622,7 @@ fn operation(
                 "Group routes must use the `chat:` prefix with an openConversationId.".into(),
             ],
             examples: Vec::new(),
-            related: vec![CapabilityId::from_static(OP_HEALTH)],
+            related: vec![CapabilityId::from_static(CAP_HEALTH_READ)],
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),

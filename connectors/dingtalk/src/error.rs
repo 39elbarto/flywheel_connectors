@@ -48,13 +48,13 @@ impl DingTalkError {
             Self::Http(error) => error.is_timeout() || error.is_connect(),
             Self::RateLimited { .. } => true,
             Self::Api { code, .. } => matches!(code, 429 | 500 | 502 | 503 | 504),
+            Self::Token(_) => true,
             Self::Media { .. }
             | Self::Json(_)
             | Self::Unauthorized(_)
             | Self::Async(_)
             | Self::Config(_)
-            | Self::InvalidInput(_)
-            | Self::Token(_) => false,
+            | Self::InvalidInput(_) => false,
         }
     }
 
@@ -219,9 +219,7 @@ mod tests {
     #[test]
     fn token_error_is_retryable() {
         let err = DingTalkError::Token("expired".into());
-        // Token errors are not retryable at the error variant level
-        assert!(!err.is_retryable());
-        // But the FcpError mapping marks them retryable for upstream retry logic
+        assert!(err.is_retryable());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::External { retryable, .. } => {

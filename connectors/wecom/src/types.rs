@@ -117,12 +117,21 @@ pub struct WeComCallbackEnvelope {
     pub plaintext_xml: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AccessTokenResponse {
     #[serde(default)]
     pub access_token: String,
     #[serde(default)]
     pub expires_in: u64,
+}
+
+impl std::fmt::Debug for AccessTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for WeComConfig {
@@ -673,5 +682,17 @@ mod tests {
         }))
         .expect_err("missing signature must fail");
         assert!(matches!(error, FcpError::InvalidRequest { code: 1005, .. }));
+    }
+
+    #[test]
+    fn access_token_response_debug_redacts_token() {
+        let response = AccessTokenResponse {
+            access_token: "super_secret_token_12345".into(),
+            expires_in: 7200,
+        };
+        let debug = format!("{response:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("super_secret_token_12345"));
+        assert!(debug.contains("7200"));
     }
 }

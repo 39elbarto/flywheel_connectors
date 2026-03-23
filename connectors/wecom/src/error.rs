@@ -45,12 +45,12 @@ impl WeComError {
             Self::Http(error) => error.is_timeout() || error.is_connect(),
             Self::RateLimited { .. } => true,
             Self::Api { errcode, .. } => matches!(errcode, 429 | 500 | 502 | 503 | 504),
+            Self::Token(_) => true,
             Self::Json(_)
             | Self::Unauthorized(_)
             | Self::Async(_)
             | Self::Config(_)
-            | Self::InvalidInput(_)
-            | Self::Token(_) => false,
+            | Self::InvalidInput(_) => false,
         }
     }
 
@@ -206,9 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn token_error_is_retryable_via_fcp() {
+    fn token_error_is_retryable() {
         let err = WeComError::Token("expired".into());
-        assert!(!err.is_retryable());
+        assert!(err.is_retryable());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::External { retryable, .. } => {

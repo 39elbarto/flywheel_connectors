@@ -159,9 +159,9 @@ impl DingTalkClient {
         })?;
 
         if token.access_token.trim().is_empty() {
-            return Err(DingTalkError::Token(format!(
-                "access token response missing access_token: {body}"
-            )));
+            return Err(DingTalkError::Token(
+                "access token response missing or empty access_token field".into(),
+            ));
         }
 
         let ttl = token

@@ -156,9 +156,9 @@ impl QqClient {
             .map_err(|e| QqError::Token(format!("failed to parse access token payload: {e}")))?;
 
         if token.access_token.trim().is_empty() {
-            return Err(QqError::Token(format!(
-                "access token response missing access_token: {body}"
-            )));
+            return Err(QqError::Token(
+                "access token response missing or empty access_token field".to_string(),
+            ));
         }
 
         let ttl = token

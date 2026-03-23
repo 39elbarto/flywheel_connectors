@@ -37,17 +37,17 @@ impl OutlookError {
                 message: message.clone(),
             },
             Self::Http(error) if error.is_timeout() => FcpError::UpstreamTimeout {
-                retry_after_ms: *retry_after_ms,
+                service: "outlook".into(),
             },
             Self::Http(error) => FcpError::External {
-                retry_after_ms: *retry_after_ms,
+                service: "outlook".into(),
                 message: error.to_string(),
                 status_code: None,
                 retryable: error.is_connect() || error.is_timeout(),
                 retry_after: None,
             },
             Self::Api { status_code, message } => FcpError::External {
-                retry_after_ms: *retry_after_ms,
+                service: "outlook".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
                 retryable: matches!(status_code, 429 | 500 | 502 | 503 | 504),

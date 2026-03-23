@@ -1,4 +1,4 @@
-//! Synology Chat connector implementation.
+//! `Synology Chat` connector implementation.
 
 use std::time::{Duration, Instant};
 
@@ -16,8 +16,8 @@ use fcp_sdk::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::client::SynologyChatClient;
-use crate::types::SynologyChatConfig;
+use crate::client::{SynologyChatClient, SynologyChatMessageRequest, SynologyChatPayload};
+use crate::types::{SynologyChatConfig, SynologyChatStateModel};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const CAP_READ: &str = "synology_chat.read";
@@ -49,7 +49,7 @@ impl DoctorResult {
 
 #[derive(Debug)]
 struct SynologyChatState {
-    config: SynologyChatConfig,
+    model: SynologyChatStateModel,
     client: SynologyChatClient,
     runtime: ConnectorRuntime,
 }
@@ -93,9 +93,15 @@ impl SynologyChatConnector {
 
         if let Some(state) = &self.state {
             checks.push(DoctorCheck {
-                name: "incoming_url".into(),
+                name: "delivery_target".into(),
                 passed: true,
-                message: state.config.normalized_incoming_url(),
+                message: state.model.delivery_target.incoming_url_redacted.clone(),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "receive_path".into(),
+                passed: true,
+                message: "disabled".into(),
                 critical: false,
             });
         }
@@ -215,11 +221,14 @@ impl SynologyChatConnector {
                     })?;
                 let user_ids = optional_user_ids(&req.input)?;
                 let bot_name = req.input.get("bot_name").and_then(|value| value.as_str());
+                let request = SynologyChatMessageRequest::new(text, &user_ids, bot_name)
+                    .map_err(|error| error.to_fcp_error())?;
                 state
                     .client
-                    .send_message(text, &user_ids, bot_name)
+                    .send_message(&request)
                     .await
                     .map_err(|error| error.to_fcp_error())?
+                    .into_json()
             }
             OP_SEND_PAYLOAD => {
                 let payload = req
@@ -229,17 +238,23 @@ impl SynologyChatConnector {
                         code: 1005,
                         message: "Missing payload".into(),
                     })?;
+                let payload = SynologyChatPayload::from_value(payload)
+                    .map_err(|error| error.to_fcp_error())?;
                 state
                     .client
-                    .send_payload(payload)
+                    .send_payload(&payload)
                     .await
                     .map_err(|error| error.to_fcp_error())?
+                    .into_json()
             }
             OP_HEALTH => json!({
                 "status": "ok",
-                "incoming_url": state.client.incoming_url(),
-                "allow_insecure_ssl": state.config.allow_insecure_ssl,
-                "outgoing_token_configured": state.config.outgoing_token.is_some(),
+                "delivery_target": &state.model.delivery_target,
+                "request_timeout_ms": state.model.request_timeout_ms,
+                "allow_insecure_ssl": state.model.allow_insecure_ssl,
+                "outgoing_token_configured": state.model.outgoing_token_configured,
+                "receive_path": &state.model.receive_path,
+                "reply_semantics": &state.model.reply_semantics,
                 "manifest_hash": Self::manifest_hash(),
             }),
             _ => unreachable!(),
@@ -274,7 +289,10 @@ fn optional_user_ids(input: &serde_json::Value) -> FcpResult<Vec<String>> {
                     message: "user_ids must not contain empty strings".into(),
                 });
             }
-            result.push(user_id.to_string());
+            let trimmed = user_id.trim();
+            if !result.iter().any(|existing| existing == trimmed) {
+                result.push(trimmed.to_string());
+            }
         }
         return Ok(result);
     }
@@ -282,7 +300,8 @@ fn optional_user_ids(input: &serde_json::Value) -> FcpResult<Vec<String>> {
     Ok(input
         .get("user_id")
         .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(|value| vec![value.to_string()])
         .unwrap_or_default())
 }
@@ -295,14 +314,15 @@ impl FcpConnector for SynologyChatConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let config = SynologyChatConfig::from_value(config)?;
+        let model = config.state_model();
         let runtime = ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
+                .with_request_timeout(Duration::from_millis(config.request_timeout_ms())),
         );
         let client =
             SynologyChatClient::from_config(&config).map_err(|error| error.to_fcp_error())?;
         self.state = Some(SynologyChatState {
-            config,
+            model,
             client,
             runtime,
         });
@@ -346,7 +366,12 @@ impl FcpConnector for SynologyChatConnector {
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         snapshot.details = Some(json!({
             "configured": self.state.is_some(),
-            "incoming_url": self.state.as_ref().map(|state| state.config.normalized_incoming_url()),
+            "delivery_target": self.state.as_ref().map(|state| &state.model.delivery_target),
+            "request_timeout_ms": self.state.as_ref().map(|state| state.model.request_timeout_ms),
+            "allow_insecure_ssl": self.state.as_ref().map(|state| state.model.allow_insecure_ssl),
+            "outgoing_token_configured": self.state.as_ref().map(|state| state.model.outgoing_token_configured),
+            "receive_path": self.state.as_ref().map(|state| &state.model.receive_path),
+            "reply_semantics": self.state.as_ref().map(|state| &state.model.reply_semantics),
             "manifest_hash": Self::manifest_hash(),
         }));
         snapshot
@@ -362,10 +387,12 @@ impl FcpConnector for SynologyChatConnector {
         let report = SelfCheckReport::ok();
         Ok(SelfCheckReport {
             details: Some(json!({
-                "incoming_url": state.config.normalized_incoming_url(),
-                "request_timeout_ms": state.config.request_timeout_ms,
-                "allow_insecure_ssl": state.config.allow_insecure_ssl,
-                "outgoing_token_configured": state.config.outgoing_token.is_some(),
+                "delivery_target": &state.model.delivery_target,
+                "request_timeout_ms": state.model.request_timeout_ms,
+                "allow_insecure_ssl": state.model.allow_insecure_ssl,
+                "outgoing_token_configured": state.model.outgoing_token_configured,
+                "receive_path": &state.model.receive_path,
+                "reply_semantics": &state.model.reply_semantics,
             })),
             ..report
         })
@@ -553,14 +580,71 @@ mod tests {
             })
             .await
             .expect("health should succeed");
-        assert_eq!(response.result.expect("result")["status"], "ok");
+        let result = response.result.expect("result");
+        assert_eq!(result["status"], "ok");
+        assert_eq!(
+            result["delivery_target"]["incoming_url_redacted"],
+            "https://nas.example.com:443/webapi/..."
+        );
+        assert_eq!(result["reply_semantics"], "outbound_only");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_reports_state_model_details() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi",
+                "request_timeout_ms": 25_000,
+                "allow_insecure_ssl": true,
+                "outgoing_token": "top-secret"
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let report = connector.self_check().await.expect("self_check should succeed");
+        let details = report.details.expect("details should be present");
+        assert_eq!(
+            details["delivery_target"]["incoming_url_redacted"],
+            "https://nas.example.com:443/webapi/..."
+        );
+        assert_eq!(details["request_timeout_ms"], 25_000);
+        assert_eq!(details["allow_insecure_ssl"], true);
+        assert_eq!(details["outgoing_token_configured"], true);
+        assert_eq!(details["receive_path"], "disabled");
+        assert_eq!(details["reply_semantics"], "outbound_only");
+    }
+
+    #[test]
+    fn introspection_reports_expected_operations_and_event_caps() {
+        let introspection = SynologyChatConnector::new().introspect();
+        let operation_ids = introspection
+            .operations
+            .iter()
+            .map(|operation| operation.id.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            operation_ids,
+            vec![
+                OP_SEND_MESSAGE.to_string(),
+                OP_SEND_PAYLOAD.to_string(),
+                OP_HEALTH.to_string()
+            ]
+        );
+
+        let event_caps = introspection.event_caps.expect("event caps should be present");
+        assert!(!event_caps.streaming);
+        assert!(!event_caps.replay);
+        assert_eq!(event_caps.min_buffer_events, 0);
+        assert!(!event_caps.requires_ack);
     }
 
     #[test]
     fn optional_user_ids_prefers_array_over_single_id() {
         let user_ids = optional_user_ids(&json!({
             "user_id": "legacy",
-            "user_ids": ["one", "two"]
+            "user_ids": ["one", " two ", "one"]
         }))
         .expect("user IDs should parse");
         assert_eq!(user_ids, vec!["one".to_string(), "two".to_string()]);

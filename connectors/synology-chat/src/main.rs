@@ -1,4 +1,4 @@
-//! Synology Chat connector entrypoint.
+//! `Synology Chat` connector entrypoint.
 
 #![forbid(unsafe_code)]
 

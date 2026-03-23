@@ -2307,6 +2307,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-brave-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "fcp-browser"
 version = "0.1.0"
 dependencies = [
@@ -2612,6 +2627,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-deepgram"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "fcp-dingtalk"
 version = "0.1.0"
 dependencies = [
@@ -2876,6 +2906,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-elevenlabs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fcp-email-generic"
 version = "0.1.0"
 dependencies = [
@@ -2914,6 +2957,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-exa"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2982,6 +3038,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-firecrawl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3501,6 +3570,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-huggingface"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fcp-imessage"
 version = "0.1.0"
 dependencies = [
@@ -3946,6 +4028,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-mistral"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fcp-mixpanel"
 version = "0.1.0"
 dependencies = [
@@ -4225,6 +4320,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-openrouter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-package-registry"
 version = "0.1.0"
 dependencies = [
@@ -4288,6 +4399,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-perplexity-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5123,6 +5247,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-tavily"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fcp-teams"
 version = "0.1.0"
 dependencies = [
@@ -5246,6 +5383,19 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-tlon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5571,6 +5721,32 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-zalo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fcp-zalouser"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

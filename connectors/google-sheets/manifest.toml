@@ -1,0 +1,298 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:a7c1e8d034f6b9210c8e5d3a7f2b6e9c4d8a1f3e5b7c9d2a4e6f8b0c3d5a7e9"
+
+[connector]
+id = "fcp.google_sheets"
+name = "Google Sheets Connector"
+version = "0.1.0"
+description = "FCP connector for Google Sheets (spreadsheets, cell values, ranges)"
+archetypes = ["operational", "knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+# -- Operations --------------------------------------------------------
+
+[provides.operations."sheets.get_spreadsheet"]
+description = "Get spreadsheet metadata and sheets list"
+capability = "sheets.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sheets.get_spreadsheet".input_schema]
+required = ["spreadsheet_id"]
+type = "object"
+[provides.operations."sheets.get_spreadsheet".input_schema.properties.spreadsheet_id]
+type = "string"
+
+[provides.operations."sheets.get_spreadsheet".output_schema]
+required = ["spreadsheet"]
+type = "object"
+[provides.operations."sheets.get_spreadsheet".output_schema.properties.spreadsheet]
+type = "object"
+
+[provides.operations."sheets.get_spreadsheet".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sheets.get_spreadsheet".ai_hints]
+when_to_use = "Get spreadsheet metadata including sheets list and properties."
+common_mistakes = ["Using a sheet ID instead of a spreadsheet ID -- they are different identifiers"]
+examples = ['{"spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"}']
+related = ["sheets.get_values"]
+
+# -----------------------------------------------------------------------
+
+[provides.operations."sheets.get_values"]
+description = "Read cell values from a range"
+capability = "sheets.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sheets.get_values".input_schema]
+required = ["spreadsheet_id", "range"]
+type = "object"
+[provides.operations."sheets.get_values".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.get_values".input_schema.properties.range]
+type = "string"
+
+[provides.operations."sheets.get_values".output_schema]
+required = ["values"]
+type = "object"
+[provides.operations."sheets.get_values".output_schema.properties.values]
+type = "array"
+
+[provides.operations."sheets.get_values".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sheets.get_values".ai_hints]
+when_to_use = "Read data from a spreadsheet range like 'Sheet1!A1:C10'."
+common_mistakes = ["Range must use A1 notation (e.g. 'Sheet1!A1:B5')", "Not handling empty cells which may be omitted from the response"]
+examples = ['{"spreadsheet_id": "abc123", "range": "Sheet1!A1:C10"}']
+related = ["sheets.update_values", "sheets.get_spreadsheet"]
+
+# -----------------------------------------------------------------------
+
+[provides.operations."sheets.update_values"]
+description = "Write cell values to a range"
+capability = "sheets.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."sheets.update_values".input_schema]
+required = ["spreadsheet_id", "range", "values"]
+type = "object"
+[provides.operations."sheets.update_values".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.update_values".input_schema.properties.range]
+type = "string"
+[provides.operations."sheets.update_values".input_schema.properties.values]
+type = "array"
+
+[provides.operations."sheets.update_values".output_schema]
+required = ["updated_cells"]
+type = "object"
+[provides.operations."sheets.update_values".output_schema.properties.updated_cells]
+type = "integer"
+
+[provides.operations."sheets.update_values".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sheets.update_values".ai_hints]
+when_to_use = "Update cell values in a spreadsheet range."
+common_mistakes = ["Values must be a 2D array (rows of cells)", "Overwrites existing data in the range without warning"]
+examples = ['{"spreadsheet_id": "abc123", "range": "Sheet1!A1:B2", "values": [["a","b"],["c","d"]]}']
+related = ["sheets.get_values", "sheets.append_values"]
+
+# -----------------------------------------------------------------------
+
+[provides.operations."sheets.append_values"]
+description = "Append rows to a sheet"
+capability = "sheets.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."sheets.append_values".input_schema]
+required = ["spreadsheet_id", "range", "values"]
+type = "object"
+[provides.operations."sheets.append_values".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.append_values".input_schema.properties.range]
+type = "string"
+[provides.operations."sheets.append_values".input_schema.properties.values]
+type = "array"
+
+[provides.operations."sheets.append_values".output_schema]
+required = ["table_range"]
+type = "object"
+[provides.operations."sheets.append_values".output_schema.properties.table_range]
+type = "string"
+
+[provides.operations."sheets.append_values".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sheets.append_values".ai_hints]
+when_to_use = "Append new rows to the end of a sheet."
+common_mistakes = ["Each call appends -- do not call repeatedly for the same data", "Range determines where the table detection starts, not the exact insertion row"]
+examples = ['{"spreadsheet_id": "abc123", "range": "Sheet1", "values": [["new","row"]]}']
+related = ["sheets.update_values", "sheets.get_values"]
+
+# -----------------------------------------------------------------------
+
+[provides.operations."sheets.clear_values"]
+description = "Clear cell values in a range"
+capability = "sheets.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."sheets.clear_values".input_schema]
+required = ["spreadsheet_id", "range"]
+type = "object"
+[provides.operations."sheets.clear_values".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.clear_values".input_schema.properties.range]
+type = "string"
+
+[provides.operations."sheets.clear_values".output_schema]
+type = "object"
+
+[provides.operations."sheets.clear_values".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sheets.clear_values".ai_hints]
+when_to_use = "Clear all values from a range (keeps formatting)."
+common_mistakes = ["This clears VALUES only, not formatting or formulas", "Cannot be undone -- consider downloading values first"]
+examples = ['{"spreadsheet_id": "abc123", "range": "Sheet1!A1:Z1000"}']
+related = ["sheets.get_values"]
+
+# -- Events ------------------------------------------------------------
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 100
+
+# -- Sandbox -----------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# -- Rate Limits -------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "sheets.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sheets.write"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[rate_limits.operation_pools]
+"sheets.get_spreadsheet" = ["sheets.read"]
+"sheets.get_values" = ["sheets.read"]
+"sheets.update_values" = ["sheets.write"]
+"sheets.append_values" = ["sheets.write"]
+"sheets.clear_values" = ["sheets.write"]

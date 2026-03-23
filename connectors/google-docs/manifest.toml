@@ -1,0 +1,205 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:google_docs_v1"
+
+[connector]
+id = "fcp.google_docs"
+name = "Google Docs Connector"
+version = "0.1.0"
+description = "FCP connector for Google Docs (get, create, and batch update documents)"
+archetypes = ["operational", "knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."docs.get"]
+description = "Get a Google Docs document by ID"
+capability = "docs.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."docs.get".input_schema]
+required = ["document_id"]
+type = "object"
+[provides.operations."docs.get".input_schema.properties.document_id]
+type = "string"
+
+[provides.operations."docs.get".output_schema]
+required = ["document"]
+type = "object"
+[provides.operations."docs.get".output_schema.properties.document]
+type = "object"
+
+[provides.operations."docs.get".network_constraints]
+host_allow = ["docs.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."docs.get".ai_hints]
+when_to_use = "Retrieve a Google Docs document including title, body content, and structure."
+common_mistakes = ["Using a file ID from Drive that is not a Docs document will fail"]
+examples = ['{"document_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"}']
+related = ["docs.create", "docs.batch_update"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."docs.create"]
+description = "Create a new Google Docs document"
+capability = "docs.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."docs.create".input_schema]
+required = ["title"]
+type = "object"
+[provides.operations."docs.create".input_schema.properties.title]
+type = "string"
+
+[provides.operations."docs.create".output_schema]
+required = ["document"]
+type = "object"
+[provides.operations."docs.create".output_schema.properties.document]
+type = "object"
+
+[provides.operations."docs.create".network_constraints]
+host_allow = ["docs.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."docs.create".ai_hints]
+when_to_use = "Create a brand new Google Docs document with a given title."
+common_mistakes = ["Each call creates a new document — do not call repeatedly for the same title"]
+examples = ['{"title": "Meeting Notes 2026-03-14"}']
+related = ["docs.get", "docs.batch_update"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."docs.batch_update"]
+description = "Apply batch updates to a Google Docs document"
+capability = "docs.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."docs.batch_update".input_schema]
+required = ["document_id", "requests"]
+type = "object"
+[provides.operations."docs.batch_update".input_schema.properties.document_id]
+type = "string"
+[provides.operations."docs.batch_update".input_schema.properties.requests]
+type = "array"
+
+[provides.operations."docs.batch_update".output_schema]
+required = ["document_id", "replies"]
+type = "object"
+[provides.operations."docs.batch_update".output_schema.properties.document_id]
+type = "string"
+[provides.operations."docs.batch_update".output_schema.properties.replies]
+type = "array"
+
+[provides.operations."docs.batch_update".network_constraints]
+host_allow = ["docs.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."docs.batch_update".ai_hints]
+when_to_use = "Insert text, delete content, or update text styling in an existing document."
+common_mistakes = ["Requests are applied in order — indices shift after inserts/deletes", "Apply changes in reverse index order to avoid index drift"]
+examples = ['{"document_id": "abc123", "requests": [{"insertText": {"location": {"index": 1}, "text": "Hello"}}]}']
+related = ["docs.get"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 100
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "docs.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "docs.write"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"docs.get" = ["docs.read"]
+"docs.create" = ["docs.write"]
+"docs.batch_update" = ["docs.write"]

@@ -1,0 +1,333 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.google_chat"
+name = "Google Chat Connector"
+version = "0.1.0"
+description = "FCP connector for Google Chat (spaces, messages, members)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+# -- Operations ---------------------------------------------------------------
+
+[provides.operations."chat.list_spaces"]
+description = "List all spaces the user has access to"
+capability = "chat.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."chat.list_spaces".input_schema]
+required = []
+type = "object"
+
+[provides.operations."chat.list_spaces".output_schema]
+required = ["spaces"]
+type = "object"
+[provides.operations."chat.list_spaces".output_schema.properties.spaces]
+type = "array"
+
+[provides.operations."chat.list_spaces".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."chat.list_spaces".ai_hints]
+when_to_use = "List all Google Chat spaces (rooms, DMs, group chats) the authenticated user belongs to."
+common_mistakes = []
+examples = ['{}']
+related = ["chat.get_space"]
+
+# ------------------------------------------------------------------------------
+
+[provides.operations."chat.get_space"]
+description = "Get details of a specific space"
+capability = "chat.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."chat.get_space".input_schema]
+required = ["space_name"]
+type = "object"
+[provides.operations."chat.get_space".input_schema.properties.space_name]
+type = "string"
+
+[provides.operations."chat.get_space".output_schema]
+required = ["space"]
+type = "object"
+[provides.operations."chat.get_space".output_schema.properties.space]
+type = "object"
+
+[provides.operations."chat.get_space".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."chat.get_space".ai_hints]
+when_to_use = "Get metadata for a specific Google Chat space by its resource name."
+common_mistakes = ["space_name must be a resource name like 'spaces/AAAA', not a display name"]
+examples = ['{"space_name": "spaces/AAAA"}']
+related = ["chat.list_spaces"]
+
+# ------------------------------------------------------------------------------
+
+[provides.operations."chat.send_message"]
+description = "Send a text message to a space"
+capability = "chat.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."chat.send_message".input_schema]
+required = ["space_name", "text"]
+type = "object"
+[provides.operations."chat.send_message".input_schema.properties.space_name]
+type = "string"
+[provides.operations."chat.send_message".input_schema.properties.text]
+type = "string"
+
+[provides.operations."chat.send_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."chat.send_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."chat.send_message".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."chat.send_message".ai_hints]
+when_to_use = "Send a new text message to a Google Chat space."
+common_mistakes = ["Each call sends a new message -- do not call repeatedly for the same content"]
+examples = ['{"space_name": "spaces/AAAA", "text": "Hello from FCP!"}']
+related = ["chat.list_messages"]
+
+# ------------------------------------------------------------------------------
+
+[provides.operations."chat.list_messages"]
+description = "List messages in a space"
+capability = "chat.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."chat.list_messages".input_schema]
+required = ["space_name"]
+type = "object"
+[provides.operations."chat.list_messages".input_schema.properties.space_name]
+type = "string"
+
+[provides.operations."chat.list_messages".output_schema]
+required = ["messages"]
+type = "object"
+[provides.operations."chat.list_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."chat.list_messages".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."chat.list_messages".ai_hints]
+when_to_use = "List recent messages in a Google Chat space."
+common_mistakes = []
+examples = ['{"space_name": "spaces/AAAA"}']
+related = ["chat.get_message"]
+
+# ------------------------------------------------------------------------------
+
+[provides.operations."chat.get_message"]
+description = "Get a specific message by name"
+capability = "chat.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."chat.get_message".input_schema]
+required = ["message_name"]
+type = "object"
+[provides.operations."chat.get_message".input_schema.properties.message_name]
+type = "string"
+
+[provides.operations."chat.get_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."chat.get_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."chat.get_message".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."chat.get_message".ai_hints]
+when_to_use = "Get a specific Google Chat message by its resource name."
+common_mistakes = ["message_name must include the full path: spaces/SPACE/messages/MSG"]
+examples = ['{"message_name": "spaces/AAAA/messages/msg1"}']
+related = ["chat.list_messages"]
+
+# ------------------------------------------------------------------------------
+
+[provides.operations."chat.list_members"]
+description = "List members of a space"
+capability = "chat.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."chat.list_members".input_schema]
+required = ["space_name"]
+type = "object"
+[provides.operations."chat.list_members".input_schema.properties.space_name]
+type = "string"
+
+[provides.operations."chat.list_members".output_schema]
+required = ["members"]
+type = "object"
+[provides.operations."chat.list_members".output_schema.properties.members]
+type = "array"
+
+[provides.operations."chat.list_members".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."chat.list_members".ai_hints]
+when_to_use = "List all members of a Google Chat space."
+common_mistakes = []
+examples = ['{"space_name": "spaces/AAAA"}']
+related = ["chat.list_spaces"]
+
+# -- Events -------------------------------------------------------------------
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 50
+
+# -- Sandbox ------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# -- Rate Limits --------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "chat.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "chat.write"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"chat.list_spaces" = ["chat.read"]
+"chat.get_space" = ["chat.read"]
+"chat.send_message" = ["chat.write"]
+"chat.list_messages" = ["chat.read"]
+"chat.get_message" = ["chat.read"]
+"chat.list_members" = ["chat.read"]

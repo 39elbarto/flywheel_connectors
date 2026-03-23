@@ -1,4 +1,4 @@
-//! Dedicated BlueBubbles connector entrypoint.
+//! Dedicated `BlueBubbles` connector entrypoint.
 
 #![forbid(unsafe_code)]
 
@@ -59,6 +59,7 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_message(
     connector: &mut fcp_imessage::BlueBubblesConnector,
     message: &str,

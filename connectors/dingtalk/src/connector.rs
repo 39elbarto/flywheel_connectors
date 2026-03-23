@@ -1,13 +1,8 @@
 //! `DingTalk` enterprise robot connector.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::Instant;
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use fcp_async_core::sync::Mutex;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
@@ -17,16 +12,13 @@ use fcp_core::{
     UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
-use reqwest::{Url, multipart};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::client::{DingTalkClient, default_mime_type};
+use crate::types::{DingTalkConfig, ParsedTarget};
+
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-const DEFAULT_BASE_URL: &str = "https://api.dingtalk.com";
-const DEFAULT_MEDIA_BASE_URL: &str = "https://oapi.dingtalk.com";
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const TOKEN_REFRESH_SAFETY_MARGIN_SECS: u64 = 60;
 
 const OP_SEND_TEXT: &str = "dingtalk.messages.send_text";
 const OP_SEND_LINK: &str = "dingtalk.messages.send_link";
@@ -38,237 +30,36 @@ const CAP_MESSAGES_WRITE: &str = "dingtalk.messages.write";
 const CAP_MEDIA_WRITE: &str = "dingtalk.media.write";
 const CAP_HEALTH_READ: &str = "dingtalk.health.read";
 
-#[derive(Debug, Clone, Deserialize)]
-struct DingTalkConfig {
-    #[serde(default = "default_base_url")]
-    base_url: String,
-    #[serde(default = "default_media_base_url")]
-    media_base_url: String,
-    client_id: String,
-    client_secret: String,
-    #[serde(default = "default_timeout_ms")]
-    request_timeout_ms: u64,
+// ─────────────────────────────────────────────────────────────────
+// Doctor types (V3 requirement)
+// ─────────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorResult {
+    pub passed: bool,
+    pub checks: Vec<DoctorCheck>,
 }
 
-#[derive(Debug, Clone)]
-struct CachedAccessToken {
-    token: String,
-    expires_at: Instant,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    name: String,
+    passed: bool,
+    message: Option<String>,
+    critical: bool,
 }
 
-#[derive(Debug)]
-struct DingTalkState {
-    config: DingTalkConfig,
-    client: reqwest::Client,
-    token_cache: Arc<Mutex<Option<CachedAccessToken>>>,
+impl DoctorResult {
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
+        Self { passed, checks }
+    }
 }
 
 #[derive(Debug)]
 pub struct DingTalkConnector {
     base: BaseConnector,
-    state: Option<DingTalkState>,
+    client: Option<DingTalkClient>,
     verifier: Option<CapabilityVerifier>,
     started_at: Instant,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AccessTokenResponse {
-    #[serde(default)]
-    access_token: String,
-    #[serde(default)]
-    expire_in: u64,
-}
-
-fn default_base_url() -> String {
-    DEFAULT_BASE_URL.to_string()
-}
-
-fn default_media_base_url() -> String {
-    DEFAULT_MEDIA_BASE_URL.to_string()
-}
-
-const fn default_timeout_ms() -> u64 {
-    DEFAULT_TIMEOUT_MS
-}
-
-impl DingTalkConfig {
-    fn validate(&self) -> FcpResult<()> {
-        if self.client_id.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "client_id must not be empty".into(),
-            });
-        }
-        if self.client_secret.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "client_secret must not be empty".into(),
-            });
-        }
-        if self.request_timeout_ms == 0 {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "request_timeout_ms must be greater than zero".into(),
-            });
-        }
-        validate_host(
-            &self.base_url,
-            &["api.dingtalk.com", "localhost", "127.0.0.1"],
-        )?;
-        validate_host(
-            &self.media_base_url,
-            &["oapi.dingtalk.com", "localhost", "127.0.0.1"],
-        )?;
-        Ok(())
-    }
-}
-
-impl DingTalkState {
-    fn new(config: DingTalkConfig) -> FcpResult<Self> {
-        config.validate()?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.request_timeout_ms))
-            .build()
-            .map_err(|error| FcpError::Internal {
-                message: format!("failed to build DingTalk HTTP client: {error}"),
-            })?;
-        Ok(Self {
-            config,
-            client,
-            token_cache: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    fn api_url(&self, path: &str) -> FcpResult<Url> {
-        let mut url =
-            Url::parse(self.config.base_url.trim()).map_err(|error| FcpError::Internal {
-                message: format!("stored DingTalk base_url is invalid: {error}"),
-            })?;
-        url.set_path(path);
-        Ok(url)
-    }
-
-    fn media_url(&self, path: &str) -> FcpResult<Url> {
-        let mut url =
-            Url::parse(self.config.media_base_url.trim()).map_err(|error| FcpError::Internal {
-                message: format!("stored DingTalk media_base_url is invalid: {error}"),
-            })?;
-        url.set_path(path);
-        Ok(url)
-    }
-
-    async fn access_token(&self) -> FcpResult<String> {
-        {
-            let cache = self.token_cache.lock().await;
-            if let Some(cached) = cache.as_ref() {
-                if Instant::now() < cached.expires_at {
-                    return Ok(cached.token.clone());
-                }
-            }
-        }
-
-        let url = self.api_url("/v1.0/oauth2/accessToken")?;
-        let response = self
-            .client
-            .post(url)
-            .json(&json!({
-                "appKey": self.config.client_id,
-                "appSecret": self.config.client_secret
-            }))
-            .send()
-            .await
-            .map_err(map_transport_error("dingtalk access token"))?;
-        let body: Value = response.json().await.map_err(|error| FcpError::Internal {
-            message: format!("failed to decode DingTalk access token response: {error}"),
-        })?;
-        let token: AccessTokenResponse =
-            serde_json::from_value(body.clone()).map_err(|error| FcpError::Internal {
-                message: format!("failed to parse DingTalk access token payload: {error}"),
-            })?;
-        if token.access_token.trim().is_empty() {
-            return Err(FcpError::Internal {
-                message: format!("DingTalk access token response missing access_token: {body}"),
-            });
-        }
-        let ttl = token
-            .expire_in
-            .saturating_sub(TOKEN_REFRESH_SAFETY_MARGIN_SECS)
-            .max(1);
-        *self.token_cache.lock().await = Some(CachedAccessToken {
-            token: token.access_token.clone(),
-            expires_at: Instant::now() + Duration::from_secs(ttl),
-        });
-        Ok(token.access_token)
-    }
-
-    async fn post_json(&self, path: &str, body: Value) -> FcpResult<Value> {
-        let token = self.access_token().await?;
-        let url = self.api_url(path)?;
-        let response = self
-            .client
-            .post(url)
-            .header("x-acs-dingtalk-access-token", &token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_transport_error("dingtalk post request"))?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(FcpError::External {
-                service: "dingtalk".into(),
-                message: format!("DingTalk API request failed [{status}]: {body}"),
-                status_code: Some(status),
-                retryable: false,
-                retry_after: None,
-            });
-        }
-        response.json().await.map_err(|error| FcpError::Internal {
-            message: format!("failed to decode DingTalk JSON response: {error}"),
-        })
-    }
-
-    async fn upload_media(
-        &self,
-        media_type: &str,
-        file_name: &str,
-        mime_type: &str,
-        content_base64: &str,
-    ) -> FcpResult<Value> {
-        let token = self.access_token().await?;
-        let bytes =
-            BASE64
-                .decode(content_base64.trim())
-                .map_err(|error| FcpError::InvalidRequest {
-                    code: 1005,
-                    message: format!("content_base64 must be valid base64: {error}"),
-                })?;
-        let mut url = self.media_url("/media/upload")?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("access_token", &token);
-            query.append_pair("type", media_type);
-        }
-        let part = multipart::Part::bytes(bytes)
-            .file_name(file_name.to_string())
-            .mime_str(mime_type)
-            .map_err(|error| FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("invalid mime_type: {error}"),
-            })?;
-        let response = self
-            .client
-            .post(url)
-            .multipart(multipart::Form::new().part("media", part))
-            .send()
-            .await
-            .map_err(map_transport_error("dingtalk upload media"))?;
-        let body: Value = response.json().await.map_err(|error| FcpError::Internal {
-            message: format!("failed to decode DingTalk upload response: {error}"),
-        })?;
-        ensure_dingtalk_media_success(body)
-    }
 }
 
 impl DingTalkConnector {
@@ -276,7 +67,7 @@ impl DingTalkConnector {
     pub fn new() -> Self {
         Self {
             base: BaseConnector::new(ConnectorId::from_static("fcp.dingtalk")),
-            state: None,
+            client: None,
             verifier: None,
             started_at: Instant::now(),
         }
@@ -286,6 +77,46 @@ impl DingTalkConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Run connector diagnostics.
+    pub fn doctor(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "runtime".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "ConnectorRuntime initialized".into()
+            } else {
+                "Runtime missing - configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: self.verifier.is_some(),
+            message: Some(if self.verifier.is_some() {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -382,7 +213,7 @@ impl DingTalkConnector {
     #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
-        let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let capability = required_capability(req.operation.as_str())?;
         verifier.verify(&req.capability_token, &capability, &req.operation, &[])?;
@@ -396,30 +227,33 @@ impl DingTalkConnector {
                     (
                         "/v1.0/robot/groupMessages/send",
                         json!({
-                        "robotCode": state.config.client_id,
-                        "openConversationId": target.id,
-                        "msgKey": "sampleMarkdown",
-                        "msgParam": json!({
-                            "title": title_for(content),
-                            "text": content,
-                        }).to_string(),
+                            "robotCode": client.config().client_id,
+                            "openConversationId": target.id,
+                            "msgKey": "sampleMarkdown",
+                            "msgParam": json!({
+                                "title": title_for(content),
+                                "text": content,
+                            }).to_string(),
                         }),
                     )
                 } else {
                     (
                         "/v1.0/robot/oToMessages/batchSend",
                         json!({
-                        "robotCode": state.config.client_id,
-                        "userIds": [target.id],
-                        "msgKey": "sampleMarkdown",
-                        "msgParam": json!({
-                            "title": title_for(content),
-                            "text": content,
-                        }).to_string(),
+                            "robotCode": client.config().client_id,
+                            "userIds": [target.id],
+                            "msgKey": "sampleMarkdown",
+                            "msgParam": json!({
+                                "title": title_for(content),
+                                "text": content,
+                            }).to_string(),
                         }),
                     )
                 };
-                state.post_json(path, body).await?
+                client
+                    .post_json(path, body)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
             }
             OP_SEND_LINK => {
                 let to = required_string(&req.input, "to")?;
@@ -436,34 +270,37 @@ impl DingTalkConnector {
                     (
                         "/v1.0/robot/groupMessages/send",
                         json!({
-                        "robotCode": state.config.client_id,
-                        "openConversationId": target.id,
-                        "msgKey": "sampleLink",
-                        "msgParam": json!({
-                            "title": title,
-                            "text": text,
-                            "messageUrl": message_url,
-                            "picUrl": pic_url,
-                        }).to_string(),
+                            "robotCode": client.config().client_id,
+                            "openConversationId": target.id,
+                            "msgKey": "sampleLink",
+                            "msgParam": json!({
+                                "title": title,
+                                "text": text,
+                                "messageUrl": message_url,
+                                "picUrl": pic_url,
+                            }).to_string(),
                         }),
                     )
                 } else {
                     (
                         "/v1.0/robot/oToMessages/batchSend",
                         json!({
-                        "robotCode": state.config.client_id,
-                        "userIds": [target.id],
-                        "msgKey": "sampleLink",
-                        "msgParam": json!({
-                            "title": title,
-                            "text": text,
-                            "messageUrl": message_url,
-                            "picUrl": pic_url,
-                        }).to_string(),
+                            "robotCode": client.config().client_id,
+                            "userIds": [target.id],
+                            "msgKey": "sampleLink",
+                            "msgParam": json!({
+                                "title": title,
+                                "text": text,
+                                "messageUrl": message_url,
+                                "picUrl": pic_url,
+                            }).to_string(),
                         }),
                     )
                 };
-                state.post_json(path, body).await?
+                client
+                    .post_json(path, body)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
             }
             OP_SEND_FILE => {
                 let to = required_string(&req.input, "to")?;
@@ -475,32 +312,35 @@ impl DingTalkConnector {
                     (
                         "/v1.0/robot/groupMessages/send",
                         json!({
-                        "robotCode": state.config.client_id,
-                        "openConversationId": target.id,
-                        "msgKey": "sampleFile",
-                        "msgParam": json!({
-                            "mediaId": media_id,
-                            "fileName": file_name,
-                            "fileType": file_type,
-                        }).to_string(),
+                            "robotCode": client.config().client_id,
+                            "openConversationId": target.id,
+                            "msgKey": "sampleFile",
+                            "msgParam": json!({
+                                "mediaId": media_id,
+                                "fileName": file_name,
+                                "fileType": file_type,
+                            }).to_string(),
                         }),
                     )
                 } else {
                     (
                         "/v1.0/robot/oToMessages/batchSend",
                         json!({
-                        "robotCode": state.config.client_id,
-                        "userIds": [target.id],
-                        "msgKey": "sampleFile",
-                        "msgParam": json!({
-                            "mediaId": media_id,
-                            "fileName": file_name,
-                            "fileType": file_type,
-                        }).to_string(),
+                            "robotCode": client.config().client_id,
+                            "userIds": [target.id],
+                            "msgKey": "sampleFile",
+                            "msgParam": json!({
+                                "mediaId": media_id,
+                                "fileName": file_name,
+                                "fileType": file_type,
+                            }).to_string(),
                         }),
                     )
                 };
-                state.post_json(path, body).await?
+                client
+                    .post_json(path, body)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
             }
             OP_UPLOAD_MEDIA => {
                 let media_type = required_string(&req.input, "media_type")?;
@@ -517,17 +357,18 @@ impl DingTalkConnector {
                     .and_then(Value::as_str)
                     .unwrap_or_else(|| default_mime_type(media_type));
                 let content_base64 = required_string(&req.input, "content_base64")?;
-                state
+                client
                     .upload_media(media_type, file_name, mime_type, content_base64)
-                    .await?
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
             }
             OP_HEALTH => {
-                let _token = state.access_token().await?;
+                let _token = client.access_token().await.map_err(|e| e.to_fcp_error())?;
                 json!({
                     "status": "ok",
-                    "base_url": state.config.base_url,
-                    "media_base_url": state.config.media_base_url,
-                    "client_id": state.config.client_id,
+                    "base_url": client.config().base_url,
+                    "media_base_url": client.config().media_base_url,
+                    "client_id": client.config().client_id,
                     "manifest_hash": Self::manifest_hash(),
                 })
             }
@@ -561,7 +402,7 @@ impl FcpConnector for DingTalkConnector {
                 code: 1003,
                 message: format!("invalid DingTalk configuration: {error}"),
             })?;
-        self.state = Some(DingTalkState::new(config)?);
+        self.client = Some(DingTalkClient::new(config).map_err(|e| e.to_fcp_error())?);
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
@@ -594,18 +435,18 @@ impl FcpConnector for DingTalkConnector {
 
     async fn health(&self) -> HealthSnapshot {
         HealthSnapshot {
-            status: if self.state.is_some() {
+            status: if self.client.is_some() {
                 HealthState::Ready
             } else {
                 HealthState::Starting
             },
             uptime_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             load: None,
-            details: self.state.as_ref().map(|state| {
+            details: self.client.as_ref().map(|c| {
                 json!({
-                    "base_url": state.config.base_url,
-                    "media_base_url": state.config.media_base_url,
-                    "client_id": state.config.client_id,
+                    "base_url": c.config().base_url,
+                    "media_base_url": c.config().media_base_url,
+                    "client_id": c.config().client_id,
                 })
             }),
             rate_limit: None,
@@ -613,15 +454,15 @@ impl FcpConnector for DingTalkConnector {
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(state) = self.state.as_ref() else {
+        let Some(client) = self.client.as_ref() else {
             return Ok(SelfCheckReport::failed(
                 "not_configured",
                 "configure must be called before DingTalk self_check",
             ));
         };
-        match state.access_token().await {
+        match client.access_token().await {
             Ok(_) => Ok(SelfCheckReport::ok()),
-            Err(error) => Ok(SelfCheckReport::from_error(&error)),
+            Err(error) => Ok(SelfCheckReport::from_error(&error.to_fcp_error())),
         }
     }
 
@@ -630,7 +471,10 @@ impl FcpConnector for DingTalkConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
-        self.state = None;
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        self.client = None;
         self.verifier = None;
         self.base.set_handshaken(false);
         self.base.set_configured(false);
@@ -669,7 +513,7 @@ impl FcpConnector for DingTalkConnector {
                 ));
             }
         };
-        if self.state.is_none() {
+        if self.client.is_none() {
             return Ok(SimulateResponse::denied(
                 req.id,
                 "Connector is not configured",
@@ -705,49 +549,6 @@ impl FcpConnector for DingTalkConnector {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ParsedTarget<'a> {
-    id: &'a str,
-    is_group: bool,
-}
-
-impl<'a> ParsedTarget<'a> {
-    #[allow(clippy::option_if_let_else)]
-    fn parse(raw: &'a str) -> Self {
-        if let Some(id) = raw.strip_prefix("chat:") {
-            Self { id, is_group: true }
-        } else if let Some(id) = raw.strip_prefix("user:") {
-            Self {
-                id,
-                is_group: false,
-            }
-        } else {
-            Self {
-                id: raw,
-                is_group: false,
-            }
-        }
-    }
-}
-
-fn validate_host(raw: &str, allowed_hosts: &[&str]) -> FcpResult<()> {
-    let url = Url::parse(raw.trim()).map_err(|error| FcpError::InvalidRequest {
-        code: 1001,
-        message: format!("invalid URL `{raw}`: {error}"),
-    })?;
-    let host = url.host_str().ok_or_else(|| FcpError::InvalidRequest {
-        code: 1001,
-        message: format!("URL `{raw}` must include a host"),
-    })?;
-    if !allowed_hosts.contains(&host) {
-        return Err(FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("URL host `{host}` is not allowed"),
-        });
-    }
-    Ok(())
-}
-
 fn title_for(content: &str) -> String {
     content.chars().take(10).collect()
 }
@@ -761,35 +562,6 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
             code: 1005,
             message: format!("{field} is required"),
         })
-}
-
-fn map_transport_error(context: &'static str) -> impl Fn(reqwest::Error) -> FcpError {
-    move |error| FcpError::External {
-        service: "dingtalk".into(),
-        message: format!("{context} failed: {error}"),
-        status_code: None,
-        retryable: error.is_timeout() || error.is_connect(),
-        retry_after: None,
-    }
-}
-
-fn ensure_dingtalk_media_success(body: Value) -> FcpResult<Value> {
-    let errcode = body.get("errcode").and_then(Value::as_i64).unwrap_or(0);
-    if errcode == 0 {
-        Ok(body)
-    } else {
-        let errmsg = body
-            .get("errmsg")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown DingTalk media upload error");
-        Err(FcpError::External {
-            service: "dingtalk".into(),
-            message: format!("DingTalk media upload error {errcode}: {errmsg}"),
-            status_code: None,
-            retryable: false,
-            retry_after: None,
-        })
-    }
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
@@ -821,15 +593,6 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
             operation: None,
         })
         .collect()
-}
-
-fn default_mime_type(media_type: &str) -> &'static str {
-    match media_type {
-        "image" => "image/png",
-        "voice" => "audio/amr",
-        "video" => "video/mp4",
-        _ => "application/octet-stream",
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -869,21 +632,36 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, method, path, query_param},
     };
 
-    #[test]
-    fn config_rejects_empty_client_id() {
-        let error = serde_json::from_value::<DingTalkConfig>(json!({
-            "client_id": "",
-            "client_secret": "secret"
-        }))
-        .expect("config should deserialize")
-        .validate()
-        .expect_err("client_id must be required");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    async fn configured_connector(server: &MockServer) -> DingTalkConnector {
+        let mut connector = DingTalkConnector::new();
+        connector
+            .configure(json!({
+                "base_url": server.uri(),
+                "media_base_url": server.uri(),
+                "client_id": "ding-app",
+                "client_secret": "secret"
+            }))
+            .await
+            .expect("configure should succeed");
+        connector
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn config_rejects_empty_client_id() {
+        let mut connector = DingTalkConnector::new();
+        let result = connector
+            .configure(json!({
+                "client_id": "",
+                "client_secret": "secret"
+            }))
+            .await;
+        assert!(result.is_err());
     }
 
     #[fcp_async_core::runtime::test]
@@ -911,16 +689,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let state = DingTalkState::new(DingTalkConfig {
-            base_url: server.uri(),
-            media_base_url: server.uri(),
-            client_id: "ding-app".into(),
-            client_secret: "secret".into(),
-            request_timeout_ms: DEFAULT_TIMEOUT_MS,
-        })
-        .expect("state should build");
+        let connector = configured_connector(&server).await;
+        let client = connector.client.as_ref().unwrap();
 
-        let output = state
+        let output = client
             .post_json(
                 "/v1.0/robot/oToMessages/batchSend",
                 json!({
@@ -960,20 +732,91 @@ mod tests {
             .mount(&server)
             .await;
 
-        let state = DingTalkState::new(DingTalkConfig {
-            base_url: server.uri(),
-            media_base_url: server.uri(),
-            client_id: "ding-app".into(),
-            client_secret: "secret".into(),
-            request_timeout_ms: DEFAULT_TIMEOUT_MS,
-        })
-        .expect("state should build");
+        let connector = configured_connector(&server).await;
+        let client = connector.client.as_ref().unwrap();
 
-        let output = state
+        let output = client
             .upload_media("image", "test.png", "image/png", &BASE64.encode(b"png"))
             .await
             .expect("upload should succeed");
 
         assert_eq!(output["media_id"], "MEDIA123");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_returns_ready_after_configure() {
+        let server = MockServer::start().await;
+        let connector = configured_connector(&server).await;
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Ready));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_returns_starting_before_configure() {
+        let connector = DingTalkConnector::new();
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Starting));
+    }
+
+    #[test]
+    fn doctor_fails_before_configure() {
+        let connector = DingTalkConnector::new();
+        let report = connector.doctor();
+        assert!(!report.passed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_passes_after_configure() {
+        let server = MockServer::start().await;
+        let connector = configured_connector(&server).await;
+        let report = connector.doctor();
+        assert!(report.passed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_fails_before_configure() {
+        let connector = DingTalkConnector::new();
+        let report = connector.self_check().await.unwrap();
+        assert_ne!(report.status, fcp_core::SelfCheckStatus::Ok);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_returns_five_operations() {
+        let connector = DingTalkConnector::new();
+        let introspection = connector.introspect();
+        assert_eq!(introspection.operations.len(), 5);
+    }
+
+    #[test]
+    fn operations_count() {
+        let ops = DingTalkConnector::operations();
+        assert_eq!(ops.len(), 5);
+        assert_eq!(ops[0].id.as_str(), OP_SEND_TEXT);
+        assert_eq!(ops[4].id.as_str(), OP_HEALTH);
+    }
+
+    #[test]
+    fn required_capability_maps_correctly() {
+        assert!(required_capability(OP_SEND_TEXT).is_ok());
+        assert!(required_capability(OP_SEND_LINK).is_ok());
+        assert!(required_capability(OP_UPLOAD_MEDIA).is_ok());
+        assert!(required_capability("unknown.op").is_err());
+    }
+
+    #[test]
+    fn granted_capabilities_filters() {
+        let requested = vec![
+            CapabilityId::from_static(CAP_MESSAGES_WRITE),
+            CapabilityId::from_static("dingtalk.fake"),
+        ];
+        let granted = granted_capabilities(requested);
+        assert_eq!(granted.len(), 1);
+        assert_eq!(granted[0].capability.as_str(), CAP_MESSAGES_WRITE);
+    }
+
+    #[test]
+    fn title_for_truncates() {
+        assert_eq!(title_for("hello world, this is long"), "hello worl");
+        assert_eq!(title_for("short"), "short");
     }
 }

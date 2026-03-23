@@ -1,4 +1,4 @@
-//! Apple Reminders connector implementation.
+//! `Apple Reminders` connector implementation.
 
 use std::time::Instant;
 
@@ -217,7 +217,7 @@ impl AppleRemindersConnector {
         ]
     }
 
-    async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+    fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let required_cap = match req.operation.as_str() {
@@ -250,7 +250,7 @@ impl AppleRemindersConnector {
                     .input
                     .get("title")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing title".into(),
                     })?;
@@ -264,7 +264,7 @@ impl AppleRemindersConnector {
                     .input
                     .get("reminder_id")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing reminder_id".into(),
                     })?;
@@ -393,7 +393,7 @@ impl FcpConnector for AppleRemindersConnector {
     }
 
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
-        let result = self.invoke_inner(req).await;
+        let result = self.invoke_inner(req);
         self.base.record_request(result.is_ok());
         result
     }

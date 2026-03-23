@@ -1,4 +1,4 @@
-//! Hue connector implementation.
+//! `Hue` connector implementation.
 
 use std::time::{Duration, Instant};
 
@@ -259,19 +259,22 @@ impl HueConnector {
                     .input
                     .get("light_id")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing light_id".into(),
                     })?;
                 let on = req
                     .input
                     .get("on")
-                    .and_then(|value| value.as_bool())
-                    .ok_or(FcpError::InvalidRequest {
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing on".into(),
                     })?;
-                let brightness = req.input.get("brightness").and_then(|value| value.as_f64());
+                let brightness = req
+                    .input
+                    .get("brightness")
+                    .and_then(serde_json::Value::as_f64);
                 state
                     .client
                     .set_light_state(light_id, on, brightness)
@@ -283,7 +286,7 @@ impl HueConnector {
                     .input
                     .get("scene_id")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing scene_id".into(),
                     })?;

@@ -1,4 +1,4 @@
-//! Configuration types for the Apple Notes connector.
+//! Configuration types for the `Apple Notes` connector.
 
 use fcp_core::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};

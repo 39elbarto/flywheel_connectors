@@ -1,4 +1,4 @@
-//! Philips Hue connector.
+//! `Philips Hue` connector.
 
 #![forbid(unsafe_code)]
 #![allow(

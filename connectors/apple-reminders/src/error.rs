@@ -1,4 +1,4 @@
-//! Error types for the Apple Reminders connector.
+//! Error types for the `Apple Reminders` connector.
 
 use fcp_core::FcpError;
 use thiserror::Error;

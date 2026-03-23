@@ -1,4 +1,4 @@
-//! Error types for the Sonos connector.
+//! Error types for the `Sonos` connector.
 
 use fcp_core::FcpError;
 use thiserror::Error;

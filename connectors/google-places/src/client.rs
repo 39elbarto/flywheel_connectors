@@ -1,4 +1,4 @@
-//! HTTP client for the Google Places API (New).
+//! `HTTP` client for the `Google Places API (New)`.
 
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};

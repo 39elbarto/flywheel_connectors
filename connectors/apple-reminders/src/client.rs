@@ -1,4 +1,4 @@
-//! Apple Reminders process client based on `osascript`.
+//! `Apple Reminders` process client based on `osascript`.
 
 use std::process::Command;
 
@@ -100,7 +100,7 @@ impl AppleRemindersClient {
     }
 
     #[must_use]
-    pub fn list_lists_invocation(&self) -> ScriptInvocation {
+    pub const fn list_lists_invocation(&self) -> ScriptInvocation {
         ScriptInvocation {
             script: LIST_LISTS_SCRIPT,
             args: Vec::new(),

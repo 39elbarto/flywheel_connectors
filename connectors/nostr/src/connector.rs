@@ -1,6 +1,6 @@
 //! `Nostr` relay connector.
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use fcp_core::{
@@ -12,145 +12,49 @@ use fcp_core::{
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
-use fcp_streaming::{StreamError, WsClient, WsMessage};
-use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey, schnorr::Signature};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use url::Url;
-use uuid::Uuid;
+
+use crate::client::NostrClient;
+use crate::types::{
+    CAP_EVENTS_READ, CAP_HEALTH_READ, CAP_NOTES_WRITE, CAP_RELAYS_READ, NostrConfig, OP_HEALTH,
+    OP_LIST_RELAYS, OP_PUBLISH_NOTE, OP_QUERY_EVENTS, build_filter, note_kind, note_tags,
+    required_string,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-const DEFAULT_TIMEOUT_MS: u64 = 15_000;
-const DEFAULT_QUERY_LIMIT: u64 = 25;
-const NOTE_KIND_TEXT: u64 = 1;
 
-const OP_PUBLISH_NOTE: &str = "nostr.notes.publish";
-const OP_QUERY_EVENTS: &str = "nostr.events.query";
-const OP_LIST_RELAYS: &str = "nostr.relays.list";
-const OP_HEALTH: &str = "nostr.health";
+// ─── Doctor types (V3 requirement) ───────────────────────────────────────
 
-const CAP_NOTES_WRITE: &str = "nostr.notes.write";
-const CAP_EVENTS_READ: &str = "nostr.events.read";
-const CAP_RELAYS_READ: &str = "nostr.relays.read";
-const CAP_HEALTH_READ: &str = "nostr.health.read";
-
-#[derive(Clone, Deserialize)]
-struct NostrConfig {
-    relay_urls: Vec<String>,
-    secret_key_hex: String,
-    #[serde(default = "default_timeout_ms")]
-    request_timeout_ms: u64,
-    #[serde(default = "default_query_limit")]
-    default_query_limit: u64,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorResult {
+    pub passed: bool,
+    pub checks: Vec<DoctorCheck>,
 }
 
-impl std::fmt::Debug for NostrConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NostrConfig")
-            .field("relay_urls", &self.relay_urls)
-            .field("secret_key_hex", &"[REDACTED]")
-            .field("request_timeout_ms", &self.request_timeout_ms)
-            .field("default_query_limit", &self.default_query_limit)
-            .finish()
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    name: String,
+    passed: bool,
+    message: Option<String>,
+    critical: bool,
+}
+
+impl DoctorResult {
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
+        Self { passed, checks }
     }
 }
 
-struct NostrState {
-    relay_urls: Vec<String>,
-    secret_key_hex: String,
-    request_timeout: Duration,
-    default_query_limit: u64,
-    public_key_hex: String,
-}
-
-impl std::fmt::Debug for NostrState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NostrState")
-            .field("relay_urls", &self.relay_urls)
-            .field("secret_key_hex", &"[REDACTED]")
-            .field("request_timeout", &self.request_timeout)
-            .field("default_query_limit", &self.default_query_limit)
-            .field("public_key_hex", &self.public_key_hex)
-            .finish()
-    }
-}
+// ─── Connector ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct NostrConnector {
     base: BaseConnector,
-    state: Option<NostrState>,
+    client: Option<NostrClient>,
     verifier: Option<CapabilityVerifier>,
     started_at: Instant,
-}
-
-const fn default_timeout_ms() -> u64 {
-    DEFAULT_TIMEOUT_MS
-}
-
-const fn default_query_limit() -> u64 {
-    DEFAULT_QUERY_LIMIT
-}
-
-impl NostrConfig {
-    fn validate(&self) -> FcpResult<()> {
-        if self.relay_urls.is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "relay_urls must not be empty".into(),
-            });
-        }
-        if self.secret_key_hex.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "secret_key_hex must not be empty".into(),
-            });
-        }
-        if self.request_timeout_ms == 0 {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "request_timeout_ms must be greater than zero".into(),
-            });
-        }
-        if self.default_query_limit == 0 {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "default_query_limit must be greater than zero".into(),
-            });
-        }
-        for relay in &self.relay_urls {
-            let url = Url::parse(relay).map_err(|error| FcpError::InvalidRequest {
-                code: 1001,
-                message: format!("invalid relay URL `{relay}`: {error}"),
-            })?;
-            if !matches!(url.scheme(), "ws" | "wss") {
-                return Err(FcpError::InvalidRequest {
-                    code: 1001,
-                    message: format!("relay URL `{relay}` must use ws:// or wss://"),
-                });
-            }
-        }
-        parse_secret_key(&self.secret_key_hex)?;
-        Ok(())
-    }
-}
-
-impl NostrState {
-    fn new(config: NostrConfig) -> FcpResult<Self> {
-        config.validate()?;
-        let public_key_hex = derive_public_key_hex(&config.secret_key_hex)?;
-        Ok(Self {
-            relay_urls: config.relay_urls,
-            secret_key_hex: config.secret_key_hex,
-            request_timeout: Duration::from_millis(config.request_timeout_ms),
-            default_query_limit: config.default_query_limit,
-            public_key_hex,
-        })
-    }
-
-    fn secret_key(&self) -> FcpResult<SecretKey> {
-        parse_secret_key(&self.secret_key_hex)
-    }
 }
 
 impl NostrConnector {
@@ -158,7 +62,7 @@ impl NostrConnector {
     pub fn new() -> Self {
         Self {
             base: BaseConnector::new(ConnectorId::from_static("fcp.nostr")),
-            state: None,
+            client: None,
             verifier: None,
             started_at: Instant::now(),
         }
@@ -168,6 +72,66 @@ impl NostrConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Run connector diagnostics.
+    pub fn doctor(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "runtime".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "ConnectorRuntime active".into()
+            } else {
+                "ConnectorRuntime not initialized".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: self.verifier.is_some(),
+            message: Some(if self.verifier.is_some() {
+                "Handshake completed".into()
+            } else {
+                "No handshake - run handshake after configure".into()
+            }),
+            critical: false,
+        });
+
+        if let Some(client) = &self.client {
+            checks.push(DoctorCheck {
+                name: "relays".into(),
+                passed: !client.relays.is_empty(),
+                message: Some(format!("{} relay(s) configured", client.relay_count())),
+                critical: true,
+            });
+
+            checks.push(DoctorCheck {
+                name: "key_material".into(),
+                passed: true,
+                message: Some(format!(
+                    "Public key: {}...{}",
+                    &client.public_key_hex()[..8],
+                    &client.public_key_hex()[56..]
+                )),
+                critical: true,
+            });
+        }
+
+        DoctorResult::from_checks(checks)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -263,19 +227,19 @@ impl NostrConnector {
 
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
-        let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let capability = required_capability(req.operation.as_str())?;
         verifier.verify(&req.capability_token, &capability, &req.operation, &[])?;
 
         let output = match req.operation.as_str() {
-            OP_PUBLISH_NOTE => publish_note(state, &req.input).await?,
-            OP_QUERY_EVENTS => query_events(state, &req.input).await?,
+            OP_PUBLISH_NOTE => client.publish_note(&req.input).await?,
+            OP_QUERY_EVENTS => client.query_events(&req.input).await?,
             OP_LIST_RELAYS => json!({
-                "relays": state.relay_urls,
-                "public_key_hex": state.public_key_hex,
+                "relays": client.relay_urls(),
+                "public_key_hex": client.public_key_hex(),
             }),
-            OP_HEALTH => health_details(state).await?,
+            OP_HEALTH => client.health_details().await?,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -306,8 +270,11 @@ impl FcpConnector for NostrConnector {
                 code: 1003,
                 message: format!("invalid Nostr configuration: {error}"),
             })?;
-        self.state = Some(NostrState::new(config)?);
+        let client = NostrClient::new(&config)?;
+        self.client = Some(client);
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
+        self.verifier = None;
         Ok(())
     }
 
@@ -337,17 +304,17 @@ impl FcpConnector for NostrConnector {
 
     async fn health(&self) -> HealthSnapshot {
         HealthSnapshot {
-            status: if self.state.is_some() {
+            status: if self.client.is_some() {
                 HealthState::Ready
             } else {
                 HealthState::Starting
             },
             uptime_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             load: None,
-            details: self.state.as_ref().map(|state| {
+            details: self.client.as_ref().map(|client| {
                 json!({
-                    "relay_count": state.relay_urls.len(),
-                    "public_key_hex": state.public_key_hex,
+                    "relay_count": client.relay_count(),
+                    "public_key_hex": client.public_key_hex(),
                 })
             }),
             rate_limit: None,
@@ -355,13 +322,13 @@ impl FcpConnector for NostrConnector {
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(state) = self.state.as_ref() else {
+        let Some(client) = self.client.as_ref() else {
             return Ok(SelfCheckReport::failed(
                 "not_configured",
                 "configure must be called before Nostr self_check",
             ));
         };
-        match health_details(state).await {
+        match client.health_details().await {
             Ok(_) => Ok(SelfCheckReport::ok()),
             Err(error) => Ok(SelfCheckReport::from_error(&error)),
         }
@@ -372,8 +339,13 @@ impl FcpConnector for NostrConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
-        self.state = None;
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
+        self.client = None;
         self.verifier = None;
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(())
     }
 
@@ -409,7 +381,7 @@ impl FcpConnector for NostrConnector {
                 ));
             }
         };
-        let Some(state) = self.state.as_ref() else {
+        let Some(client) = self.client.as_ref() else {
             return Ok(SimulateResponse::denied(
                 req.id,
                 "Connector is not configured",
@@ -433,7 +405,7 @@ impl FcpConnector for NostrConnector {
             }
             return Ok(response);
         }
-        if let Err(error) = validate_simulation_input(req.operation.as_str(), &req.input, state) {
+        if let Err(error) = validate_simulation_input(req.operation.as_str(), &req.input, client) {
             return Ok(SimulateResponse::denied(
                 req.id,
                 error.to_string(),
@@ -452,294 +424,7 @@ impl FcpConnector for NostrConnector {
     }
 }
 
-async fn publish_note(state: &NostrState, input: &Value) -> FcpResult<Value> {
-    let content = required_string(input, "content")?;
-    let kind = note_kind(input)?;
-    let tags = note_tags(input)?;
-    let event = build_signed_event(
-        &state.secret_key()?,
-        &state.public_key_hex,
-        kind,
-        &tags,
-        content,
-    )?;
-
-    let mut accepted = Vec::new();
-    let mut rejected = Vec::new();
-    for relay in &state.relay_urls {
-        match publish_to_relay(relay, state.request_timeout, &event).await {
-            Ok(result) => accepted.push(result),
-            Err(error) => rejected.push(json!({
-                "relay": relay,
-                "error": error.to_string(),
-            })),
-        }
-    }
-
-    Ok(json!({
-        "event": event,
-        "accepted_relays": accepted,
-        "rejected_relays": rejected,
-    }))
-}
-
-async fn query_events(state: &NostrState, input: &Value) -> FcpResult<Value> {
-    let filter = build_filter(input, state.default_query_limit)?;
-    let sub_id = format!("fcp-{}", Uuid::new_v4().simple());
-    let mut per_relay = Vec::new();
-    for relay in &state.relay_urls {
-        match query_relay(relay, state.request_timeout, &sub_id, &filter).await {
-            Ok(events) => per_relay.push(json!({
-                "relay": relay,
-                "events": events,
-            })),
-            Err(error) => per_relay.push(json!({
-                "relay": relay,
-                "error": error.to_string(),
-            })),
-        }
-    }
-    Ok(json!({
-        "subscription_id": sub_id,
-        "filter": filter,
-        "results": per_relay,
-    }))
-}
-
-async fn health_details(state: &NostrState) -> FcpResult<Value> {
-    let mut results = Vec::with_capacity(state.relay_urls.len());
-    for relay in &state.relay_urls {
-        match connect_relay(relay).await {
-            Ok(mut ws) => {
-                let _ = ws.close().await;
-                results.push(json!({
-                    "relay": relay,
-                    "reachable": true,
-                }));
-            }
-            Err(error) => results.push(json!({
-                "relay": relay,
-                "reachable": false,
-                "error": error.to_string(),
-            })),
-        }
-    }
-    Ok(json!({
-        "public_key_hex": state.public_key_hex,
-        "relay_health": results,
-    }))
-}
-
-async fn publish_to_relay(relay: &str, timeout: Duration, event: &Value) -> FcpResult<Value> {
-    let mut ws = connect_relay(relay).await?;
-    let payload = json!(["EVENT", event]);
-    ws.send_json(&payload)
-        .await
-        .map_err(map_stream_error("nostr publish send"))?;
-    let response = fcp_async_core::time::timeout(timeout, ws.recv())
-        .await
-        .map_err(|_| FcpError::UpstreamTimeout {
-            service: "nostr".into(),
-        })?
-        .map_err(map_stream_error("nostr publish recv"))?;
-    let _ = ws.close().await;
-    let response = response.ok_or_else(|| FcpError::External {
-        service: "nostr".into(),
-        message: format!("relay `{relay}` closed before acknowledging event"),
-        status_code: None,
-        retryable: true,
-        retry_after: None,
-    })?;
-    let parsed = parse_ws_message(&response)?;
-    Ok(json!({
-        "relay": relay,
-        "response": parsed,
-    }))
-}
-
-async fn query_relay(
-    relay: &str,
-    timeout: Duration,
-    sub_id: &str,
-    filter: &Value,
-) -> FcpResult<Vec<Value>> {
-    let mut ws = connect_relay(relay).await?;
-    ws.send_json(&json!(["REQ", sub_id, filter]))
-        .await
-        .map_err(map_stream_error("nostr query send"))?;
-
-    let mut events = Vec::new();
-    loop {
-        let message = fcp_async_core::time::timeout(timeout, ws.recv())
-            .await
-            .map_err(|_| FcpError::UpstreamTimeout {
-                service: "nostr".into(),
-            })?
-            .map_err(map_stream_error("nostr query recv"))?;
-        let Some(message) = message else {
-            break;
-        };
-        let parsed = parse_ws_message(&message)?;
-        if is_eose(&parsed, sub_id) {
-            break;
-        }
-        if let Some(event) = extract_event(&parsed, sub_id) {
-            events.push(event);
-        }
-    }
-
-    let _ = ws.send_json(&json!(["CLOSE", sub_id])).await;
-    let _ = ws.close().await;
-    Ok(events)
-}
-
-async fn connect_relay(relay: &str) -> FcpResult<fcp_streaming::WsConnection> {
-    WsClient::new(relay)
-        .connect()
-        .await
-        .map_err(map_stream_error("nostr relay connect"))
-}
-
-fn map_stream_error(context: &'static str) -> impl Fn(StreamError) -> FcpError {
-    move |error| FcpError::External {
-        service: "nostr".into(),
-        message: format!("{context} failed: {error}"),
-        status_code: None,
-        retryable: true,
-        retry_after: None,
-    }
-}
-
-fn parse_secret_key(raw: &str) -> FcpResult<SecretKey> {
-    let bytes = hex::decode(raw.trim()).map_err(|error| FcpError::InvalidRequest {
-        code: 1001,
-        message: format!("secret_key_hex must be valid hex: {error}"),
-    })?;
-    SecretKey::from_slice(&bytes).map_err(|error| FcpError::InvalidRequest {
-        code: 1001,
-        message: format!("secret_key_hex is not a valid secp256k1 secret key: {error}"),
-    })
-}
-
-fn derive_public_key_hex(secret_key_hex: &str) -> FcpResult<String> {
-    let secp = Secp256k1::new();
-    let secret_key = parse_secret_key(secret_key_hex)?;
-    let keypair = Keypair::from_secret_key(&secp, &secret_key);
-    let (pubkey, _) = XOnlyPublicKey::from_keypair(&keypair);
-    Ok(pubkey.to_string())
-}
-
-fn build_signed_event(
-    secret_key: &SecretKey,
-    public_key_hex: &str,
-    kind: u64,
-    tags: &Value,
-    content: &str,
-) -> FcpResult<Value> {
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| FcpError::Internal {
-            message: format!("system clock error: {error}"),
-        })?
-        .as_secs();
-    let canonical = json!([0, public_key_hex, created_at, kind, tags, content]);
-    let canonical_bytes = serde_json::to_vec(&canonical).map_err(|error| FcpError::Internal {
-        message: format!("failed to encode Nostr canonical event: {error}"),
-    })?;
-    let id = hex::encode(Sha256::digest(canonical_bytes));
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, secret_key);
-    let msg =
-        Message::from_digest_slice(&hex::decode(&id).map_err(|error| FcpError::Internal {
-            message: format!("failed to decode event id hex: {error}"),
-        })?)
-        .map_err(|error| FcpError::Internal {
-            message: format!("failed to build secp256k1 message: {error}"),
-        })?;
-    let sig: Signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-    Ok(json!({
-        "id": id,
-        "pubkey": public_key_hex,
-        "created_at": created_at,
-        "kind": kind,
-        "tags": tags,
-        "content": content,
-        "sig": sig.to_string(),
-    }))
-}
-
-fn build_filter(input: &Value, default_limit: u64) -> FcpResult<Value> {
-    let mut filter = serde_json::Map::new();
-    if let Some(authors) = string_array_field(input, "authors")? {
-        filter.insert("authors".into(), Value::Array(authors));
-    }
-    if let Some(ids) = string_array_field(input, "ids")? {
-        filter.insert("ids".into(), Value::Array(ids));
-    }
-    if let Some(kinds) = u64_array_field(input, "kinds")? {
-        filter.insert("kinds".into(), Value::Array(kinds));
-    }
-    if let Some(since) = i64_field(input, "since")? {
-        filter.insert("since".into(), json!(since));
-    }
-    if let Some(until) = i64_field(input, "until")? {
-        filter.insert("until".into(), json!(until));
-    }
-    let limit = u64_field(input, "limit")?.unwrap_or(default_limit);
-    if limit == 0 {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: "limit must be greater than zero".into(),
-        });
-    }
-    filter.insert("limit".into(), json!(limit));
-    Ok(Value::Object(filter))
-}
-
-fn parse_ws_message(message: &WsMessage) -> FcpResult<Value> {
-    match message {
-        WsMessage::Text(text) => {
-            serde_json::from_str::<Value>(text).map_err(|error| FcpError::External {
-                service: "nostr".into(),
-                message: format!("failed to parse relay frame: {error}"),
-                status_code: None,
-                retryable: false,
-                retry_after: None,
-            })
-        }
-        other => Err(FcpError::External {
-            service: "nostr".into(),
-            message: format!("unexpected relay frame type: {other:?}"),
-            status_code: None,
-            retryable: false,
-            retry_after: None,
-        }),
-    }
-}
-
-fn is_eose(parsed: &Value, sub_id: &str) -> bool {
-    parsed
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(Value::as_str)
-        == Some("EOSE")
-        && parsed
-            .as_array()
-            .and_then(|items| items.get(1))
-            .and_then(Value::as_str)
-            == Some(sub_id)
-}
-
-fn extract_event(parsed: &Value, sub_id: &str) -> Option<Value> {
-    let items = parsed.as_array()?;
-    if items.first().and_then(Value::as_str) != Some("EVENT") {
-        return None;
-    }
-    if items.get(1).and_then(Value::as_str) != Some(sub_id) {
-        return None;
-    }
-    items.get(2).cloned()
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
@@ -757,7 +442,11 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     Ok(CapabilityId::from_static(capability))
 }
 
-fn validate_simulation_input(operation: &str, input: &Value, state: &NostrState) -> FcpResult<()> {
+fn validate_simulation_input(
+    operation: &str,
+    input: &Value,
+    client: &NostrClient,
+) -> FcpResult<()> {
     match operation {
         OP_PUBLISH_NOTE => {
             let _ = required_string(input, "content")?;
@@ -766,7 +455,7 @@ fn validate_simulation_input(operation: &str, input: &Value, state: &NostrState)
             Ok(())
         }
         OP_QUERY_EVENTS => {
-            let _ = build_filter(input, state.default_query_limit)?;
+            let _ = build_filter(input, client.default_query_limit)?;
             Ok(())
         }
         OP_LIST_RELAYS | OP_HEALTH => Ok(()),
@@ -798,131 +487,6 @@ fn nostr_auth_caps() -> AuthCaps {
         methods: vec!["secp256k1_secret_key_hex".to_string()],
         oauth: None,
     }
-}
-
-fn note_kind(input: &Value) -> FcpResult<u64> {
-    let kind = u64_field(input, "kind")?.unwrap_or(NOTE_KIND_TEXT);
-    if kind != NOTE_KIND_TEXT {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: "nostr.notes.publish only supports kind=1 public notes in this first slice"
-                .into(),
-        });
-    }
-    Ok(kind)
-}
-
-fn note_tags(input: &Value) -> FcpResult<Value> {
-    let Some(tags) = input.get("tags") else {
-        return Ok(Value::Array(Vec::new()));
-    };
-    let Value::Array(tag_rows) = tags else {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: "tags must be an array of string arrays".into(),
-        });
-    };
-    for tag in tag_rows {
-        let Value::Array(parts) = tag else {
-            return Err(FcpError::InvalidRequest {
-                code: 1005,
-                message: "each tag must be an array of strings".into(),
-            });
-        };
-        if parts.iter().any(|part| !part.is_string()) {
-            return Err(FcpError::InvalidRequest {
-                code: 1005,
-                message: "each tag entry must be a string".into(),
-            });
-        }
-    }
-    Ok(Value::Array(tag_rows.clone()))
-}
-
-fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
-    let Some(raw) = value.get(field) else {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} is required"),
-        });
-    };
-    let Some(text) = raw.as_str() else {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must be a non-empty string"),
-        });
-    };
-    if text.trim().is_empty() {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must be a non-empty string"),
-        });
-    }
-    Ok(text)
-}
-
-fn string_array_field(input: &Value, field: &str) -> FcpResult<Option<Vec<Value>>> {
-    let Some(value) = input.get(field) else {
-        return Ok(None);
-    };
-    let Value::Array(items) = value else {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must be an array of strings"),
-        });
-    };
-    if items.iter().any(|item| !item.is_string()) {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must contain only strings"),
-        });
-    }
-    Ok(Some(items.clone()))
-}
-
-fn u64_array_field(input: &Value, field: &str) -> FcpResult<Option<Vec<Value>>> {
-    let Some(value) = input.get(field) else {
-        return Ok(None);
-    };
-    let Value::Array(items) = value else {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must be an array of integers"),
-        });
-    };
-    if items.iter().any(|item| item.as_u64().is_none()) {
-        return Err(FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must contain only integers"),
-        });
-    }
-    Ok(Some(items.clone()))
-}
-
-fn i64_field(input: &Value, field: &str) -> FcpResult<Option<i64>> {
-    let Some(value) = input.get(field) else {
-        return Ok(None);
-    };
-    value
-        .as_i64()
-        .map(Some)
-        .ok_or_else(|| FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must be an integer"),
-        })
-}
-
-fn u64_field(input: &Value, field: &str) -> FcpResult<Option<u64>> {
-    let Some(value) = input.get(field) else {
-        return Ok(None);
-    };
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("{field} must be an unsigned integer"),
-        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -966,89 +530,145 @@ fn operation(
     }
 }
 
+// ─── Tests ───────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, ConnectorId, ZoneId};
+    use fcp_core::{CapabilityToken, ConnectorId, SelfCheckStatus, ZoneId};
+    use fcp_sdk::prelude::FcpConnector;
+    use std::sync::atomic::Ordering;
 
-    #[test]
-    fn config_requires_at_least_one_relay() {
-        let error = serde_json::from_value::<NostrConfig>(json!({
-            "relay_urls": [],
+    fn test_config() -> Value {
+        json!({
+            "relay_urls": ["wss://relay.example.com"],
             "secret_key_hex": "1111111111111111111111111111111111111111111111111111111111111111"
-        }))
-        .expect("config should deserialize")
-        .validate()
-        .expect_err("relay_urls must be required");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+        })
     }
 
-    #[test]
-    fn build_signed_event_produces_hex_id_and_signature() {
-        let secret_key =
-            parse_secret_key("1111111111111111111111111111111111111111111111111111111111111111")
-                .expect("secret key should parse");
-        let public_key = derive_public_key_hex(
-            "1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .expect("public key should derive");
-        let event = build_signed_event(&secret_key, &public_key, 1, &json!([]), "hello nostr")
-            .expect("event should build");
-        assert_eq!(event["id"].as_str().unwrap().len(), 64);
-        assert_eq!(event["sig"].as_str().unwrap().len(), 128);
+    fn handshake_request() -> HandshakeRequest {
+        HandshakeRequest {
+            protocol_version: "2.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key: [7u8; 32],
+            nonce: [9u8; 32],
+            capabilities_requested: vec![CapabilityId::from_static(CAP_HEALTH_READ)],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        }
     }
 
-    #[test]
-    fn filter_uses_default_limit() {
-        let filter = build_filter(&json!({ "kinds": [1] }), 25).expect("filter should build");
-        assert_eq!(filter["limit"], 25);
-        assert_eq!(filter["kinds"], json!([1]));
-    }
+    // ── Doctor tests ─────────────────────────────────────────────────
 
     #[test]
-    fn note_kind_rejects_non_note_kinds() {
-        let error = note_kind(&json!({ "kind": 4 })).expect_err("kind 4 must be rejected");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn note_kind_rejects_non_integer_values() {
-        let error =
-            note_kind(&json!({ "kind": "1" })).expect_err("string kind values must be rejected");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn note_tags_require_string_arrays() {
-        let error = note_tags(&json!({ "tags": [["p", 3]] }))
-            .expect_err("non-string tag entries must be rejected");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn required_string_rejects_non_string_values() {
-        let error = required_string(&json!({ "content": 7 }), "content")
-            .expect_err("numeric content must be rejected");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
-        assert_eq!(
-            error.to_string(),
-            "Invalid request: content must be a non-empty string"
+    fn doctor_unconfigured_reports_failure() {
+        let connector = NostrConnector::new();
+        let result = connector.doctor();
+        assert!(!result.passed);
+        let config_check = result
+            .checks
+            .iter()
+            .find(|c| c.name == "configuration")
+            .unwrap();
+        assert!(!config_check.passed);
+        assert!(
+            config_check
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("Not configured")
         );
     }
 
-    #[test]
-    fn filter_rejects_invalid_limit_type() {
-        let error = build_filter(&json!({ "limit": "10" }), 25)
-            .expect_err("string limit values must be rejected");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    #[fcp_async_core::runtime::test]
+    async fn doctor_configured_reports_success() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let result = connector.doctor();
+        assert!(result.passed);
+        let config_check = result
+            .checks
+            .iter()
+            .find(|c| c.name == "configuration")
+            .unwrap();
+        assert!(config_check.passed);
+        let relays_check = result.checks.iter().find(|c| c.name == "relays").unwrap();
+        assert!(relays_check.passed);
+        let key_check = result
+            .checks
+            .iter()
+            .find(|c| c.name == "key_material")
+            .unwrap();
+        assert!(key_check.passed);
     }
 
-    #[test]
-    fn filter_rejects_non_string_authors() {
-        let error = build_filter(&json!({ "authors": ["ok", 3] }), 25)
-            .expect_err("authors must contain only strings");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    #[fcp_async_core::runtime::test]
+    async fn doctor_shows_handshake_not_done() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let result = connector.doctor();
+        let hs_check = result
+            .checks
+            .iter()
+            .find(|c| c.name == "handshake")
+            .unwrap();
+        assert!(!hs_check.passed);
+        assert!(
+            hs_check
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("No handshake")
+        );
     }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_shows_handshake_done() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        connector.handshake(handshake_request()).await.unwrap();
+        let result = connector.doctor();
+        let hs_check = result
+            .checks
+            .iter()
+            .find(|c| c.name == "handshake")
+            .unwrap();
+        assert!(hs_check.passed);
+    }
+
+    // ── Health tests ─────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn health_starting_when_unconfigured() {
+        let connector = NostrConnector::new();
+        let snapshot = connector.health().await;
+        assert!(matches!(snapshot.status, HealthState::Starting));
+        assert!(snapshot.details.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_ready_when_configured() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let snapshot = connector.health().await;
+        assert!(matches!(snapshot.status, HealthState::Ready));
+        let details = snapshot.details.unwrap();
+        assert_eq!(details["relay_count"], 1);
+        assert!(details["public_key_hex"].is_string());
+    }
+
+    // ── Self-check tests ─────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_fails_when_unconfigured() {
+        let connector = NostrConnector::new();
+        let report = connector.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+    }
+
+    // ── Introspect tests ─────────────────────────────────────────────
 
     #[test]
     fn introspection_reports_raw_key_auth_boundary() {
@@ -1080,6 +700,27 @@ mod tests {
     }
 
     #[test]
+    fn introspect_has_four_operations() {
+        let intro = NostrConnector::new().introspect();
+        assert_eq!(intro.operations.len(), 4);
+        let ids: Vec<_> = intro.operations.iter().map(|op| op.id.as_str()).collect();
+        assert!(ids.contains(&OP_PUBLISH_NOTE));
+        assert!(ids.contains(&OP_QUERY_EVENTS));
+        assert!(ids.contains(&OP_LIST_RELAYS));
+        assert!(ids.contains(&OP_HEALTH));
+    }
+
+    #[test]
+    fn introspect_event_caps_no_streaming() {
+        let intro = NostrConnector::new().introspect();
+        let caps = intro.event_caps.unwrap();
+        assert!(!caps.streaming);
+        assert!(!caps.replay);
+    }
+
+    // ── Simulate tests ───────────────────────────────────────────────
+
+    #[test]
     fn simulate_denies_when_not_configured() {
         let connector = NostrConnector::new();
         let response = fcp_async_core::runtime::block_on_sync(async {
@@ -1101,5 +742,221 @@ mod tests {
             response.failure_reason.as_deref(),
             Some("Connector is not configured")
         );
+    }
+
+    // ── Configure / handshake / shutdown lifecycle tests ─────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn reconfigure_requires_a_fresh_handshake() {
+        let mut connector = NostrConnector::new();
+        connector
+            .configure(test_config())
+            .await
+            .expect("configure should succeed");
+        connector
+            .handshake(handshake_request())
+            .await
+            .expect("handshake should succeed");
+        assert!(connector.base.handshaken.load(Ordering::Relaxed));
+
+        connector
+            .configure(test_config())
+            .await
+            .expect("reconfigure should succeed");
+
+        assert!(!connector.base.handshaken.load(Ordering::Relaxed));
+        assert!(connector.verifier.is_none());
+
+        let response = connector
+            .simulate(SimulateRequest::new(
+                ConnectorId::from_static("fcp.nostr"),
+                OperationId::from_static(OP_HEALTH),
+                ZoneId::work(),
+                json!({}),
+                CapabilityToken::test_token(),
+            ))
+            .await
+            .expect("simulate should return");
+        assert!(!response.would_succeed);
+        let expected = FcpError::NotHandshaken.error_code();
+        assert_eq!(response.denial_code.as_deref(), Some(expected.as_str()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_base_ready_flags() {
+        let mut connector = NostrConnector::new();
+        connector
+            .configure(test_config())
+            .await
+            .expect("configure should succeed");
+        connector
+            .handshake(handshake_request())
+            .await
+            .expect("handshake should succeed");
+
+        connector
+            .shutdown(ShutdownRequest {
+                r#type: "shutdown".into(),
+                deadline_ms: 1_000,
+                drain: false,
+                reason: Some("test".into()),
+            })
+            .await
+            .expect("shutdown should succeed");
+
+        assert!(!connector.base.configured.load(Ordering::Relaxed));
+        assert!(!connector.base.handshaken.load(Ordering::Relaxed));
+        assert!(connector.verifier.is_none());
+        assert!(connector.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_json() {
+        let mut connector = NostrConnector::new();
+        let err = connector
+            .configure(json!({ "bad": "config" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_empty_relays() {
+        let mut connector = NostrConnector::new();
+        let err = connector
+            .configure(json!({
+                "relay_urls": [],
+                "secret_key_hex": "1111111111111111111111111111111111111111111111111111111111111111"
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_grants_requested_capabilities() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let resp = connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: [7u8; 32],
+                nonce: [9u8; 32],
+                capabilities_requested: vec![
+                    CapabilityId::from_static(CAP_HEALTH_READ),
+                    CapabilityId::from_static(CAP_NOTES_WRITE),
+                    CapabilityId::from_static("unknown.cap"),
+                ],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+        let granted: Vec<_> = resp
+            .capabilities_granted
+            .iter()
+            .map(|g| g.capability.as_str())
+            .collect();
+        assert!(granted.contains(&CAP_HEALTH_READ));
+        assert!(granted.contains(&CAP_NOTES_WRITE));
+        assert!(!granted.contains(&"unknown.cap"));
+    }
+
+    // ── Connector ID / default tests ─────────────────────────────────
+
+    #[test]
+    fn connector_id_is_fcp_nostr() {
+        let connector = NostrConnector::new();
+        assert_eq!(connector.id().as_str(), "fcp.nostr");
+    }
+
+    #[test]
+    fn default_creates_new() {
+        let connector = NostrConnector::default();
+        assert_eq!(connector.id().as_str(), "fcp.nostr");
+        assert!(connector.client.is_none());
+    }
+
+    #[test]
+    fn manifest_hash_is_deterministic() {
+        let h1 = NostrConnector::manifest_hash();
+        let h2 = NostrConnector::manifest_hash();
+        assert_eq!(h1, h2);
+        assert!(h1.starts_with("sha256:"));
+    }
+
+    // ── Required capability tests ────────────────────────────────────
+
+    #[test]
+    fn required_capability_publish() {
+        let cap = required_capability(OP_PUBLISH_NOTE).unwrap();
+        assert_eq!(cap.as_str(), CAP_NOTES_WRITE);
+    }
+
+    #[test]
+    fn required_capability_query() {
+        let cap = required_capability(OP_QUERY_EVENTS).unwrap();
+        assert_eq!(cap.as_str(), CAP_EVENTS_READ);
+    }
+
+    #[test]
+    fn required_capability_unknown() {
+        assert!(required_capability("unknown.op").is_err());
+    }
+
+    // ── Doctor serialization test ────────────────────────────────────
+
+    #[test]
+    fn doctor_result_serializes() {
+        let result = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: Some("all good".into()),
+            critical: true,
+        }]);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["passed"], true);
+        assert_eq!(json["checks"][0]["name"], "test");
+    }
+
+    #[test]
+    fn doctor_result_fails_on_critical_failure() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "pass".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+            DoctorCheck {
+                name: "fail".into(),
+                passed: false,
+                message: Some("broken".into()),
+                critical: true,
+            },
+        ]);
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn doctor_result_passes_with_non_critical_failure() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "pass_critical".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "fail_non_critical".into(),
+                passed: false,
+                message: Some("optional".into()),
+                critical: false,
+            },
+        ]);
+        assert!(result.passed);
     }
 }

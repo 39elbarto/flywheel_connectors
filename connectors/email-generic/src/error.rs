@@ -52,7 +52,7 @@ impl EmailGenericError {
                 message: error.to_string(),
             },
             Self::Address(error) => FcpError::Internal {
-                message: error.to_string(),
+                message: error.clone(),
             },
         }
     }

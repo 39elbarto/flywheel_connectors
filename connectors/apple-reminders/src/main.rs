@@ -1,4 +1,4 @@
-//! Apple Reminders connector entrypoint.
+//! `Apple Reminders` connector entrypoint.
 
 #![forbid(unsafe_code)]
 
@@ -59,6 +59,7 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_message(
     connector: &mut AppleRemindersConnector,
     message: &str,

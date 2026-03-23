@@ -1,4 +1,4 @@
-//! Error types for the Apple Notes connector.
+//! Error types for the `Apple Notes` connector.
 
 use fcp_core::FcpError;
 use thiserror::Error;

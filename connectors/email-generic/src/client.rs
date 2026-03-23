@@ -1,4 +1,4 @@
-//! Generic IMAP/SMTP client helpers.
+//! Generic `IMAP`/`SMTP` client helpers.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -64,7 +64,7 @@ impl EmailGenericClient {
         })
     }
 
-    fn imap_timeout(&self) -> Duration {
+    const fn imap_timeout(&self) -> Duration {
         Duration::from_millis(self.config.request_timeout_ms)
     }
 
@@ -132,7 +132,7 @@ impl EmailGenericClient {
     {
         let mut reader = self.connect_imap()?;
         let greeting = Self::read_line(&mut reader)?;
-        if !greeting.starts_with("*") {
+        if !greeting.starts_with('*') {
             return Err(EmailGenericError::Imap("Invalid IMAP greeting".into()));
         }
         let login = format!(

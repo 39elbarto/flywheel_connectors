@@ -1,4 +1,4 @@
-//! Google Places connector.
+//! `Google Places` connector.
 
 #![forbid(unsafe_code)]
 #![allow(

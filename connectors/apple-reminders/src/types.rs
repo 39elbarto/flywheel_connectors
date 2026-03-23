@@ -1,4 +1,4 @@
-//! Configuration types for the Apple Reminders connector.
+//! Configuration types for the `Apple Reminders` connector.
 
 use fcp_core::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};

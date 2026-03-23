@@ -1,4 +1,4 @@
-//! Configuration types for the Sonos connector.
+//! Configuration types for the `Sonos` connector.
 
 use fcp_core::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};

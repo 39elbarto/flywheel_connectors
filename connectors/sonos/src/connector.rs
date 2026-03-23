@@ -1,4 +1,4 @@
-//! Sonos connector implementation.
+//! `Sonos` connector implementation.
 
 use std::time::{Duration, Instant};
 
@@ -302,9 +302,9 @@ impl SonosConnector {
                 let volume = req
                     .input
                     .get("volume")
-                    .and_then(|value| value.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .and_then(|value| u8::try_from(value).ok())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing or invalid volume".into(),
                     })?;

@@ -15,6 +15,34 @@ use tracing::{info, instrument};
 use crate::client::WolframClient;
 use crate::types::WolframConfig;
 
+/// Result of a doctor check run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub passed: bool,
+    pub message: Option<String>,
+    pub critical: bool,
+}
+
+/// Aggregate result of all doctor checks.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorResult {
+    pub passed: bool,
+    pub checks: Vec<DoctorCheck>,
+}
+
+impl DoctorResult {
+    /// Create a `DoctorResult` from a list of checks.
+    /// The overall result passes when all critical checks pass.
+    #[must_use]
+    pub fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let passed = checks
+            .iter()
+            .all(|c| !c.critical || c.passed);
+        Self { passed, checks }
+    }
+}
+
 /// FCP Wolfram Alpha Connector.
 pub struct WolframConnector {
     base: Arc<BaseConnector>,
@@ -138,6 +166,50 @@ impl WolframConnector {
                 "requests_error": self.base.metrics().requests_error,
             }
         })
+    }
+
+    /// Run structured doctor checks and return a typed `DoctorResult`.
+    #[must_use]
+    pub fn doctor(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        // Check 1: Configuration loaded
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: Some(if self.config.is_some() {
+                "Configured".into()
+            } else {
+                "Not configured".into()
+            }),
+            critical: true,
+        });
+
+        // Check 2: Client initialised
+        checks.push(DoctorCheck {
+            name: "client".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "HTTP client ready".into()
+            } else {
+                "HTTP client not initialised".into()
+            }),
+            critical: true,
+        });
+
+        // Check 3: Runtime initialised
+        checks.push(DoctorCheck {
+            name: "runtime".into(),
+            passed: self.runtime.is_some(),
+            message: Some(if self.runtime.is_some() {
+                "Runtime initialised".into()
+            } else {
+                "Runtime not initialised".into()
+            }),
+            critical: true,
+        });
+
+        DoctorResult::from_checks(checks)
     }
 
     /// Handle doctor checks.
@@ -906,6 +978,70 @@ mod tests {
         assert!(op_ids.contains(&"wolfram.query"));
         assert!(op_ids.contains(&"wolfram.short_answer"));
         assert!(op_ids.contains(&"wolfram.spoken_result"));
+    }
+
+    #[test]
+    fn doctor_unconfigured_fails() {
+        let connector = WolframConnector::new();
+        let result = connector.doctor();
+        assert!(!result.passed, "unconfigured connector should fail doctor");
+        let config_check = result.checks.iter().find(|c| c.name == "configuration").unwrap();
+        assert!(!config_check.passed);
+        assert!(config_check.critical);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_configured_passes() {
+        let mut connector = WolframConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await
+            .expect("configure");
+        let result = connector.doctor();
+        assert!(result.passed, "configured connector should pass doctor");
+        assert!(result.checks.iter().all(|c| c.passed));
+    }
+
+    #[test]
+    fn doctor_result_from_checks_critical_failure() {
+        let checks = vec![
+            DoctorCheck {
+                name: "ok_check".into(),
+                passed: true,
+                message: Some("Good".into()),
+                critical: false,
+            },
+            DoctorCheck {
+                name: "critical_fail".into(),
+                passed: false,
+                message: Some("Bad".into()),
+                critical: true,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert!(!result.passed, "should fail when critical check fails");
+    }
+
+    #[test]
+    fn doctor_result_from_checks_noncritical_failure_ok() {
+        let checks = vec![
+            DoctorCheck {
+                name: "critical_ok".into(),
+                passed: true,
+                message: Some("Good".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "noncritical_fail".into(),
+                passed: false,
+                message: Some("Warning".into()),
+                critical: false,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert!(result.passed, "should pass when only non-critical check fails");
     }
 
     #[test]

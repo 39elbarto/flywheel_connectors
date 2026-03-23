@@ -203,7 +203,7 @@ impl EmailGenericConnector {
         ]
     }
 
-    async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+    fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let required_cap = match req.operation.as_str() {
@@ -236,7 +236,7 @@ impl EmailGenericConnector {
                     .input
                     .get("mailbox")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing mailbox".into(),
                     })?;
@@ -244,7 +244,7 @@ impl EmailGenericConnector {
                     .input
                     .get("query")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing query".into(),
                     })?;
@@ -257,7 +257,7 @@ impl EmailGenericConnector {
                     .input
                     .get("to")
                     .and_then(|value| value.as_array())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing to".into(),
                     })?
@@ -279,7 +279,7 @@ impl EmailGenericConnector {
                     .input
                     .get("subject")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing subject".into(),
                     })?;
@@ -287,7 +287,7 @@ impl EmailGenericConnector {
                     .input
                     .get("body")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing body".into(),
                     })?;
@@ -409,7 +409,7 @@ impl FcpConnector for EmailGenericConnector {
     }
 
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
-        let result = self.invoke_inner(req).await;
+        let result = self.invoke_inner(req);
         self.base.record_request(result.is_ok());
         result
     }

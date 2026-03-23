@@ -1,4 +1,4 @@
-//! Apple Notes process client based on `osascript`.
+//! `Apple Notes` process client based on `osascript`.
 
 use std::process::Command;
 

@@ -1,4 +1,4 @@
-//! Apple Notes connector implementation.
+//! `Apple Notes` connector implementation.
 
 use std::time::Instant;
 
@@ -227,7 +227,7 @@ impl AppleNotesConnector {
         ]
     }
 
-    async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+    fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let required_cap = match req.operation.as_str() {
@@ -261,7 +261,7 @@ impl AppleNotesConnector {
                     .input
                     .get("query")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing query".into(),
                     })?;
@@ -274,7 +274,7 @@ impl AppleNotesConnector {
                     .input
                     .get("note_id")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing note_id".into(),
                     })?;
@@ -287,7 +287,7 @@ impl AppleNotesConnector {
                     .input
                     .get("title")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing title".into(),
                     })?;
@@ -295,7 +295,7 @@ impl AppleNotesConnector {
                     .input
                     .get("body")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing body".into(),
                     })?;
@@ -425,7 +425,7 @@ impl FcpConnector for AppleNotesConnector {
     }
 
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
-        let result = self.invoke_inner(req).await;
+        let result = self.invoke_inner(req);
         self.base.record_request(result.is_ok());
         result
     }

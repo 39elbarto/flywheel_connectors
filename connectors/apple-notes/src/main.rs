@@ -1,4 +1,4 @@
-//! Apple Notes connector entrypoint.
+//! `Apple Notes` connector entrypoint.
 
 #![forbid(unsafe_code)]
 
@@ -59,6 +59,7 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_message(connector: &mut AppleNotesConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(value) => value,

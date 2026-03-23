@@ -1,4 +1,4 @@
-//! Configuration types for the Hue connector.
+//! Configuration types for the `Hue` connector.
 
 use fcp_core::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};

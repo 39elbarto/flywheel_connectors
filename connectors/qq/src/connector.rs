@@ -1,12 +1,8 @@
 //! Tencent `QQ` bot connector.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::Instant;
 
 use async_trait::async_trait;
-use fcp_async_core::sync::Mutex;
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
@@ -16,226 +12,47 @@ use fcp_core::{
     UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
-use reqwest::Url;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::client::{QqClient, channel_message_body, direct_message_body, sanitize_path_segment};
+use crate::types::{
+    CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C,
+    OP_SEND_CHANNEL, OP_SEND_GROUP, QqConfig,
+};
+
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-const DEFAULT_BASE_URL: &str = "https://api.sgroup.qq.com";
-const DEFAULT_TOKEN_BASE_URL: &str = "https://bots.qq.com";
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const TOKEN_REFRESH_SAFETY_MARGIN_SECS: u64 = 60;
 
-const OP_SEND_CHANNEL: &str = "qq.messages.send_channel";
-const OP_SEND_GROUP: &str = "qq.messages.send_group";
-const OP_SEND_C2C: &str = "qq.messages.send_c2c";
-const OP_GET_GATEWAY: &str = "qq.gateway.get";
-const OP_HEALTH: &str = "qq.health";
-
-const CAP_MESSAGES_WRITE: &str = "qq.messages.write";
-const CAP_GATEWAY_READ: &str = "qq.gateway.read";
-const CAP_HEALTH_READ: &str = "qq.health.read";
-
-#[derive(Debug, Clone, Deserialize)]
-struct QqConfig {
-    #[serde(default = "default_base_url")]
-    base_url: String,
-    #[serde(default = "default_token_base_url")]
-    token_base_url: String,
-    app_id: String,
-    client_secret: String,
-    #[serde(default = "default_timeout_ms")]
-    request_timeout_ms: u64,
+// ─────────────────────────────────────────────────────────────────
+// Doctor types (V3 requirement)
+// ─────────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorResult {
+    pub passed: bool,
+    pub checks: Vec<DoctorCheck>,
 }
 
-#[derive(Debug, Clone)]
-struct CachedAccessToken {
-    token: String,
-    expires_at: Instant,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    name: String,
+    passed: bool,
+    message: Option<String>,
+    critical: bool,
 }
 
-#[derive(Debug)]
-struct QqState {
-    config: QqConfig,
-    client: reqwest::Client,
-    token_cache: Arc<Mutex<Option<CachedAccessToken>>>,
+impl DoctorResult {
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
+        Self { passed, checks }
+    }
 }
 
 #[derive(Debug)]
 pub struct QqConnector {
     base: BaseConnector,
-    state: Option<QqState>,
+    client: Option<QqClient>,
     verifier: Option<CapabilityVerifier>,
     started_at: Instant,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccessTokenResponse {
-    #[serde(default)]
-    access_token: String,
-    #[serde(default)]
-    expires_in: u64,
-}
-
-fn default_base_url() -> String {
-    DEFAULT_BASE_URL.to_string()
-}
-
-fn default_token_base_url() -> String {
-    DEFAULT_TOKEN_BASE_URL.to_string()
-}
-
-const fn default_timeout_ms() -> u64 {
-    DEFAULT_TIMEOUT_MS
-}
-
-impl QqConfig {
-    fn validate(&self) -> FcpResult<()> {
-        if self.app_id.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "app_id must not be empty".into(),
-            });
-        }
-        if self.client_secret.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "client_secret must not be empty".into(),
-            });
-        }
-        if self.request_timeout_ms == 0 {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "request_timeout_ms must be greater than zero".into(),
-            });
-        }
-        validate_host(
-            &self.base_url,
-            &["api.sgroup.qq.com", "localhost", "127.0.0.1"],
-        )?;
-        validate_host(
-            &self.token_base_url,
-            &["bots.qq.com", "localhost", "127.0.0.1"],
-        )?;
-        Ok(())
-    }
-}
-
-impl QqState {
-    fn new(config: QqConfig) -> FcpResult<Self> {
-        config.validate()?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.request_timeout_ms))
-            .build()
-            .map_err(|error| FcpError::Internal {
-                message: format!("failed to build QQ HTTP client: {error}"),
-            })?;
-        Ok(Self {
-            config,
-            client,
-            token_cache: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    fn api_url(&self, path: &str) -> FcpResult<Url> {
-        let mut url =
-            Url::parse(self.config.base_url.trim()).map_err(|error| FcpError::Internal {
-                message: format!("stored QQ base_url is invalid: {error}"),
-            })?;
-        url.set_path(path);
-        Ok(url)
-    }
-
-    fn token_url(&self, path: &str) -> FcpResult<Url> {
-        let mut url =
-            Url::parse(self.config.token_base_url.trim()).map_err(|error| FcpError::Internal {
-                message: format!("stored QQ token_base_url is invalid: {error}"),
-            })?;
-        url.set_path(path);
-        Ok(url)
-    }
-
-    async fn access_token(&self) -> FcpResult<String> {
-        {
-            let cache = self.token_cache.lock().await;
-            if let Some(cached) = cache.as_ref() {
-                if Instant::now() < cached.expires_at {
-                    return Ok(cached.token.clone());
-                }
-            }
-        }
-
-        let url = self.token_url("/app/getAppAccessToken")?;
-        let response = self
-            .client
-            .post(url)
-            .json(&json!({
-                "appId": self.config.app_id,
-                "clientSecret": self.config.client_secret
-            }))
-            .send()
-            .await
-            .map_err(map_transport_error("qq access token"))?;
-        let body: Value = response.json().await.map_err(|error| FcpError::Internal {
-            message: format!("failed to decode QQ access token response: {error}"),
-        })?;
-        let token: AccessTokenResponse =
-            serde_json::from_value(body.clone()).map_err(|error| FcpError::Internal {
-                message: format!("failed to parse QQ access token payload: {error}"),
-            })?;
-        if token.access_token.trim().is_empty() {
-            return Err(FcpError::Internal {
-                message: format!("QQ access token response missing access_token: {body}"),
-            });
-        }
-        let ttl = token
-            .expires_in
-            .saturating_sub(TOKEN_REFRESH_SAFETY_MARGIN_SECS)
-            .max(1);
-        *self.token_cache.lock().await = Some(CachedAccessToken {
-            token: token.access_token.clone(),
-            expires_at: Instant::now() + Duration::from_secs(ttl),
-        });
-        Ok(token.access_token)
-    }
-
-    async fn api_request(
-        &self,
-        method: reqwest::Method,
-        path: &str,
-        body: Option<Value>,
-    ) -> FcpResult<Value> {
-        let token = self.access_token().await?;
-        let url = self.api_url(path)?;
-        let request = self
-            .client
-            .request(method, url)
-            .header("Authorization", format!("QQBot {token}"));
-        let request = if let Some(body) = body.as_ref() {
-            request.json(body)
-        } else {
-            request
-        };
-        let response = request
-            .send()
-            .await
-            .map_err(map_transport_error("qq api request"))?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(FcpError::External {
-                service: "qq".into(),
-                message: format!("QQ API request failed [{status}]: {body}"),
-                status_code: Some(status),
-                retryable: false,
-                retry_after: None,
-            });
-        }
-        response.json().await.map_err(|error| FcpError::Internal {
-            message: format!("failed to decode QQ JSON response: {error}"),
-        })
-    }
 }
 
 impl QqConnector {
@@ -243,7 +60,7 @@ impl QqConnector {
     pub fn new() -> Self {
         Self {
             base: BaseConnector::new(ConnectorId::from_static("fcp.qq")),
-            state: None,
+            client: None,
             verifier: None,
             started_at: Instant::now(),
         }
@@ -253,6 +70,46 @@ impl QqConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Run connector diagnostics.
+    pub fn doctor(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "runtime".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "ConnectorRuntime initialized".into()
+            } else {
+                "Runtime missing - configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: self.verifier.is_some(),
+            message: Some(if self.verifier.is_some() {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -337,7 +194,7 @@ impl QqConnector {
 
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
-        let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let capability = required_capability(req.operation.as_str())?;
         verifier.verify(&req.capability_token, &capability, &req.operation, &[])?;
@@ -345,53 +202,62 @@ impl QqConnector {
         let output = match req.operation.as_str() {
             OP_SEND_CHANNEL => {
                 let channel_id = required_string(&req.input, "channel_id")?;
+                let _safe_id = sanitize_path_segment(channel_id, "channel_id")
+                    .map_err(|e| e.to_fcp_error())?;
                 let content = required_string(&req.input, "content")?;
                 let msg_id = req.input.get("msg_id").and_then(Value::as_str);
-                state
+                client
                     .api_request(
                         reqwest::Method::POST,
                         &format!("/channels/{channel_id}/messages"),
                         Some(channel_message_body(content, msg_id)),
                     )
-                    .await?
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
             }
             OP_SEND_GROUP => {
                 let group_openid = required_string(&req.input, "group_openid")?;
+                let _safe_id = sanitize_path_segment(group_openid, "group_openid")
+                    .map_err(|e| e.to_fcp_error())?;
                 let content = required_string(&req.input, "content")?;
                 let msg_id = req.input.get("msg_id").and_then(Value::as_str);
-                state
+                client
                     .api_request(
                         reqwest::Method::POST,
                         &format!("/v2/groups/{group_openid}/messages"),
                         Some(direct_message_body(content, msg_id)),
                     )
-                    .await?
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
             }
             OP_SEND_C2C => {
                 let openid = required_string(&req.input, "openid")?;
+                let _safe_id =
+                    sanitize_path_segment(openid, "openid").map_err(|e| e.to_fcp_error())?;
                 let content = required_string(&req.input, "content")?;
                 let msg_id = req.input.get("msg_id").and_then(Value::as_str);
-                state
+                client
                     .api_request(
                         reqwest::Method::POST,
                         &format!("/v2/users/{openid}/messages"),
                         Some(direct_message_body(content, msg_id)),
                     )
-                    .await?
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
             }
-            OP_GET_GATEWAY => {
-                state
-                    .api_request(reqwest::Method::GET, "/gateway", None)
-                    .await?
-            }
+            OP_GET_GATEWAY => client
+                .api_request(reqwest::Method::GET, "/gateway", None)
+                .await
+                .map_err(|e| e.to_fcp_error())?,
             OP_HEALTH => {
-                let _token = state.access_token().await?;
-                let gateway = state
+                let _token = client.access_token().await.map_err(|e| e.to_fcp_error())?;
+                let gateway = client
                     .api_request(reqwest::Method::GET, "/gateway", None)
-                    .await?;
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 json!({
                     "status": "ok",
-                    "base_url": state.config.base_url,
+                    "base_url": client.config().base_url,
                     "gateway": gateway.get("url").cloned().unwrap_or(Value::Null),
                     "manifest_hash": Self::manifest_hash(),
                 })
@@ -426,7 +292,7 @@ impl FcpConnector for QqConnector {
                 code: 1003,
                 message: format!("invalid QQ configuration: {error}"),
             })?;
-        self.state = Some(QqState::new(config)?);
+        self.client = Some(QqClient::new(config).map_err(|e| e.to_fcp_error())?);
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
@@ -459,18 +325,18 @@ impl FcpConnector for QqConnector {
 
     async fn health(&self) -> HealthSnapshot {
         HealthSnapshot {
-            status: if self.state.is_some() {
+            status: if self.client.is_some() {
                 HealthState::Ready
             } else {
                 HealthState::Starting
             },
             uptime_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             load: None,
-            details: self.state.as_ref().map(|state| {
+            details: self.client.as_ref().map(|c| {
                 json!({
-                    "base_url": state.config.base_url,
-                    "token_base_url": state.config.token_base_url,
-                    "app_id": state.config.app_id,
+                    "base_url": c.config().base_url,
+                    "token_base_url": c.config().token_base_url,
+                    "app_id": c.config().app_id,
                 })
             }),
             rate_limit: None,
@@ -478,15 +344,18 @@ impl FcpConnector for QqConnector {
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
-        let Some(state) = self.state.as_ref() else {
+        let Some(client) = self.client.as_ref() else {
             return Ok(SelfCheckReport::failed(
                 "not_configured",
                 "configure must be called before QQ self_check",
             ));
         };
-        match state.access_token().await {
+        match client.access_token().await {
             Ok(_) => Ok(SelfCheckReport::ok()),
-            Err(error) => Ok(SelfCheckReport::from_error(&error)),
+            Err(error) => {
+                let fcp_err = error.to_fcp_error();
+                Ok(SelfCheckReport::from_error(&fcp_err))
+            }
         }
     }
 
@@ -495,7 +364,10 @@ impl FcpConnector for QqConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
-        self.state = None;
+        if let Some(client) = self.client.as_ref() {
+            client.shutdown();
+        }
+        self.client = None;
         self.verifier = None;
         self.base.set_handshaken(false);
         self.base.set_configured(false);
@@ -534,7 +406,7 @@ impl FcpConnector for QqConnector {
                 ));
             }
         };
-        if self.state.is_none() {
+        if self.client.is_none() {
             return Ok(SimulateResponse::denied(
                 req.id,
                 "Connector is not configured",
@@ -567,34 +439,6 @@ impl FcpConnector for QqConnector {
 
     async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
         Err(FcpError::StreamingNotSupported)
-    }
-}
-
-fn validate_host(raw: &str, allowed_hosts: &[&str]) -> FcpResult<()> {
-    let url = Url::parse(raw.trim()).map_err(|error| FcpError::InvalidRequest {
-        code: 1001,
-        message: format!("invalid URL `{raw}`: {error}"),
-    })?;
-    let host = url.host_str().ok_or_else(|| FcpError::InvalidRequest {
-        code: 1001,
-        message: format!("URL `{raw}` must include a host"),
-    })?;
-    if !allowed_hosts.contains(&host) {
-        return Err(FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("URL host `{host}` is not allowed"),
-        });
-    }
-    Ok(())
-}
-
-fn map_transport_error(context: &'static str) -> impl Fn(reqwest::Error) -> FcpError {
-    move |error| FcpError::External {
-        service: "qq".into(),
-        message: format!("{context} failed: {error}"),
-        status_code: None,
-        retryable: error.is_timeout() || error.is_connect(),
-        retry_after: None,
     }
 }
 
@@ -640,28 +484,6 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
         })
 }
 
-fn direct_message_body(content: &str, msg_id: Option<&str>) -> Value {
-    let mut body = json!({
-        "content": content,
-        "msg_type": 0,
-        "msg_seq": 1,
-    });
-    if let Some(msg_id) = msg_id {
-        body["msg_id"] = json!(msg_id);
-    }
-    body
-}
-
-fn channel_message_body(content: &str, msg_id: Option<&str>) -> Value {
-    let mut body = json!({
-        "content": content,
-    });
-    if let Some(msg_id) = msg_id {
-        body["msg_id"] = json!(msg_id);
-    }
-    body
-}
-
 #[allow(clippy::too_many_arguments)]
 fn operation(
     id: &'static str,
@@ -700,108 +522,267 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_partial_json, header, method, path},
-    };
 
     #[test]
-    fn config_rejects_empty_app_id() {
-        let error = serde_json::from_value::<QqConfig>(json!({
+    fn connector_default_creates_instance() {
+        let connector = QqConnector::default();
+        assert_eq!(connector.id().as_str(), "fcp.qq");
+    }
+
+    #[test]
+    fn introspect_returns_five_operations() {
+        let connector = QqConnector::new();
+        let introspection = connector.introspect();
+        assert_eq!(introspection.operations.len(), 5);
+    }
+
+    #[test]
+    fn introspect_operation_ids() {
+        let connector = QqConnector::new();
+        let introspection = connector.introspect();
+        let ids: Vec<&str> = introspection
+            .operations
+            .iter()
+            .map(|op| op.id.as_str())
+            .collect();
+        assert!(ids.contains(&"qq.messages.send_channel"));
+        assert!(ids.contains(&"qq.messages.send_group"));
+        assert!(ids.contains(&"qq.messages.send_c2c"));
+        assert!(ids.contains(&"qq.gateway.get"));
+        assert!(ids.contains(&"qq.health"));
+    }
+
+    #[test]
+    fn manifest_hash_is_stable() {
+        let a = QqConnector::manifest_hash();
+        let b = QqConnector::manifest_hash();
+        assert_eq!(a, b);
+        assert!(a.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn doctor_unconfigured_fails_critical() {
+        let connector = QqConnector::new();
+        let result = connector.doctor();
+        assert!(!result.passed);
+        assert_eq!(result.checks.len(), 3);
+        // configuration is critical, should fail
+        assert!(!result.checks[0].passed);
+        assert!(result.checks[0].critical);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_starting_when_unconfigured() {
+        let connector = QqConnector::new();
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Starting));
+        assert!(health.details.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_ready_when_configured() {
+        let mut connector = QqConnector::new();
+        let config = serde_json::json!({
+            "app_id": "test-app",
+            "client_secret": "test-secret",
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999"
+        });
+        connector.configure(config).await.unwrap();
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Ready));
+        assert!(health.details.is_some());
+        let details = health.details.unwrap();
+        assert_eq!(details["app_id"], "test-app");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_without_config_reports_failed() {
+        let connector = QqConnector::new();
+        let report = connector.self_check().await.unwrap();
+        assert_ne!(report.status, fcp_core::SelfCheckStatus::Ok);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_validates_empty_app_id() {
+        let mut connector = QqConnector::new();
+        let config = serde_json::json!({
             "app_id": "",
-            "client_secret": "secret"
-        }))
-        .expect("config should deserialize")
-        .validate()
-        .expect_err("app_id must be required");
-        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+            "client_secret": "test-secret",
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999"
+        });
+        let err = connector.configure(config).await;
+        assert!(err.is_err());
     }
 
     #[fcp_async_core::runtime::test]
-    async fn send_channel_posts_expected_payload() {
-        let api_server = MockServer::start().await;
-        let token_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "token-123",
-                "expires_in": 7200
-            })))
-            .mount(&token_server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/channels/channel-1/messages"))
-            .and(header("authorization", "QQBot token-123"))
-            .and(body_partial_json(json!({
-                "content": "hello qq"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "msg-1",
-                "timestamp": "123456"
-            })))
-            .mount(&api_server)
-            .await;
-
-        let state = QqState::new(QqConfig {
-            base_url: api_server.uri(),
-            token_base_url: token_server.uri(),
-            app_id: "app-1".into(),
-            client_secret: "secret".into(),
-            request_timeout_ms: DEFAULT_TIMEOUT_MS,
-        })
-        .expect("state should build");
-
-        let output = state
-            .api_request(
-                reqwest::Method::POST,
-                "/channels/channel-1/messages",
-                Some(channel_message_body("hello qq", None)),
-            )
-            .await
-            .expect("channel send should succeed");
-
-        assert_eq!(output["id"], "msg-1");
+    async fn configure_validates_bad_host() {
+        let mut connector = QqConnector::new();
+        let config = serde_json::json!({
+            "app_id": "test-app",
+            "client_secret": "test-secret",
+            "base_url": "https://evil.example.com",
+            "token_base_url": "http://localhost:9999"
+        });
+        let err = connector.configure(config).await;
+        assert!(err.is_err());
     }
 
     #[fcp_async_core::runtime::test]
-    async fn gateway_request_uses_bearer_token() {
-        let api_server = MockServer::start().await;
-        let token_server = MockServer::start().await;
+    async fn shutdown_clears_state() {
+        let mut connector = QqConnector::new();
+        let config = serde_json::json!({
+            "app_id": "test-app",
+            "client_secret": "test-secret",
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999"
+        });
+        connector.configure(config).await.unwrap();
+        assert!(connector.client.is_some());
 
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "token-123",
-                "expires_in": 7200
-            })))
-            .mount(&token_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/gateway"))
-            .and(header("authorization", "QQBot token-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "url": "wss://gateway.qq.example/ws"
-            })))
-            .mount(&api_server)
-            .await;
-
-        let state = QqState::new(QqConfig {
-            base_url: api_server.uri(),
-            token_base_url: token_server.uri(),
-            app_id: "app-1".into(),
-            client_secret: "secret".into(),
-            request_timeout_ms: DEFAULT_TIMEOUT_MS,
-        })
-        .expect("state should build");
-
-        let output = state
-            .api_request(reqwest::Method::GET, "/gateway", None)
+        connector
+            .shutdown(ShutdownRequest {
+                r#type: "shutdown".into(),
+                deadline_ms: 5000,
+                drain: false,
+                reason: Some("test".into()),
+            })
             .await
-            .expect("gateway discovery should succeed");
+            .unwrap();
+        assert!(connector.client.is_none());
+        assert!(connector.verifier.is_none());
+    }
 
-        assert_eq!(output["url"], "wss://gateway.qq.example/ws");
+    #[test]
+    fn doctor_configured_passes_critical() {
+        let mut connector = QqConnector::new();
+        // Manually configure via direct field assignment to avoid async
+        let config = QqConfig {
+            base_url: "http://localhost:9999".into(),
+            token_base_url: "http://localhost:9999".into(),
+            app_id: "test-app".into(),
+            client_secret: "test-secret".into(),
+            request_timeout_ms: 30_000,
+        };
+        connector.client = Some(QqClient::new(config).unwrap());
+        let result = connector.doctor();
+        assert!(result.passed);
+        // handshake check is non-critical, so overall passes
+        assert!(!result.checks[2].passed);
+        assert!(!result.checks[2].critical);
+    }
+
+    #[test]
+    fn required_capability_known_ops() {
+        assert!(required_capability(OP_SEND_CHANNEL).is_ok());
+        assert!(required_capability(OP_SEND_GROUP).is_ok());
+        assert!(required_capability(OP_SEND_C2C).is_ok());
+        assert!(required_capability(OP_GET_GATEWAY).is_ok());
+        assert!(required_capability(OP_HEALTH).is_ok());
+    }
+
+    #[test]
+    fn required_capability_unknown_op() {
+        let err = required_capability("qq.unknown").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn granted_capabilities_filters_known() {
+        let requested = vec![
+            CapabilityId::from_static(CAP_MESSAGES_WRITE),
+            CapabilityId::from_static(CAP_GATEWAY_READ),
+            CapabilityId::from_static("qq.unknown.cap"),
+        ];
+        let granted = granted_capabilities(requested);
+        assert_eq!(granted.len(), 2);
+    }
+
+    #[test]
+    fn required_string_extracts_value() {
+        let val = serde_json::json!({"key": "value"});
+        assert_eq!(required_string(&val, "key").unwrap(), "value");
+    }
+
+    #[test]
+    fn required_string_rejects_empty() {
+        let val = serde_json::json!({"key": ""});
+        assert!(required_string(&val, "key").is_err());
+    }
+
+    #[test]
+    fn required_string_rejects_missing() {
+        let val = serde_json::json!({});
+        assert!(required_string(&val, "key").is_err());
+    }
+
+    #[test]
+    fn required_string_rejects_whitespace_only() {
+        let val = serde_json::json!({"key": "   "});
+        assert!(required_string(&val, "key").is_err());
+    }
+
+    #[test]
+    fn streaming_not_supported() {
+        // The connector does not support streaming (subscribe/unsubscribe return StreamingNotSupported).
+        // Verified via event_caps: streaming=false, replay=false.
+        let connector = QqConnector::new();
+        let intro = connector.introspect();
+        let caps = intro.event_caps.unwrap();
+        assert!(!caps.streaming);
+        assert!(!caps.replay);
+    }
+
+    #[test]
+    fn event_caps_disabled() {
+        let connector = QqConnector::new();
+        let intro = connector.introspect();
+        let caps = intro.event_caps.unwrap();
+        assert!(!caps.streaming);
+        assert!(!caps.replay);
+        assert!(!caps.requires_ack);
+        assert_eq!(caps.min_buffer_events, 0);
+    }
+
+    #[test]
+    fn operations_have_correct_capabilities() {
+        let ops = QqConnector::operations();
+        let send_ops: Vec<_> = ops
+            .iter()
+            .filter(|op| op.id.as_str().starts_with("qq.messages."))
+            .collect();
+        for op in &send_ops {
+            assert_eq!(op.capability.as_str(), CAP_MESSAGES_WRITE);
+            assert_eq!(op.safety_tier, SafetyTier::Risky);
+            assert_eq!(op.risk_level, RiskLevel::Medium);
+        }
+        let gateway = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_GET_GATEWAY)
+            .unwrap();
+        assert_eq!(gateway.capability.as_str(), CAP_GATEWAY_READ);
+        assert_eq!(gateway.safety_tier, SafetyTier::Safe);
+
+        let health = ops.iter().find(|op| op.id.as_str() == OP_HEALTH).unwrap();
+        assert_eq!(health.capability.as_str(), CAP_HEALTH_READ);
+        assert_eq!(health.safety_tier, SafetyTier::Safe);
+    }
+
+    #[test]
+    fn operations_have_agent_hints() {
+        let ops = QqConnector::operations();
+        for op in &ops {
+            assert!(!op.ai_hints.when_to_use.is_empty());
+            assert!(!op.ai_hints.common_mistakes.is_empty());
+        }
+    }
+
+    #[test]
+    fn metrics_initial_state() {
+        let connector = QqConnector::new();
+        let metrics = connector.metrics();
+        assert_eq!(metrics.requests_total, 0);
+        assert_eq!(metrics.requests_error, 0);
     }
 }

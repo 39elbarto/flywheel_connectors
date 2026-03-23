@@ -1,4 +1,4 @@
-//! Error types for the Hue connector.
+//! Error types for the `Hue` connector.
 
 use fcp_core::FcpError;
 use thiserror::Error;

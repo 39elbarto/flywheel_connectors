@@ -1,13 +1,8 @@
-//! `IRC` connector.
+//! `IRC` connector -- `FcpConnector` implementation.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
-use fcp_async_core::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    net::TcpStream,
-    tls::TlsConnectorBuilder,
-};
 use fcp_core::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
@@ -17,43 +12,47 @@ use fcp_core::{
     UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::client::with_irc_session;
+use crate::types::{
+    IrcConfig, CAP_CHANNELS_WRITE, CAP_HEALTH_READ, CAP_MESSAGES_READ, CAP_MESSAGES_WRITE,
+    DEFAULT_SAMPLE_LINES, OP_HEALTH, OP_JOIN_CHANNEL, OP_SAMPLE_TRANSCRIPT, OP_SEND_MESSAGE,
+};
+
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-const DEFAULT_PORT_TLS: u16 = 6697;
-const DEFAULT_PORT_PLAIN: u16 = 6667;
-const DEFAULT_TIMEOUT_MS: u64 = 10_000;
-const DEFAULT_SAMPLE_LINES: usize = 20;
 
-const OP_SEND_MESSAGE: &str = "irc.messages.send";
-const OP_JOIN_CHANNEL: &str = "irc.channels.join";
-const OP_SAMPLE_TRANSCRIPT: &str = "irc.transcript.sample";
-const OP_HEALTH: &str = "irc.health";
+// ─────────────────────────────────────────────────────────────────
+// Doctor types (V3 requirement)
+// ─────────────────────────────────────────────────────────────────
 
-const CAP_MESSAGES_WRITE: &str = "irc.messages.write";
-const CAP_CHANNELS_WRITE: &str = "irc.channels.write";
-const CAP_MESSAGES_READ: &str = "irc.messages.read";
-const CAP_HEALTH_READ: &str = "irc.health.read";
-
-#[derive(Debug, Clone, Deserialize)]
-struct IrcConfig {
-    server: String,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default = "default_true")]
-    tls: bool,
-    nick: String,
-    #[serde(default = "default_username")]
-    username: String,
-    #[serde(default = "default_realname")]
-    realname: String,
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default = "default_timeout_ms")]
-    request_timeout_ms: u64,
+/// Result of a connector diagnostic check.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorResult {
+    pub passed: bool,
+    pub checks: Vec<DoctorCheck>,
 }
+
+/// A single diagnostic check within a `DoctorResult`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    name: String,
+    passed: bool,
+    message: Option<String>,
+    critical: bool,
+}
+
+impl DoctorResult {
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let passed = checks.iter().filter(|c| c.critical).all(|c| c.passed);
+        Self { passed, checks }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Connector state
+// ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 struct IrcState {
@@ -66,58 +65,6 @@ pub struct IrcConnector {
     state: Option<IrcState>,
     verifier: Option<CapabilityVerifier>,
     started_at: Instant,
-}
-
-const fn default_true() -> bool {
-    true
-}
-
-fn default_username() -> String {
-    "flywheel".into()
-}
-
-fn default_realname() -> String {
-    "Flywheel Connector".into()
-}
-
-const fn default_timeout_ms() -> u64 {
-    DEFAULT_TIMEOUT_MS
-}
-
-impl IrcConfig {
-    fn validate(&self) -> FcpResult<()> {
-        if self.server.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "server must not be empty".into(),
-            });
-        }
-        if self.nick.trim().is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "nick must not be empty".into(),
-            });
-        }
-        if self.request_timeout_ms == 0 {
-            return Err(FcpError::InvalidRequest {
-                code: 1001,
-                message: "request_timeout_ms must be greater than zero".into(),
-            });
-        }
-        Ok(())
-    }
-
-    fn port(&self) -> u16 {
-        self.port.unwrap_or(if self.tls {
-            DEFAULT_PORT_TLS
-        } else {
-            DEFAULT_PORT_PLAIN
-        })
-    }
-
-    const fn timeout(&self) -> Duration {
-        Duration::from_millis(self.request_timeout_ms)
-    }
 }
 
 impl IrcConnector {
@@ -135,6 +82,56 @@ impl IrcConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Run connector diagnostics.
+    pub fn doctor(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.state.is_some(),
+            message: Some(if self.state.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: self.verifier.is_some(),
+            message: Some(if self.verifier.is_some() {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
+        if let Some(state) = &self.state {
+            checks.push(DoctorCheck {
+                name: "server_configured".into(),
+                passed: !state.config.server.trim().is_empty(),
+                message: Some(format!(
+                    "Server: {}:{} (TLS: {})",
+                    state.config.server,
+                    state.config.port(),
+                    state.config.tls
+                )),
+                critical: true,
+            });
+
+            checks.push(DoctorCheck {
+                name: "nick_configured".into(),
+                passed: !state.config.nick.trim().is_empty(),
+                message: Some(format!("Nick: {}", state.config.nick)),
+                critical: true,
+            });
+        }
+
+        DoctorResult::from_checks(checks)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -459,181 +456,7 @@ impl FcpConnector for IrcConnector {
     }
 }
 
-struct IrcSession {
-    stream: BufReader<Box<dyn IrcStream>>,
-    timeout: Duration,
-    lines: Vec<String>,
-}
-
-trait IrcStream: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T> IrcStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl IrcSession {
-    async fn send_line(&mut self, line: &str) -> FcpResult<()> {
-        self.stream
-            .get_mut()
-            .write_all(line.as_bytes())
-            .await
-            .map_err(io_error("irc write"))?;
-        self.stream
-            .get_mut()
-            .write_all(b"\r\n")
-            .await
-            .map_err(io_error("irc write"))?;
-        self.stream
-            .get_mut()
-            .flush()
-            .await
-            .map_err(io_error("irc flush"))?;
-        Ok(())
-    }
-
-    async fn read_line(&mut self) -> FcpResult<Option<String>> {
-        let mut line = String::new();
-        let bytes = fcp_async_core::time::timeout(self.timeout, self.stream.read_line(&mut line))
-            .await
-            .map_err(|_| FcpError::UpstreamTimeout {
-                service: "irc".into(),
-            })?
-            .map_err(io_error("irc read"))?;
-        if bytes == 0 {
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-        if let Some(payload) = trimmed.strip_prefix("PING :") {
-            self.send_line(&format!("PONG :{payload}")).await?;
-        }
-        self.lines.push(trimmed.clone());
-        Ok(Some(trimmed))
-    }
-
-    async fn await_welcome(&mut self) -> FcpResult<()> {
-        loop {
-            let Some(line) = self.read_line().await? else {
-                return Err(FcpError::External {
-                    service: "irc".into(),
-                    message: "IRC server closed connection before welcome".into(),
-                    status_code: None,
-                    retryable: true,
-                    retry_after: None,
-                });
-            };
-            if line.contains(" 001 ") {
-                return Ok(());
-            }
-            if line.contains(" 433 ") {
-                return Err(FcpError::External {
-                    service: "irc".into(),
-                    message: "IRC nickname already in use".into(),
-                    status_code: None,
-                    retryable: false,
-                    retry_after: None,
-                });
-            }
-        }
-    }
-
-    async fn join(&mut self, channel: &str, channel_key: Option<&str>) -> FcpResult<()> {
-        let cmd = channel_key.map_or_else(
-            || format!("JOIN {channel}"),
-            |channel_key| format!("JOIN {channel} {channel_key}"),
-        );
-        self.send_line(&cmd).await?;
-        self.read_until(5).await?;
-        Ok(())
-    }
-
-    async fn send_privmsg(&mut self, target: &str, message: &str) -> FcpResult<()> {
-        self.send_line(&format!("PRIVMSG {target} :{message}"))
-            .await
-    }
-
-    async fn read_until(&mut self, sample_lines: usize) -> FcpResult<()> {
-        while self.lines.len() < sample_lines {
-            let Some(_) = self.read_line().await? else {
-                break;
-            };
-        }
-        Ok(())
-    }
-
-    async fn quit(&mut self) -> FcpResult<()> {
-        self.send_line("QUIT :fcp").await
-    }
-}
-
-async fn with_irc_session<F, Fut>(config: &IrcConfig, f: F) -> FcpResult<Vec<String>>
-where
-    F: FnOnce(IrcSession) -> Fut,
-    Fut: std::future::Future<Output = FcpResult<Vec<String>>>,
-{
-    let address = format!("{}:{}", config.server, config.port());
-    let tcp = fcp_async_core::time::timeout(config.timeout(), TcpStream::connect(address.clone()))
-        .await
-        .map_err(|_| FcpError::UpstreamTimeout {
-            service: "irc".into(),
-        })?
-        .map_err(io_error("irc connect"))?;
-    let _ = tcp.set_nodelay(true);
-
-    let stream: Box<dyn IrcStream> = if config.tls {
-        let connector = TlsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|error| FcpError::Internal {
-                message: format!("failed to initialize IRC TLS roots: {error}"),
-            })?
-            .build()
-            .map_err(|error| FcpError::Internal {
-                message: format!("failed to build IRC TLS connector: {error}"),
-            })?;
-        let tls =
-            fcp_async_core::time::timeout(config.timeout(), connector.connect(&config.server, tcp))
-                .await
-                .map_err(|_| FcpError::UpstreamTimeout {
-                    service: "irc".into(),
-                })?
-                .map_err(|error| FcpError::External {
-                    service: "irc".into(),
-                    message: format!("IRC TLS handshake failed: {error}"),
-                    status_code: None,
-                    retryable: true,
-                    retry_after: None,
-                })?;
-        Box::new(tls)
-    } else {
-        Box::new(tcp)
-    };
-
-    let mut session = IrcSession {
-        stream: BufReader::new(stream),
-        timeout: config.timeout(),
-        lines: Vec::new(),
-    };
-
-    if let Some(password) = config.password.as_deref() {
-        session.send_line(&format!("PASS {password}")).await?;
-    }
-    session.send_line(&format!("NICK {}", config.nick)).await?;
-    session
-        .send_line(&format!(
-            "USER {} 0 * :{}",
-            config.username, config.realname
-        ))
-        .await?;
-    session.await_welcome().await?;
-    f(session).await
-}
-
-fn io_error(context: &'static str) -> impl Fn(std::io::Error) -> FcpError {
-    move |error| FcpError::External {
-        service: "irc".into(),
-        message: format!("{context} failed: {error}"),
-        status_code: None,
-        retryable: true,
-        retry_after: None,
-    }
-}
+// ── Helper functions ──
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
@@ -716,6 +539,8 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{DEFAULT_PORT_PLAIN, DEFAULT_PORT_TLS};
+    use fcp_core::SelfCheckStatus;
 
     #[test]
     fn config_requires_server() {
@@ -752,5 +577,287 @@ mod tests {
         let error = required_string(&json!({ "message": "" }), "message")
             .expect_err("empty message should be rejected");
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn operations_count() {
+        let ops = IrcConnector::operations();
+        assert_eq!(ops.len(), 4);
+    }
+
+    #[test]
+    fn operations_contain_expected_ids() {
+        let ops = IrcConnector::operations();
+        let ids: Vec<&str> = ops.iter().map(|op| op.id.as_str()).collect();
+        assert!(ids.contains(&OP_SEND_MESSAGE));
+        assert!(ids.contains(&OP_JOIN_CHANNEL));
+        assert!(ids.contains(&OP_SAMPLE_TRANSCRIPT));
+        assert!(ids.contains(&OP_HEALTH));
+    }
+
+    #[test]
+    fn manifest_hash_is_deterministic() {
+        let h1 = IrcConnector::manifest_hash();
+        let h2 = IrcConnector::manifest_hash();
+        assert_eq!(h1, h2);
+        assert!(h1.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn connector_id_is_fcp_irc() {
+        let connector = IrcConnector::new();
+        assert_eq!(connector.id().as_str(), "fcp.irc");
+    }
+
+    #[test]
+    fn default_connector_has_no_state() {
+        let connector = IrcConnector::new();
+        assert!(connector.state.is_none());
+        assert!(connector.verifier.is_none());
+    }
+
+    #[test]
+    fn doctor_unconfigured() {
+        let connector = IrcConnector::new();
+        let result = connector.doctor();
+        assert!(!result.passed);
+        assert!(!result.checks.is_empty());
+        assert!(result.checks.iter().any(|c| c.name == "configuration" && !c.passed));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_sets_state() {
+        let mut connector = IrcConnector::new();
+        connector
+            .configure(json!({
+                "server": "irc.libera.chat",
+                "nick": "flywheel"
+            }))
+            .await
+            .expect("configure should succeed");
+        assert!(connector.state.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid() {
+        let mut connector = IrcConnector::new();
+        let result = connector.configure(json!({ "not_server": true })).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_configured() {
+        let mut connector = IrcConnector::new();
+        connector
+            .configure(json!({
+                "server": "irc.libera.chat",
+                "nick": "flywheel"
+            }))
+            .await
+            .unwrap();
+        let result = connector.doctor();
+        assert!(result.passed);
+        assert!(result.checks.iter().any(|c| c.name == "configuration" && c.passed));
+        assert!(result.checks.iter().any(|c| c.name == "server_configured" && c.passed));
+        assert!(result.checks.iter().any(|c| c.name == "nick_configured" && c.passed));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_starting_when_unconfigured() {
+        let connector = IrcConnector::new();
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Starting));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_ready_when_configured() {
+        let mut connector = IrcConnector::new();
+        connector
+            .configure(json!({
+                "server": "irc.libera.chat",
+                "nick": "flywheel"
+            }))
+            .await
+            .unwrap();
+        let health = connector.health().await;
+        assert!(matches!(health.status, HealthState::Ready));
+        let details = health.details.unwrap();
+        assert_eq!(details["server"], "irc.libera.chat");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_state() {
+        let mut connector = IrcConnector::new();
+        connector
+            .configure(json!({
+                "server": "irc.libera.chat",
+                "nick": "flywheel"
+            }))
+            .await
+            .unwrap();
+        let shutdown_req: ShutdownRequest = serde_json::from_value(json!({
+            "type": "shutdown"
+        })).unwrap();
+        connector.shutdown(shutdown_req).await.unwrap();
+        assert!(connector.state.is_none());
+        assert!(connector.verifier.is_none());
+    }
+
+    #[test]
+    fn introspect_returns_four_operations() {
+        let connector = IrcConnector::new();
+        let intro = connector.introspect();
+        assert_eq!(intro.operations.len(), 4);
+        assert!(intro.events.is_empty());
+        assert!(!intro.event_caps.as_ref().unwrap().streaming);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn subscribe_returns_not_supported() {
+        let connector = IrcConnector::new();
+        let req: SubscribeRequest = serde_json::from_value(json!({
+            "type": "subscribe",
+            "id": "sub-1",
+            "topics": ["test.topic"]
+        }))
+        .unwrap();
+        let result = connector.subscribe(req).await;
+        assert!(matches!(result, Err(FcpError::StreamingNotSupported)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn unsubscribe_returns_not_supported() {
+        let connector = IrcConnector::new();
+        let req: UnsubscribeRequest = serde_json::from_value(json!({
+            "type": "unsubscribe",
+            "id": "unsub-1",
+            "topics": ["test.topic"]
+        }))
+        .unwrap();
+        let result = connector.unsubscribe(req).await;
+        assert!(matches!(result, Err(FcpError::StreamingNotSupported)));
+    }
+
+    #[test]
+    fn required_capability_maps_operations() {
+        assert_eq!(
+            required_capability(OP_SEND_MESSAGE).unwrap().as_str(),
+            CAP_MESSAGES_WRITE
+        );
+        assert_eq!(
+            required_capability(OP_JOIN_CHANNEL).unwrap().as_str(),
+            CAP_CHANNELS_WRITE
+        );
+        assert_eq!(
+            required_capability(OP_SAMPLE_TRANSCRIPT).unwrap().as_str(),
+            CAP_MESSAGES_READ
+        );
+        assert_eq!(
+            required_capability(OP_HEALTH).unwrap().as_str(),
+            CAP_HEALTH_READ
+        );
+    }
+
+    #[test]
+    fn required_capability_rejects_unknown() {
+        let result = required_capability("unknown.op");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn granted_capabilities_filters_known() {
+        let requested = vec![
+            CapabilityId::from_static(CAP_MESSAGES_WRITE),
+            CapabilityId::from_static("unknown.cap"),
+            CapabilityId::from_static(CAP_HEALTH_READ),
+        ];
+        let grants = granted_capabilities(requested);
+        assert_eq!(grants.len(), 2);
+    }
+
+    #[test]
+    fn required_string_accepts_non_empty() {
+        let val = json!({ "target": "#channel" });
+        assert_eq!(required_string(&val, "target").unwrap(), "#channel");
+    }
+
+    #[test]
+    fn required_string_rejects_missing() {
+        let val = json!({});
+        assert!(required_string(&val, "target").is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_not_configured() {
+        let connector = IrcConnector::new();
+        let report = connector.self_check().await.unwrap();
+        assert_ne!(report.status, SelfCheckStatus::Ok);
+    }
+
+    #[test]
+    fn doctor_result_from_checks_all_pass() {
+        let checks = vec![
+            DoctorCheck {
+                name: "test".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn doctor_result_from_checks_critical_fails() {
+        let checks = vec![
+            DoctorCheck {
+                name: "test".into(),
+                passed: false,
+                message: Some("failed".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "optional".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn doctor_result_from_checks_non_critical_fail_still_passes() {
+        let checks = vec![
+            DoctorCheck {
+                name: "critical".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "optional".into(),
+                passed: false,
+                message: Some("non-critical failure".into()),
+                critical: false,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn default_impl_creates_new() {
+        let connector = IrcConnector::default();
+        assert_eq!(connector.id().as_str(), "fcp.irc");
+    }
+
+    #[test]
+    fn metrics_initial() {
+        let connector = IrcConnector::new();
+        let metrics = connector.metrics();
+        assert_eq!(metrics.requests_total, 0);
     }
 }

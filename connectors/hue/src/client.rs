@@ -1,4 +1,4 @@
-//! HTTP client for the Hue bridge API.
+//! `HTTP` client for the `Hue` bridge `API`.
 
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};

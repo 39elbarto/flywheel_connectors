@@ -1,4 +1,4 @@
-//! Sonos connector.
+//! `Sonos` connector.
 
 #![forbid(unsafe_code)]
 #![allow(

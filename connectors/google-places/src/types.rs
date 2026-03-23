@@ -1,4 +1,4 @@
-//! Configuration and helper types for the Google Places connector.
+//! Configuration and helper types for the `Google Places` connector.
 
 use fcp_core::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};

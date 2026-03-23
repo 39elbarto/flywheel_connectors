@@ -1,4 +1,4 @@
-//! Apple Notes connector.
+//! `Apple Notes` connector.
 
 #![forbid(unsafe_code)]
 #![allow(

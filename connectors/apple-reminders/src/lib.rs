@@ -1,4 +1,4 @@
-//! Apple Reminders connector.
+//! `Apple Reminders` connector.
 
 #![forbid(unsafe_code)]
 #![allow(

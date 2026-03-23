@@ -1,4 +1,4 @@
-//! Sonos SOAP client.
+//! `Sonos` `SOAP` client.
 
 use regex::Regex;
 use serde_json::{Value, json};

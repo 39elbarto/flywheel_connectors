@@ -1,4 +1,4 @@
-//! Google Places connector implementation.
+//! `Google Places` connector implementation.
 
 use std::time::{Duration, Instant};
 
@@ -235,16 +235,19 @@ impl GooglePlacesConnector {
                     .input
                     .get("query")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing query".into(),
                     })?;
                 let max_result_count = req
                     .input
                     .get("max_result_count")
-                    .and_then(|value| value.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .and_then(|value| u32::try_from(value).ok());
-                let open_now = req.input.get("open_now").and_then(|value| value.as_bool());
+                let open_now = req
+                    .input
+                    .get("open_now")
+                    .and_then(serde_json::Value::as_bool);
                 let field_mask = req.input.get("field_mask").and_then(|value| value.as_str());
                 state
                     .client
@@ -257,7 +260,7 @@ impl GooglePlacesConnector {
                     .input
                     .get("input")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing input".into(),
                     })?;
@@ -277,7 +280,7 @@ impl GooglePlacesConnector {
                     .input
                     .get("place")
                     .and_then(|value| value.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                    .ok_or_else(|| FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing place".into(),
                     })?;

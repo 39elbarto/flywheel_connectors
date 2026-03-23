@@ -1,6 +1,6 @@
-//! Dedicated BlueBubbles connector wrapper.
+//! Dedicated `BlueBubbles` connector wrapper.
 //!
-//! This reuses the existing BlueBubbles-backed iMessage implementation while
+//! This reuses the existing `BlueBubbles`-backed `iMessage` implementation while
 //! exposing a connector identity and manifest that are explicit about the
 //! bridge surface itself.
 

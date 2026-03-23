@@ -1201,7 +1201,7 @@ fn bench_raptorq_with_config(
 ) -> anyhow::Result<BenchmarkResult> {
     use fcp_raptorq::{RaptorQDecoder, RaptorQEncoder};
 
-    if size_bytes > config.max_object_size as usize {
+    if usize::try_from(config.max_object_size).map_or(true, |max| size_bytes > max) {
         bail!(
             "size {} exceeds RaptorQ max_object_size {}",
             size_bytes,

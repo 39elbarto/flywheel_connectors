@@ -1126,6 +1126,56 @@ where
     Ok(())
 }
 
+/// Run the newline-delimited JSON stdio transport on blocking stdio handles.
+///
+/// # Errors
+///
+/// Returns an error if reading from stdin, writing to stdout, or serializing a
+/// response fails.
+pub fn run_stdio_transport_blocking<R, W, F>(
+    state: &McpServerState,
+    reader: R,
+    mut writer: W,
+    mut tool_handler: F,
+) -> Result<()>
+where
+    R: std::io::BufRead,
+    W: std::io::Write,
+    F: FnMut(&McpToolDefinition, Value, Value) -> JsonRpcResponse,
+{
+    for line in reader.lines() {
+        let line = line?;
+        let raw = line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        let response = match parse_jsonrpc_request(raw) {
+            Ok(request) => {
+                if request.id.is_none() {
+                    if request.method.starts_with("notifications/") {
+                        let _ = handle_request(state, &request);
+                    }
+                    continue;
+                }
+                if request.method == "tools/call" {
+                    handle_stdio_tools_call(state, &request, &mut tool_handler)
+                } else {
+                    handle_request(state, &request)
+                }
+            }
+            Err(response) => response,
+        };
+
+        let encoded = serde_json::to_string(&response)?;
+        writer.write_all(encoded.as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+
+    Ok(())
+}
+
 fn handle_stdio_tools_call<F>(
     state: &McpServerState,
     request: &JsonRpcRequest,
@@ -1911,7 +1961,8 @@ fn example_input_from_schema(schema: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_async_core::io::{AsupersyncIo, AsyncReadExt, AsyncWriteExt, BufReader};
+    use fcp_async_core::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+    use fcp_async_core::net::{TcpListener, TcpStream};
 
     // ── Helpers ─────────────────────────────────────────────────────
 
@@ -2043,19 +2094,32 @@ mod tests {
         }
     }
 
+    async fn connected_tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tcp pair listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let accept_task = fcp_async_core::task::spawn(async move {
+            listener.accept().await.expect("accept tcp pair").0
+        });
+
+        let client = TcpStream::connect(addr).await.expect("connect tcp pair");
+        let server = accept_task.await.expect("tcp pair accept task");
+        (client, server)
+    }
+
     async fn drive_stdio_transport<F>(state: McpServerState, input: &str, callback: F) -> String
     where
         F: FnMut(&McpToolDefinition, Value, Value) -> JsonRpcResponse + Send + 'static,
     {
-        let (client_input, server_input) = tokio::io::duplex(4096);
-        let (server_output, client_output) = tokio::io::duplex(4096);
-        let mut client_input = AsupersyncIo::new(client_input);
+        let (mut client_input, server_input) = connected_tcp_pair().await;
+        let (server_output, client_output) = connected_tcp_pair().await;
 
         let task = fcp_async_core::task::spawn(async move {
             run_stdio_transport(
                 &state,
-                BufReader::new(AsupersyncIo::new(server_input)),
-                AsupersyncIo::new(server_output),
+                BufReader::new(server_input),
+                server_output,
                 callback,
             )
             .await
@@ -2067,7 +2131,7 @@ mod tests {
         task.await.unwrap();
 
         let mut output = String::new();
-        let mut reader = BufReader::new(AsupersyncIo::new(client_output));
+        let mut reader = BufReader::new(client_output);
         reader.read_to_string(&mut output).await.unwrap();
         output
     }

@@ -71,8 +71,8 @@ contract?"
 
 ### Current Reclassification Findings
 
-- Connectors with some source-adjacent `#[cfg(test)]` signal: `149/149`. The old `139/149` number is obsolete.
-- Connectors with a clean source-adjacent `pure_unit` floor: `87/149`.
+- Connectors with some source-adjacent `#[cfg(test)]` signal: `143/149`. Six scaffolds have zero `src/` tests: `firecrawl`, `huggingface`, `perplexity-search`, `tlon`, `zalo`, `zalouser`.
+- Connectors with a clean source-adjacent `pure_unit` floor: `81/149`.
 - Connectors with inline mock leakage in `src/**/*.rs`: `62/149`.
 - Workspace crates with some source-adjacent `#[cfg(test)]` signal: `27/28`.
 - Workspace crates with a clean source-adjacent `pure_unit` floor: `15/28`.
@@ -89,22 +89,133 @@ contract?"
 
 #### Crates With Inline Mock Leakage in `src/**/*.rs`
 
-- `fcp-bootstrap`
-- `fcp-conformance`
-- `fcp-core`
-- `fcp-e2e`
-- `fcp-google-discovery`
-- `fcp-oauth`
-- `fcp-registry`
-- `fcp-sandbox`
-- `fcp-tailscale`
-- `fcp-testkit`
-- `fcp-webhook`
-- `fwc`
+The 12 crates below have mock or fake references inside `#[cfg(test)]` modules
+in their `src/` files.  They split into two sub-categories that matter for
+downstream remediation (verified 2026-03-23):
+
+**wiremock library leakage** (real HTTP mock servers in inline tests — these
+tests are clearly `deterministic_contract`, not `pure_unit`):
+
+- `fcp-oauth` — wiremock in `src/oauth2.rs` tests (OAuth token exchange flows)
+- `fcp-webhook` — wiremock in `src/provider.rs` tests (webhook registration)
+- `fcp-google-discovery` — wiremock in `src/lib.rs` tests (Google API flows)
+- `fcp-testkit` — wiremock in `src/mock_server.rs` (by design; test infra crate)
+- `fcp-e2e` — wiremock in `src/lib.rs` (by design; E2E harness crate)
+- `fwc` — wiremock references in `src/new_cmd.rs` and `src/doc_playbooks.rs`
+  (scaffold templates, not live test boundary crossings)
+
+**Local trait-mock leakage** (in-memory Mock* structs implementing internal
+traits — no external network/daemon boundary crossed, but still not `pure_unit`
+under strict V3 Section 6a reading):
+
+- `fcp-core` — `MockProvisioner` in `src/provisioning.rs`, `fake_token` helpers
+  in `src/provenance.rs`
+- `fcp-bootstrap` — `MockTokenProvider` in `src/hardware_token.rs`
+- `fcp-conformance` — `MockConnector`, `MockClock` in `src/compliance.rs` and
+  `src/harness.rs`
+- `fcp-registry` — `MockTransparencyVerifier`, `MockTufVerifier`,
+  `MockSigstoreVerifier` in `src/lib.rs`
+- `fcp-sandbox` — `MockInjector` in `src/egress.rs`
+- `fcp-tailscale` — `MockTailscaleClient` in `src/client.rs`
+
+**Downstream guidance for `49z0b.7.1`**: wiremock-leaking crates (`fcp-oauth`,
+`fcp-webhook`, `fcp-google-discovery`) need mock extraction to separate
+`deterministic_contract` suites from `pure_unit` logic.  `fcp-testkit` and
+`fcp-e2e` are test infra by design and do not need remediation.  `fwc` has
+template references only, not live leakage.  Local-trait-mock crates are lower
+priority: the test doubles exercise in-process logic and may legitimately
+remain inline as `pure_unit` helpers if the trait boundary is internal-only.
 
 #### Connectors With Inline Mock Leakage in `src/**/*.rs`
 
 - `airtable`, `anthropic`, `azure`, `browser`, `calendly`, `circleci`, `coda`, `confluence`, `deepgram`, `dingtalk`, `discord`, `feishu`, `figma`, `firebase`, `github`, `gmail`, `google-ai`, `google-chat`, `google-docs`, `google-places`, `google-sheets`, `google-workspace-events`, `hackernews`, `hue`, `imessage`, `jira`, `line`, `linear`, `mastodon`, `matrix`, `microsoft365`, `nextcloud-talk`, `notion`, `openai`, `package-registry`, `paypal`, `pinecone`, `plaid`, `postgresql`, `qdrant`, `qq`, `redis`, `s3`, `signal`, `slack`, `sonos`, `square`, `stripe`, `synology-chat`, `teams`, `telegram`, `twilio`, `twitch`, `twitter`, `vercel`, `wecom`, `whatsapp`, `whisper`, `wolfram`, `youtube`, `zendesk`, `zoom`
+
+### Per-File Mock Leakage Map (Verified 2026-03-23)
+
+This table identifies every `src/` file containing `wiremock`, `MockServer`, or
+`MockApiServer` imports inside `#[cfg(test)]` blocks. Downstream beads should
+use this to decide, per connector, whether to extract pure-unit tests into a
+clean module or to rename the contaminated module as `deterministic_contract`.
+
+| Connector | Leaking `src/` Files | Total `src/` Tests | Leaking `tests/` Files |
+| --- | --- | --- | --- |
+| `airtable` | `client.rs` | 554 | `integration.rs` |
+| `anthropic` | `client.rs`, `connector.rs` | 183 | `v3_lifecycle.rs`, `integration.rs` |
+| `azure` | `client.rs` | 69 | `integration.rs` |
+| `browser` | `client.rs` | 185 | `integration.rs` |
+| `calendly` | `client.rs` | 52 | `integration.rs` |
+| `circleci` | `client.rs`, `connector.rs` | 43 | — |
+| `coda` | `client.rs` | 57 | `integration.rs` |
+| `confluence` | `client.rs` | 44 | — |
+| `deepgram` | `connector.rs` | 3 | — |
+| `dingtalk` | `client.rs`, `connector.rs` | 62 | — |
+| `discord` | `client.rs`, `connector.rs`, `api.rs` | 180 | `integration.rs` |
+| `feishu` | `client.rs` | 68 | `integration.rs` |
+| `figma` | `client.rs` | 227 | `integration.rs` |
+| `firebase` | `client.rs`, `connector.rs` | 10 | `integration.rs` |
+| `github` | `client.rs` | 187 | `integration.rs` |
+| `gmail` | `connector.rs` | 155 | `integration.rs` |
+| `google-ai` | `client.rs`, `connector.rs` | 182 | `integration.rs` |
+| `google-chat` | `connector.rs` | 72 | — |
+| `google-docs` | `connector.rs` | 70 | — |
+| `google-places` | `client.rs` | 15 | `integration.rs` |
+| `google-sheets` | `connector.rs` | 51 | — |
+| `google-workspace-events` | `connector.rs` | 14 | — |
+| `hackernews` | `client.rs` | 47 | `integration.rs` |
+| `hue` | `client.rs` | 7 | `integration.rs` |
+| `imessage` | `connector.rs` | 65 | — |
+| `jira` | `client.rs` | 225 | `integration.rs` |
+| `line` | `client.rs` | 52 | `integration.rs` |
+| `linear` | `client.rs` | 205 | `integration.rs` |
+| `mastodon` | `client.rs` | 44 | — |
+| `matrix` | `client.rs`, `connector.rs` | 53 | — |
+| `microsoft365` | `client.rs`, `connector.rs` | 635 | `integration.rs` |
+| `nextcloud-talk` | `connector.rs` | 22 | — |
+| `notion` | `client.rs` | 177 | `integration.rs` |
+| `openai` | `client.rs` | 166 | `integration.rs` |
+| `package-registry` | `client.rs` | 11 | `integration.rs` |
+| `paypal` | `client.rs`, `connector.rs` | 80 | — |
+| `pinecone` | `client.rs` | 167 | `integration.rs` |
+| `plaid` | `client.rs`, `connector.rs` | 191 | `integration.rs` |
+| `postgresql` | `lib.rs` | 187 | — |
+| `qdrant` | `client.rs`, `connector.rs` | 161 | `integration.rs` |
+| `qq` | `client.rs` | 86 | — |
+| `redis` | `lib.rs` | 171 | — |
+| `s3` | `client.rs`, `error.rs` | 175 | `integration.rs` |
+| `signal` | `bridge.rs`, `client.rs`, `connector.rs` | 109 | — |
+| `slack` | `connector.rs` | 172 | `integration.rs` |
+| `sonos` | `client.rs` | 3 | — |
+| `square` | `connector.rs` | 53 | `integration.rs` |
+| `stripe` | `client.rs` | 181 | `integration.rs` |
+| `synology-chat` | `client.rs` | 29 | `integration.rs` |
+| `teams` | `client.rs`, `connector.rs` | 73 | — |
+| `telegram` | `client.rs`, `connector.rs` | 218 | `integration.rs` |
+| `twilio` | `client.rs` | 185 | `integration.rs` |
+| `twitch` | `client.rs` | 42 | — |
+| `twitter` | `client.rs`, `connector.rs` | 336 | `integration.rs` |
+| `vercel` | `client.rs`, `client/env_vars.rs`, `client/domains.rs`, `client/projects.rs`, `client/deployments.rs` | 28 | — |
+| `wecom` | `client.rs`, `connector.rs` | 29 | — |
+| `whatsapp` | `client.rs` | 86 | `integration.rs` |
+| `whisper` | `lib.rs` | 161 | — |
+| `wolfram` | `client.rs`, `connector.rs` | 24 | — |
+| `youtube` | `client.rs` | 176 | `integration.rs` |
+| `zendesk` | `client.rs` | 606 | `integration.rs` |
+| `zoom` | `connector.rs` | 49 | `integration.rs` |
+
+**Leakage pattern summary**: The dominant leak vector is `client.rs` (47/62
+connectors), where HTTP client tests naturally use `wiremock` to verify request
+construction. The secondary vector is `connector.rs` (24/62), typically for
+`doctor`, `self_check`, or lifecycle tests that spin up a `MockServer`. Only
+`vercel` has leakage across more than three files.
+
+**Remediation guidance for downstream beads**:
+- **client.rs leaks**: In most connectors these are testing HTTP request
+  construction and response parsing. The mock-backed tests should be moved to
+  `tests/integration.rs` (or renamed as `deterministic_contract`). Pure struct
+  serialization and error mapping tests should remain in `src/`.
+- **connector.rs leaks**: Lifecycle and doctor tests often need a mock server.
+  Extract them to `tests/` and leave only config parsing, operation info, and
+  error mapping tests as `pure_unit`.
 
 ### Naming Violations: `no_mock_integration.rs` That Are Not Actually Non-Mock
 
@@ -114,9 +225,24 @@ contract?"
 
 ### Backlog-Ready Downstream Consumers
 
-- `flywheel_connectors-49z0b.16.2` should consume the 62-connector inline-mock list plus the 79 mock-backed `fcp-e2e` compliance suites and split them into "pure unit extraction" vs "deterministic contract rename" work.
-- `flywheel_connectors-49z0b.16.3` should consume the `fcp-streaming` and `fcp-tailscale` naming violations plus the bridge, daemon, browser, and local-platform connectors that need truthful `local_non_mock` or `host_e2e` evidence.
-- `flywheel_connectors-49z0b.7.1` should consume the twelve crate-level inline-mock leaks and the `fcp-async-core-macros` unit-floor gap.
+- `flywheel_connectors-49z0b.16.2` should consume the per-file mock leakage
+  map (62 connectors, dominated by `client.rs` leaks) plus the 79 mock-backed
+  `fcp-e2e` compliance suites and split them into "pure unit extraction" vs
+  "deterministic contract rename" work.  The leakage map table above gives
+  exact file names and test counts per connector.
+- `flywheel_connectors-49z0b.16.3` should consume the `fcp-streaming` and
+  `fcp-tailscale` naming violations plus the bridge, daemon, browser, and
+  local-platform connectors that need truthful `local_non_mock` or `host_e2e`
+  evidence.
+- `flywheel_connectors-49z0b.7.1` should consume the crate-level inline-mock
+  leaks split into two tiers: (a) the 3 crates with wiremock library leakage
+  (`fcp-oauth`, `fcp-webhook`, `fcp-google-discovery`) that need mock
+  extraction to separate suites, and (b) the 6 crates with local trait-mock
+  leakage that may legitimately keep inline test doubles for internal-only
+  trait boundaries.  Also addresses the `fcp-async-core-macros` unit-floor gap.
+- `flywheel_connectors-49z0b.15.1` should consume this entire inventory to
+  build an automated suite-class scanner that replaces manual file-level
+  classification.
 
 ## Executive Summary
 
@@ -125,7 +251,7 @@ contract?"
 - Connector crate-local `tests/` coverage exists in 100/149 connectors.
 - Connector `fcp-e2e` coverage exists in 84/149 connectors.
 - Connector `no_mock_integration.rs` coverage exists in 0/149 connectors.
-- Inline mock leakage exists in 62 connector crates and 12 workspace crates.
+- Inline mock leakage exists in 62 connector crates and 12 workspace crates (of which 3 crates have wiremock library leakage needing extraction, 3 are test infra by design, and 6 have local trait-mock leakage that is lower priority).
 - Workspace `no_mock_integration.rs` coverage exists in 18/28 crates, but 3 of those suites are misnamed and still belong to `deterministic_contract`.
 - Documented connector verification bundles exist in 8 connectors: `calendly`, `coda`, `feishu`, `hackernews`, `line`, `obsidian`, `square`, `zoom`.
 - Host-backed connector references exist for only 10 connectors: `browser`, `discord`, `exa`, `github`, `line`, `make`, `matrix`, `openai`, `signal`, `slack`.

@@ -724,6 +724,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let arg_refs: Vec<&str> = args.connector_args.iter().map(String::as_str).collect();
     let mut runner = ConnectorProcessRunner::spawn(&connector_cmd, &arg_refs, &[]).await?;
+    let command_metadata = runner.command_metadata();
 
     let mut logger = E2eLogger::new();
     let run_id = CorrelationId::new().to_string();
@@ -732,6 +733,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut assertions_passed = 0_u32;
     let mut assertions_failed = 0_u32;
     let mut step_reports = Vec::new();
+    let mut artifacts = Vec::new();
 
     for (index, request) in args.requests.iter().enumerate() {
         let step_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
@@ -742,6 +744,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let response_path = bundle_dir
             .as_ref()
             .map(|dir| dir.join(format!("{step_id}-response.json")));
+        let stdout_path = bundle_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("{step_id}-stdout.txt")));
         let stderr_path = bundle_dir
             .as_ref()
             .map(|dir| dir.join(format!("{step_id}-stderr.txt")));
@@ -751,7 +756,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request_start = std::time::Instant::now();
         let response = runner.request(request).await;
         let duration_ms = request_start.elapsed().as_millis() as u64;
+        let stdout_lines = runner.drain_stdout_lines().await;
         let stderr_lines = runner.drain_stderr_lines().await;
+        if let Some(path) = stdout_path.as_ref() {
+            if !stdout_lines.is_empty() {
+                write_text_file(path, &stdout_lines.join("\n"))?;
+            }
+        }
         if let Some(path) = stderr_path.as_ref() {
             if !stderr_lines.is_empty() {
                 write_text_file(path, &stderr_lines.join("\n"))?;
@@ -761,10 +772,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut step_artifacts = Vec::new();
         if let Some(path) = request_path.as_ref() {
             step_artifacts.push(path.display().to_string());
+            artifacts.push(artifact_record_from_payload(
+                format!("{step_id}-request-json"),
+                path,
+                "json",
+                format!("request payload for {step_id}"),
+                &serialize_pretty_json(request)?,
+            ));
+        }
+        if let Some(path) = stdout_path.as_ref() {
+            if !stdout_lines.is_empty() {
+                step_artifacts.push(path.display().to_string());
+                artifacts.push(artifact_record_from_payload(
+                    format!("{step_id}-stdout-txt"),
+                    path,
+                    "text",
+                    format!("raw stdout captured for {step_id}"),
+                    &stdout_lines.join("\n"),
+                ));
+            }
         }
         if let Some(path) = stderr_path.as_ref() {
             if !stderr_lines.is_empty() {
                 step_artifacts.push(path.display().to_string());
+                artifacts.push(artifact_record_from_payload(
+                    format!("{step_id}-stderr-txt"),
+                    path,
+                    "text",
+                    format!("stderr captured for {step_id}"),
+                    &stderr_lines.join("\n"),
+                ));
             }
         }
 
@@ -774,6 +811,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(path) = response_path.as_ref() {
                     write_pretty_json(path, &response)?;
                     step_artifacts.push(path.display().to_string());
+                    artifacts.push(artifact_record_from_payload(
+                        format!("{step_id}-response-json"),
+                        path,
+                        "json",
+                        format!("parsed response payload for {step_id}"),
+                        &serialize_pretty_json(&response)?,
+                    ));
                 }
                 (
                     "info",
@@ -787,7 +831,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None,
                     response_path
                         .as_ref()
-                        .map(|path| path.display().to_string()),
+                        .and_then(|_| stdout_path.as_ref())
+                        .and_then(|path| {
+                            if step_artifacts
+                                .iter()
+                                .any(|artifact| artifact == &path.display().to_string())
+                            {
+                                Some(path.display().to_string())
+                            } else {
+                                None
+                            }
+                        }),
                 )
             }
             Err(err) => {
@@ -827,22 +881,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_run_id(run_id.clone())
         .with_step(step_id.clone(), step_number)
         .with_attempt(1)
-        .with_command(serde_json::json!({
-            "command": connector_cmd.clone(),
-            "args": args.connector_args.clone(),
-            "runner_prefix": if Path::new(&connector_cmd)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value == "cargo")
-            {
-                Some("rch exec --")
-            } else {
-                None
-            },
-            "working_directory": std::env::current_dir()
-                .ok()
-                .map(|cwd| cwd.display().to_string()),
-        }))
+        .with_command(serde_json::to_value(&command_metadata).unwrap_or(serde_json::Value::Null))
         .with_prerequisites(serde_json::json!([
             {
                 "name": "connector_process",
@@ -854,6 +893,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_details(serde_json::json!({
             "request_index": index,
             "request_file_count": args.request_files.len(),
+            "stdout_line_count": stdout_lines.len(),
             "stderr_line_count": stderr_lines.len(),
             "stdout_path": stdout_path,
             "stderr_path": stderr_path.as_ref().map(|path| path.display().to_string()),
@@ -906,19 +946,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             attempt: 1,
             result: result.to_string(),
             duration_ms,
-            command: Some(E2eCommandMetadata {
-                command: connector_cmd.clone(),
-                args: args.connector_args.clone(),
-                runner_prefix: Path::new(&connector_cmd)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .filter(|value| *value == "cargo")
-                    .map(|_| "rch exec --".to_string()),
-                working_directory: std::env::current_dir()
-                    .ok()
-                    .map(|cwd| cwd.display().to_string()),
-                env_keys: Vec::new(),
-            }),
+            command: Some(command_metadata.clone()),
             stdout_path,
             stderr_path: stderr_path
                 .as_ref()
@@ -943,7 +971,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    runner.terminate()?;
+    let replay_path = bundle_dir.as_ref().map(|dir| dir.join("replay.sh"));
+    if let Some(path) = replay_path.as_ref() {
+        runner.write_replay_script(path)?;
+        artifacts.push(artifact_record_from_payload(
+            "replay-sh",
+            path,
+            "replay",
+            "deterministic replay script for the connector subprocess boundary",
+            &runner.replay_script(),
+        ));
+    }
+
+    let exit_status_payload = runner
+        .terminate_and_capture_exit_status(std::time::Duration::from_millis(250))
+        .await?;
+    let exit_status_path = bundle_dir.as_ref().map(|dir| dir.join("exit-status.json"));
+    if let Some(path) = exit_status_path.as_ref() {
+        let payload = serialize_pretty_json(&exit_status_payload)?;
+        write_scanned_text(Some(path), &payload, "connector subprocess exit status")?;
+        artifacts.push(artifact_record_from_payload(
+            "exit-status-json",
+            path,
+            "json",
+            "captured connector subprocess exit status after teardown",
+            &payload,
+        ));
+    }
+
     let stderr_lines = runner.drain_stderr_lines().await;
     for line in stderr_lines {
         let mut entry = E2eLogEntry::new(
@@ -1029,7 +1084,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         write_scanned_text(Some(path), &payload, "stable JSONL log")?;
     }
 
-    let mut artifacts = Vec::new();
     if let Some(path) = output_path.as_ref() {
         artifacts.push(artifact_record_from_payload(
             "logs-jsonl",
@@ -1061,7 +1115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|failure| failure.stderr_excerpt.clone())
         }),
     });
-    let run_report = build_run_report(
+    let mut run_report = build_run_report(
         &run_id,
         &args.module,
         &report,
@@ -1070,6 +1124,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         artifacts,
         failure,
     );
+    if let Some(path) = summary_output_path.as_ref() {
+        run_report.log_artifacts.push(E2eArtifactRecord {
+            label: "summary-txt".to_string(),
+            path: path.display().to_string(),
+            kind: "text".to_string(),
+            description: Some("human-readable connector mode summary".to_string()),
+            scan: None,
+        });
+    }
+    if let Some(path) = report_json_path.as_ref() {
+        run_report.log_artifacts.push(E2eArtifactRecord {
+            label: "report-json".to_string(),
+            path: path.display().to_string(),
+            kind: "json".to_string(),
+            description: Some("machine-readable connector mode run report".to_string()),
+            scan: None,
+        });
+    }
+    run_report.refresh_human_summary();
     if let Some(path) = summary_output_path.as_ref() {
         write_scanned_text(Some(path), &run_report.human_summary, "human summary")?;
     }

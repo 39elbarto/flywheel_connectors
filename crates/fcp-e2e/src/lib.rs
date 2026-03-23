@@ -31,6 +31,10 @@ use fcp_core::{
 use fcp_testkit::LogRedactionScanner;
 use serde::{Deserialize, Serialize};
 
+pub use fcp_testkit::session_script::{
+    AckMode, Fault, MessageMatcher, ScriptHealthState, ScriptStep, SessionScript,
+    SessionTranscript, StepOutcome, TranscriptEntry, TranscriptSummary, Transport,
+};
 pub use fcp_testkit::{LogScanReport, LogScanReportFinding};
 pub use logging::{
     AssertionsSummary, E2eLogEntry, E2eLogger, LogSchemaError, validate_log_entry_value,
@@ -302,6 +306,9 @@ pub struct E2eRunReport {
     /// Persisted artifacts for the run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub log_artifacts: Vec<E2eArtifactRecord>,
+    /// Optional structured session transcript for streaming or webhook runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_transcript: Option<SessionTranscript>,
     /// Aggregated secret/PII scan for the JSONL log stream.
     pub scan: LogScanReport,
     /// Human-readable summary emitted alongside the JSON report.
@@ -332,6 +339,7 @@ impl E2eRunReport {
             duration_ms,
             step_reports: Vec::new(),
             log_artifacts: Vec::new(),
+            session_transcript: None,
             scan,
             human_summary: String::new(),
             failure: None,
@@ -356,6 +364,13 @@ impl E2eRunReport {
     #[must_use]
     pub fn with_log_artifacts(mut self, log_artifacts: Vec<E2eArtifactRecord>) -> Self {
         self.log_artifacts = log_artifacts;
+        self
+    }
+
+    /// Attach a typed session transcript to the run report.
+    #[must_use]
+    pub fn with_session_transcript(mut self, session_transcript: SessionTranscript) -> Self {
+        self.session_transcript = Some(session_transcript);
         self
     }
 
@@ -385,6 +400,21 @@ impl E2eRunReport {
             "Scan: {} errors, {} warnings",
             self.scan.error_count, self.scan.warn_count
         );
+        if let Some(transcript) = &self.session_transcript {
+            let transport = transcript
+                .transport
+                .map_or("unspecified".to_string(), |transport| transport.to_string());
+            let _ = writeln!(
+                out,
+                "Session Transcript: {} with {} entries ({} passed, {} failed, {} skipped, {} timed out)",
+                transport,
+                transcript.summary.total,
+                transcript.summary.passed,
+                transcript.summary.failed,
+                transcript.summary.skipped,
+                transcript.summary.timed_out
+            );
+        }
 
         if !self.step_reports.is_empty() {
             let _ = writeln!(out);
@@ -2868,6 +2898,53 @@ mod tests {
 
         assert!(json_path.exists(), "json report should be created");
         assert!(summary_path.exists(), "summary report should be created");
+    }
+
+    #[test]
+    fn e2e_run_report_human_summary_mentions_session_transcript() {
+        let transcript = SessionTranscript {
+            scenario_id: "scenario.websocket.happy".to_string(),
+            run_id: "run-1".to_string(),
+            transport: Some(Transport::WebSocket),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            total_duration: std::time::Duration::from_millis(12),
+            entries: vec![TranscriptEntry {
+                timestamp: chrono::Utc::now(),
+                step_index: 0,
+                step: ScriptStep::connect(Transport::WebSocket, "/ws"),
+                outcome: StepOutcome::Pass,
+                duration: std::time::Duration::from_millis(4),
+                detail: None,
+                correlation_id: Some("corr-1".to_string()),
+            }],
+            outcome: StepOutcome::Pass,
+            summary: TranscriptSummary {
+                total: 1,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                timed_out: 0,
+            },
+        };
+        let report = E2eRunReport::new(
+            "run-1",
+            "websocket_happy_path",
+            "fcp-e2e",
+            true,
+            12,
+            LogScanReport {
+                total_lines: 1,
+                findings: vec![],
+                error_count: 0,
+                warn_count: 0,
+            },
+        )
+        .with_session_transcript(transcript);
+
+        let summary = report.render_human_summary();
+        assert!(summary.contains("Session Transcript: websocket"));
+        assert!(summary.contains("1 entries"));
     }
 
     #[test]

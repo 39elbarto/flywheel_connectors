@@ -2713,7 +2713,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_id_display() {
+    fn instance_id_display_format() {
         let id = InstanceId::new();
         let displayed = id.to_string();
         assert!(displayed.starts_with("inst_"));

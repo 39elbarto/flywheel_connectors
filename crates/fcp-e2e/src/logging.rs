@@ -5,7 +5,9 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use fcp_conformance::schemas::validate_e2e_log_entry;
+use fcp_testkit::session_script::{ScriptStep, SessionTranscript, TranscriptEntry};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// Summary of assertions for a test phase.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -239,6 +241,38 @@ impl E2eLogEntry {
         self
     }
 
+    /// Attach typed session-transcript step metadata.
+    #[must_use]
+    pub fn with_session_transcript_entry(mut self, entry: &TranscriptEntry) -> Self {
+        self.promote_to_v2();
+        let step_number = session_step_number(entry.step_index);
+        self.step_id = Some(session_step_id(entry, step_number));
+        self.step_number = Some(step_number);
+
+        let value = match serde_json::to_value(entry) {
+            Ok(value) => value,
+            Err(err) => panic!("session transcript entry serialization should not fail: {err}"),
+        };
+        insert_redacted_subfield(&mut self.details, "session", value);
+        self
+    }
+
+    /// Attach typed session-transcript summary metadata.
+    #[must_use]
+    pub fn with_session_transcript_summary(mut self, transcript: &SessionTranscript) -> Self {
+        self.promote_to_v2();
+        self.run_id = Some(transcript.run_id.clone());
+        self.scenario_id = Some(transcript.scenario_id.clone());
+
+        let value = json!({
+            "transport": transcript.transport,
+            "outcome": transcript.outcome,
+            "summary": transcript.summary,
+        });
+        insert_redacted_subfield(&mut self.summary, "session", value);
+        self
+    }
+
     /// Validate this log entry against the shared E2E schema.
     ///
     /// # Errors
@@ -253,6 +287,36 @@ impl E2eLogEntry {
 
 fn default_log_version() -> String {
     "v1".to_string()
+}
+
+fn session_step_number(step_index: usize) -> u32 {
+    u32::try_from(step_index.saturating_add(1)).unwrap_or(u32::MAX)
+}
+
+fn session_step_id(entry: &TranscriptEntry, step_number: u32) -> String {
+    format!(
+        "session-step-{step_number}-{}",
+        session_step_label(&entry.step)
+    )
+}
+
+const fn session_step_label(step: &ScriptStep) -> &'static str {
+    match step {
+        ScriptStep::Connect { .. } => "connect",
+        ScriptStep::Disconnect => "disconnect",
+        ScriptStep::SendMessage { .. } => "send_message",
+        ScriptStep::ExpectMessage { .. } => "expect_message",
+        ScriptStep::ExpectCount { .. } => "expect_count",
+        ScriptStep::ExpectSilence { .. } => "expect_silence",
+        ScriptStep::Wait { .. } => "wait",
+        ScriptStep::AssertHealth { .. } => "assert_health",
+        ScriptStep::AssertReconnectCount { .. } => "assert_reconnect_count",
+        ScriptStep::AssertMessagesReceived { .. } => "assert_messages_received",
+        ScriptStep::InjectFault { .. } => "inject_fault",
+        ScriptStep::WebhookDeliver { .. } => "webhook_deliver",
+        ScriptStep::WebhookExpectAck { .. } => "webhook_expect_ack",
+        ScriptStep::Annotate { .. } => "annotate",
+    }
 }
 
 /// Logger that collects E2E log entries in memory.
@@ -393,10 +457,40 @@ fn redact_secrets(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+fn insert_redacted_subfield(
+    slot: &mut Option<serde_json::Value>,
+    field: &str,
+    value: serde_json::Value,
+) {
+    let redacted = redact_secrets(&value);
+    match slot.take() {
+        Some(serde_json::Value::Object(mut map)) => {
+            map.insert(field.to_string(), redacted);
+            *slot = Some(serde_json::Value::Object(map));
+        }
+        Some(existing) => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), existing);
+            map.insert(field.to_string(), redacted);
+            *slot = Some(serde_json::Value::Object(map));
+        }
+        None => {
+            let mut map = serde_json::Map::new();
+            map.insert(field.to_string(), redacted);
+            *slot = Some(serde_json::Value::Object(map));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AssertionsSummary, E2eLogEntry, validate_log_entry_value};
+    use chrono::Utc;
+    use fcp_testkit::session_script::{
+        ScriptStep, SessionTranscript, StepOutcome, TranscriptEntry, TranscriptSummary, Transport,
+    };
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn validate_harness_log_entry() {
@@ -1075,5 +1169,109 @@ mod tests {
         let cloned = entry.clone();
         assert_eq!(cloned.test_name, entry.test_name);
         assert_eq!(cloned.module, entry.module);
+    }
+
+    #[test]
+    fn log_entry_with_session_transcript_entry_promotes_to_v2() {
+        let entry = TranscriptEntry {
+            timestamp: Utc::now(),
+            step_index: 1,
+            step: ScriptStep::send_message(json!({"type": "ping"})),
+            outcome: StepOutcome::Pass,
+            duration: Duration::from_millis(3),
+            detail: Some(json!({"token": "secret-value"})),
+            correlation_id: Some("corr-session".to_string()),
+        };
+
+        let log = E2eLogEntry::new(
+            "info",
+            "session_test",
+            "fcp-e2e",
+            "execute",
+            "corr-session",
+            "pass",
+            10,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        )
+        .with_session_transcript_entry(&entry);
+
+        assert_eq!(log.log_version, "v2");
+        assert_eq!(log.step_id.as_deref(), Some("session-step-2-send_message"));
+        assert_eq!(log.step_number, Some(2));
+        assert_eq!(log.attempt, None);
+        assert!(log.artifacts.is_empty());
+        assert_eq!(
+            log.details
+                .as_ref()
+                .and_then(|details| details.get("session"))
+                .and_then(|session| session.get("detail"))
+                .and_then(|detail| detail.get("token"))
+                .and_then(|value| value.as_str()),
+            Some("redacted")
+        );
+    }
+
+    #[test]
+    fn log_entry_with_session_transcript_summary_sets_run_and_scenario() {
+        let transcript = SessionTranscript {
+            scenario_id: "scenario.session.summary".to_string(),
+            run_id: "run-42".to_string(),
+            transport: Some(Transport::WebSocket),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            total_duration: Duration::from_millis(5),
+            entries: vec![TranscriptEntry {
+                timestamp: Utc::now(),
+                step_index: 0,
+                step: ScriptStep::connect(Transport::WebSocket, "/ws"),
+                outcome: StepOutcome::Pass,
+                duration: Duration::from_millis(5),
+                detail: None,
+                correlation_id: Some("corr-session".to_string()),
+            }],
+            outcome: StepOutcome::Pass,
+            summary: TranscriptSummary {
+                total: 1,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                timed_out: 0,
+            },
+        };
+
+        let log = E2eLogEntry::new(
+            "info",
+            "session_summary",
+            "fcp-e2e",
+            "verify",
+            "corr-session",
+            "pass",
+            5,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        )
+        .with_session_transcript_summary(&transcript);
+
+        assert_eq!(log.log_version, "v2");
+        assert_eq!(log.run_id.as_deref(), Some("run-42"));
+        assert_eq!(log.scenario_id.as_deref(), Some("scenario.session.summary"));
+        assert_eq!(
+            log.summary
+                .as_ref()
+                .and_then(|summary| summary.get("session"))
+                .and_then(|session| session.get("transport"))
+                .and_then(|value| value.as_str()),
+            Some("websocket")
+        );
+        assert_eq!(
+            log.summary
+                .as_ref()
+                .and_then(|summary| summary.get("session"))
+                .and_then(|session| session.get("summary"))
+                .and_then(|summary| summary.get("total"))
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
     }
 }

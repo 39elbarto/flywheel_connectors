@@ -33,6 +33,7 @@ members = [
     "connectors/aws",
     "connectors/discord",
     "connectors/openai",
+    "connectors/openrouter",
     "connectors/telegram",
     "connectors/twitter",
     "connectors/vectordb",
@@ -167,6 +168,18 @@ members = [
     "connectors/twitch",
     "connectors/line",
     "connectors/feishu",
+    "connectors/mistral",
+    "connectors/huggingface",
+    "connectors/brave-search",
+    "connectors/perplexity-search",
+    "connectors/firecrawl",
+    "connectors/exa",
+    "connectors/tavily",
+    "connectors/deepgram",
+    "connectors/elevenlabs",
+    "connectors/zalo",
+    "connectors/zalouser",
+    "connectors/tlon",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

@@ -1,0 +1,40 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:tavily-first-slice"
+
+[connector]
+id = "fcp.tavily"
+name = "Tavily"
+version = "0.1.0"
+description = "Tavily connector for search, extract, crawl, and map"
+archetypes = ["request-response"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "First slice: search, extract, crawl, and map."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["network.listen", "system.exec"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+deny_exec = true
+deny_ptrace = true
+

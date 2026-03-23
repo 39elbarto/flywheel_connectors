@@ -1,0 +1,74 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:openrouter-first-slice"
+
+[connector]
+id = "fcp.openrouter"
+name = "OpenRouter"
+version = "0.1.0"
+description = "OpenRouter request-response connector for non-streaming chat completions and model discovery"
+archetypes = ["request-response"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional HTTP-Referer/X-Title metadata, base_url, and request_timeout_ms."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 96
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."openrouter.chat.completions"]
+description = "Create a non-streaming OpenRouter chat completion using the OpenAI-compatible chat completions API."
+capability = "openrouter.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "openai/gpt-4.1-mini" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {} } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["openrouter.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."openrouter.chat.completions".ai_hints]
+when_to_use = "Use for routed model access through OpenRouter when you need one OpenAI-compatible chat request surface."
+common_mistakes = ["Expecting server-sent streaming in this first slice. The connector only exposes bounded non-streaming completions right now.", "Forgetting to pass a provider-qualified model such as openai/gpt-4.1-mini or anthropic/claude-sonnet-4."]
+examples = ['{"model":"openai/gpt-4.1-mini","messages":[{"role":"user","content":"Summarize the FCP security model in 3 bullets."}]}']
+related = ["openrouter.models.list"]
+
+[provides.operations."openrouter.models.list"]
+description = "List currently available OpenRouter models."
+capability = "openrouter.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["openrouter.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."openrouter.models.list".ai_hints]
+when_to_use = "Use to discover provider-qualified model IDs before sending a routed completion."
+common_mistakes = ["Assuming OpenRouter model IDs are the same as first-party provider IDs without the provider prefix."]
+examples = ["{}"]
+related = ["openrouter.chat.completions"]

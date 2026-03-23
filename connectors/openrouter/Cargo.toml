@@ -1,0 +1,35 @@
+[package]
+name = "fcp-openrouter"
+description = "OpenRouter API connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_openrouter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-openrouter"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-core = { path = "../../crates/fcp-core" }
+
+anyhow.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true

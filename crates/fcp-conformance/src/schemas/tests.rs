@@ -752,6 +752,85 @@ fn v2_required_fields_preserved_in_dispatch() {
     );
 }
 
+#[test]
+fn v2_expanded_reporting_fields_validate() {
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-03-23T08:30:00Z",
+            "log_version": "v2",
+            "test_name": "connector_bundle",
+            "module": "fcp-e2e",
+            "phase": "execute",
+            "correlation_id": "00000000-0000-4000-8000-000000000099",
+            "result": "fail",
+            "duration_ms": 42,
+            "assertions": { "passed": 0, "failed": 1 },
+            "run_id": "run-123",
+            "scenario_id": "acceptance.connector_bundle",
+            "step_id": "ipc-request-001",
+            "step_number": 1,
+            "attempt": 1,
+            "artifacts": ["artifacts/run-123/logs.jsonl", "artifacts/run-123/request.json"],
+            "command": {
+                "command": "connector-binary",
+                "args": ["--serve"],
+                "runner_prefix": null
+            },
+            "prerequisites": [
+                { "name": "connector_process", "status": "spawned" }
+            ],
+            "scan": {
+                "error_count": 0,
+                "warn_count": 0
+            },
+            "failure_summary": {
+                "reason": "connector request failed",
+                "error_code": "connector_request_failed"
+            },
+            "summary": {
+                "request_count": 1
+            },
+            "details": {
+                "stderr_line_count": 2
+            }
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_ok(),
+        "expanded v2 entry should validate"
+    );
+}
+
+#[test]
+fn v2_rejects_non_numeric_attempt() {
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-03-23T08:30:00Z",
+            "log_version": "v2",
+            "test_name": "connector_bundle",
+            "module": "fcp-e2e",
+            "phase": "execute",
+            "correlation_id": "00000000-0000-4000-8000-000000000100",
+            "result": "pass",
+            "duration_ms": 12,
+            "assertions": { "passed": 1, "failed": 0 },
+            "attempt": "first"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_err(),
+        "string attempt should be rejected"
+    );
+}
+
 // ============================================================================
 // ASUPERSYNC Forensics Schema Validation
 // ============================================================================

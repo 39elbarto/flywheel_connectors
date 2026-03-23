@@ -15,6 +15,7 @@ pub mod evidence;
 mod logging;
 mod subprocess;
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
@@ -27,85 +28,19 @@ use fcp_core::{
     CorrelationId, FcpConnector, FcpError, HandshakeRequest, HealthSnapshot, Introspection,
     InvokeRequest, InvokeResponse, InvokeStatus, ObjectId,
 };
-use fcp_testkit::{LogRedactionScanner, ScanSeverity};
+use fcp_testkit::LogRedactionScanner;
 use serde::{Deserialize, Serialize};
 
+pub use fcp_testkit::{LogScanReport, LogScanReportFinding};
 pub use logging::{
     AssertionsSummary, E2eLogEntry, E2eLogger, LogSchemaError, validate_log_entry_value,
 };
 pub use subprocess::ConnectorProcessRunner;
 
-/// Summary report for a log scan run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogScanReport {
-    /// Total non-empty lines scanned.
-    pub total_lines: u64,
-    /// Findings with redacted context.
-    pub findings: Vec<LogScanReportFinding>,
-    /// Number of error-severity findings.
-    pub error_count: u64,
-    /// Number of warn-severity findings.
-    pub warn_count: u64,
-}
-
-/// A single log scan finding with redacted context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogScanReportFinding {
-    /// 1-based line number.
-    pub line: usize,
-    /// Rule identifier.
-    pub rule_id: String,
-    /// Severity label.
-    pub severity: String,
-    /// Optional JSON path.
-    pub json_path: Option<String>,
-    /// Redacted context snippet.
-    pub context_redacted: String,
-}
-
 /// Scan a JSONL payload for secrets/PII and return a report.
 #[must_use]
 pub fn scan_log_jsonl(input: &str) -> LogScanReport {
-    let scanner = LogRedactionScanner::new();
-    let findings = scanner.scan_jsonl(input);
-    let lines: Vec<&str> = input.lines().collect();
-    let mut report_findings = Vec::new();
-    let mut error_count = 0_u64;
-    let mut warn_count = 0_u64;
-
-    for finding in findings {
-        let line_idx = finding.line.saturating_sub(1);
-        let raw = lines.get(line_idx).copied().unwrap_or_default();
-        let mut redacted = raw.replace(&finding.snippet, "<redacted>");
-        if redacted.len() > 200 {
-            redacted.truncate(200);
-        }
-        let severity = match finding.severity {
-            ScanSeverity::Error => {
-                error_count += 1;
-                "error"
-            }
-            ScanSeverity::Warn => {
-                warn_count += 1;
-                "warn"
-            }
-        };
-        report_findings.push(LogScanReportFinding {
-            line: finding.line,
-            rule_id: finding.rule_id,
-            severity: severity.to_string(),
-            json_path: finding.json_path,
-            context_redacted: redacted,
-        });
-    }
-
-    let total_lines = lines.iter().filter(|line| !line.trim().is_empty()).count() as u64;
-    LogScanReport {
-        total_lines,
-        findings: report_findings,
-        error_count,
-        warn_count,
-    }
+    LogRedactionScanner::new().scan_report(input)
 }
 
 /// Errors returned by the E2E harness.
@@ -131,16 +66,26 @@ pub struct E2eReport {
 
 impl E2eReport {
     /// Serialize logs to JSON lines.
+    ///
+    /// # Panics
+    /// Panics if an `E2eLogEntry` cannot be serialized to JSON. This is treated
+    /// as an invariant violation because silently dropping evidence entries would
+    /// corrupt the report.
     #[must_use]
     pub fn to_json_lines(&self) -> String {
         self.logs
             .iter()
-            .filter_map(|entry| serde_json::to_string(entry).ok())
+            .map(serialize_log_entry)
             .collect::<Vec<_>>()
             .join("\n")
     }
 
     /// Serialize logs to stable JSON lines with nondeterministic fields normalized.
+    ///
+    /// # Panics
+    /// Panics if an `E2eLogEntry` cannot be normalized or serialized to JSON.
+    /// Stable output is evidence material, so silent truncation would be worse
+    /// than a hard failure.
     #[must_use]
     pub fn to_stable_json_lines(&self) -> String {
         stable_json_lines(&self.logs)
@@ -151,6 +96,7 @@ impl E2eReport {
     /// # Errors
     /// Returns an IO error if the file cannot be written.
     pub fn write_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        ensure_parent_directory(path.as_ref())?;
         let mut file = std::fs::File::create(path)?;
         for entry in &self.logs {
             let line = serde_json::to_string(entry)
@@ -184,16 +130,26 @@ pub struct E2eBatchReport {
 
 impl E2eBatchReport {
     /// Serialize all logs to JSON lines.
+    ///
+    /// # Panics
+    /// Panics if an `E2eLogEntry` cannot be serialized to JSON. This is treated
+    /// as an invariant violation because silently dropping evidence entries would
+    /// corrupt the batch report.
     #[must_use]
     pub fn to_json_lines(&self) -> String {
         self.logs
             .iter()
-            .filter_map(|entry| serde_json::to_string(entry).ok())
+            .map(serialize_log_entry)
             .collect::<Vec<_>>()
             .join("\n")
     }
 
     /// Serialize all logs to stable JSON lines with nondeterministic fields normalized.
+    ///
+    /// # Panics
+    /// Panics if an `E2eLogEntry` cannot be normalized or serialized to JSON.
+    /// Stable output is evidence material, so silent truncation would be worse
+    /// than a hard failure.
     #[must_use]
     pub fn to_stable_json_lines(&self) -> String {
         stable_json_lines(&self.logs)
@@ -204,6 +160,7 @@ impl E2eBatchReport {
     /// # Errors
     /// Returns an IO error if the file cannot be written.
     pub fn write_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        ensure_parent_directory(path.as_ref())?;
         let mut file = std::fs::File::create(path)?;
         for entry in &self.logs {
             let line = serde_json::to_string(entry)
@@ -222,17 +179,306 @@ impl E2eBatchReport {
     }
 }
 
+/// Structured metadata for a command executed during an E2E step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eCommandMetadata {
+    /// The executable or logical command name.
+    pub command: String,
+    /// Command arguments in order.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional command runner prefix (for example `rch exec --`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_prefix: Option<String>,
+    /// Optional working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    /// Environment keys that materially shaped the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
+}
+
+/// Structured prerequisite state captured for a step or run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2ePrerequisiteState {
+    /// Stable prerequisite name.
+    pub name: String,
+    /// Status label (`satisfied`, `missing`, `seeded`, etc.).
+    pub status: String,
+    /// Optional operator-facing detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Summarized failure metadata for triage and replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eFailureSummary {
+    /// Optional step identifier where the failure surfaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    /// Human-readable failure reason.
+    pub reason: String,
+    /// Optional stable error code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Optional stderr excerpt or similar short evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_excerpt: Option<String>,
+}
+
+/// Artifact persisted for an E2E run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eArtifactRecord {
+    /// Stable artifact label within the run report.
+    pub label: String,
+    /// Path where the artifact was written.
+    pub path: String,
+    /// Artifact kind (`jsonl`, `json`, `text`, `replay`, etc.).
+    pub kind: String,
+    /// Optional human-facing description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional scan result for the artifact payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<LogScanReport>,
+}
+
+/// Detailed report for one logical E2E step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eStepReport {
+    /// Stable step identifier.
+    pub step_id: String,
+    /// 1-based ordinal for human/debug consumption.
+    pub step_number: u32,
+    /// Phase label (`setup`, `execute`, `verify`, `teardown`, etc.).
+    pub phase: String,
+    /// Attempt number for retries.
+    pub attempt: u32,
+    /// Step result (`pass` or `fail`).
+    pub result: String,
+    /// Step duration in milliseconds.
+    pub duration_ms: u64,
+    /// Optional command metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<E2eCommandMetadata>,
+    /// Optional stdout artifact path or equivalent primary output artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_path: Option<String>,
+    /// Optional stderr artifact path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_path: Option<String>,
+    /// Additional artifacts tied to this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+    /// Prerequisite state captured for this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<E2ePrerequisiteState>,
+    /// Optional failure metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<E2eFailureSummary>,
+}
+
+/// Rich machine-readable report for an E2E run and its persisted artifacts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eRunReport {
+    /// Version marker for the machine-readable report payload.
+    pub report_version: String,
+    /// Stable run identifier.
+    pub run_id: String,
+    /// Test name.
+    pub test_name: String,
+    /// Module name.
+    pub module: String,
+    /// Optional scenario identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+    /// Whether the run passed.
+    pub passed: bool,
+    /// Total duration in milliseconds.
+    pub duration_ms: u64,
+    /// Per-step detail for debugging and replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_reports: Vec<E2eStepReport>,
+    /// Persisted artifacts for the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub log_artifacts: Vec<E2eArtifactRecord>,
+    /// Aggregated secret/PII scan for the JSONL log stream.
+    pub scan: LogScanReport,
+    /// Human-readable summary emitted alongside the JSON report.
+    pub human_summary: String,
+    /// Optional overall failure summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<E2eFailureSummary>,
+}
+
+impl E2eRunReport {
+    /// Create a new run report with a default report version marker.
+    #[must_use]
+    pub fn new(
+        run_id: impl Into<String>,
+        test_name: impl Into<String>,
+        module: impl Into<String>,
+        passed: bool,
+        duration_ms: u64,
+        scan: LogScanReport,
+    ) -> Self {
+        Self {
+            report_version: "e2e-run/v1".to_string(),
+            run_id: run_id.into(),
+            test_name: test_name.into(),
+            module: module.into(),
+            scenario_id: None,
+            passed,
+            duration_ms,
+            step_reports: Vec::new(),
+            log_artifacts: Vec::new(),
+            scan,
+            human_summary: String::new(),
+            failure: None,
+        }
+    }
+
+    /// Attach a scenario identifier.
+    #[must_use]
+    pub fn with_scenario_id(mut self, scenario_id: impl Into<String>) -> Self {
+        self.scenario_id = Some(scenario_id.into());
+        self
+    }
+
+    /// Attach step reports.
+    #[must_use]
+    pub fn with_step_reports(mut self, step_reports: Vec<E2eStepReport>) -> Self {
+        self.step_reports = step_reports;
+        self
+    }
+
+    /// Attach artifact records.
+    #[must_use]
+    pub fn with_log_artifacts(mut self, log_artifacts: Vec<E2eArtifactRecord>) -> Self {
+        self.log_artifacts = log_artifacts;
+        self
+    }
+
+    /// Attach an overall failure summary.
+    #[must_use]
+    pub fn with_failure(mut self, failure: E2eFailureSummary) -> Self {
+        self.failure = Some(failure);
+        self
+    }
+
+    /// Render a concise human-readable summary of the run.
+    #[must_use]
+    pub fn render_human_summary(&self) -> String {
+        let mut out = String::new();
+        let status = if self.passed { "PASS" } else { "FAIL" };
+        let _ = writeln!(out, "Run: {}", self.run_id);
+        let _ = writeln!(out, "Test: {}", self.test_name);
+        let _ = writeln!(out, "Module: {}", self.module);
+        if let Some(scenario_id) = &self.scenario_id {
+            let _ = writeln!(out, "Scenario: {scenario_id}");
+        }
+        let _ = writeln!(out, "Result: {status}");
+        let _ = writeln!(out, "Duration: {}ms", self.duration_ms);
+        let _ = writeln!(out, "Steps: {}", self.step_reports.len());
+        let _ = writeln!(
+            out,
+            "Scan: {} errors, {} warnings",
+            self.scan.error_count, self.scan.warn_count
+        );
+
+        if !self.step_reports.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Step Summary:");
+            for step in &self.step_reports {
+                let _ = writeln!(
+                    out,
+                    "  {}. {} [{}] {} (attempt {}, {}ms)",
+                    step.step_number,
+                    step.step_id,
+                    step.phase,
+                    step.result,
+                    step.attempt,
+                    step.duration_ms
+                );
+                if let Some(failure) = &step.failure {
+                    let _ = writeln!(out, "     failure: {}", failure.reason);
+                }
+            }
+        }
+
+        if !self.log_artifacts.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Artifacts:");
+            for artifact in &self.log_artifacts {
+                let _ = writeln!(
+                    out,
+                    "  {}: {} ({})",
+                    artifact.label, artifact.path, artifact.kind
+                );
+            }
+        }
+
+        if let Some(failure) = &self.failure {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Failure: {}", failure.reason);
+        }
+
+        out
+    }
+
+    /// Update the embedded human-readable summary from the current fields.
+    pub fn refresh_human_summary(&mut self) {
+        self.human_summary = self.render_human_summary();
+    }
+
+    /// Persist the machine-readable report as pretty JSON.
+    ///
+    /// # Errors
+    /// Returns an IO or serialization error if the file cannot be written.
+    pub fn write_json<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        ensure_parent_directory(path.as_ref())?;
+        let file = std::fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, self)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+    }
+
+    /// Persist the human-readable summary.
+    ///
+    /// # Errors
+    /// Returns an IO error if the file cannot be written.
+    pub fn write_human_summary<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        ensure_parent_directory(path.as_ref())?;
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(self.human_summary.as_bytes())
+    }
+}
+
+fn ensure_parent_directory(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
 fn stable_json_lines(entries: &[E2eLogEntry]) -> String {
     entries
         .iter()
-        .filter_map(stable_log_value)
-        .filter_map(|entry| serde_json::to_string(&entry).ok())
+        .map(stable_log_value)
+        .map(|entry| match serde_json::to_string(&entry) {
+            Ok(line) => line,
+            Err(err) => panic!("stable E2E log serialization should not fail: {err}"),
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn stable_log_value(entry: &E2eLogEntry) -> Option<serde_json::Value> {
-    let mut value = serde_json::to_value(entry).ok()?;
+fn stable_log_value(entry: &E2eLogEntry) -> serde_json::Value {
+    let mut value = match serde_json::to_value(entry) {
+        Ok(value) => value,
+        Err(err) => panic!("E2E log normalization should not fail: {err}"),
+    };
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "timestamp".to_string(),
@@ -244,10 +490,18 @@ fn stable_log_value(entry: &E2eLogEntry) -> Option<serde_json::Value> {
         );
         object.insert("duration_ms".to_string(), serde_json::Value::from(0_u64));
     }
-    Some(value)
+    value
+}
+
+fn serialize_log_entry(entry: &E2eLogEntry) -> String {
+    match serde_json::to_string(entry) {
+        Ok(line) => line,
+        Err(err) => panic!("E2E log serialization should not fail: {err}"),
+    }
 }
 
 fn write_json_lines_payload<P: AsRef<Path>>(path: P, payload: &str) -> io::Result<()> {
+    ensure_parent_directory(path.as_ref())?;
     let mut file = std::fs::File::create(path)?;
     if !payload.is_empty() {
         writeln!(file, "{payload}")?;
@@ -2578,6 +2832,42 @@ mod tests {
         let dbg = format!("{report:?}");
         assert!(dbg.contains("LogScanReport"));
         assert!(dbg.contains("total_lines"));
+    }
+
+    #[test]
+    fn e2e_run_report_writers_create_parent_directories() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should advance")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "fcp-e2e-run-report-{unique}-{}",
+            std::process::id()
+        ));
+        let json_path = base.join("nested/report.json");
+        let summary_path = base.join("nested/summary.txt");
+        let mut report = E2eRunReport::new(
+            "run-1",
+            "nested_outputs",
+            "fcp-e2e",
+            true,
+            12,
+            LogScanReport {
+                total_lines: 1,
+                findings: vec![],
+                error_count: 0,
+                warn_count: 0,
+            },
+        );
+        report.refresh_human_summary();
+
+        report.write_json(&json_path).expect("write json report");
+        report
+            .write_human_summary(&summary_path)
+            .expect("write summary report");
+
+        assert!(json_path.exists(), "json report should be created");
+        assert!(summary_path.exists(), "summary report should be created");
     }
 
     #[test]

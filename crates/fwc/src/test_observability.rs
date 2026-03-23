@@ -10,6 +10,7 @@
 //! - **Replay**: Captures everything needed to reproduce a scenario run.
 
 use crate::readiness::CommandAvailability;
+use fcp_testkit::{LogRedactionScanner, LogScanReport};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -121,11 +122,13 @@ impl ScenarioId {
     /// Create a new scenario ID from its components.
     #[must_use]
     pub fn new(layer: ScenarioLayer, suite: impl Into<String>, case: impl Into<String>) -> Self {
-        Self {
-            layer,
-            suite: suite.into(),
-            case: case.into(),
-        }
+        let suite = suite.into();
+        let case = case.into();
+        assert!(
+            is_valid_scenario_component(&suite) && is_valid_scenario_component(&case),
+            "scenario suite/case must be non-empty path-safe components"
+        );
+        Self { layer, suite, case }
     }
 
     /// Parse a colon-delimited string: `"unit:routing:ambiguous_alias"`.
@@ -138,6 +141,9 @@ impl ScenarioId {
             return None;
         }
         let layer = ScenarioLayer::parse_label(parts[0])?;
+        if !is_valid_scenario_component(parts[1]) || !is_valid_scenario_component(parts[2]) {
+            return None;
+        }
         Some(Self {
             layer,
             suite: parts[1].to_string(),
@@ -150,6 +156,10 @@ impl ScenarioId {
     pub fn to_string_id(&self) -> String {
         format!("{}:{}:{}", self.layer, self.suite, self.case)
     }
+}
+
+fn is_valid_scenario_component(value: &str) -> bool {
+    !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\\'])
 }
 
 impl fmt::Display for ScenarioId {
@@ -851,6 +861,15 @@ impl TraceLog {
     }
 }
 
+/// Scan a trace log's JSONL payload using the shared E2E secret scanner.
+///
+/// # Errors
+/// Returns a serialization error if the trace log cannot be encoded as JSONL.
+pub fn scan_trace_log(log: &TraceLog) -> Result<LogScanReport, serde_json::Error> {
+    let payload = log.to_jsonl()?;
+    Ok(LogRedactionScanner::new().scan_report(&payload))
+}
+
 // ── 3. Artifact Bundle Layout ───────────────────────────────────────────────
 
 /// Outcome of a scenario run.
@@ -910,6 +929,11 @@ impl ArtifactBundle {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn new(base: &std::path::Path, scenario_id: &ScenarioId, trace_id: &TraceId) -> Self {
+        assert!(
+            is_valid_scenario_component(&scenario_id.suite)
+                && is_valid_scenario_component(&scenario_id.case),
+            "artifact bundles require non-empty path-safe scenario suite/case"
+        );
         let now = SystemTime::now();
         let millis = now
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -972,6 +996,17 @@ impl ArtifactBundle {
             self.replay_script_path(),
         ]
     }
+
+    /// Return the canonical report artifacts keyed by stable label.
+    #[must_use]
+    pub fn report_artifact_paths(&self) -> BTreeMap<String, PathBuf> {
+        BTreeMap::from([
+            ("trace_jsonl".to_string(), self.trace_path()),
+            ("summary_json".to_string(), self.summary_path()),
+            ("environment_json".to_string(), self.environment_path()),
+            ("replay_sh".to_string(), self.replay_script_path()),
+        ])
+    }
 }
 
 /// Metadata manifest for an artifact bundle.
@@ -1017,6 +1052,55 @@ impl ArtifactManifest {
         self.log_summary = log.summary();
         self.truthfulness = log.truthfulness_summary();
         self
+    }
+
+    /// Render a human-readable summary aligned with the shared E2E reporting vocabulary.
+    #[must_use]
+    pub fn render_e2e_summary(&self, bundle: &ArtifactBundle) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "Bundle: {}", bundle.bundle_id);
+        let _ = writeln!(out, "Scenario: {}", self.scenario_id);
+        let _ = writeln!(out, "Trace: {}", self.trace_id);
+        let _ = writeln!(out, "Outcome: {}", self.outcome);
+        let _ = writeln!(
+            out,
+            "Files: {} ({})",
+            self.file_count,
+            bundle.root.display()
+        );
+        let _ = writeln!(
+            out,
+            "Trace Summary: {} entries, {} errors, {} warnings, {} redacted",
+            self.log_summary.total_entries,
+            self.log_summary.error_count,
+            self.log_summary.warn_count,
+            self.log_summary.redacted_count
+        );
+        if !self.truthfulness.provenance_markers.is_empty() {
+            let _ = writeln!(
+                out,
+                "Provenance: {}",
+                self.truthfulness.provenance_markers.join(", ")
+            );
+        }
+        if !self.truthfulness.phases.is_empty() {
+            let _ = writeln!(out, "Phases: {}", self.truthfulness.phases.join(", "));
+        }
+        if !self.truthfulness.command_availabilities.is_empty() {
+            let availability = self
+                .truthfulness
+                .command_availabilities
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "Availability: {availability}");
+        }
+        let _ = writeln!(out, "Artifacts:");
+        for (label, path) in bundle.report_artifact_paths() {
+            let _ = writeln!(out, "  {label}: {}", path.display());
+        }
+        out
     }
 }
 
@@ -2284,6 +2368,19 @@ mod tests {
     }
 
     #[test]
+    fn artifact_bundle_report_artifact_paths_have_stable_labels() {
+        let base = PathBuf::from("/tmp/tb");
+        let sid = ScenarioId::new(ScenarioLayer::E2E, "life", "boot");
+        let tid = TraceId::from_string("t");
+        let bundle = ArtifactBundle::new(&base, &sid, &tid);
+        let artifacts = bundle.report_artifact_paths();
+        assert!(artifacts.contains_key("trace_jsonl"));
+        assert!(artifacts.contains_key("summary_json"));
+        assert!(artifacts.contains_key("environment_json"));
+        assert!(artifacts.contains_key("replay_sh"));
+    }
+
+    #[test]
     fn artifact_bundle_trace_path() {
         let base = PathBuf::from("/tmp/bp");
         let sid = ScenarioId::new(ScenarioLayer::Snapshot, "s", "c");
@@ -3190,11 +3287,24 @@ mod tests {
     }
 
     #[test]
-    fn scenario_id_parse_empty_suite_and_case() {
-        // Empty suite and case are technically valid parse-wise
-        let parsed = ScenarioId::parse("unit::").unwrap();
-        assert_eq!(parsed.suite, "");
-        assert_eq!(parsed.case, "");
+    fn scenario_id_parse_empty_suite_and_case_rejected() {
+        assert!(ScenarioId::parse("unit::").is_none());
+    }
+
+    #[test]
+    fn scenario_id_parse_rejects_path_unsafe_components() {
+        assert!(ScenarioId::parse("unit:../suite:case").is_none());
+        assert!(ScenarioId::parse("unit:suite:../case").is_none());
+        assert!(ScenarioId::parse("unit:suite/child:case").is_none());
+        assert!(ScenarioId::parse("unit:suite:case/child").is_none());
+    }
+
+    #[test]
+    fn scenario_id_new_rejects_path_unsafe_components() {
+        let panic = std::panic::catch_unwind(|| {
+            let _ = ScenarioId::new(ScenarioLayer::Unit, "../suite", "case");
+        });
+        assert!(panic.is_err());
     }
 
     #[test]
@@ -3778,6 +3888,19 @@ mod tests {
     }
 
     #[test]
+    fn artifact_bundle_new_rejects_deserialized_path_unsafe_scenario_ids() {
+        let base = PathBuf::from("/tmp/ab");
+        let sid = ScenarioId {
+            layer: ScenarioLayer::Unit,
+            suite: "../suite".to_string(),
+            case: "case".to_string(),
+        };
+        let tid = TraceId::from_string("t");
+        let panic = std::panic::catch_unwind(|| ArtifactBundle::new(&base, &sid, &tid));
+        assert!(panic.is_err());
+    }
+
+    #[test]
     fn artifact_bundle_root_contains_layer_path() {
         let base = PathBuf::from("/artifacts-root");
         let sid = ScenarioId::new(ScenarioLayer::Benchmark, "perf", "speed");
@@ -3847,6 +3970,46 @@ mod tests {
         assert_eq!(m.log_summary.total_entries, 2);
         assert_eq!(m.log_summary.info_count, 1);
         assert_eq!(m.log_summary.error_count, 1);
+    }
+
+    #[test]
+    fn artifact_manifest_render_e2e_summary_lists_artifacts() {
+        let base = PathBuf::from("/tmp/summary");
+        let ctx = scenario_context(ScenarioLayer::E2E, "suite", "case");
+        let mut log = new_trace_log();
+        emit_entry(
+            &mut log,
+            &ctx,
+            TraceLevel::Info,
+            TraceCategory::Setup,
+            "setup complete",
+        );
+        let (bundle, manifest) = create_bundle(&base, &ctx, &log, BundleOutcome::Pass);
+        let summary = manifest.render_e2e_summary(&bundle);
+        assert!(summary.contains("Bundle:"));
+        assert!(summary.contains("trace_jsonl"));
+        assert!(summary.contains("summary_json"));
+    }
+
+    #[test]
+    fn scan_trace_log_detects_leaks_with_shared_scanner() {
+        let ctx = scenario_context(ScenarioLayer::E2E, "suite", "case");
+        let mut log = new_trace_log();
+        let entry = TraceEntry::new(
+            &ctx.trace_id,
+            &ctx.scenario_id,
+            TraceLevel::Error,
+            TraceCategory::Assertion,
+            "token leaked",
+        )
+        .with_field(
+            "authorization",
+            serde_json::json!("Bearer abcdefghijklmnopqrstuvwxyz012345"),
+        );
+        log.append(entry);
+        let report = scan_trace_log(&log).expect("trace log should serialize");
+        assert_eq!(report.error_count, 1);
+        assert!(!report.passed());
     }
 
     #[test]

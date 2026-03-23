@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Severity of a scan finding.
@@ -29,6 +30,42 @@ pub struct ScanFinding {
     pub snippet: String,
     /// Optional JSON path where the match was found.
     pub json_path: Option<String>,
+}
+
+/// A single scan finding rendered for persisted reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogScanReportFinding {
+    /// 1-based line number.
+    pub line: usize,
+    /// Stable rule identifier.
+    pub rule_id: String,
+    /// Severity label (`error` or `warn`).
+    pub severity: String,
+    /// Optional JSON path for structured inputs.
+    pub json_path: Option<String>,
+    /// Redacted context snippet for debugging.
+    pub context_redacted: String,
+}
+
+/// Aggregated scan report for a log or artifact payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogScanReport {
+    /// Total non-empty lines scanned.
+    pub total_lines: u64,
+    /// Detailed findings with redacted snippets.
+    pub findings: Vec<LogScanReportFinding>,
+    /// Number of error-severity findings.
+    pub error_count: u64,
+    /// Number of warn-severity findings.
+    pub warn_count: u64,
+}
+
+impl LogScanReport {
+    /// Whether the report is free of error-severity findings.
+    #[must_use]
+    pub const fn passed(&self) -> bool {
+        self.error_count == 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +188,50 @@ impl LogRedactionScanner {
             findings.extend(self.scan_line(idx + 1, trimmed));
         }
         findings
+    }
+
+    /// Scan a payload and return a persisted report with redacted snippets.
+    #[must_use]
+    pub fn scan_report(&self, input: &str) -> LogScanReport {
+        let findings = self.scan_jsonl(input);
+        let lines: Vec<&str> = input.lines().collect();
+        let mut report_findings = Vec::with_capacity(findings.len());
+        let mut error_count = 0_u64;
+        let mut warn_count = 0_u64;
+
+        for finding in findings {
+            let line_idx = finding.line.saturating_sub(1);
+            let raw = lines.get(line_idx).copied().unwrap_or_default();
+            let mut redacted = raw.replace(&finding.snippet, "<redacted>");
+            if redacted.len() > 200 {
+                redacted.truncate(200);
+            }
+            let severity = match finding.severity {
+                ScanSeverity::Error => {
+                    error_count += 1;
+                    "error"
+                }
+                ScanSeverity::Warn => {
+                    warn_count += 1;
+                    "warn"
+                }
+            };
+            report_findings.push(LogScanReportFinding {
+                line: finding.line,
+                rule_id: finding.rule_id,
+                severity: severity.to_string(),
+                json_path: finding.json_path,
+                context_redacted: redacted,
+            });
+        }
+
+        let total_lines = lines.iter().filter(|line| !line.trim().is_empty()).count() as u64;
+        LogScanReport {
+            total_lines,
+            findings: report_findings,
+            error_count,
+            warn_count,
+        }
     }
 
     fn scan_line(&self, line_no: usize, line: &str) -> Vec<ScanFinding> {
@@ -314,6 +395,25 @@ mod tests {
         let findings = scanner.scan_jsonl(input);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule_id, "BEARER_TOKEN");
+    }
+
+    #[test]
+    fn scan_report_summarizes_findings() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"email":"user@example.com"}
+{"token":"sk-abc123def456ghi789jkl012mno345pqr"}"#;
+        let report = scanner.scan_report(input);
+        assert_eq!(report.total_lines, 2);
+        assert_eq!(report.error_count, 1);
+        assert_eq!(report.warn_count, 1);
+        assert_eq!(report.findings.len(), 2);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| !finding.context_redacted.is_empty())
+        );
+        assert!(!report.passed());
     }
 
     #[test]

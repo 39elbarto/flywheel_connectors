@@ -33,6 +33,7 @@ fcp-manifest.workspace = true
 fcp-mesh.workspace = true
 fcp-sandbox.workspace = true
 fcp-telemetry.workspace = true
+fcp-testkit.workspace = true
 handlebars.workspace = true
 jaq-core = "2.2.1"
 jaq-json = { version = "1.1.3", features = ["serde_json"] }

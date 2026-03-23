@@ -51,6 +51,45 @@ pub struct E2eLogEntry {
     /// Context-specific fields (`zone_id`, `connector_id`, etc.).
     #[serde(default)]
     pub context: serde_json::Value,
+    /// Optional run identifier for multi-artifact bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Optional scenario identifier when the run is scenario-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
+    /// Optional step identifier for step-level reporting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    /// Optional 1-based step number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_number: Option<u32>,
+    /// Optional retry/attempt counter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    /// Optional artifact paths tied to this entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+    /// Optional stable error code for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Optional structured details payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    /// Optional structured summary payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<serde_json::Value>,
+    /// Optional per-step command metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<serde_json::Value>,
+    /// Optional prerequisite state snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prerequisites: Option<serde_json::Value>,
+    /// Optional secret-scan result payload for this entry or bundle slice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<serde_json::Value>,
+    /// Optional failure summary for debugging bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_summary: Option<serde_json::Value>,
 }
 
 impl E2eLogEntry {
@@ -79,7 +118,125 @@ impl E2eLogEntry {
             duration_ms,
             assertions,
             context: redact_secrets(&context),
+            run_id: None,
+            scenario_id: None,
+            step_id: None,
+            step_number: None,
+            attempt: None,
+            artifacts: Vec::new(),
+            error_code: None,
+            details: None,
+            summary: None,
+            command: None,
+            prerequisites: None,
+            scan: None,
+            failure_summary: None,
         }
+    }
+
+    fn promote_to_v2(&mut self) {
+        self.log_version = "v2".to_string();
+    }
+
+    /// Attach a run identifier.
+    #[must_use]
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.promote_to_v2();
+        self.run_id = Some(run_id.into());
+        self
+    }
+
+    /// Attach a scenario identifier.
+    #[must_use]
+    pub fn with_scenario_id(mut self, scenario_id: impl Into<String>) -> Self {
+        self.promote_to_v2();
+        self.scenario_id = Some(scenario_id.into());
+        self
+    }
+
+    /// Attach 1-based step metadata.
+    #[must_use]
+    pub fn with_step(mut self, step_id: impl Into<String>, step_number: u32) -> Self {
+        self.promote_to_v2();
+        self.step_id = Some(step_id.into());
+        self.step_number = Some(step_number);
+        self
+    }
+
+    /// Attach an attempt counter.
+    #[must_use]
+    pub fn with_attempt(mut self, attempt: u32) -> Self {
+        self.promote_to_v2();
+        self.attempt = Some(attempt);
+        self
+    }
+
+    /// Attach artifact paths.
+    #[must_use]
+    pub fn with_artifacts<I, S>(mut self, artifacts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.promote_to_v2();
+        self.artifacts = artifacts.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Attach a stable error code.
+    #[must_use]
+    pub fn with_error_code(mut self, error_code: impl Into<String>) -> Self {
+        self.promote_to_v2();
+        self.error_code = Some(error_code.into());
+        self
+    }
+
+    /// Attach structured details after secret redaction.
+    #[must_use]
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.promote_to_v2();
+        self.details = Some(redact_secrets(&details));
+        self
+    }
+
+    /// Attach a structured summary payload after secret redaction.
+    #[must_use]
+    pub fn with_summary(mut self, summary: serde_json::Value) -> Self {
+        self.promote_to_v2();
+        self.summary = Some(redact_secrets(&summary));
+        self
+    }
+
+    /// Attach per-step command metadata after secret redaction.
+    #[must_use]
+    pub fn with_command(mut self, command: serde_json::Value) -> Self {
+        self.promote_to_v2();
+        self.command = Some(redact_secrets(&command));
+        self
+    }
+
+    /// Attach prerequisite state after secret redaction.
+    #[must_use]
+    pub fn with_prerequisites(mut self, prerequisites: serde_json::Value) -> Self {
+        self.promote_to_v2();
+        self.prerequisites = Some(redact_secrets(&prerequisites));
+        self
+    }
+
+    /// Attach secret-scan metadata after secret redaction.
+    #[must_use]
+    pub fn with_scan(mut self, scan: serde_json::Value) -> Self {
+        self.promote_to_v2();
+        self.scan = Some(redact_secrets(&scan));
+        self
+    }
+
+    /// Attach a failure summary after secret redaction.
+    #[must_use]
+    pub fn with_failure_summary(mut self, failure_summary: serde_json::Value) -> Self {
+        self.promote_to_v2();
+        self.failure_summary = Some(redact_secrets(&failure_summary));
+        self
     }
 
     /// Validate this log entry against the shared E2E schema.
@@ -128,11 +285,19 @@ impl E2eLogger {
     }
 
     /// Serialize all entries to JSON lines.
+    ///
+    /// # Panics
+    /// Panics if an `E2eLogEntry` cannot be serialized to JSON. This is treated
+    /// as an invariant violation because silently dropping evidence entries would
+    /// corrupt the log stream.
     #[must_use]
     pub fn to_json_lines(&self) -> String {
         self.entries
             .iter()
-            .filter_map(|entry| serde_json::to_string(entry).ok())
+            .map(|entry| match serde_json::to_string(entry) {
+                Ok(line) => line,
+                Err(err) => panic!("E2E log entry serialization should not fail: {err}"),
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -142,6 +307,9 @@ impl E2eLogger {
     /// # Errors
     /// Returns an IO error if the file cannot be created or written to.
     pub fn write_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        if let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut file = std::fs::File::create(path)?;
         for entry in &self.entries {
             let line = serde_json::to_string(entry)
@@ -635,6 +803,39 @@ mod tests {
     }
 
     #[test]
+    fn log_entry_extended_fields_promote_to_v2() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "version_check",
+            "mod",
+            "setup",
+            "corr-v2",
+            "pass",
+            0,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        )
+        .with_run_id("run-1")
+        .with_step("step-1", 1)
+        .with_attempt(1)
+        .with_details(json!({"token":"secret"}))
+        .with_artifacts(["artifacts/run-1/logs.jsonl"]);
+        assert_eq!(entry.log_version, "v2");
+        assert_eq!(entry.run_id.as_deref(), Some("run-1"));
+        assert_eq!(entry.step_id.as_deref(), Some("step-1"));
+        assert_eq!(entry.step_number, Some(1));
+        assert_eq!(entry.attempt, Some(1));
+        assert_eq!(
+            entry
+                .details
+                .as_ref()
+                .and_then(|details| details.get("token"))
+                .and_then(|value| value.as_str()),
+            Some("redacted")
+        );
+    }
+
+    #[test]
     fn log_entry_timestamp_is_utc() {
         let before = chrono::Utc::now();
         let entry = E2eLogEntry::new(
@@ -813,6 +1014,33 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(content.lines().next().unwrap()).expect("valid json");
         assert_eq!(parsed["test_name"], "write_test");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logger_write_json_lines_creates_parent_directories() {
+        let mut logger = super::E2eLogger::new();
+        logger.push(super::E2eLogEntry::new(
+            "info",
+            "write_test_nested",
+            "fcp-e2e",
+            "verify",
+            "00000000-0000-0000-0000-000000000001",
+            "pass",
+            10,
+            super::AssertionsSummary::new(1, 0),
+            json!({}),
+        ));
+
+        let dir = std::env::temp_dir().join("fcp-e2e-test-write-jsonl-nested");
+        let path = dir.join("nested").join("test.jsonl");
+
+        logger
+            .write_json_lines(&path)
+            .expect("write should create parent directories");
+        let content = std::fs::read_to_string(&path).expect("read back");
+        assert!(!content.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

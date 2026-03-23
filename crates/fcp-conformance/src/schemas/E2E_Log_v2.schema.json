@@ -105,6 +105,14 @@
         "artifacts": { "$ref": "#/$defs/artifacts" },
         "error_code": { "$ref": "#/$defs/non_empty_string" },
         "details": { "$ref": "#/$defs/details" },
+        "step_id": { "$ref": "#/$defs/non_empty_string" },
+        "step_number": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 0 },
+        "summary": { "$ref": "#/$defs/details" },
+        "command": { "$ref": "#/$defs/details" },
+        "scan": { "$ref": "#/$defs/details" },
+        "prerequisites": { "$ref": "#/$defs/details" },
+        "failure_summary": { "$ref": "#/$defs/details" },
         "run_id": { "$ref": "#/$defs/non_empty_string" },
         "scenario_id": { "$ref": "#/$defs/non_empty_string" }
       }
@@ -127,12 +135,21 @@
         "script": { "$ref": "#/$defs/non_empty_string" },
         "step": { "$ref": "#/$defs/non_empty_string" },
         "step_number": { "type": "integer", "minimum": 0 },
+        "step_id": { "$ref": "#/$defs/non_empty_string" },
+        "attempt": { "type": "integer", "minimum": 0 },
         "correlation_id": { "$ref": "#/$defs/non_empty_string" },
         "duration_ms": { "$ref": "#/$defs/duration_ms" },
         "result": { "$ref": "#/$defs/result" },
         "artifacts": { "$ref": "#/$defs/artifacts" },
         "error_code": { "$ref": "#/$defs/non_empty_string" },
-        "details": { "$ref": "#/$defs/details" }
+        "details": { "$ref": "#/$defs/details" },
+        "summary": { "$ref": "#/$defs/details" },
+        "command": { "$ref": "#/$defs/details" },
+        "scan": { "$ref": "#/$defs/details" },
+        "prerequisites": { "$ref": "#/$defs/details" },
+        "failure_summary": { "$ref": "#/$defs/details" },
+        "run_id": { "$ref": "#/$defs/non_empty_string" },
+        "scenario_id": { "$ref": "#/$defs/non_empty_string" }
       }
     }
   }

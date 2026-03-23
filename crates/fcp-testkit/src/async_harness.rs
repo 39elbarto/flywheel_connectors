@@ -4,10 +4,11 @@
 //! can avoid ad hoc runtime setup and unstable correlation conventions.
 
 use std::future::Future;
+use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_async_core::{AsyncError, ExecutionContext, channel, shutdown, task, time};
+use fcp_async_core::{AsyncError, ExecutionContext, channel, shutdown};
 use uuid::Uuid;
 
 /// Version tag for the shared async harness contract.
@@ -105,10 +106,13 @@ where
 }
 
 /// Spawn a cancellation trigger for a context after the given delay.
+///
+/// This uses a dedicated wall-clock thread so the timer starts immediately and
+/// is not delayed by async runtime scheduling jitter.
 #[must_use]
-pub fn spawn_cancel_after(context: ExecutionContext, delay: Duration) -> task::JoinHandle<()> {
-    task::spawn(async move {
-        time::sleep(delay).await;
+pub fn spawn_cancel_after(context: ExecutionContext, delay: Duration) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        thread::sleep(delay);
         context.cancel();
     })
 }
@@ -145,6 +149,7 @@ pub async fn sleep_or_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_async_core::time;
 
     #[test]
     fn deterministic_correlation_id_is_stable() {
@@ -197,8 +202,8 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn run_with_timeout_times_out() {
-        let result = run_with_timeout(Duration::from_millis(5), async {
-            time::sleep(Duration::from_millis(20)).await;
+        let result = run_with_timeout(Duration::from_millis(25), async {
+            time::sleep(Duration::from_millis(200)).await;
             42_u8
         })
         .await;
@@ -226,7 +231,7 @@ mod tests {
     async fn sleep_or_shutdown_completes_when_sleep_wins() {
         let (_sender, mut receiver) = shutdown_channel(false);
 
-        let result = sleep_or_shutdown(Duration::from_millis(1), &mut receiver).await;
+        let result = sleep_or_shutdown(Duration::from_millis(10), &mut receiver).await;
 
         assert_eq!(result, Ok(()));
     }
@@ -253,7 +258,7 @@ mod tests {
             })
             .await;
 
-        cancel_handle.await.expect("cancellation task join");
+        cancel_handle.join().expect("cancellation task join");
         assert!(matches!(result, Err(AsyncError::Cancelled)));
     }
 
@@ -473,7 +478,7 @@ mod tests {
         tx.send(2).await.expect("send 2");
         // Channel is now full; verify by trying send with timeout
         let result =
-            fcp_async_core::time::timeout(std::time::Duration::from_millis(5), tx.send(3)).await;
+            fcp_async_core::time::timeout(std::time::Duration::from_millis(25), tx.send(3)).await;
         // Should timeout because channel is full
         assert!(result.is_err());
     }

@@ -5,6 +5,7 @@
 //!
 //! - [`ConnectorTestHarness`] - A test harness that wraps connectors with assertions
 //! - [`MockApiServer`] - HTTP mock server with request/response recording
+//! - [`HttpFixtureServer`] - Real local HTTP fixture server for non-mock acceptance tests
 //! - [`AsyncTestContext`] + async helpers for deterministic run/scenario correlation
 //! - Test fixtures for common FCP types
 //! - Assertion helpers for FCP responses
@@ -56,6 +57,7 @@ pub mod database_helpers;
 pub mod evidence_helpers;
 pub mod fixtures;
 mod harness;
+mod http_fixture;
 mod log_scan;
 mod mock_server;
 pub mod readiness_helpers;
@@ -66,6 +68,7 @@ pub mod webhook_helpers;
 pub use assertions::*;
 pub use async_harness::*;
 pub use harness::*;
+pub use http_fixture::*;
 pub use log_scan::*;
 pub use mock_server::*;
 pub use supervisor_examples::*;

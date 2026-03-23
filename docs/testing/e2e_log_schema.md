@@ -106,6 +106,56 @@ These markers are not just debugging decoration. They are the evidence that a
 future engineer can use to prove whether a scenario exercised live runtime
 truth, explicit offline artifact work, or a refusal/remediation path.
 
+Session Script DSL and Transcript Contract
+-----------------------------------------
+
+The canonical typed carriers for session-oriented acceptance work live in:
+
+- `crates/fcp-testkit/src/session_script.rs`
+  - `SessionScript`
+  - `ScriptStep`
+  - `SessionTranscript`
+  - `TranscriptEntry`
+  - `TranscriptSummary`
+
+These types define the shared vocabulary for websocket, SSE, long-poll, and
+webhook acceptance runs before any connector-specific harness layers are added.
+
+Session script fields:
+
+- `scenario_id`
+- `default_transport`: `websocket`, `sse`, `long_poll`, or `webhook_ingress`
+- `labels[]`, `description`
+- `steps[]`:
+  - typed enum variants such as `Connect`, `SendMessage`, `ExpectMessage`, `ExpectCount`, `ExpectSilence`, `Wait`, `AssertHealth`, `InjectFault`, `WebhookDeliver`, and `Annotate`
+  - timeout and ack semantics live on the relevant expect-style variants
+  - reconnect, silence, webhook, and fault behavior are represented as explicit step actions rather than free-form metadata
+
+Session transcript fields:
+
+- `scenario_id`, `run_id`
+- `transport`, `started_at`, `finished_at`, `total_duration`
+- `outcome`
+- `entries[]`:
+  - `timestamp`
+  - `step_index` as the canonical 0-based ordinal
+  - `step` with the original typed `ScriptStep`
+  - `outcome`, `duration`
+  - optional `detail`, optional `correlation_id`
+- `summary`:
+  - `total`
+  - `passed`
+  - `failed`
+  - `skipped`
+  - `timed_out`
+
+Alignment with the E2E evidence model:
+
+- `fcp-e2e::E2eRunReport` may carry the full typed `session_transcript`.
+- `E2eLogEntry::with_session_transcript_entry(...)` maps one transcript event into the existing per-step log vocabulary.
+- `E2eLogEntry::with_session_transcript_summary(...)` maps the transcript aggregate into the existing `summary` payload.
+- `E2eLogEntry` derives a 1-based `step_number` and synthetic `step_id` from the transcript's 0-based `step_index` so JSONL evidence stays readable without maintaining a second session schema.
+
 Compatibility Rules
 -------------------
 

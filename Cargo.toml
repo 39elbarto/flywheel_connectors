@@ -58,6 +58,8 @@ members = [
     "connectors/wecom",
     "connectors/dingtalk",
     "connectors/qq",
+    "connectors/nostr",
+    "connectors/irc",
     "connectors/jira",
     "connectors/twilio",
     "connectors/airtable",

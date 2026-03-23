@@ -1,0 +1,40 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:zalouser-first-slice"
+
+[connector]
+id = "fcp.zalouser"
+name = "Zalo User"
+version = "0.1.0"
+description = "Guarded helper-process connector for Zalo personal account automation"
+archetypes = ["cli-process"]
+format = "native"
+
+[connector.state]
+model = "local-cache"
+state_schema_version = "1"
+migration_hint = "First slice: explicit helper-process contract only. No bundled personal-account runtime is shipped in this crate."
+
+[zones]
+home = "z:owner"
+allowed_sources = ["z:owner"]
+allowed_targets = ["z:owner"]
+
+[capabilities]
+required = ["system.exec"]
+optional = ["network.egress", "network.dns", "network.tls.sni"]
+forbidden = ["network.listen"]
+
+[sandbox]
+profile = "medium"
+memory_mb = 96
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+deny_exec = false
+deny_ptrace = true
+

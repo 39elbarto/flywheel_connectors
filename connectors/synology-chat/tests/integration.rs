@@ -464,3 +464,85 @@ async fn ingest_outgoing_webhook_rejects_token_mismatch() {
         other => panic!("unexpected error: {other:?}"),
     }
 }
+
+#[fcp_async_core::runtime::test]
+async fn ingest_outgoing_webhook_rejects_non_string_token_values() {
+    let server = MockServer::start().await;
+    let (connector, signing_key) = setup_connector_with_options(
+        &format!("{}/webhook", server.uri()),
+        Some("true"),
+        &[CAP_WEBHOOK],
+    )
+    .await;
+
+    let error = connector
+        .invoke(invoke_request(
+            &connector,
+            OP_INGEST_OUTGOING_WEBHOOK,
+            json!({
+                "payload": {
+                    "token": true,
+                    "channel_id": "34",
+                    "channel_type": "1",
+                    "user_id": "4",
+                    "username": "mikael",
+                    "post_id": "146028888128",
+                    "thread_id": "0",
+                    "timestamp": "1646827836131",
+                    "text": "Tjena"
+                }
+            }),
+            capability_token(&signing_key, CAP_WEBHOOK, &[OP_INGEST_OUTGOING_WEBHOOK]),
+        ))
+        .await
+        .expect_err("boolean token values must be rejected");
+
+    match error {
+        FcpError::InvalidRequest { code, message } => {
+            assert_eq!(code, 1005);
+            assert!(message.contains("payload.token must be a non-empty string"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn ingest_outgoing_webhook_rejects_negative_timestamps() {
+    let server = MockServer::start().await;
+    let (connector, signing_key) = setup_connector_with_options(
+        &format!("{}/webhook", server.uri()),
+        Some("shared-secret"),
+        &[CAP_WEBHOOK],
+    )
+    .await;
+
+    let error = connector
+        .invoke(invoke_request(
+            &connector,
+            OP_INGEST_OUTGOING_WEBHOOK,
+            json!({
+                "payload": {
+                    "token": "shared-secret",
+                    "channel_id": "34",
+                    "channel_type": "1",
+                    "user_id": "4",
+                    "username": "mikael",
+                    "post_id": "146028888128",
+                    "thread_id": "0",
+                    "timestamp": "-1",
+                    "text": "Tjena"
+                }
+            }),
+            capability_token(&signing_key, CAP_WEBHOOK, &[OP_INGEST_OUTGOING_WEBHOOK]),
+        ))
+        .await
+        .expect_err("negative timestamps must be rejected");
+
+    match error {
+        FcpError::InvalidRequest { code, message } => {
+            assert_eq!(code, 1005);
+            assert!(message.contains("payload.timestamp must be a non-negative integer timestamp"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}

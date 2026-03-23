@@ -416,7 +416,7 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
             message: "payload must be a JSON object".into(),
         })?;
 
-    let payload_token = required_payload_scalar(payload, "token")?;
+    let payload_token = required_payload_string(payload, "token")?;
     if payload_token != configured_token {
         return Err(FcpError::Unauthorized {
             code: 2001,
@@ -424,16 +424,16 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
         });
     }
 
-    let channel_id = required_payload_scalar(payload, "channel_id")?;
-    let channel_type = required_payload_scalar(payload, "channel_type")?;
-    let channel_name = optional_payload_scalar(payload, "channel_name");
-    let user_id = required_payload_scalar(payload, "user_id")?;
-    let username = required_payload_scalar(payload, "username")?;
-    let post_id = required_payload_scalar(payload, "post_id")?;
-    let thread_id = required_payload_scalar(payload, "thread_id")?;
+    let channel_id = required_payload_string_or_integer(payload, "channel_id")?;
+    let channel_type = required_payload_string_or_integer(payload, "channel_type")?;
+    let channel_name = optional_payload_string(payload, "channel_name");
+    let user_id = required_payload_string_or_integer(payload, "user_id")?;
+    let username = required_payload_string(payload, "username")?;
+    let post_id = required_payload_string_or_integer(payload, "post_id")?;
+    let thread_id = required_payload_string_or_integer(payload, "thread_id")?;
     let timestamp_ms = required_payload_i64(payload, "timestamp")?;
-    let text = required_payload_scalar(payload, "text")?;
-    let trigger_word = optional_payload_scalar(payload, "trigger_word");
+    let text = required_payload_string(payload, "text")?;
+    let trigger_word = optional_payload_string(payload, "trigger_word");
     let attachments = normalize_inbound_attachments(payload);
     let is_threaded = !matches!(thread_id.as_str(), "" | "0");
 
@@ -508,7 +508,7 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
 fn normalize_inbound_attachments(payload: &Map<String, Value>) -> Vec<Value> {
     let mut attachments = Vec::new();
 
-    if let Some(file_url) = optional_payload_scalar(payload, "file_url") {
+    if let Some(file_url) = optional_payload_string(payload, "file_url") {
         attachments.push(json!({
             "source": "file_url",
             "kind": "external_file",
@@ -572,10 +572,20 @@ fn detect_attachment_kind(object: &Map<String, Value>) -> &'static str {
     "attachment"
 }
 
-fn required_payload_scalar(payload: &Map<String, Value>, field: &str) -> FcpResult<String> {
-    optional_payload_scalar(payload, field).ok_or_else(|| FcpError::InvalidRequest {
+fn required_payload_string(payload: &Map<String, Value>, field: &str) -> FcpResult<String> {
+    optional_payload_string(payload, field).ok_or_else(|| FcpError::InvalidRequest {
         code: 1005,
-        message: format!("payload.{field} must be a non-empty scalar"),
+        message: format!("payload.{field} must be a non-empty string"),
+    })
+}
+
+fn required_payload_string_or_integer(
+    payload: &Map<String, Value>,
+    field: &str,
+) -> FcpResult<String> {
+    optional_payload_string_or_integer(payload, field).ok_or_else(|| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("payload.{field} must be a non-empty string or integer"),
     })
 }
 
@@ -585,16 +595,37 @@ fn required_payload_i64(payload: &Map<String, Value>, field: &str) -> FcpResult<
         message: format!("payload.{field} is required"),
     })?;
     match value {
-        Value::Number(number) => number.as_i64().ok_or_else(|| FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("payload.{field} must be a signed 64-bit integer"),
-        }),
+        Value::Number(number) => {
+            let parsed = number.as_i64().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("payload.{field} must be a signed 64-bit integer"),
+            })?;
+            if parsed < 0 {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("payload.{field} must be a non-negative integer timestamp"),
+                });
+            }
+            Ok(parsed)
+        }
         Value::String(raw) => raw
             .trim()
             .parse::<i64>()
             .map_err(|_| FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("payload.{field} must be an integer timestamp"),
+            })
+            .and_then(|parsed| {
+                if parsed < 0 {
+                    Err(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!(
+                            "payload.{field} must be a non-negative integer timestamp"
+                        ),
+                    })
+                } else {
+                    Ok(parsed)
+                }
             }),
         _ => Err(FcpError::InvalidRequest {
             code: 1005,
@@ -603,8 +634,12 @@ fn required_payload_i64(payload: &Map<String, Value>, field: &str) -> FcpResult<
     }
 }
 
-fn optional_payload_scalar(payload: &Map<String, Value>, field: &str) -> Option<String> {
-    payload.get(field).and_then(scalar_to_string)
+fn optional_payload_string(payload: &Map<String, Value>, field: &str) -> Option<String> {
+    payload.get(field).and_then(string_value)
+}
+
+fn optional_payload_string_or_integer(payload: &Map<String, Value>, field: &str) -> Option<String> {
+    payload.get(field).and_then(string_or_integer_value)
 }
 
 fn first_payload_scalar(payload: &Map<String, Value>, fields: &[&str]) -> Option<String> {
@@ -614,6 +649,13 @@ fn first_payload_scalar(payload: &Map<String, Value>, fields: &[&str]) -> Option
 }
 
 fn scalar_to_string(value: &Value) -> Option<String> {
+    string_value(value)
+        .or_else(|| value.as_i64().map(|number| number.to_string()))
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
+        .or_else(|| value.as_bool().map(|flag| flag.to_string()))
+}
+
+fn string_value(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => {
             let trimmed = text.trim();
@@ -623,10 +665,14 @@ fn scalar_to_string(value: &Value) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        Value::Number(number) => Some(number.to_string()),
-        Value::Bool(flag) => Some(flag.to_string()),
         _ => None,
     }
+}
+
+fn string_or_integer_value(value: &Value) -> Option<String> {
+    string_value(value)
+        .or_else(|| value.as_i64().map(|number| number.to_string()))
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
 }
 
 #[async_trait]

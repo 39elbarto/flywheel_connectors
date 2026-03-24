@@ -544,6 +544,7 @@ mod tests {
         assert!(sanitize_path_segment("foo\\bar", "id").is_err());
         assert!(sanitize_path_segment("foo%2fbar", "id").is_err());
         assert!(sanitize_path_segment("foo%5Cbar", "id").is_err());
+        assert!(sanitize_path_segment("%2E%2E", "id").is_err());
         assert!(sanitize_path_segment("", "id").is_err());
         assert!(sanitize_path_segment("  ", "id").is_err());
     }

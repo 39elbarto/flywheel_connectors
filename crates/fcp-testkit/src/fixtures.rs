@@ -92,17 +92,22 @@ pub mod json {
     }
 
     /// Paginated response.
+    ///
+    /// `page_size` is the requested page size (not the actual item count on
+    /// this page, which may be smaller for the last page).
     #[must_use]
     pub fn paginated<T: serde::Serialize>(
         items: &[T],
         total: usize,
         page: usize,
+        page_size: usize,
     ) -> serde_json::Value {
+        let delivered = page.saturating_add(1).saturating_mul(page_size);
         json!({
             "items": items,
             "total": total,
             "page": page,
-            "has_more": (page + 1) * items.len() < total
+            "has_more": delivered < total
         })
     }
 
@@ -613,7 +618,7 @@ mod tests {
     #[test]
     fn json_paginated_structure() {
         let items = vec![1, 2, 3];
-        let v = json::paginated(&items, 10, 0);
+        let v = json::paginated(&items, 10, 0, 3);
         assert_eq!(v["total"], 10);
         assert_eq!(v["page"], 0);
         assert!(v["items"].is_array());
@@ -623,14 +628,28 @@ mod tests {
     #[test]
     fn json_paginated_has_more() {
         let items = vec![1, 2];
-        let v = json::paginated(&items, 10, 0);
+        let v = json::paginated(&items, 10, 0, 2);
         assert_eq!(v["has_more"], true);
     }
 
     #[test]
     fn json_paginated_no_more() {
         let items = vec![1, 2, 3];
-        let v = json::paginated(&items, 3, 0);
+        let v = json::paginated(&items, 3, 0, 3);
+        assert_eq!(v["has_more"], false);
+    }
+
+    #[test]
+    fn json_paginated_uses_requested_page_size_for_short_last_page() {
+        let items = vec![21, 22, 23];
+        let v = json::paginated(&items, 23, 4, 5);
+        assert_eq!(v["has_more"], false);
+    }
+
+    #[test]
+    fn json_paginated_saturates_page_arithmetic() {
+        let items = vec![1];
+        let v = json::paginated(&items, usize::MAX, usize::MAX, 2);
         assert_eq!(v["has_more"], false);
     }
 
@@ -769,7 +788,7 @@ mod tests {
     #[test]
     fn json_paginated_single_page() {
         let items = vec!["a", "b"];
-        let v = json::paginated(&items, 2, 0);
+        let v = json::paginated(&items, 2, 0, 2);
         assert_eq!(v["has_more"], false);
         assert_eq!(v["total"], 2);
     }
@@ -777,7 +796,7 @@ mod tests {
     #[test]
     fn json_paginated_empty_items() {
         let items: Vec<i32> = vec![];
-        let v = json::paginated(&items, 0, 0);
+        let v = json::paginated(&items, 0, 0, 25);
         assert_eq!(v["items"].as_array().unwrap().len(), 0);
         assert_eq!(v["has_more"], false);
     }
@@ -813,7 +832,7 @@ mod tests {
     #[test]
     fn json_paginated_serde_roundtrip() {
         let items = vec![10, 20, 30];
-        let v = json::paginated(&items, 100, 2);
+        let v = json::paginated(&items, 100, 2, 25);
         let serialized = serde_json::to_string(&v).unwrap();
         let deserialized: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(v, deserialized);
@@ -917,7 +936,7 @@ mod tests {
     #[test]
     fn json_paginated_large_total() {
         let items = vec![1];
-        let v = json::paginated(&items, 1_000_000, 0);
+        let v = json::paginated(&items, 1_000_000, 0, 25);
         assert_eq!(v["total"], 1_000_000);
         assert_eq!(v["has_more"], true);
     }

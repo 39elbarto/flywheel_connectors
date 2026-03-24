@@ -186,7 +186,7 @@ struct FixtureState {
 pub struct StreamingFixtureServer {
     address: SocketAddr,
     state: Arc<FixtureState>,
-    _handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl StreamingFixtureServer {
@@ -215,7 +215,7 @@ impl StreamingFixtureServer {
         Ok(Self {
             address,
             state,
-            _handle: handle,
+            handle: Some(handle),
         })
     }
 
@@ -263,11 +263,11 @@ impl StreamingFixtureServer {
 
     /// Stop the fixture server.
     pub fn stop(&self) {
-        self.state.running.store(false, Ordering::Relaxed);
+        self.state.running.store(false, Ordering::SeqCst);
     }
 
     fn accept_loop(listener: TcpListener, state: Arc<FixtureState>) {
-        while state.running.load(Ordering::Relaxed) {
+        while state.running.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
                     state.connections_accepted.fetch_add(1, Ordering::Relaxed);
@@ -343,7 +343,7 @@ impl StreamingFixtureServer {
                     let _ = stream.flush();
                 }
                 None => {
-                    if !state.running.load(Ordering::Relaxed) {
+                    if !state.running.load(Ordering::SeqCst) {
                         return;
                     }
                     thread::sleep(Duration::from_millis(10));
@@ -356,6 +356,9 @@ impl StreamingFixtureServer {
 impl Drop for StreamingFixtureServer {
     fn drop(&mut self) {
         self.stop();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -736,6 +739,16 @@ mod tests {
         assert!(url.starts_with("http://127.0.0.1:"));
         assert!(url.ends_with("/events"));
         fixture.stop();
+    }
+
+    #[test]
+    fn dropping_fixture_releases_listener() {
+        let fixture = StreamingFixtureServer::start().expect("fixture should bind");
+        let address = fixture.address();
+        drop(fixture);
+
+        let rebound = TcpListener::bind(address).expect("listener should be released on drop");
+        drop(rebound);
     }
 
     #[test]

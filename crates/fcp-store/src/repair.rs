@@ -4607,4 +4607,314 @@ mod tests {
         assert!(!rt.success);
         assert_eq!(rt.error.as_deref(), Some("decode failed"));
     }
+
+    // --- Acceptance: evaluate_zone queues repairs for deficit objects ---
+
+    #[fcp_async_core::runtime::test]
+    async fn evaluate_zone_queues_repairs_for_objects_below_coverage() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid = ObjectId::from_bytes([10; 32]);
+        // 5 of 10 source symbols → 50% coverage, unavailable
+        seed_planner_object(&store, oid, 10, 5, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        policies.insert(oid, test_policy());
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        controller.evaluate_zone(&zone, &store, &policies).await;
+
+        let stats = controller.stats();
+        assert_eq!(stats.queue_depth, 1, "one object below target should be queued");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn evaluate_zone_skips_healthy_objects() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid = ObjectId::from_bytes([11; 32]);
+        // 10 of 10 source symbols → 100% coverage, available
+        seed_planner_object(&store, oid, 10, 10, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        policies.insert(oid, test_policy());
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        controller.evaluate_zone(&zone, &store, &policies).await;
+
+        let stats = controller.stats();
+        assert_eq!(stats.queue_depth, 0, "healthy objects should not be queued");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn evaluate_zone_queues_multiple_deficit_objects_by_priority() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid_a = ObjectId::from_bytes([20; 32]);
+        let oid_b = ObjectId::from_bytes([21; 32]);
+        // oid_a: 3/10 = 30% coverage (worse deficit)
+        seed_planner_object(&store, oid_a, 10, 3, 64, &[1]).await;
+        // oid_b: 7/10 = 70% coverage (still below 100%)
+        seed_planner_object(&store, oid_b, 10, 7, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        policies.insert(oid_a, test_policy());
+        policies.insert(oid_b, test_policy());
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        controller.evaluate_zone(&zone, &store, &policies).await;
+
+        let stats = controller.stats();
+        assert_eq!(stats.queue_depth, 2, "both deficit objects should be queued");
+
+        // Higher priority item (worse coverage) should be dequeued first
+        let first = controller.next_repair().unwrap();
+        let second = controller.next_repair().unwrap();
+        assert!(
+            first.priority >= second.priority,
+            "worse deficit object should have higher or equal priority"
+        );
+    }
+
+    // --- Acceptance: plan_zone produces actionable plans ---
+
+    #[fcp_async_core::runtime::test]
+    async fn plan_zone_produces_actions_for_deficit_objects() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid = ObjectId::from_bytes([30; 32]);
+        seed_planner_object(&store, oid, 10, 5, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        policies.insert(oid, test_policy());
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let plan = controller
+            .plan_zone(&zone, &store, &policies, &planner_options(1))
+            .await;
+
+        assert_eq!(plan.zone_id, zone);
+        assert_eq!(plan.object_count_tracked, 1);
+        assert!(
+            plan.object_count_below_target > 0,
+            "below-target count must be positive"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn plan_zone_empty_when_all_objects_healthy() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid = ObjectId::from_bytes([31; 32]);
+        seed_planner_object(&store, oid, 10, 10, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        policies.insert(oid, test_policy());
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let plan = controller
+            .plan_zone(&zone, &store, &policies, &planner_options(1))
+            .await;
+
+        assert_eq!(plan.object_count_below_target, 0);
+        assert!(plan.actions.is_empty(), "no actions needed for healthy objects");
+    }
+
+    // --- Acceptance: repair loop convergence ---
+
+    #[test]
+    fn repair_queue_drains_as_results_recorded() {
+        let controller = RepairController::new(RepairControllerConfig {
+            max_repairs_per_minute: 1000,
+            ..Default::default()
+        });
+
+        // Queue 5 repair requests
+        for i in 0u8..5 {
+            controller.queue_repair(RepairRequest {
+                object_id: ObjectId::from_bytes([i; 32]),
+                zone_id: test_zone_id(),
+                coverage: test_coverage(5, 10),
+                policy: test_policy(),
+                priority: u32::from(i),
+            });
+        }
+        assert_eq!(controller.stats().queue_depth, 5);
+
+        // Process all and record success
+        let mut processed = 0;
+        while let Some(req) = controller.next_repair() {
+            controller.record_result(&RepairResult {
+                object_id: req.object_id,
+                success: true,
+                new_coverage_bps: 10_000,
+                symbols_added: 5,
+                error: None,
+            });
+            processed += 1;
+        }
+
+        assert_eq!(processed, 5, "all queued items should be processed");
+        assert_eq!(controller.stats().queue_depth, 0, "queue should drain to zero");
+        assert_eq!(controller.stats().repairs_succeeded, 5);
+        assert_eq!(controller.stats().symbols_added, 25);
+    }
+
+    #[test]
+    fn repair_queue_tracks_failures_separately() {
+        let controller = RepairController::new(RepairControllerConfig {
+            max_repairs_per_minute: 1000,
+            ..Default::default()
+        });
+
+        controller.queue_repair(RepairRequest {
+            object_id: ObjectId::from_bytes([40; 32]),
+            zone_id: test_zone_id(),
+            coverage: test_coverage(2, 10),
+            policy: test_policy(),
+            priority: 100,
+        });
+
+        let req = controller.next_repair().unwrap();
+        controller.record_result(&RepairResult {
+            object_id: req.object_id,
+            success: false,
+            new_coverage_bps: 2000,
+            symbols_added: 0,
+            error: Some("decode failed".into()),
+        });
+
+        let stats = controller.stats();
+        assert_eq!(stats.repairs_failed, 1);
+        assert_eq!(stats.repairs_succeeded, 0);
+        assert_eq!(stats.symbols_added, 0);
+    }
+
+    // --- Acceptance: concurrent permit limits ---
+
+    #[test]
+    fn concurrent_permits_respect_limit() {
+        let controller = RepairController::new(RepairControllerConfig {
+            max_concurrent_repairs: 2,
+            ..Default::default()
+        });
+
+        let p1 = controller.try_acquire_permit();
+        let p2 = controller.try_acquire_permit();
+        let p3 = controller.try_acquire_permit();
+
+        assert!(p1.is_some(), "first permit should succeed");
+        assert!(p2.is_some(), "second permit should succeed");
+        assert!(p3.is_none(), "third permit should be blocked at limit 2");
+
+        // Drop first permit, third should now succeed
+        drop(p1);
+        let p4 = controller.try_acquire_permit();
+        assert!(p4.is_some(), "permit should be available after drop");
+    }
+
+    // --- Acceptance: rate limiter ---
+
+    #[test]
+    fn rate_limiter_blocks_excessive_repairs() {
+        let controller = RepairController::new(RepairControllerConfig {
+            max_repairs_per_minute: 2,
+            ..Default::default()
+        });
+
+        for i in 0u8..5 {
+            controller.queue_repair(RepairRequest {
+                object_id: ObjectId::from_bytes([50 + i; 32]),
+                zone_id: test_zone_id(),
+                coverage: test_coverage(3, 10),
+                policy: test_policy(),
+                priority: u32::from(i),
+            });
+        }
+
+        // Should get exactly 2 before rate limit kicks in
+        let r1 = controller.next_repair();
+        let r2 = controller.next_repair();
+        let r3 = controller.next_repair();
+
+        assert!(r1.is_some(), "first repair should pass rate limit");
+        assert!(r2.is_some(), "second repair should pass rate limit");
+        assert!(r3.is_none(), "third repair should be rate limited");
+        assert!(controller.stats().rate_limited > 0, "rate limit counter should increment");
+    }
+
+    // --- Acceptance: deduplication in queue ---
+
+    #[test]
+    fn duplicate_queue_entries_are_rejected() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let oid = ObjectId::from_bytes([60; 32]);
+
+        controller.queue_repair(RepairRequest {
+            object_id: oid,
+            zone_id: test_zone_id(),
+            coverage: test_coverage(5, 10),
+            policy: test_policy(),
+            priority: 10,
+        });
+        controller.queue_repair(RepairRequest {
+            object_id: oid,
+            zone_id: test_zone_id(),
+            coverage: test_coverage(3, 10),
+            policy: test_policy(),
+            priority: 20,
+        });
+
+        assert_eq!(
+            controller.stats().queue_depth,
+            1,
+            "duplicate object should not be queued twice"
+        );
+    }
+
+    // --- Acceptance: clear_queue resets state ---
+
+    #[test]
+    fn clear_queue_empties_and_resets_depth() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+
+        for i in 0u8..3 {
+            controller.queue_repair(RepairRequest {
+                object_id: ObjectId::from_bytes([70 + i; 32]),
+                zone_id: test_zone_id(),
+                coverage: test_coverage(5, 10),
+                policy: test_policy(),
+                priority: u32::from(i),
+            });
+        }
+        assert_eq!(controller.stats().queue_depth, 3);
+
+        controller.clear_queue();
+        assert_eq!(controller.stats().queue_depth, 0);
+        assert!(controller.next_repair().is_none());
+    }
+
+    // --- Acceptance: diversity deficit triggers repair ---
+
+    #[fcp_async_core::runtime::test]
+    async fn evaluate_zone_detects_diversity_deficit() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid = ObjectId::from_bytes([80; 32]);
+        // All 10 symbols on one node — coverage is 100% but diversity is 1 (policy needs 3)
+        seed_planner_object(&store, oid, 10, 10, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        let mut policy = test_policy();
+        policy.min_source_diversity = 3;
+        policies.insert(oid, policy);
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        controller.evaluate_zone(&zone, &store, &policies).await;
+
+        // The object is available (100% coverage) but fails source-diversity policy
+        // (1 node vs 3 required), so needs_repair returns true and queues it.
+        let stats = controller.stats();
+        assert_eq!(stats.queue_depth, 1, "diversity-deficit object should be queued for repair");
+    }
 }

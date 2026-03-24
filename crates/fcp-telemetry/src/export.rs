@@ -592,4 +592,95 @@ mod tests {
         assert_eq!(response.status, "healthy");
         assert_eq!(response.checks.len(), 2);
     }
+
+    // --- Acceptance: prometheus_text_format ---
+
+    #[test]
+    fn prometheus_text_format_returns_non_empty() {
+        let text = prometheus_text_format();
+        assert!(!text.is_empty(), "prometheus text format should return content");
+        assert!(text.starts_with('#'), "should start with comment line");
+    }
+
+    // --- Acceptance: health response JSON contract ---
+
+    #[test]
+    fn health_response_json_has_required_fields() {
+        let response = HealthResponse::healthy("2.0.0", 7200)
+            .with_check("store", true, None)
+            .with_check("mesh", true, Some("all nodes reachable"));
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["status"], "healthy");
+        assert_eq!(parsed["version"], "2.0.0");
+        assert_eq!(parsed["uptime_seconds"], 7200);
+        assert!(parsed["checks"].is_array());
+        assert_eq!(parsed["checks"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn health_response_json_omits_null_messages() {
+        let response = HealthResponse::healthy("1.0.0", 0).with_check("db", true, None);
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed["checks"][0].get("message").is_none(),
+            "None message should be omitted from JSON"
+        );
+    }
+
+    #[test]
+    fn unhealthy_response_includes_failure_check() {
+        let response = HealthResponse::unhealthy("1.0.0", 100, "connection refused");
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["status"], "unhealthy");
+        assert_eq!(parsed["checks"][0]["name"], "main");
+        assert_eq!(parsed["checks"][0]["status"], "fail");
+        assert_eq!(parsed["checks"][0]["message"], "connection refused");
+    }
+
+    // --- Acceptance: mixed health check scenarios ---
+
+    #[test]
+    fn health_with_all_passing_checks_is_healthy() {
+        let response = HealthResponse::healthy("1.0.0", 500)
+            .with_check("store", true, None)
+            .with_check("mesh", true, None)
+            .with_check("audit", true, None);
+        assert!(response.is_healthy());
+        assert_eq!(response.checks.len(), 3);
+    }
+
+    #[test]
+    fn health_with_one_failing_check_is_unhealthy() {
+        let response = HealthResponse::healthy("1.0.0", 500)
+            .with_check("store", true, None)
+            .with_check("mesh", false, Some("2 nodes unreachable"))
+            .with_check("audit", true, None);
+        assert!(!response.is_healthy());
+    }
+
+    #[test]
+    fn health_with_many_checks_serializes_all() {
+        let mut response = HealthResponse::healthy("1.0.0", 0);
+        for i in 0..20 {
+            response = response.with_check(
+                &format!("check_{i}"),
+                i % 3 != 0,
+                Some(&format!("detail {i}")),
+            );
+        }
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["checks"].as_array().unwrap().len(), 20);
+    }
+
+    #[test]
+    fn health_response_version_preserved_exactly() {
+        let response = HealthResponse::healthy("0.1.0-alpha.3+build.456", 1);
+        assert_eq!(response.version, "0.1.0-alpha.3+build.456");
+    }
 }

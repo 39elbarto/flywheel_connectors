@@ -257,21 +257,158 @@ impl AppleNotesClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn list_invocation_uses_default_folder_when_present() {
-        let client = AppleNotesClient::from_config(&AppleNotesConfig {
+    fn test_client() -> AppleNotesClient {
+        AppleNotesClient::from_config(&AppleNotesConfig {
             default_folder: Some("Inbox".into()),
             osascript_path: "/usr/bin/osascript".into(),
         })
-        .expect("client should build");
+        .unwrap()
+    }
+
+    fn test_client_no_folder() -> AppleNotesClient {
+        AppleNotesClient::from_config(&AppleNotesConfig {
+            default_folder: None,
+            osascript_path: "/usr/bin/osascript".into(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn list_invocation_uses_default_folder_when_present() {
+        let client = test_client();
         let invocation = client.list_notes_invocation(None);
         assert_eq!(invocation.args, vec!["Inbox"]);
     }
 
     #[test]
-    fn get_note_parses_multiline_body() {
+    fn list_invocation_overrides_default_folder() {
+        let client = test_client();
+        let invocation = client.list_notes_invocation(Some("Work"));
+        assert_eq!(invocation.args, vec!["Work"]);
+    }
+
+    #[test]
+    fn list_invocation_empty_when_no_folder() {
+        let client = test_client_no_folder();
+        let invocation = client.list_notes_invocation(None);
+        assert_eq!(invocation.args, vec![""]);
+    }
+
+    #[test]
+    fn search_invocation_passes_query() {
+        let client = test_client();
+        let invocation = client.search_notes_invocation("meeting");
+        assert_eq!(invocation.args, vec!["meeting"]);
+    }
+
+    #[test]
+    fn get_note_invocation_passes_id() {
+        let client = test_client();
+        let invocation = client.get_note_invocation("note-123");
+        assert_eq!(invocation.args, vec!["note-123"]);
+    }
+
+    #[test]
+    fn create_invocation_passes_title_body_folder() {
+        let client = test_client();
+        let invocation = client.create_note_invocation("Title", "Body", Some("Work"));
+        assert_eq!(invocation.args, vec!["Title", "Body", "Work"]);
+    }
+
+    #[test]
+    fn create_invocation_uses_default_folder() {
+        let client = test_client();
+        let invocation = client.create_note_invocation("Title", "Body", None);
+        assert_eq!(invocation.args, vec!["Title", "Body", "Inbox"]);
+    }
+
+    #[test]
+    fn create_invocation_empty_folder_when_none() {
+        let client = test_client_no_folder();
+        let invocation = client.create_note_invocation("Title", "Body", None);
+        assert_eq!(invocation.args, vec!["Title", "Body", ""]);
+    }
+
+    #[test]
+    fn parse_note_summaries_single_line() {
         let value = AppleNotesClient::parse_note_summaries("id-1\tTitle\tInbox\n");
         assert_eq!(value["notes"][0]["id"], "id-1");
         assert_eq!(value["notes"][0]["title"], "Title");
+        assert_eq!(value["notes"][0]["folder"], "Inbox");
+    }
+
+    #[test]
+    fn parse_note_summaries_multiple_lines() {
+        let value = AppleNotesClient::parse_note_summaries(
+            "id-1\tNote A\tInbox\nid-2\tNote B\tWork\n",
+        );
+        let notes = value["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[1]["title"], "Note B");
+    }
+
+    #[test]
+    fn parse_note_summaries_empty_input() {
+        let value = AppleNotesClient::parse_note_summaries("");
+        let notes = value["notes"].as_array().unwrap();
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn parse_note_summaries_skips_blank_lines() {
+        let value = AppleNotesClient::parse_note_summaries("id-1\tA\tB\n\n\nid-2\tC\tD\n");
+        let notes = value["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 2);
+    }
+
+    #[test]
+    fn search_rejects_empty_query() {
+        // This tests the validation logic without needing macOS
+        let client = test_client();
+        let err = client.search_notes("  ");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn get_note_rejects_empty_id() {
+        let client = test_client();
+        let err = client.get_note("  ");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn create_note_rejects_empty_title() {
+        let client = test_client();
+        let err = client.create_note("  ", "body", None);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn list_notes_script_contains_tell_notes() {
+        assert!(LIST_NOTES_SCRIPT.contains("tell application \"Notes\""));
+    }
+
+    #[test]
+    fn search_notes_script_contains_contains_check() {
+        assert!(SEARCH_NOTES_SCRIPT.contains("contains queryText"));
+    }
+
+    #[test]
+    fn get_note_script_returns_body() {
+        assert!(GET_NOTE_SCRIPT.contains("body of theNote"));
+    }
+
+    #[test]
+    fn create_note_script_makes_new_note() {
+        assert!(CREATE_NOTE_SCRIPT.contains("make new note"));
+    }
+
+    #[test]
+    fn list_invocation_uses_correct_script() {
+        let client = test_client();
+        let inv = client.list_notes_invocation(None);
+        // LIST_NOTES_SCRIPT is the only script that uses "LIST" RPC pattern
+        assert!(inv.script.contains("tell application \"Notes\""));
+        assert!(inv.script.contains("outputLines"));
     }
 }

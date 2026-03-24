@@ -33,6 +33,7 @@ sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+percent-encoding.workspace = true
 url.workspace = true
 uuid.workspace = true
 hex.workspace = true

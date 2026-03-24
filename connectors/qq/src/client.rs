@@ -277,6 +277,7 @@ pub fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> QqResult<&'a st
         || value.contains("..")
         || lower.contains("%2f")
         || lower.contains("%5c")
+        || lower.contains("%2e")
     {
         return Err(QqError::InvalidInput(format!(
             "{field} contains path traversal characters"

@@ -12,10 +12,22 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const BOUNDARY: &str = "This first slice exposes web search only.";
 const DEFAULT_BASE_URL: &str = "https://api.search.brave.com/res/v1";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum Auth {
     ApiKey(String),
     CredentialId { _id: String },
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+            Self::CredentialId { _id } => f
+                .debug_struct("CredentialId")
+                .field("_id", _id)
+                .finish(),
+        }
+    }
 }
 
 impl Auth {
@@ -38,11 +50,21 @@ impl Auth {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct BraveConfig {
     auth: Auth,
     base_url: String,
     request_timeout_ms: u64,
+}
+
+impl std::fmt::Debug for BraveConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BraveConfig")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
 }
 
 impl BraveConfig {
@@ -98,11 +120,20 @@ impl BraveConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct BraveClient {
     http: Client,
     auth: Auth,
     base_url: String,
+}
+
+impl std::fmt::Debug for BraveClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BraveClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BraveClient {

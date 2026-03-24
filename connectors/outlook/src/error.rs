@@ -53,7 +53,7 @@ impl OutlookError {
                 service: "outlook".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
-                retryable: matches!(status_code, 429 | 500 | 502 | 503 | 504),
+                retryable: matches!(status_code, 408 | 429 | 500 | 502 | 503 | 504),
                 retry_after: None,
             },
             Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
@@ -75,16 +75,15 @@ impl OutlookError {
     }
 
     #[must_use]
-    pub const fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Http(_)
-                | Self::RateLimited { .. }
-                | Self::Api {
-                    status_code: 429 | 500 | 502 | 503 | 504,
-                    ..
-                }
-        )
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(error) => error.is_connect() || error.is_timeout(),
+            Self::RateLimited { .. } => true,
+            Self::Api { status_code, .. } => {
+                matches!(status_code, 408 | 429 | 500 | 502 | 503 | 504)
+            }
+            Self::Config(_) | Self::Unauthorized(_) | Self::NotFound(_) => false,
+        }
     }
 
     #[must_use]
@@ -229,7 +228,7 @@ mod tests {
         let err = OutlookError::RateLimited {
             retry_after_ms: 3000,
         };
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(3000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3)));
     }
 
     #[test]
@@ -291,6 +290,11 @@ mod tests {
                 ..
             }
         ));
+        assert!(err.is_retryable(), "timeout should remain retryable");
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(retryable),
+            other => panic!("expected retryable External, got {other:?}"),
+        }
     }
 
     #[test]

@@ -12,10 +12,20 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.exa.ai";
 const BOUNDARY: &str = "This first slice is read-only and covers Exa search. Content expansion and crawling stay out of scope for now.";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum Auth {
     ApiKey(String),
     CredentialId { _id: String },
+}
+
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+            Self::CredentialId { _id } => f.debug_struct("CredentialId").field("_id", _id).finish(),
+        }
+    }
 }
 
 impl Auth {
@@ -38,11 +48,22 @@ impl Auth {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ExaConfig {
     auth: Auth,
     base_url: String,
     request_timeout_ms: u64,
+}
+
+
+impl std::fmt::Debug for ExaConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExaConfig")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
 }
 
 impl ExaConfig {
@@ -97,11 +118,21 @@ impl ExaConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ExaClient {
     http: Client,
     auth: Auth,
     base_url: String,
+}
+
+
+impl std::fmt::Debug for ExaClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExaClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ExaClient {

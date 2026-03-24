@@ -284,11 +284,70 @@ impl OutlookConnector {
         ]
     }
 
-    fn parse_top(input: &serde_json::Value) -> Option<u32> {
-        input
-            .get("top")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
+    fn parse_top(input: &serde_json::Value) -> FcpResult<Option<u32>> {
+        let Some(value) = input.get("top") else {
+            return Ok(None);
+        };
+        let top = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "top must be a positive integer".into(),
+        })?;
+        let top = u32::try_from(top).map_err(|_| FcpError::InvalidRequest {
+            code: 1005,
+            message: "top is out of range for u32".into(),
+        })?;
+        if top == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "top must be at least 1".into(),
+            });
+        }
+        Ok(Some(top))
+    }
+
+    fn parse_string_array(
+        input: &serde_json::Value,
+        field: &str,
+        required: bool,
+    ) -> FcpResult<Vec<String>> {
+        let Some(value) = input.get(field) else {
+            return if required {
+                Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Missing {field}"),
+                })
+            } else {
+                Ok(Vec::new())
+            };
+        };
+        let values = value.as_array().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be an array of non-empty strings"),
+        })?;
+        if required && values.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must contain at least one recipient"),
+            });
+        }
+
+        values
+            .iter()
+            .map(|value| {
+                let text = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("{field} must contain only strings"),
+                })?;
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("{field} must not contain empty recipients"),
+                    });
+                }
+                Ok(trimmed.to_string())
+            })
+            .collect()
     }
 
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
@@ -301,7 +360,7 @@ impl OutlookConnector {
         let output = match req.operation.as_str() {
             OP_LIST_MESSAGES => {
                 let folder_id = req.input.get("folder_id").and_then(|v| v.as_str());
-                let top = Self::parse_top(&req.input);
+                let top = Self::parse_top(&req.input)?;
                 client
                     .list_messages(folder_id, top)
                     .await
@@ -330,34 +389,15 @@ impl OutlookConnector {
                         code: 1005,
                         message: "Missing query".into(),
                     })?;
-                let top = Self::parse_top(&req.input);
+                let top = Self::parse_top(&req.input)?;
                 client
                     .search_messages(query, top)
                     .await
                     .map_err(|e| e.to_fcp_error())?
             }
             OP_SEND_MESSAGE => {
-                let to = req
-                    .input
-                    .get("to")
-                    .and_then(|v| v.as_array())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing to".into(),
-                    })?
-                    .iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect::<Vec<_>>();
-                let cc = req
-                    .input
-                    .get("cc")
-                    .and_then(|v| v.as_array())
-                    .map(|vals| {
-                        vals.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let to = Self::parse_string_array(&req.input, "to", true)?;
+                let cc = Self::parse_string_array(&req.input, "cc", false)?;
                 let subject = req
                     .input
                     .get("subject")
@@ -380,7 +420,7 @@ impl OutlookConnector {
                     .map_err(|e| e.to_fcp_error())?
             }
             OP_LIST_EVENTS => {
-                let top = Self::parse_top(&req.input);
+                let top = Self::parse_top(&req.input)?;
                 client
                     .list_events(top)
                     .await
@@ -763,6 +803,38 @@ mod tests {
     #[test]
     fn required_capability_unknown() {
         assert!(required_capability("outlook.unknown").is_err());
+    }
+
+    #[test]
+    fn parse_top_rejects_non_numeric_values() {
+        let err = OutlookConnector::parse_top(&json!({ "top": "ten" }))
+            .expect_err("non-numeric top should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_top_rejects_zero() {
+        let err =
+            OutlookConnector::parse_top(&json!({ "top": 0 })).expect_err("zero top should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_string_array_rejects_non_string_values() {
+        let err = OutlookConnector::parse_string_array(
+            &json!({ "to": ["a@example.com", 5] }),
+            "to",
+            true,
+        )
+        .expect_err("mixed recipient types should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_string_array_rejects_blank_required_recipients() {
+        let err = OutlookConnector::parse_string_array(&json!({ "to": ["   "] }), "to", true)
+            .expect_err("blank recipient should fail");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]

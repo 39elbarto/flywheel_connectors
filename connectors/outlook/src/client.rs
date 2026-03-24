@@ -1,5 +1,6 @@
 //! Microsoft Graph API client for Outlook operations.
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
 use serde_json::{Value, json};
 
@@ -37,20 +38,16 @@ impl OutlookClient {
         })
     }
 
-    fn sanitize_id(id: &str) -> OutlookResult<&str> {
-        let lower = id.to_lowercase();
-        if id.contains('/')
-            || id.contains('\\')
-            || id.contains("..")
-            || lower.contains("%2f")
-            || lower.contains("%5c")
-            || lower.contains("%2e%2e")
-        {
+    fn encode_path_segment(id: &str) -> OutlookResult<String> {
+        if id.trim().is_empty() {
+            return Err(OutlookError::Config("ID must not be empty".into()));
+        }
+        if id.chars().any(char::is_control) {
             return Err(OutlookError::Config(
-                "ID contains invalid path characters".into(),
+                "ID contains invalid control characters".into(),
             ));
         }
-        Ok(id)
+        Ok(utf8_percent_encode(id, NON_ALPHANUMERIC).to_string())
     }
 
     async fn graph_get(&self, path: &str) -> OutlookResult<Value> {
@@ -79,10 +76,13 @@ impl OutlookClient {
     async fn handle_response(&self, response: reqwest::Response) -> OutlookResult<Value> {
         let status = response.status();
         if status.is_success() {
-            if status == reqwest::StatusCode::NO_CONTENT {
+            if matches!(
+                status,
+                reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::ACCEPTED
+            ) {
                 return Ok(json!({ "status": "ok" }));
             }
-            let body: Value = response.json().await.unwrap_or_else(|_| json!({"status": "ok"}));
+            let body: Value = response.json().await?;
             return Ok(body);
         }
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -119,18 +119,18 @@ impl OutlookClient {
         top: Option<u32>,
     ) -> OutlookResult<Value> {
         let folder = folder_id.unwrap_or("inbox");
-        let sanitized = Self::sanitize_id(folder)?;
+        let encoded_folder = Self::encode_path_segment(folder)?;
         let limit = top.unwrap_or(25).min(100);
         let path = format!(
-            "/me/mailFolders/{sanitized}/messages?$top={limit}&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,isRead,bodyPreview"
+            "/me/mailFolders/{encoded_folder}/messages?$top={limit}&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,isRead,bodyPreview"
         );
         self.graph_get(&path).await
     }
 
     pub async fn get_message(&self, message_id: &str) -> OutlookResult<Value> {
-        let sanitized = Self::sanitize_id(message_id)?;
+        let encoded_message_id = Self::encode_path_segment(message_id)?;
         let path = format!(
-            "/me/messages/{sanitized}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,body,hasAttachments"
+            "/me/messages/{encoded_message_id}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,body,hasAttachments"
         );
         self.graph_get(&path).await
     }
@@ -251,30 +251,100 @@ impl OutlookClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn sanitize_id_rejects_path_traversal() {
-        assert!(OutlookClient::sanitize_id("../etc/passwd").is_err());
-        assert!(OutlookClient::sanitize_id("foo/bar").is_err());
-        assert!(OutlookClient::sanitize_id("foo\\bar").is_err());
+    fn encode_path_segment_rejects_empty_or_control_ids() {
+        assert!(OutlookClient::encode_path_segment("").is_err());
+        assert!(OutlookClient::encode_path_segment("   ").is_err());
+        assert!(OutlookClient::encode_path_segment("AAMk\u{0000}123").is_err());
     }
 
     #[test]
-    fn sanitize_id_rejects_url_encoded_traversal() {
-        assert!(OutlookClient::sanitize_id("foo%2Fbar").is_err());
-        assert!(OutlookClient::sanitize_id("foo%5Cbar").is_err());
-        assert!(OutlookClient::sanitize_id("%2e%2e%2fpasswd").is_err());
+    fn encode_path_segment_escapes_reserved_characters() {
+        assert_eq!(
+            OutlookClient::encode_path_segment("../etc/passwd").unwrap(),
+            "%2E%2E%2Fetc%2Fpasswd"
+        );
+        assert_eq!(
+            OutlookClient::encode_path_segment("foo/bar?draft=true#frag").unwrap(),
+            "foo%2Fbar%3Fdraft%3Dtrue%23frag"
+        );
+        assert_eq!(
+            OutlookClient::encode_path_segment("foo%2Fbar").unwrap(),
+            "foo%252Fbar"
+        );
     }
 
     #[test]
-    fn sanitize_id_accepts_valid_ids() {
-        assert!(OutlookClient::sanitize_id("AAMkADk3YzQ5").is_ok());
-        assert!(OutlookClient::sanitize_id("inbox").is_ok());
-        assert!(OutlookClient::sanitize_id("Drafts").is_ok());
+    fn encode_path_segment_preserves_safe_ids() {
+        assert_eq!(
+            OutlookClient::encode_path_segment("AAMkADk3YzQ5").unwrap(),
+            "AAMkADk3YzQ5"
+        );
+        assert_eq!(
+            OutlookClient::encode_path_segment("inbox").unwrap(),
+            "inbox"
+        );
+        assert_eq!(
+            OutlookClient::encode_path_segment("Drafts").unwrap(),
+            "Drafts"
+        );
     }
 
     #[test]
     fn graph_api_version_is_v1() {
         assert_eq!(GRAPH_API_VERSION, "v1.0");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn list_folders_rejects_non_json_success_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/me/mailFolders"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("ok")
+                    .insert_header("content-type", "text/plain"),
+            )
+            .mount(&server)
+            .await;
+
+        let config = OutlookConfig {
+            access_token: "tok".into(),
+            graph_host: server.uri(),
+            request_timeout_ms: 5_000,
+        };
+        let client = OutlookClient::from_config(&config).expect("client should build");
+        let err = client
+            .list_folders()
+            .await
+            .expect_err("non-json success payload should fail");
+
+        assert!(matches!(err, OutlookError::Http(_)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_accepts_202_without_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1.0/me/sendMail"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+
+        let config = OutlookConfig {
+            access_token: "tok".into(),
+            graph_host: server.uri(),
+            request_timeout_ms: 5_000,
+        };
+        let client = OutlookClient::from_config(&config).expect("client should build");
+        let response = client
+            .send_message(&[String::from("user@example.com")], "subject", "body", &[])
+            .await
+            .expect("202 Accepted without a body should succeed");
+
+        assert_eq!(response, json!({ "status": "ok" }));
     }
 }

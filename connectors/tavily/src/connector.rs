@@ -12,10 +12,20 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.tavily.com";
 const BOUNDARY: &str = "This first slice is read-only and covers Tavily search. Extraction/crawl workflows are deferred until the connector surface is broader.";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum Auth {
     ApiKey(String),
     CredentialId { _id: String },
+}
+
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+            Self::CredentialId { _id } => f.debug_struct("CredentialId").field("_id", _id).finish(),
+        }
+    }
 }
 
 impl Auth {
@@ -38,11 +48,22 @@ impl Auth {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct TavilyConfig {
     auth: Auth,
     base_url: String,
     request_timeout_ms: u64,
+}
+
+
+impl std::fmt::Debug for TavilyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TavilyConfig")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
 }
 
 impl TavilyConfig {
@@ -98,11 +119,21 @@ impl TavilyConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct TavilyClient {
     http: Client,
     auth: Auth,
     base_url: String,
+}
+
+
+impl std::fmt::Debug for TavilyClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TavilyClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TavilyClient {

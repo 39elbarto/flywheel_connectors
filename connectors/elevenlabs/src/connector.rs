@@ -14,10 +14,20 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/v1";
 const BOUNDARY: &str = "This first slice exposes voice discovery plus request-response text-to-speech. Streaming synthesis and voice cloning stay out of scope.";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum Auth {
     ApiKey(String),
     CredentialId { _id: String },
+}
+
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+            Self::CredentialId { _id } => f.debug_struct("CredentialId").field("_id", _id).finish(),
+        }
+    }
 }
 
 impl Auth {
@@ -41,11 +51,22 @@ impl Auth {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ElevenLabsConfig {
     auth: Auth,
     base_url: String,
     request_timeout_ms: u64,
+}
+
+
+impl std::fmt::Debug for ElevenLabsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ElevenLabsConfig")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
 }
 
 impl ElevenLabsConfig {
@@ -101,11 +122,21 @@ impl ElevenLabsConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ElevenLabsClient {
     http: Client,
     auth: Auth,
     base_url: String,
+}
+
+
+impl std::fmt::Debug for ElevenLabsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ElevenLabsClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ElevenLabsClient {

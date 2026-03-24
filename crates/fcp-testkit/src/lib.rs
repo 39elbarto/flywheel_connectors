@@ -65,6 +65,7 @@ pub mod session_script;
 pub mod streaming_fixture;
 pub mod supervisor_examples;
 mod tracing_config;
+pub mod live_suite;
 pub mod webhook_helpers;
 
 pub use assertions::*;

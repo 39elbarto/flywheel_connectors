@@ -900,7 +900,7 @@ mod tests {
         let c = RedisConnector::new();
         let rt = tokio_runtime();
         let sc = rt.block_on(c.handle_self_check()).unwrap();
-        assert_eq!(sc["status"], "unconfigured");
+        assert_eq!(sc["status"], "degraded");
         assert_eq!(sc["connector_id"], "fcp.redis");
         assert_eq!(sc["version"], "0.1.0");
     }

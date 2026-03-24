@@ -141,7 +141,7 @@ struct MatrixSyncState {
     telemetry: MatrixSyncTelemetry,
 }
 
-fn auth_mode_label(auth: &MatrixAuth) -> &'static str {
+const fn auth_mode_label(auth: &MatrixAuth) -> &'static str {
     match auth {
         MatrixAuth::AccessToken { .. } => "access_token",
         MatrixAuth::CredentialId { .. } => "credential_id",
@@ -254,6 +254,7 @@ impl MatrixConnector {
         })
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     fn sync_observability_snapshot(&self) -> serde_json::Value {
         let state = self
             .sync_state
@@ -1313,7 +1314,7 @@ impl FcpConnector for MatrixConnector {
                 "runtime_missing",
                 "ConnectorRuntime not initialized; re-run configure",
             )));
-        };
+        }
         if client.is_secretless() {
             return Ok(self.attach_self_check_details(SelfCheckReport::degraded(
                 "credential_injection_required",
@@ -1648,8 +1649,52 @@ impl MatrixConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
 
-    async fn configure_and_handshake_read(c: &mut MatrixConnector, homeserver_url: &str) {
+    /// Generate a matched signing key + public key bytes for test handshake/invoke pairs.
+    fn test_signing_key() -> Ed25519SigningKey {
+        Ed25519SigningKey::generate()
+    }
+
+    /// Build a capability token signed by the given key for zone z:work.
+    /// Grants `CAP_READ` with all operation names listed so read-path invoke
+    /// calls pass verification. For write/manage operations, a separate token
+    /// with the matching capability_id would be needed.
+    fn test_token_for_key(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+        let now = chrono::Utc::now();
+        let expires = now + chrono::Duration::hours(1);
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id(CAP_READ)
+            .zone_id("z:work")
+            .principal("test-principal")
+            .issuer("node:test")
+            .validity(now, expires)
+            .operations(&[
+                OP_JOINED_ROOMS,
+                OP_GET_MESSAGES,
+                OP_SYNC,
+                OP_GET_ROOM_STATE,
+                OP_LIST_MEMBERS,
+                OP_DOWNLOAD_MEDIA,
+                OP_SEND_MESSAGE,
+                OP_UPLOAD_MEDIA,
+                OP_CREATE_ROOM,
+                OP_JOIN_ROOM,
+                OP_LEAVE_ROOM,
+            ])
+            .sign(signing_key)
+            .expect("Failed to create test token");
+        CapabilityToken { raw: cose_token }
+    }
+
+    /// Configure and handshake with a real key pair so invoke token verification succeeds.
+    async fn configure_and_handshake_with_key(
+        c: &mut MatrixConnector,
+        homeserver_url: &str,
+        signing_key: &Ed25519SigningKey,
+        caps: Vec<CapabilityId>,
+    ) {
         c.configure(json!({
             "homeserver_url": homeserver_url,
             "auth": { "mode": "access_token", "access_token": "tok" }
@@ -1660,9 +1705,9 @@ mod tests {
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
             zone_dir: None,
-            host_public_key: [0u8; 32],
+            host_public_key: signing_key.verifying_key().to_bytes(),
             nonce: [0u8; 32],
-            capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
+            capabilities_requested: caps,
             host: None,
             transport_caps: None,
             requested_instance_id: None,
@@ -1671,7 +1716,11 @@ mod tests {
         .unwrap();
     }
 
-    fn sync_invoke_request(connector: &MatrixConnector, input: serde_json::Value) -> InvokeRequest {
+    fn sync_invoke_request_with_key(
+        connector: &MatrixConnector,
+        input: serde_json::Value,
+        signing_key: &Ed25519SigningKey,
+    ) -> InvokeRequest {
         InvokeRequest {
             r#type: "invoke".into(),
             id: RequestId::new("req_sync"),
@@ -1679,7 +1728,7 @@ mod tests {
             operation: OperationId::from_static(OP_SYNC),
             zone_id: ZoneId::work(),
             input,
-            capability_token: CapabilityToken::test_token(),
+            capability_token: test_token_for_key(signing_key),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -2293,11 +2342,22 @@ mod tests {
             .mount(&mock)
             .await;
 
+        let key = test_signing_key();
         let mut c = MatrixConnector::new();
-        configure_and_handshake_read(&mut c, &mock.uri()).await;
+        configure_and_handshake_with_key(
+            &mut c,
+            &mock.uri(),
+            &key,
+            vec![CapabilityId::from_static(CAP_READ)],
+        )
+        .await;
 
         let response = c
-            .invoke(sync_invoke_request(&c, json!({ "timeout_ms": 1000 })))
+            .invoke(sync_invoke_request_with_key(
+                &c,
+                json!({ "timeout_ms": 1000 }),
+                &key,
+            ))
             .await
             .unwrap();
         let result = response.result.unwrap();
@@ -2354,13 +2414,21 @@ mod tests {
             .mount(&mock)
             .await;
 
+        let key = test_signing_key();
         let mut c = MatrixConnector::new();
-        configure_and_handshake_read(&mut c, &mock.uri()).await;
+        configure_and_handshake_with_key(
+            &mut c,
+            &mock.uri(),
+            &key,
+            vec![CapabilityId::from_static(CAP_READ)],
+        )
+        .await;
 
         let error = c
-            .invoke(sync_invoke_request(
+            .invoke(sync_invoke_request_with_key(
                 &c,
                 json!({ "since": "batch_1", "timeout_ms": 1000, "persist": false }),
+                &key,
             ))
             .await
             .unwrap_err();

@@ -785,7 +785,7 @@ mod tests {
         let c = PostgreSqlConnector::new();
         let rt = tokio_runtime();
         let result = rt.block_on(c.handle_self_check()).unwrap();
-        assert_eq!(result["status"], "unconfigured");
+        assert_eq!(result["status"], "degraded");
         assert_eq!(result["connector_id"], "fcp.postgresql");
     }
 

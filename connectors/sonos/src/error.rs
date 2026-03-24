@@ -42,7 +42,7 @@ impl SonosError {
                 service: "sonos".into(),
                 message: message.clone(),
                 status_code: Some(*status),
-                retryable: matches!(status, 429 | 500 | 502 | 503 | 504),
+                retryable: matches!(status, 408 | 429 | 500 | 502 | 503 | 504),
                 retry_after: None,
             },
             Self::Parse(message) => FcpError::Internal {
@@ -52,15 +52,12 @@ impl SonosError {
     }
 
     #[must_use]
-    pub const fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Http(_)
-                | Self::Api {
-                    status: 429 | 500 | 502 | 503 | 504,
-                    ..
-                }
-        )
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(error) => error.is_connect() || error.is_timeout(),
+            Self::Api { status, .. } => matches!(status, 408 | 429 | 500 | 502 | 503 | 504),
+            Self::Config(_) | Self::Parse(_) => false,
+        }
     }
 }
 
@@ -201,6 +198,11 @@ mod tests {
         let err =
             SonosError::from_async_error(fcp_async_core::AsyncError::Timeout { timeout_ms: 3000 });
         assert!(matches!(err, SonosError::Api { status: 408, .. }));
+        assert!(err.is_retryable(), "timeout should remain retryable");
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(retryable),
+            other => panic!("expected retryable External, got {other:?}"),
+        }
     }
 
     #[test]

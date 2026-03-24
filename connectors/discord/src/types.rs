@@ -1188,7 +1188,14 @@ mod tests {
         let cloned = identify.clone();
         assert_eq!(cloned.token, "secret");
         let dbg = format!("{identify:?}");
-        assert!(dbg.contains("secret"));
+        assert!(
+            !dbg.contains("secret"),
+            "Debug output must not contain the raw token"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug output should show [REDACTED] for token"
+        );
     }
 
     // ---- GatewayProperties ----

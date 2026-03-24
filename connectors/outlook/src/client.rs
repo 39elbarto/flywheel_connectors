@@ -50,6 +50,35 @@ impl OutlookClient {
         Ok(utf8_percent_encode(id, NON_ALPHANUMERIC).to_string())
     }
 
+    fn normalize_recipients(recipients: &[String], required: bool) -> OutlookResult<Vec<String>> {
+        if required && recipients.is_empty() {
+            return Err(OutlookError::Config(
+                "at least one recipient is required".into(),
+            ));
+        }
+
+        recipients
+            .iter()
+            .map(|recipient| {
+                let trimmed = recipient.trim();
+                if trimmed.is_empty() {
+                    return Err(OutlookError::Config(
+                        "recipient addresses must not be empty".into(),
+                    ));
+                }
+                Ok(trimmed.to_string())
+            })
+            .collect()
+    }
+
+    fn normalize_top(top: Option<u32>) -> OutlookResult<u32> {
+        match top {
+            Some(0) => Err(OutlookError::Config("top must be at least 1".into())),
+            Some(value) => Ok(value.min(100)),
+            None => Ok(25),
+        }
+    }
+
     async fn graph_get(&self, path: &str) -> OutlookResult<Value> {
         let url = format!("{}{path}", self.base_url);
         let response = self
@@ -120,7 +149,7 @@ impl OutlookClient {
     ) -> OutlookResult<Value> {
         let folder = folder_id.unwrap_or("inbox");
         let encoded_folder = Self::encode_path_segment(folder)?;
-        let limit = top.unwrap_or(25).min(100);
+        let limit = Self::normalize_top(top)?;
         let path = format!(
             "/me/mailFolders/{encoded_folder}/messages?$top={limit}&$orderby=receivedDateTime%20desc&$select=id,subject,from,receivedDateTime,isRead,bodyPreview"
         );
@@ -139,7 +168,7 @@ impl OutlookClient {
         if query.trim().is_empty() {
             return Err(OutlookError::Config("query must not be empty".into()));
         }
-        let limit = top.unwrap_or(25).min(100);
+        let limit = Self::normalize_top(top)?;
         let encoded_query =
             url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
         let path = format!(
@@ -155,12 +184,7 @@ impl OutlookClient {
         body: &str,
         cc: &[String],
     ) -> OutlookResult<Value> {
-        if to.is_empty() {
-            return Err(OutlookError::Config(
-                "at least one recipient is required".into(),
-            ));
-        }
-        let to_recipients: Vec<Value> = to
+        let to_recipients: Vec<Value> = Self::normalize_recipients(to, true)?
             .iter()
             .map(|addr| {
                 json!({
@@ -168,7 +192,7 @@ impl OutlookClient {
                 })
             })
             .collect();
-        let cc_recipients: Vec<Value> = cc
+        let cc_recipients: Vec<Value> = Self::normalize_recipients(cc, false)?
             .iter()
             .map(|addr| {
                 json!({
@@ -193,7 +217,7 @@ impl OutlookClient {
     // --- Calendar operations ---
 
     pub async fn list_events(&self, top: Option<u32>) -> OutlookResult<Value> {
-        let limit = top.unwrap_or(25).min(100);
+        let limit = Self::normalize_top(top)?;
         let path = format!(
             "/me/events?$top={limit}&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,isAllDay"
         );
@@ -298,6 +322,19 @@ mod tests {
         assert_eq!(GRAPH_API_VERSION, "v1.0");
     }
 
+    #[test]
+    fn normalize_top_uses_defaults_and_caps_large_values() {
+        assert_eq!(OutlookClient::normalize_top(None).unwrap(), 25);
+        assert_eq!(OutlookClient::normalize_top(Some(10)).unwrap(), 10);
+        assert_eq!(OutlookClient::normalize_top(Some(200)).unwrap(), 100);
+    }
+
+    #[test]
+    fn normalize_top_rejects_zero() {
+        let err = OutlookClient::normalize_top(Some(0)).expect_err("zero top should fail");
+        assert!(matches!(err, OutlookError::Config(_)));
+    }
+
     #[fcp_async_core::runtime::test]
     async fn list_folders_rejects_non_json_success_payload() {
         let server = MockServer::start().await;
@@ -346,5 +383,21 @@ mod tests {
             .expect("202 Accepted without a body should succeed");
 
         assert_eq!(response, json!({ "status": "ok" }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_rejects_blank_recipient_addresses() {
+        let config = OutlookConfig {
+            access_token: "tok".into(),
+            graph_host: "https://graph.microsoft.com".into(),
+            request_timeout_ms: 5_000,
+        };
+        let client = OutlookClient::from_config(&config).expect("client should build");
+        let err = client
+            .send_message(&[String::from("   ")], "subject", "body", &[])
+            .await
+            .expect_err("blank recipients should fail validation");
+
+        assert!(matches!(err, OutlookError::Config(_)));
     }
 }

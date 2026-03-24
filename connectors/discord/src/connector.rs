@@ -2272,13 +2272,13 @@ mod tests {
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
-        let zone_dir = unique_zone_dir("handshake-before-configure");
 
+        // Omit zone_dir — the connector should reject the handshake because
+        // Discord needs zone_dir for gateway resume-state and lease persistence.
         let result = connector
             .handle_handshake(json!({
                 "protocol_version": "1.0.0",
                 "zone": "z:work",
-                "zone_dir": zone_dir,
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
                 "capabilities_requested": ["discord.read"]

@@ -2398,7 +2398,9 @@ mod tests {
             return Some(candidate);
         }
 
-        now.checked_add(Duration::MAX).is_none().then_some(Duration::MAX)
+        now.checked_add(Duration::MAX)
+            .is_none()
+            .then_some(Duration::MAX)
     }
 
     #[test]

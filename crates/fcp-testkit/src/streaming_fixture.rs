@@ -372,11 +372,9 @@ pub mod streaming_scenarios {
     #[must_use]
     pub fn sse_sequential_events(count: u32) -> Vec<StreamingAction> {
         (0..count)
-            .map(|i| {
-                StreamingAction::SendSse {
-                    event: SseEvent::typed("message", &json!({"seq": i}).to_string())
-                        .with_id(&i.to_string()),
-                }
+            .map(|i| StreamingAction::SendSse {
+                event: SseEvent::typed("message", &json!({"seq": i}).to_string())
+                    .with_id(&i.to_string()),
             })
             .collect()
     }
@@ -422,9 +420,7 @@ pub mod streaming_scenarios {
     pub fn slow_drip(count: u32, inter_delay: Duration) -> Vec<StreamingAction> {
         let mut actions = Vec::new();
         for i in 0..count {
-            actions.push(StreamingAction::send_sse(
-                &json!({"drip": i}).to_string(),
-            ));
+            actions.push(StreamingAction::send_sse(&json!({"drip": i}).to_string()));
             if i < count - 1 {
                 actions.push(StreamingAction::delay(inter_delay));
             }
@@ -446,7 +442,10 @@ pub mod streaming_scenarios {
         let mut actions: Vec<StreamingAction> = (0..event_count)
             .map(|i| StreamingAction::send_typed_sse("data", &json!({"n": i}).to_string()))
             .collect();
-        actions.push(StreamingAction::send_typed_sse("done", r#"{"complete":true}"#));
+        actions.push(StreamingAction::send_typed_sse(
+            "done",
+            r#"{"complete":true}"#,
+        ));
         actions
     }
 }
@@ -651,13 +650,10 @@ mod tests {
             Some("text/event-stream")
         );
 
-        let body = fcp_async_core::time::timeout(
-            Duration::from_secs(5),
-            response.text(),
-        )
-        .await
-        .expect("should receive within timeout")
-        .expect("body text");
+        let body = fcp_async_core::time::timeout(Duration::from_secs(5), response.text())
+            .await
+            .expect("should receive within timeout")
+            .expect("body text");
 
         assert!(body.contains("event: message"));
         assert!(body.contains(r#"data: {"hello":"world"}"#));
@@ -682,13 +678,10 @@ mod tests {
             .await
             .expect("initial connection should succeed");
 
-        let body = fcp_async_core::time::timeout(
-            Duration::from_secs(2),
-            response.text(),
-        )
-        .await
-        .expect("should complete within timeout")
-        .expect("body text");
+        let body = fcp_async_core::time::timeout(Duration::from_secs(2), response.text())
+            .await
+            .expect("should complete within timeout")
+            .expect("body text");
 
         assert!(body.contains("data: before-drop"));
         assert_eq!(fixture.connections_accepted(), 1);

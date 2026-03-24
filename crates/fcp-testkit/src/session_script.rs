@@ -7,7 +7,7 @@
 //!
 //! - Scripts are portable across connector families.
 //! - Transcripts are machine-readable and align with the E2E log schema.
-//! - Health assertions use the same `StreamHealthState` model as production.
+//! - Health assertions mirror the production `StreamHealthState` model.
 //!
 //! # Architecture
 //!
@@ -171,16 +171,11 @@ pub enum ScriptStep {
     /// Close the connection gracefully.
     Disconnect,
     /// Send a message to the remote endpoint.
-    SendMessage {
-        body: serde_json::Value,
-    },
+    SendMessage { body: serde_json::Value },
     /// Expect a message matching the given criteria within the timeout.
     ExpectMessage {
         matcher: MessageMatcher,
-        #[serde(
-            default = "default_expect_timeout",
-            with = "humantime_serde"
-        )]
+        #[serde(default = "default_expect_timeout", with = "humantime_serde")]
         timeout: Duration,
         #[serde(default = "default_ack_mode")]
         ack: AckMode,
@@ -189,10 +184,7 @@ pub enum ScriptStep {
     ExpectCount {
         count: u32,
         matcher: MessageMatcher,
-        #[serde(
-            default = "default_expect_timeout",
-            with = "humantime_serde"
-        )]
+        #[serde(default = "default_expect_timeout", with = "humantime_serde")]
         timeout: Duration,
     },
     /// Expect no messages for the given duration (silence assertion).
@@ -206,21 +198,13 @@ pub enum ScriptStep {
         duration: Duration,
     },
     /// Assert the current health state.
-    AssertHealth {
-        expected: ScriptHealthState,
-    },
+    AssertHealth { expected: ScriptHealthState },
     /// Assert the reconnect count.
-    AssertReconnectCount {
-        expected: u32,
-    },
+    AssertReconnectCount { expected: u32 },
     /// Assert the total number of messages received so far.
-    AssertMessagesReceived {
-        min: u64,
-    },
+    AssertMessagesReceived { min: u64 },
     /// Inject a simulated fault.
-    InjectFault {
-        fault: Fault,
-    },
+    InjectFault { fault: Fault },
     /// Send a webhook payload to the connector's ingress endpoint.
     WebhookDeliver {
         event_type: String,
@@ -230,16 +214,11 @@ pub enum ScriptStep {
     },
     /// Expect a webhook acknowledgement (HTTP 200-299).
     WebhookExpectAck {
-        #[serde(
-            default = "default_expect_timeout",
-            with = "humantime_serde"
-        )]
+        #[serde(default = "default_expect_timeout", with = "humantime_serde")]
         timeout: Duration,
     },
     /// Log an annotation into the transcript.
-    Annotate {
-        message: String,
-    },
+    Annotate { message: String },
 }
 
 const fn default_expect_timeout() -> Duration {
@@ -464,7 +443,6 @@ impl SessionScript {
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -559,7 +537,7 @@ impl SessionTranscript {
     /// Panics if any entry cannot be serialized to JSON (should not happen
     /// with well-formed transcript data).
     pub fn to_jsonl(&self) -> String {
-        let mut lines = Vec::with_capacity(self.entries.len() + 2);
+        let mut lines = Vec::with_capacity(self.entries.len() + 1);
         // Header line
         let header = serde_json::json!({
             "timestamp": self.started_at.to_rfc3339(),
@@ -574,9 +552,7 @@ impl SessionTranscript {
                 "failed": self.summary.failed
             }
         });
-        lines.push(
-            serde_json::to_string(&header).expect("transcript header should serialize"),
-        );
+        lines.push(serde_json::to_string(&header).expect("transcript header should serialize"));
 
         // Per-step lines
         for entry in &self.entries {
@@ -592,9 +568,7 @@ impl SessionTranscript {
                 "duration_ms": entry.duration.as_millis() as u64,
                 "details": entry.detail,
             });
-            lines.push(
-                serde_json::to_string(&line).expect("transcript entry should serialize"),
-            );
+            lines.push(serde_json::to_string(&line).expect("transcript entry should serialize"));
         }
         lines.join("\n")
     }
@@ -643,7 +617,9 @@ pub mod scenarios {
             .with_description("Basic WebSocket hello/pong exchange")
             .step(ScriptStep::connect(Transport::WebSocket, path))
             .step(ScriptStep::assert_health(ScriptHealthState::Connected))
-            .step(ScriptStep::send_message(serde_json::json!({"type": "ping"})))
+            .step(ScriptStep::send_message(
+                serde_json::json!({"type": "ping"}),
+            ))
             .step(ScriptStep::expect_message_containing(
                 serde_json::json!({"type": "pong"}),
             ))
@@ -714,7 +690,9 @@ pub mod scenarios {
             .with_description("Verify graceful shutdown drains pending work")
             .step(ScriptStep::connect(transport, path))
             .step(ScriptStep::assert_health(ScriptHealthState::Connected))
-            .step(ScriptStep::send_message(serde_json::json!({"type": "work"})))
+            .step(ScriptStep::send_message(
+                serde_json::json!({"type": "work"}),
+            ))
             .step(ScriptStep::expect_any_message())
             .step(ScriptStep::annotate("initiating graceful shutdown"))
             .step(ScriptStep::disconnect())
@@ -727,10 +705,7 @@ pub mod scenarios {
             .with_transport(transport)
             .with_description("Verify message redelivery when ack is suppressed")
             .step(ScriptStep::connect(transport, path))
-            .step(
-                ScriptStep::expect_any_message()
-                    .with_ack(AckMode::Suppress),
-            )
+            .step(ScriptStep::expect_any_message().with_ack(AckMode::Suppress))
             .step(ScriptStep::annotate("ack suppressed, expecting redelivery"))
             .step(ScriptStep::expect_any_message().with_timeout(Duration::from_secs(10)))
             .step(ScriptStep::assert_messages_received(2))
@@ -824,7 +799,9 @@ mod tests {
             .with_transport(Transport::WebSocket)
             .with_label("smoke")
             .step(ScriptStep::connect(Transport::WebSocket, "/ws"))
-            .step(ScriptStep::expect_message_containing(json!({"type": "hello"})))
+            .step(ScriptStep::expect_message_containing(
+                json!({"type": "hello"}),
+            ))
             .step(ScriptStep::inject_fault(Fault::ConnectionDrop))
             .step(ScriptStep::wait(Duration::from_millis(500)))
             .step(ScriptStep::assert_health(ScriptHealthState::Reconnecting))

@@ -11,7 +11,8 @@ use fcp_core::CorrelationId;
 use fcp_e2e::{
     AssertionsSummary, ConnectorProcessRunner, E2eArtifactRecord, E2eCommandMetadata,
     E2eFailureSummary, E2eLogEntry, E2eLogger, E2ePrerequisiteState, E2eReport, E2eRunReport,
-    E2eRunner, E2eStepReport, LogScanReport, scan_log_jsonl, validate_log_entry_value,
+    E2eRunner, E2eStepReport, LogScanReport, ScriptStep, SessionTranscript, StepOutcome,
+    scan_log_jsonl, validate_log_entry_value,
 };
 use serde::Serialize;
 
@@ -26,6 +27,7 @@ struct CliArgs {
     report_json: Option<PathBuf>,
     summary_output: Option<PathBuf>,
     bundle_dir: Option<PathBuf>,
+    session_transcript: Option<PathBuf>,
     scenario_id: Option<String>,
     module: String,
     test_name: String,
@@ -38,11 +40,11 @@ struct CliArgs {
 
 fn usage() -> &'static str {
     "Usage:
-  fcp-e2e --interop [--output <file>] [--stable-output <file>] [--report-json <file>] [--summary-output <file>] [--bundle-dir <dir>] [--scenario-id <id>] [--test-name <name>] [--module <name>]
+  fcp-e2e --interop [--output <file>] [--stable-output <file>] [--report-json <file>] [--summary-output <file>] [--bundle-dir <dir>] [--session-transcript <file>] [--scenario-id <id>] [--test-name <name>] [--module <name>]
   fcp-e2e --validate-log <file>
-  fcp-e2e --scan-log <file> --output <jsonl> --scan-report <report.json> [--report-json <file>] [--summary-output <file>] [--bundle-dir <dir>] [--scenario-id <id>] [--test-name <name>] [--module <name>]
+  fcp-e2e --scan-log <file> --output <jsonl> --scan-report <report.json> [--report-json <file>] [--summary-output <file>] [--bundle-dir <dir>] [--session-transcript <file>] [--scenario-id <id>] [--test-name <name>] [--module <name>]
   fcp-e2e --connector-cmd <path> [--request <json> ...] [--request-file <path> ...] \\
-         [--connector-arg <arg> ...] [--output <file>] [--stable-output <file>] [--report-json <file>] [--summary-output <file>] [--bundle-dir <dir>] [--scenario-id <id>] [--test-name <name>] [--module <name>]
+         [--connector-arg <arg> ...] [--output <file>] [--stable-output <file>] [--report-json <file>] [--summary-output <file>] [--bundle-dir <dir>] [--session-transcript <file>] [--scenario-id <id>] [--test-name <name>] [--module <name>]
 "
 }
 
@@ -86,6 +88,21 @@ fn load_requests_from_file(path: &Path) -> Result<Vec<serde_json::Value>, String
     parse_request_payload(&payload, &format!("request file {}", path.display()))
 }
 
+fn load_session_transcript(path: &Path) -> Result<SessionTranscript, String> {
+    let payload = std::fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed to read session transcript {}: {err}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&payload).map_err(|err| {
+        format!(
+            "session transcript {} is invalid JSON: {err}",
+            path.display()
+        )
+    })
+}
+
 fn parse_args() -> Result<CliArgs, String> {
     let mut args = env::args().skip(1);
     let mut parsed = CliArgs {
@@ -98,6 +115,7 @@ fn parse_args() -> Result<CliArgs, String> {
         report_json: None,
         summary_output: None,
         bundle_dir: None,
+        session_transcript: None,
         scenario_id: None,
         module: "fcp-e2e".to_string(),
         test_name: "fcp-e2e".to_string(),
@@ -151,6 +169,12 @@ fn parse_args() -> Result<CliArgs, String> {
                     .next()
                     .ok_or_else(|| "--bundle-dir requires a value".to_string())?;
                 parsed.bundle_dir = Some(PathBuf::from(value));
+            }
+            "--session-transcript" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--session-transcript requires a value".to_string())?;
+                parsed.session_transcript = Some(PathBuf::from(value));
             }
             "--scenario-id" => {
                 let value = args
@@ -378,6 +402,244 @@ fn artifact_record_from_payload(
     }
 }
 
+fn effective_run_id(session_transcript: Option<&SessionTranscript>) -> String {
+    session_transcript
+        .filter(|transcript| !transcript.run_id.trim().is_empty())
+        .map(|transcript| transcript.run_id.clone())
+        .unwrap_or_else(|| CorrelationId::new().to_string())
+}
+
+fn effective_scenario_id(
+    explicit: Option<&str>,
+    session_transcript: Option<&SessionTranscript>,
+) -> Option<String> {
+    explicit.map(str::to_owned).or_else(|| {
+        session_transcript.and_then(|transcript| {
+            (!transcript.scenario_id.trim().is_empty()).then_some(transcript.scenario_id.clone())
+        })
+    })
+}
+
+fn session_assertions(transcript: &SessionTranscript) -> AssertionsSummary {
+    let passed = u32::try_from(transcript.summary.passed).unwrap_or(u32::MAX);
+    let failed = transcript
+        .summary
+        .failed
+        .saturating_add(transcript.summary.timed_out);
+    AssertionsSummary::new(passed, u32::try_from(failed).unwrap_or(u32::MAX))
+}
+
+fn session_transport_value(transcript: &SessionTranscript) -> Option<String> {
+    transcript.transport.map(|transport| transport.to_string())
+}
+
+fn session_phase(step: &ScriptStep) -> &'static str {
+    match step {
+        ScriptStep::Connect { .. } => "setup",
+        ScriptStep::Disconnect => "teardown",
+        ScriptStep::SendMessage { .. }
+        | ScriptStep::ExpectMessage { .. }
+        | ScriptStep::ExpectCount { .. }
+        | ScriptStep::ExpectSilence { .. }
+        | ScriptStep::Wait { .. }
+        | ScriptStep::WebhookDeliver { .. } => "invoke",
+        ScriptStep::AssertHealth { .. }
+        | ScriptStep::AssertReconnectCount { .. }
+        | ScriptStep::AssertMessagesReceived { .. }
+        | ScriptStep::WebhookExpectAck { .. } => "verify",
+        ScriptStep::InjectFault { .. } => "execute",
+        ScriptStep::Annotate { .. } => "observe",
+    }
+}
+
+const fn session_level(outcome: StepOutcome) -> &'static str {
+    match outcome {
+        StepOutcome::Pass => "info",
+        StepOutcome::Skip => "warn",
+        StepOutcome::Fail | StepOutcome::Timeout => "error",
+    }
+}
+
+fn append_session_transcript_logs(
+    logger: &mut E2eLogger,
+    test_name: &str,
+    module: &str,
+    scenario_id: Option<&str>,
+    transcript: &SessionTranscript,
+) {
+    let assertions = session_assertions(transcript);
+    let transcript_scenario_id = scenario_id.unwrap_or(transcript.scenario_id.as_str());
+    for entry in &transcript.entries {
+        let mut log_entry = E2eLogEntry::new(
+            session_level(entry.outcome),
+            test_name.to_string(),
+            module.to_string(),
+            session_phase(&entry.step),
+            transcript.run_id.clone(),
+            entry.outcome.to_string(),
+            entry.duration.as_millis() as u64,
+            assertions,
+            serde_json::json!({
+                "transport": session_transport_value(transcript),
+                "scenario_id": transcript_scenario_id,
+            }),
+        )
+        .with_run_id(transcript.run_id.clone())
+        .with_attempt(1)
+        .with_session_transcript_entry(entry);
+        if let Some(scenario_id) = scenario_id {
+            log_entry = log_entry.with_scenario_id(scenario_id.to_string());
+        }
+        logger.push(log_entry);
+    }
+
+    let mut summary_entry = E2eLogEntry::new(
+        session_level(transcript.outcome),
+        test_name.to_string(),
+        module.to_string(),
+        "verify",
+        transcript.run_id.clone(),
+        transcript.outcome.to_string(),
+        transcript.total_duration.as_millis() as u64,
+        assertions,
+        serde_json::json!({
+            "entry_count": transcript.entries.len(),
+            "transport": session_transport_value(transcript),
+        }),
+    )
+    .with_run_id(transcript.run_id.clone())
+    .with_step(
+        "session-transcript-summary",
+        u32::try_from(transcript.entries.len() + 1).unwrap_or(u32::MAX),
+    )
+    .with_attempt(1)
+    .with_session_transcript_summary(transcript);
+    if let Some(scenario_id) = scenario_id {
+        summary_entry = summary_entry.with_scenario_id(scenario_id.to_string());
+    }
+    logger.push(summary_entry);
+}
+
+fn attach_run_context(
+    logs: Vec<E2eLogEntry>,
+    run_id: &str,
+    scenario_id: Option<&str>,
+) -> Vec<E2eLogEntry> {
+    logs.into_iter()
+        .map(|entry| {
+            let entry = entry.with_run_id(run_id.to_string());
+            if let Some(scenario_id) = scenario_id {
+                entry.with_scenario_id(scenario_id.to_string())
+            } else {
+                entry
+            }
+        })
+        .collect()
+}
+
+fn persist_session_transcript_artifact(
+    source_path: &Path,
+    transcript: &SessionTranscript,
+    bundle_dir: Option<&Path>,
+) -> io::Result<E2eArtifactRecord> {
+    let payload = serialize_pretty_json(transcript)?;
+    let scan = scan_log_jsonl(&payload);
+    if scan.error_count > 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "session transcript failed secret scan: {} errors, {} warnings",
+                scan.error_count, scan.warn_count
+            ),
+        ));
+    }
+
+    let artifact_path = bundle_dir
+        .map(|dir| dir.join("session_transcript.json"))
+        .unwrap_or_else(|| source_path.to_path_buf());
+    if bundle_dir.is_some() {
+        write_text_file(&artifact_path, &payload)?;
+    }
+
+    Ok(E2eArtifactRecord {
+        label: "session_transcript_json".to_string(),
+        path: artifact_path.display().to_string(),
+        kind: "json".to_string(),
+        description: Some(if bundle_dir.is_some() {
+            "typed session-lifecycle transcript persisted with the evidence bundle".to_string()
+        } else {
+            "typed session-lifecycle transcript attached to the run report".to_string()
+        }),
+        scan: Some(scan),
+    })
+}
+
+fn session_transcript_failure(transcript: &SessionTranscript) -> E2eFailureSummary {
+    E2eFailureSummary {
+        step_id: Some("session-transcript-summary".to_string()),
+        reason: format!(
+            "session transcript reported {} ({} failed, {} timed out, {} skipped)",
+            transcript.outcome,
+            transcript.summary.failed,
+            transcript.summary.timed_out,
+            transcript.summary.skipped
+        ),
+        error_code: Some("session_transcript_failed".to_string()),
+        stderr_excerpt: None,
+    }
+}
+
+fn session_transcript_step_report(
+    transcript: &SessionTranscript,
+    step_number: u32,
+    artifact_path: Option<&str>,
+) -> E2eStepReport {
+    E2eStepReport {
+        step_id: "session-transcript-summary".to_string(),
+        step_number,
+        phase: "verify".to_string(),
+        attempt: 1,
+        result: if transcript.all_passed() {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        duration_ms: transcript.total_duration.as_millis() as u64,
+        command: None,
+        stdout_path: None,
+        stderr_path: None,
+        artifacts: artifact_path
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        prerequisites: vec![E2ePrerequisiteState {
+            name: "session_transcript".to_string(),
+            status: "attached".to_string(),
+            detail: Some(transcript.scenario_id.clone()),
+        }],
+        failure: (!transcript.all_passed()).then(|| session_transcript_failure(transcript)),
+    }
+}
+
+fn exit_message_for_run_report(mode: &str, run_report: &E2eRunReport) -> Option<String> {
+    if run_report.scan.error_count > 0 {
+        Some(format!(
+            "generated {mode} log failed secret scan: {} errors, {} warnings",
+            run_report.scan.error_count, run_report.scan.warn_count
+        ))
+    } else if !run_report.passed {
+        Some(format!(
+            "{mode} run failed: {}",
+            run_report
+                .failure
+                .as_ref()
+                .map(|failure| failure.reason.as_str())
+                .unwrap_or("unknown failure")
+        ))
+    } else {
+        None
+    }
+}
+
 fn build_run_report(
     run_id: &str,
     module: &str,
@@ -385,6 +647,7 @@ fn build_run_report(
     scenario_id: Option<&str>,
     step_reports: Vec<E2eStepReport>,
     log_artifacts: Vec<E2eArtifactRecord>,
+    session_transcript: Option<SessionTranscript>,
     failure: Option<E2eFailureSummary>,
 ) -> E2eRunReport {
     let mut run_report = E2eRunReport::new(
@@ -399,6 +662,9 @@ fn build_run_report(
     .with_log_artifacts(log_artifacts);
     if let Some(scenario_id) = scenario_id {
         run_report = run_report.with_scenario_id(scenario_id.to_string());
+    }
+    if let Some(session_transcript) = session_transcript {
+        run_report = run_report.with_session_transcript(session_transcript);
     }
     if let Some(failure) = failure {
         run_report = run_report.with_failure(failure);
@@ -436,7 +702,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let payload = std::fs::read_to_string(path)
             .map_err(|err| format!("failed to read scan log {}: {err}", path.display()))?;
         let source_scan = scan_log_jsonl(&payload);
-        let run_id = CorrelationId::new().to_string();
+        let session_transcript = args
+            .session_transcript
+            .as_ref()
+            .map(|path| load_session_transcript(path))
+            .transpose()?;
+        let run_id = effective_run_id(session_transcript.as_ref());
+        let scenario_id =
+            effective_scenario_id(args.scenario_id.as_deref(), session_transcript.as_ref());
         let passed = source_scan.error_count == 0;
         let mut entry = E2eLogEntry::new(
             if passed { "info" } else { "error" },
@@ -463,14 +736,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "args": [path.display().to_string()],
         }))
         .with_scan(serde_json::to_value(&source_scan).unwrap_or(serde_json::Value::Null));
-        if let Some(scenario_id) = args.scenario_id.clone() {
-            entry = entry.with_scenario_id(scenario_id);
+        if let Some(scenario_id) = scenario_id.as_deref() {
+            entry = entry.with_scenario_id(scenario_id.to_string());
         }
         let mut logger = E2eLogger::new();
         logger.push(entry);
+        if let Some(transcript) = session_transcript.as_ref() {
+            append_session_transcript_logs(
+                &mut logger,
+                &args.test_name,
+                &args.module,
+                scenario_id.as_deref(),
+                transcript,
+            );
+        }
         let log_report = E2eReport {
             test_name: args.test_name.clone(),
-            passed,
+            passed: passed
+                && session_transcript
+                    .as_ref()
+                    .is_none_or(SessionTranscript::all_passed),
             duration_ms: 0,
             logs: logger.drain(),
         };
@@ -533,17 +818,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &serde_json::to_string_pretty(&source_scan).unwrap_or_else(|_| "{}".to_string()),
             ));
         }
+        let session_transcript_artifact = args
+            .session_transcript
+            .as_ref()
+            .zip(session_transcript.as_ref())
+            .map(|(source_path, transcript)| {
+                persist_session_transcript_artifact(source_path, transcript, bundle_dir)
+            })
+            .transpose()?;
+        if let Some(artifact) = session_transcript_artifact.as_ref() {
+            artifacts.push(artifact.clone());
+        }
 
-        let failure = (!passed).then(|| E2eFailureSummary {
-            step_id: Some("scan-log".to_string()),
-            reason: format!(
-                "source payload produced {} error findings and {} warnings",
-                source_scan.error_count, source_scan.warn_count
-            ),
-            error_code: Some("log_scan_detected_secret".to_string()),
-            stderr_excerpt: None,
-        });
-        let step_reports = vec![E2eStepReport {
+        let scan_failure = if !passed {
+            Some(E2eFailureSummary {
+                step_id: Some("scan-log".to_string()),
+                reason: format!(
+                    "source payload produced {} error findings and {} warnings",
+                    source_scan.error_count, source_scan.warn_count
+                ),
+                error_code: Some("log_scan_detected_secret".to_string()),
+                stderr_excerpt: None,
+            })
+        } else {
+            None
+        };
+        let mut step_reports = vec![E2eStepReport {
             step_id: "scan-log".to_string(),
             step_number: 1,
             phase: "execute".to_string(),
@@ -572,15 +872,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 status: "satisfied".to_string(),
                 detail: Some(path.display().to_string()),
             }],
-            failure: failure.clone(),
+            failure: scan_failure.clone(),
         }];
+        if let Some(transcript) = session_transcript.as_ref() {
+            step_reports.push(session_transcript_step_report(
+                transcript,
+                2,
+                session_transcript_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.path.as_str()),
+            ));
+        }
+        let failure = scan_failure.or_else(|| {
+            session_transcript
+                .as_ref()
+                .filter(|transcript| !transcript.all_passed())
+                .map(session_transcript_failure)
+        });
         let run_report = build_run_report(
             &run_id,
             &args.module,
             &log_report,
-            args.scenario_id.as_deref(),
+            scenario_id.as_deref(),
             step_reports,
             artifacts,
+            session_transcript,
             failure,
         );
         if let Some(path) = summary_output_path.as_ref() {
@@ -590,20 +906,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let payload = serialize_pretty_json(&run_report)?;
             write_scanned_text(Some(path), &payload, "machine-readable report")?;
         }
-        if !passed || run_report.scan.error_count > 0 {
-            eprintln!(
-                "log scan failed: {} source errors, {} source warnings, {} generated-log errors",
-                source_scan.error_count, source_scan.warn_count, run_report.scan.error_count
-            );
+        if let Some(message) = exit_message_for_run_report("scan-log", &run_report) {
+            eprintln!("{message}");
             process::exit(1);
         }
         return Ok(());
     }
 
     if args.interop {
-        let run_id = CorrelationId::new().to_string();
+        let session_transcript = args
+            .session_transcript
+            .as_ref()
+            .map(|path| load_session_transcript(path))
+            .transpose()?;
+        let run_id = effective_run_id(session_transcript.as_ref());
+        let scenario_id =
+            effective_scenario_id(args.scenario_id.as_deref(), session_transcript.as_ref());
         let mut runner = E2eRunner::new(args.module.clone());
-        let report = runner.run_interop_suite(args.test_name.clone());
+        let mut report = runner.run_interop_suite(args.test_name.clone());
+        let interop_suite_passed = report.passed;
+        report.logs = attach_run_context(report.logs, &run_id, scenario_id.as_deref());
+        if let Some(transcript) = session_transcript.as_ref() {
+            let mut logger = E2eLogger::new();
+            for entry in report.logs.drain(..) {
+                logger.push(entry);
+            }
+            append_session_transcript_logs(
+                &mut logger,
+                &args.test_name,
+                &args.module,
+                scenario_id.as_deref(),
+                transcript,
+            );
+            report.logs = logger.drain();
+            report.passed &= transcript.all_passed();
+        }
         if let Err(err) = validate_entries(&report.logs) {
             eprintln!("log schema validation failed: {err}");
             process::exit(1);
@@ -641,19 +978,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &report.to_stable_json_lines(),
             ));
         }
+        let session_transcript_artifact = args
+            .session_transcript
+            .as_ref()
+            .zip(session_transcript.as_ref())
+            .map(|(source_path, transcript)| {
+                persist_session_transcript_artifact(source_path, transcript, bundle_dir)
+            })
+            .transpose()?;
+        if let Some(artifact) = session_transcript_artifact.as_ref() {
+            artifacts.push(artifact.clone());
+        }
 
-        let failure = (!report.passed).then(|| E2eFailureSummary {
-            step_id: Some("interop-suite".to_string()),
-            reason: "interop suite recorded failing checks".to_string(),
-            error_code: Some("interop_suite_failed".to_string()),
-            stderr_excerpt: None,
-        });
-        let step_reports = vec![E2eStepReport {
+        let interop_failure = if !interop_suite_passed {
+            Some(E2eFailureSummary {
+                step_id: Some("interop-suite".to_string()),
+                reason: "interop suite recorded failing checks".to_string(),
+                error_code: Some("interop_suite_failed".to_string()),
+                stderr_excerpt: None,
+            })
+        } else {
+            None
+        };
+        let mut step_reports = vec![E2eStepReport {
             step_id: "interop-suite".to_string(),
             step_number: 1,
             phase: "verify".to_string(),
             attempt: 1,
-            result: if report.passed { "pass" } else { "fail" }.to_string(),
+            result: if interop_suite_passed { "pass" } else { "fail" }.to_string(),
             duration_ms: report.duration_ms,
             command: Some(E2eCommandMetadata {
                 command: "interop".to_string(),
@@ -670,15 +1022,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             stderr_path: None,
             artifacts: Vec::new(),
             prerequisites: Vec::new(),
-            failure: failure.clone(),
+            failure: interop_failure.clone(),
         }];
+        if let Some(transcript) = session_transcript.as_ref() {
+            step_reports.push(session_transcript_step_report(
+                transcript,
+                2,
+                session_transcript_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.path.as_str()),
+            ));
+        }
+        let failure = interop_failure.or_else(|| {
+            session_transcript
+                .as_ref()
+                .filter(|transcript| !transcript.all_passed())
+                .map(session_transcript_failure)
+        });
         let run_report = build_run_report(
             &run_id,
             &args.module,
             &report,
-            args.scenario_id.as_deref(),
+            scenario_id.as_deref(),
             step_reports,
             artifacts,
+            session_transcript,
             failure,
         );
         if let Some(path) = summary_output_path.as_ref() {
@@ -688,11 +1056,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let payload = serialize_pretty_json(&run_report)?;
             write_scanned_text(Some(path), &payload, "machine-readable report")?;
         }
-        if run_report.scan.error_count > 0 {
-            eprintln!(
-                "generated interop log failed secret scan: {} errors, {} warnings",
-                run_report.scan.error_count, run_report.scan.warn_count
-            );
+        if let Some(message) = exit_message_for_run_report("interop", &run_report) {
+            eprintln!("{message}");
             process::exit(1);
         }
         return Ok(());
@@ -708,6 +1073,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let bundle_dir = args.bundle_dir.clone();
+    let session_transcript = args
+        .session_transcript
+        .as_ref()
+        .map(|path| load_session_transcript(path))
+        .transpose()?;
     if let Some(dir) = bundle_dir.as_ref() {
         std::fs::create_dir_all(dir)?;
     }
@@ -727,7 +1097,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command_metadata = runner.command_metadata();
 
     let mut logger = E2eLogger::new();
-    let run_id = CorrelationId::new().to_string();
+    let run_id = effective_run_id(session_transcript.as_ref());
+    let scenario_id =
+        effective_scenario_id(args.scenario_id.as_deref(), session_transcript.as_ref());
     let start = std::time::Instant::now();
     let mut passed = true;
     let mut assertions_passed = 0_u32;
@@ -898,8 +1270,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "stdout_path": stdout_path,
             "stderr_path": stderr_path.as_ref().map(|path| path.display().to_string()),
         }));
-        if let Some(scenario_id) = args.scenario_id.clone() {
-            entry = entry.with_scenario_id(scenario_id);
+        if let Some(scenario_id) = scenario_id.as_deref() {
+            entry = entry.with_scenario_id(scenario_id.to_string());
         }
         if let Some(failure) = failure.as_ref() {
             entry = entry
@@ -933,8 +1305,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_run_id(run_id.clone())
             .with_step(step_id.clone(), step_number)
             .with_attempt(1);
-            if let Some(scenario_id) = args.scenario_id.clone() {
-                entry = entry.with_scenario_id(scenario_id);
+            if let Some(scenario_id) = scenario_id.as_deref() {
+                entry = entry.with_scenario_id(scenario_id.to_string());
             }
             logger.push(entry);
         }
@@ -1021,22 +1393,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             u32::try_from(args.requests.len() + 1).unwrap_or(u32::MAX),
         )
         .with_attempt(1);
-        if let Some(scenario_id) = args.scenario_id.clone() {
-            entry = entry.with_scenario_id(scenario_id);
+        if let Some(scenario_id) = scenario_id.as_deref() {
+            entry = entry.with_scenario_id(scenario_id.to_string());
         }
         logger.push(entry);
     }
 
+    if let Some(transcript) = session_transcript.as_ref() {
+        append_session_transcript_logs(
+            &mut logger,
+            &args.test_name,
+            &args.module,
+            scenario_id.as_deref(),
+            transcript,
+        );
+        passed &= transcript.all_passed();
+    }
+
     let duration_ms = start.elapsed().as_millis() as u64;
+    let request_assertions = AssertionsSummary::new(assertions_passed, assertions_failed);
+    let session_assertions = session_transcript
+        .as_ref()
+        .map(session_assertions)
+        .unwrap_or_else(|| AssertionsSummary::new(0, 0));
+    let combined_assertions = AssertionsSummary::new(
+        request_assertions
+            .passed
+            .saturating_add(session_assertions.passed),
+        request_assertions
+            .failed
+            .saturating_add(session_assertions.failed),
+    );
     let mut summary_entry = E2eLogEntry::new(
-        "info",
+        if passed { "info" } else { "error" },
         args.test_name.clone(),
         args.module.clone(),
         "teardown",
         run_id.clone(),
         if passed { "pass" } else { "fail" },
         duration_ms,
-        AssertionsSummary::new(assertions_passed, assertions_failed),
+        combined_assertions,
         serde_json::json!({
             "connector_cmd": connector_cmd.clone(),
             "connector_args": args.connector_args.clone(),
@@ -1055,16 +1451,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_summary(serde_json::json!({
         "request_count": args.requests.len(),
-        "assertions_passed": assertions_passed,
-        "assertions_failed": assertions_failed,
+        "assertions_passed": combined_assertions.passed,
+        "assertions_failed": combined_assertions.failed,
         "request_files": args
             .request_files
             .iter()
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>(),
+        "session_transcript": session_transcript.as_ref().map(|transcript| serde_json::json!({
+            "scenario_id": scenario_id
+                .clone()
+                .unwrap_or_else(|| transcript.scenario_id.clone()),
+            "transport": session_transport_value(transcript),
+            "outcome": transcript.outcome,
+            "summary": transcript.summary,
+        })),
     }));
-    if let Some(scenario_id) = args.scenario_id.clone() {
-        summary_entry = summary_entry.with_scenario_id(scenario_id);
+    if let Some(scenario_id) = scenario_id.as_deref() {
+        summary_entry = summary_entry.with_scenario_id(scenario_id.to_string());
     }
     logger.push(summary_entry);
 
@@ -1102,26 +1506,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &report.to_stable_json_lines(),
         ));
     }
-    let failure = (!passed).then(|| E2eFailureSummary {
-        step_id: step_reports
-            .iter()
-            .find(|step| step.result == "fail")
-            .map(|step| step.step_id.clone()),
-        reason: "one or more connector requests failed".to_string(),
-        error_code: Some("connector_run_failed".to_string()),
-        stderr_excerpt: step_reports.iter().find_map(|step| {
-            step.failure
+    let session_transcript_artifact = args
+        .session_transcript
+        .as_ref()
+        .zip(session_transcript.as_ref())
+        .map(|(source_path, transcript)| {
+            persist_session_transcript_artifact(source_path, transcript, bundle_dir.as_deref())
+        })
+        .transpose()?;
+    if let Some(artifact) = session_transcript_artifact.as_ref() {
+        artifacts.push(artifact.clone());
+    }
+    let request_failed = step_reports.iter().any(|step| step.result == "fail");
+    let request_failure = if request_failed {
+        Some(E2eFailureSummary {
+            step_id: step_reports
+                .iter()
+                .find(|step| step.result == "fail")
+                .map(|step| step.step_id.clone()),
+            reason: "one or more connector requests failed".to_string(),
+            error_code: Some("connector_run_failed".to_string()),
+            stderr_excerpt: step_reports.iter().find_map(|step| {
+                step.failure
+                    .as_ref()
+                    .and_then(|failure| failure.stderr_excerpt.clone())
+            }),
+        })
+    } else {
+        None
+    };
+    if let Some(transcript) = session_transcript.as_ref() {
+        step_reports.push(session_transcript_step_report(
+            transcript,
+            u32::try_from(step_reports.len() + 1).unwrap_or(u32::MAX),
+            session_transcript_artifact
                 .as_ref()
-                .and_then(|failure| failure.stderr_excerpt.clone())
-        }),
-    });
+                .map(|artifact| artifact.path.as_str()),
+        ));
+    }
+    let failure = if let Some(failure) = request_failure {
+        Some(failure)
+    } else if let Some(transcript) = session_transcript.as_ref().filter(|t| !t.all_passed()) {
+        Some(session_transcript_failure(transcript))
+    } else {
+        None
+    };
     let mut run_report = build_run_report(
         &run_id,
         &args.module,
         &report,
-        args.scenario_id.as_deref(),
+        scenario_id.as_deref(),
         step_reports,
         artifacts,
+        session_transcript.clone(),
         failure,
     );
     if let Some(path) = summary_output_path.as_ref() {
@@ -1150,11 +1587,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let payload = serialize_pretty_json(&run_report)?;
         write_scanned_text(Some(path), &payload, "machine-readable report")?;
     }
-    if run_report.scan.error_count > 0 {
-        eprintln!(
-            "generated connector log failed secret scan: {} errors, {} warnings",
-            run_report.scan.error_count, run_report.scan.warn_count
-        );
+    if let Some(message) = exit_message_for_run_report("connector", &run_report) {
+        eprintln!("{message}");
         process::exit(1);
     }
     Ok(())
@@ -1162,8 +1596,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_requests_from_file, parse_request_payload, write_scanned_text};
-    use fcp_e2e::{AssertionsSummary, E2eLogEntry, E2eReport};
+    use super::{
+        append_session_transcript_logs, attach_run_context, exit_message_for_run_report,
+        load_requests_from_file, load_session_transcript, parse_request_payload,
+        persist_session_transcript_artifact, session_transcript_step_report, write_scanned_text,
+    };
+    use fcp_e2e::{
+        AssertionsSummary, E2eFailureSummary, E2eLogEntry, E2eLogger, E2eReport, E2eRunReport,
+        ScriptStep, SessionTranscript, StepOutcome, TranscriptEntry, TranscriptSummary, Transport,
+        scan_log_jsonl,
+    };
+    use std::time::Duration;
+
+    fn sample_transcript() -> SessionTranscript {
+        SessionTranscript {
+            scenario_id: "workflow.session_reconnect".to_string(),
+            run_id: "run-session-1".to_string(),
+            transport: Some(Transport::WebSocket),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            total_duration: Duration::from_millis(42),
+            entries: vec![TranscriptEntry {
+                timestamp: chrono::Utc::now(),
+                step_index: 0,
+                step: ScriptStep::connect(Transport::WebSocket, "/ws"),
+                outcome: StepOutcome::Pass,
+                duration: Duration::from_millis(5),
+                detail: None,
+                correlation_id: Some("corr-1".to_string()),
+            }],
+            outcome: StepOutcome::Pass,
+            summary: TranscriptSummary {
+                total: 1,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                timed_out: 0,
+            },
+        }
+    }
 
     #[test]
     fn parse_request_payload_accepts_single_object() {
@@ -1213,6 +1684,156 @@ mod tests {
         assert_eq!(requests[0]["method"], "health");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_session_transcript_supports_json_files() {
+        let unique = format!(
+            "fcp-e2e-session-transcript-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let path = std::env::temp_dir().join(unique);
+        let transcript = sample_transcript();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&transcript).expect("serialize transcript"),
+        )
+        .expect("write transcript file");
+
+        let loaded = load_session_transcript(&path).expect("transcript should parse");
+        assert_eq!(loaded.scenario_id, transcript.scenario_id);
+        assert_eq!(loaded.run_id, transcript.run_id);
+        assert_eq!(loaded.summary.total, 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn persist_session_transcript_artifact_writes_bundle_copy() {
+        let unique = format!(
+            "fcp-e2e-session-bundle-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let source = base.join("source-transcript.json");
+        let bundle_dir = base.join("bundle");
+        std::fs::create_dir_all(&bundle_dir).expect("create bundle dir");
+        let transcript = sample_transcript();
+
+        let artifact = persist_session_transcript_artifact(&source, &transcript, Some(&bundle_dir))
+            .expect("transcript artifact should persist");
+
+        assert_eq!(artifact.label, "session_transcript_json");
+        assert!(bundle_dir.join("session_transcript.json").exists());
+        assert!(
+            artifact.path.ends_with("session_transcript.json"),
+            "artifact should point at the bundle copy"
+        );
+    }
+
+    #[test]
+    fn append_session_transcript_logs_adds_entry_and_summary() {
+        let transcript = sample_transcript();
+        let mut logger = E2eLogger::new();
+        append_session_transcript_logs(
+            &mut logger,
+            "transcript-aware-run",
+            "fcp-e2e",
+            Some("workflow.session_reconnect"),
+            &transcript,
+        );
+        let logs = logger.drain();
+
+        assert_eq!(logs.len(), 2, "one transcript entry plus one summary");
+        assert!(
+            logs[0].step_id.is_some(),
+            "entry log should have a stable step id"
+        );
+        assert!(
+            logs[1].summary.is_some(),
+            "summary log should carry transcript summary metadata"
+        );
+    }
+
+    #[test]
+    fn append_session_transcript_logs_prefers_explicit_scenario_id() {
+        let transcript = sample_transcript();
+        let mut logger = E2eLogger::new();
+        append_session_transcript_logs(
+            &mut logger,
+            "transcript-aware-run",
+            "fcp-e2e",
+            Some("workflow.override"),
+            &transcript,
+        );
+        let logs = logger.drain();
+
+        assert_eq!(logs[0].scenario_id.as_deref(), Some("workflow.override"));
+        assert_eq!(logs[1].scenario_id.as_deref(), Some("workflow.override"));
+    }
+
+    #[test]
+    fn attach_run_context_sets_run_and_scenario_ids() {
+        let logs = vec![E2eLogEntry::new(
+            "info",
+            "interop-suite",
+            "fcp-e2e",
+            "verify",
+            "corr-1",
+            "pass",
+            5,
+            AssertionsSummary::new(1, 0),
+            serde_json::json!({ "interop": true }),
+        )];
+
+        let logs = attach_run_context(logs, "run-42", Some("scenario.interop"));
+
+        assert_eq!(logs[0].run_id.as_deref(), Some("run-42"));
+        assert_eq!(logs[0].scenario_id.as_deref(), Some("scenario.interop"));
+    }
+
+    #[test]
+    fn session_transcript_step_report_marks_timeout_as_failure() {
+        let mut transcript = sample_transcript();
+        transcript.outcome = StepOutcome::Timeout;
+        transcript.summary.passed = 0;
+        transcript.summary.timed_out = 1;
+
+        let report =
+            session_transcript_step_report(&transcript, 2, Some("/tmp/session_transcript.json"));
+
+        assert_eq!(report.step_id, "session-transcript-summary");
+        assert_eq!(report.result, "fail");
+        assert_eq!(report.artifacts, vec!["/tmp/session_transcript.json"]);
+        assert!(
+            report.failure.is_some(),
+            "non-passing transcript step should carry failure metadata"
+        );
+    }
+
+    #[test]
+    fn exit_message_for_run_report_flags_failed_reports_without_scan_errors() {
+        let run_report = E2eRunReport::new(
+            "run-session-1",
+            "transcript-aware-run",
+            "fcp-e2e",
+            false,
+            42,
+            scan_log_jsonl(""),
+        )
+        .with_failure(E2eFailureSummary {
+            step_id: Some("session-transcript-summary".to_string()),
+            reason: "session transcript reported fail".to_string(),
+            error_code: Some("session_transcript_failed".to_string()),
+            stderr_excerpt: None,
+        });
+
+        assert_eq!(
+            exit_message_for_run_report("interop", &run_report).as_deref(),
+            Some("interop run failed: session transcript reported fail")
+        );
     }
 
     #[test]

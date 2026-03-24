@@ -265,7 +265,7 @@ impl E2eLogEntry {
         self.scenario_id = Some(transcript.scenario_id.clone());
 
         let value = json!({
-            "transport": transcript.transport,
+            "transport": transcript.transport.map(|transport| transport.to_string()),
             "outcome": transcript.outcome,
             "summary": transcript.summary,
         });

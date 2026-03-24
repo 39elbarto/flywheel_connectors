@@ -35,14 +35,12 @@ pub use fcp_testkit::session_script::{
     AckMode, Fault, MessageMatcher, ScriptHealthState, ScriptStep, SessionScript,
     SessionTranscript, StepOutcome, TranscriptEntry, TranscriptSummary, Transport,
 };
-pub use fcp_testkit::streaming_fixture::{
-    SseEvent, StreamingAction, StreamingFixtureServer,
-};
+pub use fcp_testkit::streaming_fixture::{SseEvent, StreamingAction, StreamingFixtureServer};
 pub use fcp_testkit::{
     HttpFixtureArtifactDescriptor, HttpFixtureArtifactKind, HttpFixtureContract,
-    HttpFixtureResponse, HttpFixtureRoute, HttpFixtureScenarioDefinition,
-    HttpFixtureScenarioKind, HttpFixtureServer, LogScanReport, LogScanReportFinding,
-    RecordedHttpRequest, canonical_http_fixture_contract, canonical_http_fixture_inventory,
+    HttpFixtureResponse, HttpFixtureRoute, HttpFixtureScenarioDefinition, HttpFixtureScenarioKind,
+    HttpFixtureServer, LogScanReport, LogScanReportFinding, RecordedHttpRequest,
+    canonical_http_fixture_contract, canonical_http_fixture_inventory,
 };
 pub use logging::{
     AssertionsSummary, E2eLogEntry, E2eLogger, LogSchemaError, validate_log_entry_value,

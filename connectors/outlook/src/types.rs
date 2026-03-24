@@ -5,16 +5,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Outlook connector configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OutlookConfig {
-    /// Microsoft Graph API access token (OAuth2 bearer token).
+    /// Microsoft Graph API access token (`OAuth2` bearer token).
     pub access_token: String,
-    /// Optional Graph API base URL override (default: graph.microsoft.com).
+    /// Optional Graph API base URL override (default: `graph.microsoft.com`).
     #[serde(default = "default_graph_host")]
     pub graph_host: String,
     /// Request timeout in milliseconds.
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+}
+
+impl std::fmt::Debug for OutlookConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutlookConfig")
+            .field("access_token", &"[REDACTED]")
+            .field("graph_host", &self.graph_host)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
 }
 
 fn default_graph_host() -> String {

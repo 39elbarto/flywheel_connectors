@@ -103,7 +103,12 @@ mod tests {
     fn imap_error_maps_to_external() {
         let err = EmailGenericError::Imap("connection refused".into());
         match err.to_fcp_error() {
-            FcpError::External { service, message, retryable, .. } => {
+            FcpError::External {
+                service,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "email_generic");
                 assert!(message.contains("connection refused"));
                 assert!(!retryable);
@@ -116,7 +121,9 @@ mod tests {
     fn smtp_error_maps_to_external() {
         let err = EmailGenericError::Smtp("auth failed".into());
         match err.to_fcp_error() {
-            FcpError::External { service, retryable, .. } => {
+            FcpError::External {
+                service, retryable, ..
+            } => {
                 assert_eq!(service, "email_generic");
                 assert!(!retryable);
             }
@@ -151,10 +158,8 @@ mod tests {
 
     #[test]
     fn io_error_is_retryable() {
-        let err = EmailGenericError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "timeout",
-        ));
+        let err =
+            EmailGenericError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"));
         assert!(err.is_retryable());
     }
 
@@ -216,9 +221,9 @@ mod tests {
     #[test]
     fn connector_error_mapping_from_timeout() {
         use fcp_sdk::migration::ConnectorErrorMapping;
-        let err = EmailGenericError::from_async_error(
-            fcp_async_core::AsyncError::Timeout { timeout_ms: 5000 },
-        );
+        let err = EmailGenericError::from_async_error(fcp_async_core::AsyncError::Timeout {
+            timeout_ms: 5000,
+        });
         assert!(matches!(err, EmailGenericError::Imap(_)));
         let msg = err.to_string();
         assert!(msg.contains("5000"));

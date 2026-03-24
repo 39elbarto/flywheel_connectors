@@ -587,11 +587,7 @@ impl<'a> NostrRelayClient<'a> {
         sub_id: &str,
         filter: &Value,
     ) -> bool {
-        if ws
-            .send_json(&json!(["REQ", sub_id, filter]))
-            .await
-            .is_err()
-        {
+        if ws.send_json(&json!(["REQ", sub_id, filter])).await.is_err() {
             return false;
         }
 

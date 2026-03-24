@@ -283,7 +283,8 @@ mod tests {
 
     #[test]
     fn create_invocation_passes_title_and_list() {
-        let invocation = client_with_list().create_reminder_invocation("Buy milk", Some("Shopping"));
+        let invocation =
+            client_with_list().create_reminder_invocation("Buy milk", Some("Shopping"));
         assert_eq!(invocation.args, vec!["Buy milk", "Shopping"]);
     }
 

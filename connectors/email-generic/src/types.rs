@@ -4,7 +4,7 @@ use fcp_core::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ImapConfig {
     pub host: String,
     #[serde(default = "default_imap_port")]
@@ -15,7 +15,19 @@ pub struct ImapConfig {
     pub tls: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for ImapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImapConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SmtpConfig {
     pub host: String,
     #[serde(default = "default_smtp_port")]
@@ -27,6 +39,20 @@ pub struct SmtpConfig {
     pub from_name: Option<String>,
     #[serde(default = "default_true")]
     pub starttls: bool,
+}
+
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("from_address", &self.from_address)
+            .field("from_name", &self.from_name)
+            .field("starttls", &self.starttls)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +140,8 @@ mod tests {
 
     #[test]
     fn config_parses_successfully() {
-        let config = EmailGenericConfig::from_value(valid_config_json())
-            .expect("config should parse");
+        let config =
+            EmailGenericConfig::from_value(valid_config_json()).expect("config should parse");
         assert_eq!(config.imap.port, 993);
         assert_eq!(config.smtp.port, 587);
     }

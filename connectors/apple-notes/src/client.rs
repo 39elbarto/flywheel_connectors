@@ -339,9 +339,8 @@ mod tests {
 
     #[test]
     fn parse_note_summaries_multiple_lines() {
-        let value = AppleNotesClient::parse_note_summaries(
-            "id-1\tNote A\tInbox\nid-2\tNote B\tWork\n",
-        );
+        let value =
+            AppleNotesClient::parse_note_summaries("id-1\tNote A\tInbox\nid-2\tNote B\tWork\n");
         let notes = value["notes"].as_array().unwrap();
         assert_eq!(notes.len(), 2);
         assert_eq!(notes[1]["title"], "Note B");

@@ -576,10 +576,12 @@ fn invoke_webhook_normalize(input: &Value, state: &SynologyChatState) -> FcpResu
             message: "Missing payload".into(),
         })?;
 
-    let payload: InboundWebhookPayload = serde_json::from_value(payload_value.clone())
-        .map_err(|error| FcpError::InvalidRequest {
-            code: 1005,
-            message: format!("Invalid inbound webhook payload: {error}"),
+    let payload: InboundWebhookPayload =
+        serde_json::from_value(payload_value.clone()).map_err(|error| {
+            FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid inbound webhook payload: {error}"),
+            }
         })?;
 
     let (event, verification) = normalize_inbound_event(

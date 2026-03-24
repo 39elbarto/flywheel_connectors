@@ -155,7 +155,10 @@ pub fn classify_message_target(msg: &IrcMessage, my_nick: &str) -> MessageTarget
                     };
                 }
                 if target.eq_ignore_ascii_case(my_nick) {
-                    let from = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
+                    let from = msg
+                        .prefix
+                        .as_ref()
+                        .and_then(|p| extract_nick_from_prefix(p));
                     return MessageTarget::Private { from };
                 }
                 // Target is some other nick
@@ -164,10 +167,7 @@ pub fn classify_message_target(msg: &IrcMessage, my_nick: &str) -> MessageTarget
             MessageTarget::Unknown
         }
         "JOIN" | "PART" | "TOPIC" | "MODE" => {
-            let channel = msg
-                .params
-                .first()
-                .or(msg.trailing.as_ref());
+            let channel = msg.params.first().or(msg.trailing.as_ref());
             if let Some(ch) = channel {
                 if is_channel_target(ch) {
                     return MessageTarget::Channel {
@@ -297,17 +297,20 @@ impl MessageBuffer {
     }
 
     /// Return all messages for a specific channel.
-    pub fn messages_for_channel<'a>(&'a self, channel: &'a str) -> impl Iterator<Item = &'a BufferedMessage> {
-        self.buf.iter().filter(move |entry| {
-            entry.event.channel.as_deref() == Some(channel)
-        })
+    pub fn messages_for_channel<'a>(
+        &'a self,
+        channel: &'a str,
+    ) -> impl Iterator<Item = &'a BufferedMessage> {
+        self.buf
+            .iter()
+            .filter(move |entry| entry.event.channel.as_deref() == Some(channel))
     }
 
     /// Return all private messages (not channel messages).
     pub fn private_messages(&self) -> impl Iterator<Item = &BufferedMessage> {
-        self.buf.iter().filter(|entry| {
-            entry.event.route.kind == IrcRouteKind::Private
-        })
+        self.buf
+            .iter()
+            .filter(|entry| entry.event.route.kind == IrcRouteKind::Private)
     }
 
     /// Return the last `n` messages (or all if fewer).
@@ -517,13 +520,13 @@ impl IrcPersistentSession {
             }
 
             // ── ERR_NICKNAMEINUSE (433) ──
-            "433" => {
-                self.handle_nick_collision()
-            }
+            "433" => self.handle_nick_collision(),
 
             // ── PING ──
             "PING" => {
-                let payload = msg.trailing.as_deref()
+                let payload = msg
+                    .trailing
+                    .as_deref()
                     .or_else(|| msg.params.first().map(String::as_str))
                     .unwrap_or("");
                 SessionAction::SendPong(payload.to_string())
@@ -532,10 +535,15 @@ impl IrcPersistentSession {
             // ── JOIN ──
             "JOIN" => {
                 // If the joining nick is us, track the channel
-                let joiner_nick = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
-                if joiner_nick.as_deref().map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick)) {
-                    let channel = msg.params.first()
-                        .or(msg.trailing.as_ref());
+                let joiner_nick = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
+                if joiner_nick
+                    .as_deref()
+                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                {
+                    let channel = msg.params.first().or(msg.trailing.as_ref());
                     if let Some(ch) = channel {
                         self.joined_channels.insert(ch.clone());
                     }
@@ -545,8 +553,14 @@ impl IrcPersistentSession {
 
             // ── PART ──
             "PART" => {
-                let parter_nick = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
-                if parter_nick.as_deref().map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick)) {
+                let parter_nick = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
+                if parter_nick
+                    .as_deref()
+                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                {
                     if let Some(ch) = msg.params.first() {
                         self.joined_channels.remove(ch);
                     }
@@ -570,10 +584,15 @@ impl IrcPersistentSession {
             // ── NICK ──
             "NICK" => {
                 // If we changed nick, track it
-                let changer = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
-                if changer.as_deref().map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick)) {
-                    let new_nick = msg.trailing.as_ref()
-                        .or_else(|| msg.params.first());
+                let changer = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
+                if changer
+                    .as_deref()
+                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                {
+                    let new_nick = msg.trailing.as_ref().or_else(|| msg.params.first());
                     if let Some(nn) = new_nick {
                         self.current_nick = nn.clone();
                     }
@@ -583,8 +602,14 @@ impl IrcPersistentSession {
 
             // ── QUIT / ERROR ──
             "QUIT" => {
-                let quitter = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
-                if quitter.as_deref().map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick)) {
+                let quitter = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
+                if quitter
+                    .as_deref()
+                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                {
                     self.mark_disconnected();
                 }
                 SessionAction::None
@@ -737,10 +762,7 @@ mod tests {
         let msg = parse_irc_message(":irc.example.com 433 * flywheel :Nickname is already in use.");
         assert_eq!(msg.command, "433");
         assert_eq!(msg.params, vec!["*", "flywheel"]);
-        assert_eq!(
-            msg.trailing.as_deref(),
-            Some("Nickname is already in use.")
-        );
+        assert_eq!(msg.trailing.as_deref(), Some("Nickname is already in use."));
     }
 
     #[test]
@@ -977,10 +999,7 @@ mod tests {
 
     #[test]
     fn extract_nick_no_user() {
-        assert_eq!(
-            extract_nick_from_prefix("alice@host"),
-            Some("alice".into())
-        );
+        assert_eq!(extract_nick_from_prefix("alice@host"), Some("alice".into()));
     }
 
     #[test]
@@ -1156,12 +1175,16 @@ mod tests {
     #[test]
     fn process_welcome_transitions_to_registered() {
         let mut session = IrcPersistentSession::with_default_capacity("flywheel");
-        let (_msg, action) = session.process_line(":irc.example.com 001 flywheel :Welcome to the IRC Network");
+        let (_msg, action) =
+            session.process_line(":irc.example.com 001 flywheel :Welcome to the IRC Network");
         assert_eq!(action, SessionAction::None);
         assert_eq!(session.state(), ConnectionState::Registered);
         assert!(session.is_registered());
         assert_eq!(session.server_name(), Some("irc.example.com"));
-        assert_eq!(session.welcome_message(), Some("Welcome to the IRC Network"));
+        assert_eq!(
+            session.welcome_message(),
+            Some("Welcome to the IRC Network")
+        );
         assert!(session.time_since_registration().is_some());
     }
 
@@ -1213,20 +1236,14 @@ mod tests {
     fn ping_returns_pong_action() {
         let mut session = IrcPersistentSession::with_default_capacity("flywheel");
         let (_msg, action) = session.process_line("PING :irc.example.com");
-        assert_eq!(
-            action,
-            SessionAction::SendPong("irc.example.com".into())
-        );
+        assert_eq!(action, SessionAction::SendPong("irc.example.com".into()));
     }
 
     #[test]
     fn ping_with_param_instead_of_trailing() {
         let mut session = IrcPersistentSession::with_default_capacity("flywheel");
         let (_msg, action) = session.process_line("PING irc.example.com");
-        assert_eq!(
-            action,
-            SessionAction::SendPong("irc.example.com".into())
-        );
+        assert_eq!(action, SessionAction::SendPong("irc.example.com".into()));
     }
 
     #[test]
@@ -1447,14 +1464,14 @@ mod tests {
 
         // 7. Handle PING
         let (_, action) = session.process_line("PING :irc.libera.chat");
-        assert_eq!(
-            action,
-            SessionAction::SendPong("irc.libera.chat".into())
-        );
+        assert_eq!(action, SessionAction::SendPong("irc.libera.chat".into()));
 
         // 8. Verify buffer contents
         // #rust has 2 messages: our JOIN + alice's PRIVMSG
-        let rust_msgs: Vec<_> = session.message_buffer().messages_for_channel("#rust").collect();
+        let rust_msgs: Vec<_> = session
+            .message_buffer()
+            .messages_for_channel("#rust")
+            .collect();
         assert_eq!(rust_msgs.len(), 2);
         assert!(rust_msgs[1].message.raw.contains("hello everyone"));
 

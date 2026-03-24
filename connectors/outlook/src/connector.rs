@@ -283,6 +283,146 @@ impl OutlookConnector {
             },
         ]
     }
+
+    fn parse_top(input: &serde_json::Value) -> Option<u32> {
+        input
+            .get("top")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        self.base.check_ready()?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let cap = required_capability(req.operation.as_str())?;
+        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let output = match req.operation.as_str() {
+            OP_LIST_MESSAGES => {
+                let folder_id = req.input.get("folder_id").and_then(|v| v.as_str());
+                let top = Self::parse_top(&req.input);
+                client
+                    .list_messages(folder_id, top)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_GET_MESSAGE => {
+                let message_id = req
+                    .input
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing message_id".into(),
+                    })?;
+                client
+                    .get_message(message_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_SEARCH_MESSAGES => {
+                let query = req
+                    .input
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing query".into(),
+                    })?;
+                let top = Self::parse_top(&req.input);
+                client
+                    .search_messages(query, top)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_SEND_MESSAGE => {
+                let to = req
+                    .input
+                    .get("to")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing to".into(),
+                    })?
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                let cc = req
+                    .input
+                    .get("cc")
+                    .and_then(|v| v.as_array())
+                    .map(|vals| {
+                        vals.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let subject = req
+                    .input
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing subject".into(),
+                    })?;
+                let body = req
+                    .input
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing body".into(),
+                    })?;
+                client
+                    .send_message(&to, subject, body, &cc)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_LIST_EVENTS => {
+                let top = Self::parse_top(&req.input);
+                client
+                    .list_events(top)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_CREATE_EVENT => {
+                let subject = req
+                    .input
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing subject".into(),
+                    })?;
+                let start = req
+                    .input
+                    .get("start")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing start".into(),
+                    })?;
+                let end = req
+                    .input
+                    .get("end")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing end".into(),
+                    })?;
+                let body = req.input.get("body").and_then(|v| v.as_str());
+                let location = req.input.get("location").and_then(|v| v.as_str());
+                client
+                    .create_event(subject, start, end, body, location)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_LIST_FOLDERS => client.list_folders().await.map_err(|e| e.to_fcp_error())?,
+            _ => unreachable!(),
+        };
+        Ok(InvokeResponse::ok(req.id, output))
+    }
 }
 
 impl Default for OutlookConnector {
@@ -370,7 +510,10 @@ impl FcpConnector for OutlookConnector {
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded("not_configured", "Connector not configured"));
+            return Ok(SelfCheckReport::degraded(
+                "not_configured",
+                "Connector not configured",
+            ));
         };
         let details = client.health().await.map_err(|e| e.to_fcp_error())?;
         Ok(SelfCheckReport {
@@ -408,76 +551,35 @@ impl FcpConnector for OutlookConnector {
     }
 
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
-        self.base.check_ready()?;
-        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
-        let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-
-        let output = match req.operation.as_str() {
-            OP_LIST_MESSAGES => {
-                let folder_id = req.input.get("folder_id").and_then(|v| v.as_str());
-                let top = req.input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
-                client.list_messages(folder_id, top).await.map_err(|e| e.to_fcp_error())?
-            }
-            OP_GET_MESSAGE => {
-                let message_id = req.input.get("message_id").and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing message_id".into() })?;
-                client.get_message(message_id).await.map_err(|e| e.to_fcp_error())?
-            }
-            OP_SEARCH_MESSAGES => {
-                let query = req.input.get("query").and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing query".into() })?;
-                let top = req.input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
-                client.search_messages(query, top).await.map_err(|e| e.to_fcp_error())?
-            }
-            OP_SEND_MESSAGE => {
-                let to = req.input.get("to").and_then(|v| v.as_array())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing to".into() })?
-                    .iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>();
-                let cc = req.input.get("cc").and_then(|v| v.as_array())
-                    .map(|vals| vals.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>())
-                    .unwrap_or_default();
-                let subject = req.input.get("subject").and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing subject".into() })?;
-                let body = req.input.get("body").and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing body".into() })?;
-                client.send_message(&to, subject, body, &cc).await.map_err(|e| e.to_fcp_error())?
-            }
-            OP_LIST_EVENTS => {
-                let top = req.input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
-                client.list_events(top).await.map_err(|e| e.to_fcp_error())?
-            }
-            OP_CREATE_EVENT => {
-                let subject = req.input.get("subject").and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing subject".into() })?;
-                let start = req.input.get("start").and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing start".into() })?;
-                let end = req.input.get("end").and_then(|v| v.as_str())
-                    .ok_or_else(|| FcpError::InvalidRequest { code: 1005, message: "Missing end".into() })?;
-                let body = req.input.get("body").and_then(|v| v.as_str());
-                let location = req.input.get("location").and_then(|v| v.as_str());
-                client.create_event(subject, start, end, body, location).await.map_err(|e| e.to_fcp_error())?
-            }
-            OP_LIST_FOLDERS => {
-                client.list_folders().await.map_err(|e| e.to_fcp_error())?
-            }
-            _ => unreachable!(),
-        };
-        self.base.record_request(true);
-        Ok(InvokeResponse::ok(req.id, output))
+        let result = self.invoke_inner(req).await;
+        self.base.record_request(result.is_ok());
+        result
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
         let cap = match required_capability(req.operation.as_str()) {
             Ok(c) => c,
-            Err(e) => return Ok(SimulateResponse::denied(req.id, e.to_string(), e.error_code())),
+            Err(e) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    e.to_string(),
+                    e.error_code(),
+                ));
+            }
         };
         if self.client.is_none() {
-            return Ok(SimulateResponse::denied(req.id, "Not configured", FcpError::NotConfigured.error_code()));
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
         }
         let Some(verifier) = self.verifier.as_ref() else {
-            return Ok(SimulateResponse::denied(req.id, "Not handshaken", FcpError::NotHandshaken.error_code()));
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Not handshaken",
+                FcpError::NotHandshaken.error_code(),
+            ));
         };
         if let Err(e) = verifier.verify(&req.capability_token, &cap, &req.operation, &[]) {
             let mut response = SimulateResponse::denied(req.id, e.to_string(), e.error_code());
@@ -500,8 +602,8 @@ impl FcpConnector for OutlookConnector {
 
 #[cfg(test)]
 mod tests {
-    use fcp_core::FcpConnector;
     use super::*;
+    use fcp_core::FcpConnector;
 
     #[test]
     fn connector_id_is_correct() {
@@ -538,7 +640,10 @@ mod tests {
     #[test]
     fn send_message_is_risky() {
         let ops = OutlookConnector::operations_info();
-        let send = ops.iter().find(|o| o.id.as_str() == OP_SEND_MESSAGE).unwrap();
+        let send = ops
+            .iter()
+            .find(|o| o.id.as_str() == OP_SEND_MESSAGE)
+            .unwrap();
         assert_eq!(send.safety_tier, SafetyTier::Risky);
         assert_eq!(send.idempotency, IdempotencyClass::None);
     }
@@ -546,14 +651,22 @@ mod tests {
     #[test]
     fn create_event_is_risky() {
         let ops = OutlookConnector::operations_info();
-        let event = ops.iter().find(|o| o.id.as_str() == OP_CREATE_EVENT).unwrap();
+        let event = ops
+            .iter()
+            .find(|o| o.id.as_str() == OP_CREATE_EVENT)
+            .unwrap();
         assert_eq!(event.safety_tier, SafetyTier::Risky);
     }
 
     #[test]
     fn read_operations_are_safe() {
         let ops = OutlookConnector::operations_info();
-        for op_id in [OP_LIST_MESSAGES, OP_GET_MESSAGE, OP_SEARCH_MESSAGES, OP_LIST_FOLDERS] {
+        for op_id in [
+            OP_LIST_MESSAGES,
+            OP_GET_MESSAGE,
+            OP_SEARCH_MESSAGES,
+            OP_LIST_FOLDERS,
+        ] {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
             assert_eq!(op.safety_tier, SafetyTier::Safe, "{op_id} should be Safe");
         }
@@ -609,21 +722,42 @@ mod tests {
 
     #[test]
     fn required_capability_read_ops() {
-        assert_eq!(required_capability(OP_LIST_MESSAGES).unwrap().as_str(), CAP_READ);
-        assert_eq!(required_capability(OP_GET_MESSAGE).unwrap().as_str(), CAP_READ);
-        assert_eq!(required_capability(OP_SEARCH_MESSAGES).unwrap().as_str(), CAP_READ);
-        assert_eq!(required_capability(OP_LIST_FOLDERS).unwrap().as_str(), CAP_READ);
+        assert_eq!(
+            required_capability(OP_LIST_MESSAGES).unwrap().as_str(),
+            CAP_READ
+        );
+        assert_eq!(
+            required_capability(OP_GET_MESSAGE).unwrap().as_str(),
+            CAP_READ
+        );
+        assert_eq!(
+            required_capability(OP_SEARCH_MESSAGES).unwrap().as_str(),
+            CAP_READ
+        );
+        assert_eq!(
+            required_capability(OP_LIST_FOLDERS).unwrap().as_str(),
+            CAP_READ
+        );
     }
 
     #[test]
     fn required_capability_send() {
-        assert_eq!(required_capability(OP_SEND_MESSAGE).unwrap().as_str(), CAP_SEND);
+        assert_eq!(
+            required_capability(OP_SEND_MESSAGE).unwrap().as_str(),
+            CAP_SEND
+        );
     }
 
     #[test]
     fn required_capability_calendar() {
-        assert_eq!(required_capability(OP_LIST_EVENTS).unwrap().as_str(), CAP_CALENDAR);
-        assert_eq!(required_capability(OP_CREATE_EVENT).unwrap().as_str(), CAP_CALENDAR);
+        assert_eq!(
+            required_capability(OP_LIST_EVENTS).unwrap().as_str(),
+            CAP_CALENDAR
+        );
+        assert_eq!(
+            required_capability(OP_CREATE_EVENT).unwrap().as_str(),
+            CAP_CALENDAR
+        );
     }
 
     #[test]
@@ -645,13 +779,18 @@ mod tests {
     async fn health_before_configure_is_degraded() {
         let connector = OutlookConnector::new();
         let snapshot = connector.health().await;
-        assert!(matches!(snapshot.status, fcp_core::HealthState::Degraded { .. }));
+        assert!(matches!(
+            snapshot.status,
+            fcp_core::HealthState::Degraded { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
     async fn configure_accepts_valid_config() {
         let mut connector = OutlookConnector::new();
-        let result = connector.configure(json!({ "access_token": "test-token" })).await;
+        let result = connector
+            .configure(json!({ "access_token": "test-token" }))
+            .await;
         assert!(result.is_ok());
     }
 
@@ -665,7 +804,10 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn health_after_configure_is_ready() {
         let mut connector = OutlookConnector::new();
-        connector.configure(json!({ "access_token": "tok" })).await.unwrap();
+        connector
+            .configure(json!({ "access_token": "tok" }))
+            .await
+            .unwrap();
         let snapshot = connector.health().await;
         assert!(matches!(snapshot.status, fcp_core::HealthState::Ready));
     }

@@ -70,10 +70,7 @@ impl EncryptedDmEvent {
             });
         }
         if self.recipient_pubkey.len() != 64
-            || !self
-                .recipient_pubkey
-                .chars()
-                .all(|c| c.is_ascii_hexdigit())
+            || !self.recipient_pubkey.chars().all(|c| c.is_ascii_hexdigit())
         {
             return Err(FcpError::InvalidRequest {
                 code: 1005,
@@ -679,20 +676,14 @@ mod tests {
 
     #[test]
     fn encrypted_dm_event_new_sets_kind_4() {
-        let dm = EncryptedDmEvent::new(
-            "aaaa".repeat(16),
-            "encrypted_content?iv=base64iv".into(),
-        );
+        let dm = EncryptedDmEvent::new("aaaa".repeat(16), "encrypted_content?iv=base64iv".into());
         assert_eq!(dm.kind, NIP04_KIND_ENCRYPTED_DM);
         assert_eq!(dm.recipient_pubkey.len(), 64);
     }
 
     #[test]
     fn encrypted_dm_event_serializes() {
-        let dm = EncryptedDmEvent::new(
-            "bbbb".repeat(16),
-            "ciphertext?iv=nonce".into(),
-        );
+        let dm = EncryptedDmEvent::new("bbbb".repeat(16), "ciphertext?iv=nonce".into());
         let json = serde_json::to_value(&dm).unwrap();
         assert_eq!(json["kind"], 4);
         assert_eq!(json["content"], "ciphertext?iv=nonce");
@@ -713,10 +704,7 @@ mod tests {
 
     #[test]
     fn encrypted_dm_event_roundtrip() {
-        let original = EncryptedDmEvent::new(
-            "dddd".repeat(16),
-            "test_payload?iv=abc".into(),
-        );
+        let original = EncryptedDmEvent::new("dddd".repeat(16), "test_payload?iv=abc".into());
         let json = serde_json::to_value(&original).unwrap();
         let deserialized: EncryptedDmEvent = serde_json::from_value(json).unwrap();
         assert_eq!(original, deserialized);
@@ -724,10 +712,7 @@ mod tests {
 
     #[test]
     fn encrypted_dm_event_validate_valid() {
-        let dm = EncryptedDmEvent::new(
-            "eeee".repeat(16),
-            "valid_content".into(),
-        );
+        let dm = EncryptedDmEvent::new("eeee".repeat(16), "valid_content".into());
         assert!(dm.validate().is_ok());
     }
 
@@ -796,10 +781,7 @@ mod tests {
 
     #[test]
     fn encrypted_dm_event_tags_has_p_tag() {
-        let dm = EncryptedDmEvent::new(
-            "ffff".repeat(16),
-            "payload".into(),
-        );
+        let dm = EncryptedDmEvent::new("ffff".repeat(16), "payload".into());
         let tags = dm.tags();
         assert_eq!(tags, json!([["p", "ffff".repeat(16)]]));
     }

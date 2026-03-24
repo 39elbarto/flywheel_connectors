@@ -476,13 +476,16 @@ mod tests {
         assert_eq!(payload.text.as_deref(), Some("Tjena"));
         assert_eq!(payload.token.as_deref(), Some("shared-secret"));
         assert_eq!(payload.trigger_word.as_deref(), Some("Tjena"));
-        assert_eq!(payload.file_url.as_deref(), Some("https://nas.local/file.pdf"));
+        assert_eq!(
+            payload.file_url.as_deref(),
+            Some("https://nas.local/file.pdf")
+        );
     }
 
     #[test]
     fn inbound_webhook_payload_handles_missing_optional_fields() {
-        let payload: InboundWebhookPayload =
-            serde_json::from_value(serde_json::json!({})).expect("empty payload should deserialize");
+        let payload: InboundWebhookPayload = serde_json::from_value(serde_json::json!({}))
+            .expect("empty payload should deserialize");
 
         assert!(payload.user_id.is_none());
         assert!(payload.username.is_none());
@@ -540,10 +543,22 @@ mod tests {
     #[test]
     fn token_verification_variants_are_distinct() {
         assert_ne!(TokenVerification::Verified, TokenVerification::Mismatch);
-        assert_ne!(TokenVerification::Verified, TokenVerification::MissingFromPayload);
-        assert_ne!(TokenVerification::Verified, TokenVerification::NotConfigured);
-        assert_ne!(TokenVerification::Mismatch, TokenVerification::MissingFromPayload);
-        assert_ne!(TokenVerification::Mismatch, TokenVerification::NotConfigured);
+        assert_ne!(
+            TokenVerification::Verified,
+            TokenVerification::MissingFromPayload
+        );
+        assert_ne!(
+            TokenVerification::Verified,
+            TokenVerification::NotConfigured
+        );
+        assert_ne!(
+            TokenVerification::Mismatch,
+            TokenVerification::MissingFromPayload
+        );
+        assert_ne!(
+            TokenVerification::Mismatch,
+            TokenVerification::NotConfigured
+        );
         assert_ne!(
             TokenVerification::MissingFromPayload,
             TokenVerification::NotConfigured

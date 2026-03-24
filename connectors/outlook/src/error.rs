@@ -46,7 +46,10 @@ impl OutlookError {
                 retryable: error.is_connect() || error.is_timeout(),
                 retry_after: None,
             },
-            Self::Api { status_code, message } => FcpError::External {
+            Self::Api {
+                status_code,
+                message,
+            } => FcpError::External {
                 service: "outlook".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
@@ -58,7 +61,8 @@ impl OutlookError {
                 violation: None,
             },
             Self::Unauthorized(message) => FcpError::Unauthorized {
-                code: 2001, message: message.clone(),
+                code: 2001,
+                message: message.clone(),
             },
             Self::NotFound(message) => FcpError::External {
                 service: "outlook".into(),
@@ -74,12 +78,17 @@ impl OutlookError {
     pub const fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Http(_) | Self::RateLimited { .. } | Self::Api { status_code: 429 | 500 | 502 | 503 | 504, .. }
+            Self::Http(_)
+                | Self::RateLimited { .. }
+                | Self::Api {
+                    status_code: 429 | 500 | 502 | 503 | 504,
+                    ..
+                }
         )
     }
 
     #[must_use]
-    pub fn retry_after(&self) -> Option<Duration> {
+    pub const fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
@@ -125,14 +134,24 @@ mod tests {
     #[test]
     fn config_error_maps_to_invalid_request() {
         let err = OutlookError::Config("bad config".into());
-        assert!(matches!(err.to_fcp_error(), FcpError::InvalidRequest { .. }));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { .. }
+        ));
     }
 
     #[test]
     fn api_500_maps_to_retryable_external() {
-        let err = OutlookError::Api { status_code: 500, message: "internal".into() };
+        let err = OutlookError::Api {
+            status_code: 500,
+            message: "internal".into(),
+        };
         match err.to_fcp_error() {
-            FcpError::External { retryable, status_code, .. } => {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
                 assert!(retryable);
                 assert_eq!(status_code, Some(500));
             }
@@ -142,7 +161,10 @@ mod tests {
 
     #[test]
     fn api_400_maps_to_non_retryable() {
-        let err = OutlookError::Api { status_code: 400, message: "bad".into() };
+        let err = OutlookError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        };
         match err.to_fcp_error() {
             FcpError::External { retryable, .. } => assert!(!retryable),
             other => panic!("expected External, got {other:?}"),
@@ -151,7 +173,9 @@ mod tests {
 
     #[test]
     fn rate_limited_maps_to_rate_limited() {
-        let err = OutlookError::RateLimited { retry_after_ms: 5000 };
+        let err = OutlookError::RateLimited {
+            retry_after_ms: 5000,
+        };
         assert!(matches!(err.to_fcp_error(), FcpError::RateLimited { .. }));
     }
 
@@ -165,7 +189,11 @@ mod tests {
     fn not_found_maps_to_external_404() {
         let err = OutlookError::NotFound("message not found".into());
         match err.to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(!retryable);
             }
@@ -175,7 +203,9 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        let err = OutlookError::RateLimited { retry_after_ms: 1000 };
+        let err = OutlookError::RateLimited {
+            retry_after_ms: 1000,
+        };
         assert!(err.is_retryable());
     }
 
@@ -196,7 +226,9 @@ mod tests {
 
     #[test]
     fn retry_after_returns_duration_for_rate_limited() {
-        let err = OutlookError::RateLimited { retry_after_ms: 3000 };
+        let err = OutlookError::RateLimited {
+            retry_after_ms: 3000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(3000)));
     }
 
@@ -215,13 +247,18 @@ mod tests {
 
     #[test]
     fn error_display_api() {
-        let err = OutlookError::Api { status_code: 503, message: "down".into() };
+        let err = OutlookError::Api {
+            status_code: 503,
+            message: "down".into(),
+        };
         assert_eq!(err.to_string(), "API error (503): down");
     }
 
     #[test]
     fn error_display_rate_limited() {
-        let err = OutlookError::RateLimited { retry_after_ms: 1000 };
+        let err = OutlookError::RateLimited {
+            retry_after_ms: 1000,
+        };
         assert_eq!(err.to_string(), "rate limited");
     }
 
@@ -244,10 +281,16 @@ mod tests {
     #[test]
     fn connector_error_mapping_from_timeout() {
         use fcp_sdk::migration::ConnectorErrorMapping;
-        let err = OutlookError::from_async_error(
-            fcp_async_core::AsyncError::Timeout { timeout_ms: 5000 },
-        );
-        assert!(matches!(err, OutlookError::Api { status_code: 408, .. }));
+        let err = OutlookError::from_async_error(fcp_async_core::AsyncError::Timeout {
+            timeout_ms: 5000,
+        });
+        assert!(matches!(
+            err,
+            OutlookError::Api {
+                status_code: 408,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -246,7 +246,10 @@ pub fn normalize_inbound_event(
     payload: &crate::types::InboundWebhookPayload,
     configured_token: Option<&str>,
     raw: serde_json::Value,
-) -> (crate::types::NormalizedInboundEvent, crate::types::TokenVerification) {
+) -> (
+    crate::types::NormalizedInboundEvent,
+    crate::types::TokenVerification,
+) {
     use crate::types::{NormalizedInboundEvent, TokenVerification};
 
     let channel_id = payload.channel_id.as_ref().and_then(stringify_json_value);
@@ -651,7 +654,10 @@ mod tests {
 
         assert!(event.is_threaded);
         assert_eq!(event.thread_id.as_deref(), Some("thread-456"));
-        assert_eq!(event.file_url.as_deref(), Some("https://nas.local/file.pdf"));
+        assert_eq!(
+            event.file_url.as_deref(),
+            Some("https://nas.local/file.pdf")
+        );
         assert_eq!(event.text.as_deref(), Some("Reply in thread"));
     }
 

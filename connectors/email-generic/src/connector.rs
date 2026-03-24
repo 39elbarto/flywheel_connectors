@@ -565,7 +565,10 @@ mod tests {
     #[test]
     fn send_message_is_risky() {
         let ops = EmailGenericConnector::operations_info();
-        let send = ops.iter().find(|o| o.id.as_str() == OP_SEND_MESSAGE).unwrap();
+        let send = ops
+            .iter()
+            .find(|o| o.id.as_str() == OP_SEND_MESSAGE)
+            .unwrap();
         assert_eq!(send.safety_tier, SafetyTier::Risky);
         assert_eq!(send.idempotency, IdempotencyClass::None);
     }
@@ -596,7 +599,10 @@ mod tests {
     #[test]
     fn send_uses_write_capability() {
         let ops = EmailGenericConnector::operations_info();
-        let send = ops.iter().find(|o| o.id.as_str() == OP_SEND_MESSAGE).unwrap();
+        let send = ops
+            .iter()
+            .find(|o| o.id.as_str() == OP_SEND_MESSAGE)
+            .unwrap();
         assert_eq!(send.capability.as_str(), CAP_WRITE);
     }
 
@@ -610,11 +616,7 @@ mod tests {
     #[test]
     fn operations_have_descriptions() {
         for op in EmailGenericConnector::operations_info() {
-            assert!(
-                op.description.is_some(),
-                "{} missing description",
-                op.id
-            );
+            assert!(op.description.is_some(), "{} missing description", op.id);
         }
     }
 
@@ -680,10 +682,7 @@ mod tests {
 
     #[test]
     fn required_capability_read_ops() {
-        assert_eq!(
-            required_capability(OP_HEALTH).unwrap().as_str(),
-            CAP_READ
-        );
+        assert_eq!(required_capability(OP_HEALTH).unwrap().as_str(), CAP_READ);
         assert_eq!(
             required_capability(OP_LIST_MAILBOXES).unwrap().as_str(),
             CAP_READ
@@ -728,10 +727,7 @@ mod tests {
         let connector = EmailGenericConnector::new();
         let snapshot = connector.health().await;
         assert!(
-            matches!(
-                snapshot.status,
-                fcp_core::HealthState::Degraded { .. }
-            ),
+            matches!(snapshot.status, fcp_core::HealthState::Degraded { .. }),
             "should be degraded before configure"
         );
     }
@@ -773,10 +769,7 @@ mod tests {
     async fn self_check_before_configure_returns_degraded() {
         let connector = EmailGenericConnector::new();
         let report = connector.self_check().await.unwrap();
-        assert_eq!(
-            report.status,
-            fcp_core::SelfCheckStatus::Degraded
-        );
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Degraded);
     }
 
     #[fcp_async_core::runtime::test]

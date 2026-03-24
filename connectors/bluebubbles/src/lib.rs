@@ -93,8 +93,7 @@ mod tests {
     #[test]
     fn default_health_is_not_ready_before_configure() {
         let connector = new_connector();
-        let result =
-            fcp_async_core::runtime::block_on_sync(async { connector.health().await });
+        let result = fcp_async_core::runtime::block_on_sync(async { connector.health().await });
         let snapshot = result.expect("health() should not fail");
         assert!(
             !matches!(snapshot.status, fcp_core::HealthState::Ready),
@@ -273,7 +272,9 @@ mod tests {
         for op in &introspection.operations {
             let idempotency_str = format!("{:?}", op.idempotency);
             assert!(
-                ["Strict", "BestEffort", "None"].iter().any(|v| idempotency_str.contains(v)),
+                ["Strict", "BestEffort", "None"]
+                    .iter()
+                    .any(|v| idempotency_str.contains(v)),
                 "operation {} has unexpected idempotency: {idempotency_str}",
                 op.id
             );

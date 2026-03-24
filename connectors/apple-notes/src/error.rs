@@ -71,7 +71,10 @@ mod tests {
     #[test]
     fn config_error_maps_to_invalid_request() {
         let err = AppleNotesError::Config("bad".into());
-        assert!(matches!(err.to_fcp_error(), FcpError::InvalidRequest { .. }));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { .. }
+        ));
     }
 
     #[test]

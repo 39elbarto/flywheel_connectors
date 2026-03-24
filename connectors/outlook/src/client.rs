@@ -8,11 +8,21 @@ use crate::types::OutlookConfig;
 
 const GRAPH_API_VERSION: &str = "v1.0";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OutlookClient {
     client: Client,
     base_url: String,
     access_token: String,
+}
+
+impl std::fmt::Debug for OutlookClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutlookClient")
+            .field("client", &"<reqwest::Client>")
+            .field("base_url", &self.base_url)
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl OutlookClient {
@@ -28,7 +38,14 @@ impl OutlookClient {
     }
 
     fn sanitize_id(id: &str) -> OutlookResult<&str> {
-        if id.contains('/') || id.contains('\\') || id.contains("..") {
+        let lower = id.to_lowercase();
+        if id.contains('/')
+            || id.contains('\\')
+            || id.contains("..")
+            || lower.contains("%2f")
+            || lower.contains("%5c")
+            || lower.contains("%2e%2e")
+        {
             return Err(OutlookError::Config(
                 "ID contains invalid path characters".into(),
             ));
@@ -65,7 +82,7 @@ impl OutlookClient {
             if status == reqwest::StatusCode::NO_CONTENT {
                 return Ok(json!({ "status": "ok" }));
             }
-            let body: Value = response.json().await.unwrap_or(json!({"status": "ok"}));
+            let body: Value = response.json().await.unwrap_or_else(|_| json!({"status": "ok"}));
             return Ok(body);
         }
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -82,8 +99,7 @@ impl OutlookClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .map(|s| s * 1000)
-                .unwrap_or(60_000);
+                .map_or(60_000, |s| s * 1000);
             return Err(OutlookError::RateLimited {
                 retry_after_ms: retry_after,
             });
@@ -113,7 +129,9 @@ impl OutlookClient {
 
     pub async fn get_message(&self, message_id: &str) -> OutlookResult<Value> {
         let sanitized = Self::sanitize_id(message_id)?;
-        let path = format!("/me/messages/{sanitized}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,body,hasAttachments");
+        let path = format!(
+            "/me/messages/{sanitized}?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,body,hasAttachments"
+        );
         self.graph_get(&path).await
     }
 
@@ -122,7 +140,8 @@ impl OutlookClient {
             return Err(OutlookError::Config("query must not be empty".into()));
         }
         let limit = top.unwrap_or(25).min(100);
-        let encoded_query = url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
+        let encoded_query =
+            url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
         let path = format!(
             "/me/messages?$search=\"{encoded_query}\"&$top={limit}&$select=id,subject,from,receivedDateTime,bodyPreview"
         );
@@ -238,6 +257,13 @@ mod tests {
         assert!(OutlookClient::sanitize_id("../etc/passwd").is_err());
         assert!(OutlookClient::sanitize_id("foo/bar").is_err());
         assert!(OutlookClient::sanitize_id("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn sanitize_id_rejects_url_encoded_traversal() {
+        assert!(OutlookClient::sanitize_id("foo%2Fbar").is_err());
+        assert!(OutlookClient::sanitize_id("foo%5Cbar").is_err());
+        assert!(OutlookClient::sanitize_id("%2e%2e%2fpasswd").is_err());
     }
 
     #[test]

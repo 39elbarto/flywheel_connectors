@@ -101,6 +101,12 @@ pub struct SessionE2eConfig {
     /// Author identifier.
     #[serde(default = "default_author")]
     pub author: String,
+    /// Optional Cargo test filter for a real owning test surface.
+    ///
+    /// When present, replay instructions include this filter instead of
+    /// pointing at a non-existent canned test target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_test_filter: Option<String>,
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -121,6 +127,7 @@ impl Default for SessionE2eConfig {
             env: HashMap::new(),
             tags: Vec::new(),
             author: default_author(),
+            replay_test_filter: None,
         }
     }
 }
@@ -272,7 +279,12 @@ impl SessionE2eRunner {
 
     fn run_setup_phase(&mut self) -> u64 {
         let phase_start = Instant::now();
-        self.log(SessionPhase::Setup, "info", "Starting session E2E run", None);
+        self.log(
+            SessionPhase::Setup,
+            "info",
+            "Starting session E2E run",
+            None,
+        );
         self.log(
             SessionPhase::Setup,
             "info",
@@ -312,10 +324,7 @@ impl SessionE2eRunner {
         phase_start.elapsed().as_millis() as u64
     }
 
-    fn run_execute_phase(
-        &mut self,
-        script: &SessionScript,
-    ) -> (SessionTranscript, u64) {
+    fn run_execute_phase(&mut self, script: &SessionScript) -> (SessionTranscript, u64) {
         let phase_start = Instant::now();
         self.log(
             SessionPhase::Execute,
@@ -354,10 +363,7 @@ impl SessionE2eRunner {
         self.log(
             SessionPhase::Verify,
             if passed { "info" } else { "error" },
-            &format!(
-                "Verification: {}",
-                if passed { "PASS" } else { "FAIL" }
-            ),
+            &format!("Verification: {}", if passed { "PASS" } else { "FAIL" }),
             Some(serde_json::json!({
                 "passed": passed,
                 "transcript_outcome": format!("{:?}", transcript.outcome),
@@ -400,7 +406,11 @@ impl SessionE2eRunner {
                 "retention_days": evidence.retention_days,
             })),
         );
-        (evidence, replay_command, phase_start.elapsed().as_millis() as u64)
+        (
+            evidence,
+            replay_command,
+            phase_start.elapsed().as_millis() as u64,
+        )
     }
 
     /// Record a transcript from an externally-executed session and produce
@@ -414,45 +424,54 @@ impl SessionE2eRunner {
         script: &SessionScript,
         transcript: SessionTranscript,
     ) -> SessionE2eResult {
-        let start = Instant::now();
-
-        self.log(
-            SessionPhase::Verify,
-            "info",
-            "Recording externally-provided transcript",
-            None,
-        );
+        let setup_ms = self.run_setup_phase();
+        let lifecycle_ms = self.run_lifecycle_phase();
 
         let summary = transcript.summary;
-        let passed = transcript.outcome == StepOutcome::Pass && summary.failed == 0;
+        let execute_ms = transcript.total_duration.as_millis() as u64;
 
         self.log(
-            SessionPhase::Verify,
-            if passed { "info" } else { "error" },
-            &format!(
-                "External transcript: {} ({}/{} passed)",
-                if passed { "PASS" } else { "FAIL" },
-                summary.passed,
-                summary.total
-            ),
-            None,
+            SessionPhase::Execute,
+            "info",
+            "Recording externally-provided transcript",
+            Some(serde_json::json!({
+                "transport": format!("{:?}", transcript.transport),
+                "passed": summary.passed,
+                "failed": summary.failed,
+                "skipped": summary.skipped,
+                "timed_out": summary.timed_out,
+                "duration_ms": execute_ms,
+            })),
         );
 
-        let evidence = self.build_evidence_bundle(script, &transcript, passed);
-        let replay_command = self.build_replay_command(script);
+        let (passed, verify_ms) = self.run_verify_phase(&transcript);
+        let (evidence, replay_command, teardown_ms) =
+            self.run_teardown_phase(script, &transcript, passed);
+        let phase_durations = PhaseDurations {
+            setup_ms,
+            lifecycle_ms,
+            execute_ms,
+            verify_ms,
+            teardown_ms,
+        };
+        let total_ms = phase_durations.setup_ms
+            + phase_durations.lifecycle_ms
+            + phase_durations.execute_ms
+            + phase_durations.verify_ms
+            + phase_durations.teardown_ms;
 
         SessionE2eResult {
             passed,
             run_id: self.run_id.clone(),
             scenario_id: self.config.scenario_id.clone(),
             connector_id: self.config.connector_id.clone(),
-            duration_ms: start.elapsed().as_millis() as u64,
+            duration_ms: total_ms,
             transcript_summary: Some(summary),
             transcript: Some(transcript),
             phase_logs: self.logs.clone(),
             evidence,
             replay_command,
-            phase_durations: PhaseDurations::default(),
+            phase_durations,
         }
     }
 
@@ -601,6 +620,72 @@ impl SessionE2eRunner {
             });
         }
 
+        let phase_log_lines = self
+            .logs_to_jsonl()
+            .lines()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+        if !phase_log_lines.is_empty() {
+            steps.push(ScenarioStep {
+                index: steps.len() as u32,
+                kind: StepKind::Checkpoint,
+                description: "Structured phase logs and transcript summary".to_string(),
+                correlation_id: self.correlation_id.clone(),
+                timestamp: transcript.finished_at.to_rfc3339(),
+                duration_ms: Some(transcript.total_duration.as_millis() as u64),
+                assertions: vec![
+                    StepAssertion {
+                        description: "Phase logs captured".to_string(),
+                        passed: true,
+                        expected: ">0 entries".to_string(),
+                        actual: self.logs.len().to_string(),
+                    },
+                    StepAssertion {
+                        description: "Transcript outcome".to_string(),
+                        passed,
+                        expected: if passed {
+                            "pass".to_string()
+                        } else {
+                            "fail".to_string()
+                        },
+                        actual: if passed {
+                            "pass".to_string()
+                        } else {
+                            "fail".to_string()
+                        },
+                    },
+                ],
+                evidence: vec![
+                    EvidenceItem::Log {
+                        lines: phase_log_lines,
+                    },
+                    EvidenceItem::Metric {
+                        name: "phase_log_count".to_string(),
+                        value: self.logs.len() as f64,
+                        unit: "entries".to_string(),
+                    },
+                    EvidenceItem::Metric {
+                        name: "transcript_step_count".to_string(),
+                        value: transcript.summary.total as f64,
+                        unit: "steps".to_string(),
+                    },
+                    EvidenceItem::Metric {
+                        name: "transcript_duration_ms".to_string(),
+                        value: transcript.total_duration.as_millis() as f64,
+                        unit: "ms".to_string(),
+                    },
+                    EvidenceItem::HealthSnapshot {
+                        component: self.config.connector_id.clone(),
+                        state: if passed {
+                            "healthy".to_string()
+                        } else {
+                            "degraded".to_string()
+                        },
+                    },
+                ],
+            });
+        }
+
         let outcome = if passed {
             ScenarioOutcome::Pass
         } else {
@@ -652,20 +737,33 @@ impl SessionE2eRunner {
             acc
         });
 
+        let cargo_replay = self.config.replay_test_filter.as_deref().map_or_else(
+            || {
+                "# No direct cargo test filter is recorded for this scenario.\n\
+                 # Re-run the host-facing simulate command above or supply a concrete cargo test filter."
+                    .to_string()
+            },
+            |filter| {
+                format!(
+                    "# Re-run the associated fcp-e2e test/filter:\n\
+                     cargo test -p fcp-e2e {filter} -- --nocapture"
+                )
+            },
+        );
+
         format!(
             "# Replay session E2E:\n\
              # Run ID: {}\n\
              # Correlation: {}\n\
              fwc simulate {} --scenario {}{}{}\n\
-             # Or re-run the full session:\n\
-             cargo test -p fcp-e2e --test session_lifecycle_e2e -- {} --nocapture",
+             {}",
             self.run_id,
             self.correlation_id,
             self.config.connector_id,
             script.scenario_id,
             fixture_arg,
             env_args,
-            script.scenario_id.replace('.', "_"),
+            cargo_replay,
         )
     }
 }
@@ -899,8 +997,7 @@ mod tests {
             ..Default::default()
         });
 
-        let script =
-            SessionScript::new("phases").step(ScriptStep::annotate("test step"));
+        let script = SessionScript::new("phases").step(ScriptStep::annotate("test step"));
 
         let result = runner.execute(&script);
 
@@ -923,6 +1020,8 @@ mod tests {
         let cmd = runner.build_replay_command(&SessionScript::new("ws.test"));
         assert!(cmd.contains("--fixture-addr 127.0.0.1:8080"));
         assert!(cmd.contains("discord"));
+        assert!(!cmd.contains("session_lifecycle_e2e"));
+        assert!(cmd.contains("No direct cargo test filter"));
     }
 
     #[test]
@@ -938,6 +1037,21 @@ mod tests {
         let cmd = runner.build_replay_command(&SessionScript::new("env.test"));
         assert!(cmd.contains("API_KEY=<redacted>"));
         assert!(!cmd.contains("secret123"));
+    }
+
+    #[test]
+    fn replay_command_uses_explicit_test_filter_when_available() {
+        let runner = SessionE2eRunner::new(SessionE2eConfig {
+            connector_id: "discord".into(),
+            scenario_id: "ws.test".into(),
+            replay_test_filter: Some("host_e2e::tests::execute_basic_sse_script_passes".into()),
+            ..Default::default()
+        });
+        let cmd = runner.build_replay_command(&SessionScript::new("ws.test"));
+        assert!(cmd.contains(
+            "cargo test -p fcp-e2e host_e2e::tests::execute_basic_sse_script_passes -- --nocapture"
+        ));
+        assert!(!cmd.contains("No direct cargo test filter"));
     }
 
     #[test]
@@ -971,6 +1085,113 @@ mod tests {
     }
 
     #[test]
+    fn external_transcript_records_all_phases_and_checkpoint_evidence() {
+        let mut runner = SessionE2eRunner::new(SessionE2eConfig {
+            connector_id: "telegram".into(),
+            scenario_id: "poll.cursor_recovery".into(),
+            ..Default::default()
+        });
+
+        let script = SessionScript::new("poll.cursor_recovery")
+            .step(ScriptStep::connect(Transport::LongPoll, "/getUpdates"))
+            .step(ScriptStep::expect_any_message())
+            .step(ScriptStep::disconnect());
+
+        let now = Utc::now();
+        let transcript = SessionTranscript {
+            scenario_id: "poll.cursor_recovery".into(),
+            run_id: runner.run_id.clone(),
+            transport: Some(Transport::LongPoll),
+            started_at: now,
+            finished_at: now + chrono::Duration::milliseconds(65),
+            total_duration: Duration::from_millis(65),
+            entries: vec![
+                TranscriptEntry {
+                    timestamp: now,
+                    step_index: 0,
+                    step: ScriptStep::connect(Transport::LongPoll, "/getUpdates"),
+                    outcome: StepOutcome::Pass,
+                    duration: Duration::from_millis(10),
+                    detail: None,
+                    correlation_id: None,
+                },
+                TranscriptEntry {
+                    timestamp: now,
+                    step_index: 1,
+                    step: ScriptStep::expect_any_message(),
+                    outcome: StepOutcome::Pass,
+                    duration: Duration::from_millis(50),
+                    detail: Some(serde_json::json!("Received update payload")),
+                    correlation_id: None,
+                },
+                TranscriptEntry {
+                    timestamp: now,
+                    step_index: 2,
+                    step: ScriptStep::disconnect(),
+                    outcome: StepOutcome::Pass,
+                    duration: Duration::from_millis(5),
+                    detail: None,
+                    correlation_id: None,
+                },
+            ],
+            outcome: StepOutcome::Pass,
+            summary: TranscriptSummary {
+                total: 3,
+                passed: 3,
+                failed: 0,
+                skipped: 0,
+                timed_out: 0,
+            },
+        };
+
+        let result = runner.record_external_transcript(&script, transcript);
+        let phases: Vec<SessionPhase> = result.phase_logs.iter().map(|log| log.phase).collect();
+        assert!(phases.contains(&SessionPhase::Setup));
+        assert!(phases.contains(&SessionPhase::Lifecycle));
+        assert!(phases.contains(&SessionPhase::Execute));
+        assert!(phases.contains(&SessionPhase::Verify));
+        assert!(phases.contains(&SessionPhase::Teardown));
+        assert_eq!(result.phase_durations.execute_ms, 65);
+        assert_eq!(
+            result.duration_ms,
+            result.phase_durations.setup_ms
+                + result.phase_durations.lifecycle_ms
+                + result.phase_durations.execute_ms
+                + result.phase_durations.verify_ms
+                + result.phase_durations.teardown_ms
+        );
+        assert!(result.duration_ms >= 65);
+
+        let checkpoint = result
+            .evidence
+            .script
+            .steps
+            .last()
+            .expect("checkpoint step should exist");
+        assert_eq!(checkpoint.kind, StepKind::Checkpoint);
+        assert!(
+            checkpoint
+                .evidence
+                .iter()
+                .any(|item| matches!(item, EvidenceItem::Log { lines } if !lines.is_empty()))
+        );
+        assert!(checkpoint.evidence.iter().any(|item| {
+            matches!(
+                item,
+                EvidenceItem::Metric { name, value, unit }
+                    if name == "transcript_duration_ms" && *value == 65.0 && unit == "ms"
+            )
+        }));
+        assert!(checkpoint.evidence.iter().any(|item| {
+            matches!(
+                item,
+                EvidenceItem::HealthSnapshot { component, state }
+                    if component == "telegram" && state == "healthy"
+            )
+        }));
+    }
+
+    #[test]
     fn config_serialization_roundtrip() {
         let cfg = SessionE2eConfig {
             connector_id: "discord".into(),
@@ -984,11 +1205,16 @@ mod tests {
             },
             tags: vec!["streaming".into()],
             author: "agent-x".into(),
+            replay_test_filter: Some("host_e2e::tests::execute_basic_sse_script_passes".into()),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let roundtrip: SessionE2eConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip.connector_id, "discord");
         assert_eq!(roundtrip.scenario_id, "ws.test");
         assert_eq!(roundtrip.tags, vec!["streaming"]);
+        assert_eq!(
+            roundtrip.replay_test_filter.as_deref(),
+            Some("host_e2e::tests::execute_basic_sse_script_passes")
+        );
     }
 }

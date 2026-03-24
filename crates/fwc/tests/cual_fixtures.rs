@@ -155,6 +155,10 @@ struct HostIntegrationFixture {
     tool_count: usize,
     #[serde(default)]
     provenance_markers: Vec<String>,
+    #[serde(default)]
+    required_artifacts: Vec<String>,
+    #[serde(default)]
+    required_log_fields: Vec<String>,
     notes: String,
 }
 
@@ -420,6 +424,15 @@ fn validate_batch_fixture(relative: &str) -> Result<(), String> {
 
 fn load_host_integration_fixture_catalog() -> HostIntegrationFixtureCatalog {
     load_json("host_integration/fixture_matrix.json")
+}
+
+fn assert_contains_all_strings(actual: &[String], expected: &[&str], label: &str) {
+    for expected_value in expected {
+        assert!(
+            actual.iter().any(|value| value == expected_value),
+            "{label} missing `{expected_value}`; got {actual:?}"
+        );
+    }
 }
 
 #[test]
@@ -793,6 +806,21 @@ fn host_integration_fixture_matrix_entries_are_semantically_complete() {
             "fixture {} should explain why it exists",
             fixture.id
         );
+        assert_contains_all_strings(
+            &fixture.required_artifacts,
+            &[
+                "trace.jsonl",
+                "summary.json",
+                "environment.json",
+                "replay.sh",
+            ],
+            &format!("fixture {} required_artifacts", fixture.id),
+        );
+        assert_contains_all_strings(
+            &fixture.required_log_fields,
+            &["correlation_id", "phase"],
+            &format!("fixture {} required_log_fields", fixture.id),
+        );
     }
 
     let github = catalog
@@ -806,8 +834,34 @@ fn host_integration_fixture_matrix_entries_are_semantically_complete() {
     assert_eq!(github.reversibility, OperationReversibility::Mixed);
     assert_eq!(github.tool_count, 2);
     assert!(
+        !github
+            .required_artifacts
+            .iter()
+            .any(|artifact| artifact == "session_transcript.json")
+    );
+    assert!(
         github
             .notes
             .contains("workflow_search_to_invoke_to_history_full_chain")
     );
+
+    for fixture_id in [
+        "slack_event_stream",
+        "stripe_webhook_receipts",
+        "gmail_polling_sync",
+        "browser_session_automation",
+    ] {
+        let fixture = catalog
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.id == fixture_id)
+            .unwrap_or_else(|| panic!("fixture {fixture_id} should exist"));
+        assert!(
+            fixture
+                .required_artifacts
+                .iter()
+                .any(|artifact| artifact == "session_transcript.json"),
+            "fixture {fixture_id} should require session_transcript.json"
+        );
+    }
 }

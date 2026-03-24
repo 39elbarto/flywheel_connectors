@@ -54,6 +54,10 @@ struct HostIntegrationFixture {
     tool_count: usize,
     #[serde(default)]
     provenance_markers: Vec<String>,
+    #[serde(default)]
+    required_artifacts: Vec<String>,
+    #[serde(default)]
+    required_log_fields: Vec<String>,
     notes: String,
 }
 
@@ -129,6 +133,55 @@ fn load_host_integration_fixture(id: &str) -> HostIntegrationFixture {
         .into_iter()
         .find(|fixture| fixture.id == id)
         .unwrap_or_else(|| panic!("missing host integration fixture `{id}`"))
+}
+
+fn assert_fixture_has_core_host_bundle(fixture: &HostIntegrationFixture) {
+    for artifact in [
+        "trace.jsonl",
+        "summary.json",
+        "environment.json",
+        "replay.sh",
+    ] {
+        assert!(
+            fixture
+                .required_artifacts
+                .iter()
+                .any(|value| value == artifact),
+            "fixture {} missing required artifact {artifact}",
+            fixture.id
+        );
+    }
+    for field in ["correlation_id", "phase"] {
+        assert!(
+            fixture
+                .required_log_fields
+                .iter()
+                .any(|value| value == field),
+            "fixture {} missing required log field {field}",
+            fixture.id
+        );
+    }
+}
+
+#[test]
+fn session_oriented_host_integration_fixtures_require_session_transcript_artifacts() {
+    for (fixture_id, archetype) in [
+        ("slack_event_stream", "streaming"),
+        ("stripe_webhook_receipts", "webhook"),
+        ("gmail_polling_sync", "polling"),
+        ("browser_session_automation", "browser"),
+    ] {
+        let fixture = load_host_integration_fixture(fixture_id);
+        assert_eq!(fixture.archetype, archetype);
+        assert_fixture_has_core_host_bundle(&fixture);
+        assert!(
+            fixture
+                .required_artifacts
+                .iter()
+                .any(|value| value == "session_transcript.json"),
+            "fixture {fixture_id} should require session_transcript.json"
+        );
+    }
 }
 
 fn spawn_mock_host_sequence(routes: Vec<(String, Value)>) -> (String, thread::JoinHandle<()>) {
@@ -2305,6 +2358,13 @@ fn workflow_search_to_invoke_to_history_full_chain() {
     assert_eq!(github_fixture.auth_scope, "tenant_scoped");
     assert_eq!(github_fixture.reversibility, "mixed");
     assert_eq!(github_fixture.operation_family, "issues");
+    assert_fixture_has_core_host_bundle(&github_fixture);
+    assert!(
+        !github_fixture
+            .required_artifacts
+            .iter()
+            .any(|value| value == "session_transcript.json")
+    );
     assert!(
         github_fixture
             .provenance_markers

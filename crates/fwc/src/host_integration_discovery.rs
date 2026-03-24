@@ -933,7 +933,7 @@ pub fn format_matrix_result_toon(result: &MatrixResult) -> String {
     let _ = writeln!(out);
 
     let mut categories: Vec<_> = result.by_category.iter().collect();
-    categories.sort_by_key(|(k, _)| k.clone());
+    categories.sort_by_key(|(k, _)| (*k).clone());
 
     for (name, cat) in &categories {
         let _ = writeln!(

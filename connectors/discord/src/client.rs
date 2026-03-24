@@ -47,7 +47,7 @@ impl DiscordClient {
 
     /// Get a reference to the underlying API client.
     #[must_use]
-    pub fn api_client(&self) -> &DiscordApiClient {
+    pub const fn api_client(&self) -> &DiscordApiClient {
         &self.inner
     }
 }
@@ -65,7 +65,7 @@ impl fmt::Debug for DiscordClient {
         f.debug_struct("DiscordClient")
             .field("base_url", &self.base_url)
             .field("bot_credential", &"[REDACTED]")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

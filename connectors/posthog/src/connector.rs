@@ -572,7 +572,7 @@ impl PostHogConnector {
                         Some(&live_probe),
                     )
                 }
-                Err(PostHogError::Unauthorized) | Err(PostHogError::Forbidden) => {
+                Err(PostHogError::Unauthorized | PostHogError::Forbidden) => {
                     self.attach_self_check_details(
                         SelfCheckReport::failed(
                             "auth_invalid",

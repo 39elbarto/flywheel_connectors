@@ -23,9 +23,9 @@ impl std::fmt::Debug for Auth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
-            Self::CredentialId { _id } => f
+            Self::CredentialId { _id: id } => f
                 .debug_struct("CredentialId")
-                .field("_id", _id)
+                .field("_id", id)
                 .finish(),
         }
     }

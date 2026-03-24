@@ -167,19 +167,19 @@ fn default_place_details_field_mask() -> String {
     DEFAULT_PLACE_DETAILS_FIELD_MASK.to_string()
 }
 
-fn invalid_request(code: u32, message: impl Into<String>) -> FcpError {
+fn invalid_request(code: u16, message: impl Into<String>) -> FcpError {
     FcpError::InvalidRequest {
         code,
         message: message.into(),
     }
 }
 
-fn parse_value<T: DeserializeOwned>(value: Value, code: u32, context: &str) -> FcpResult<T> {
+fn parse_value<T: DeserializeOwned>(value: Value, code: u16, context: &str) -> FcpResult<T> {
     serde_json::from_value(value)
         .map_err(|error| invalid_request(code, format!("Invalid {context}: {error}")))
 }
 
-fn validate_non_empty_mask(mask: &str, field: &str, code: u32) -> FcpResult<()> {
+fn validate_non_empty_mask(mask: &str, field: &str, code: u16) -> FcpResult<()> {
     if mask.trim().is_empty() {
         return Err(invalid_request(code, format!("{field} must not be empty")));
     }

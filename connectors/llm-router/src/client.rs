@@ -53,7 +53,7 @@ impl std::fmt::Debug for LlmRouterClient {
             .field("base_url", &self.base_url)
             .field("auth", &self.auth.redacted_label())
             .field("retry_config", &self.retry_config)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -165,7 +165,7 @@ impl LlmRouterClient {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
-        let result = RetryLoop::execute(&ctx, &policy, |attempt| {
+        RetryLoop::execute(&ctx, &policy, |attempt| {
             let req = self
                 .authenticated_request(reqwest::Method::POST, &url)
                 .json(&body);
@@ -227,9 +227,7 @@ impl LlmRouterClient {
                 }
             }
         })
-        .await;
-
-        result
+        .await
     }
 
     /// List available models from the provider's models endpoint.

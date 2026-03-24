@@ -512,7 +512,7 @@ impl AmplitudeConnector {
                         Some(&live_probe),
                     )
                 }
-                Err(AmplitudeError::Unauthorized) | Err(AmplitudeError::Forbidden) => self
+                Err(AmplitudeError::Unauthorized | AmplitudeError::Forbidden) => self
                     .attach_self_check_details(
                         SelfCheckReport::failed(
                             "auth_invalid",
@@ -1075,6 +1075,15 @@ mod tests {
         let result = AmplitudeConfig::from_params(&json!({
             "api_key": "key",
             "secret_key": ["a", "b"],
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_object_secret_key() {
+        let result = AmplitudeConfig::from_params(&json!({
+            "api_key": "key",
+            "secret_key": {"nested": true},
         }));
         assert!(result.is_err());
     }

@@ -5,7 +5,8 @@
 //! connector acceptance tests that need real redirects, retries, uploads,
 //! downloads, and timeout behavior without depending on an external `SaaS`.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
+use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{
@@ -16,6 +17,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::{LogRedactionScanner, LogScanReport};
 
 /// Stable artifact kind for the canonical HTTP fixture contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +375,843 @@ pub fn canonical_http_fixture_contract() -> HttpFixtureContract {
     }
 }
 
+const DEFAULT_HTTP_FIXTURE_AUTH_TOKEN: &str = "fixture-test-token";
+const DEFAULT_HTTP_FIXTURE_UPLOAD_BODY: &str = "fixture-upload-payload";
+const DEFAULT_HTTP_FIXTURE_DOWNLOAD_HEX: &str = "666978747572652d646f776e6c6f6164";
+const DEFAULT_HTTP_FIXTURE_TIMEOUT_DELAY_MS: u64 = 250;
+
+/// Serializable request body encoding for fixture artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpFixturePayloadEncoding {
+    /// UTF-8 payload content.
+    Utf8,
+    /// Hex-encoded binary payload content.
+    Hex,
+}
+
+/// Structured payload snapshot for request/response evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpFixturePayloadRecord {
+    /// Encoding used for `body`.
+    pub encoding: HttpFixturePayloadEncoding,
+    /// Redacted payload content.
+    pub body: String,
+    /// Original payload byte length before redaction.
+    pub length: usize,
+    /// Blake3 digest of the original payload bytes.
+    pub blake3: String,
+}
+
+/// Serializable response body for a seeded HTTP fixture route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpFixtureBodySpec {
+    /// Empty body.
+    Empty,
+    /// JSON body serialized on write.
+    Json(serde_json::Value),
+    /// UTF-8 text body.
+    Text(String),
+    /// Binary body encoded as lowercase hex.
+    BinaryHex(String),
+}
+
+impl HttpFixtureBodySpec {
+    fn to_body(&self) -> HttpFixtureBody {
+        match self {
+            Self::Empty => HttpFixtureBody::Empty,
+            Self::Json(value) => HttpFixtureBody::Json(value.clone()),
+            Self::Text(text) => HttpFixtureBody::Text(text.clone()),
+            Self::BinaryHex(value) => {
+                HttpFixtureBody::Binary(hex::decode(value).unwrap_or_default())
+            }
+        }
+    }
+
+    fn redacted(&self) -> Self {
+        match self {
+            Self::Empty => Self::Empty,
+            Self::Json(value) => Self::Json(redact_json_value(value)),
+            Self::Text(text) => Self::Text(redact_text_value(text)),
+            Self::BinaryHex(value) => Self::BinaryHex(value.clone()),
+        }
+    }
+}
+
+/// Serializable HTTP response for a seeded HTTP fixture route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpFixtureResponseSpec {
+    /// Response status code.
+    pub status: u16,
+    /// Response headers in write order.
+    pub headers: Vec<(String, String)>,
+    /// Response body.
+    pub body: HttpFixtureBodySpec,
+    /// Optional delay before the response is written.
+    pub delay_ms: Option<u64>,
+}
+
+impl HttpFixtureResponseSpec {
+    /// Build an empty response with the given status.
+    #[must_use]
+    pub const fn empty(status: u16) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: HttpFixtureBodySpec::Empty,
+            delay_ms: None,
+        }
+    }
+
+    /// Build a JSON response with status 200.
+    #[must_use]
+    pub fn json(body: serde_json::Value) -> Self {
+        Self {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: HttpFixtureBodySpec::Json(body),
+            delay_ms: None,
+        }
+    }
+
+    /// Build a text response with the given status.
+    #[must_use]
+    pub fn text(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
+            body: HttpFixtureBodySpec::Text(body.into()),
+            delay_ms: None,
+        }
+    }
+
+    /// Build a binary response body encoded as lowercase hex.
+    #[must_use]
+    pub fn binary_hex(hex_body: &str, content_type: &str) -> Self {
+        Self {
+            status: 200,
+            headers: vec![("Content-Type".into(), content_type.to_string())],
+            body: HttpFixtureBodySpec::BinaryHex(hex_body.to_string()),
+            delay_ms: None,
+        }
+    }
+
+    /// Build a redirect response.
+    #[must_use]
+    pub fn redirect(status: u16, location: &str) -> Self {
+        Self::empty(status).with_header("Location", location)
+    }
+
+    /// Build a rate-limited response with a `Retry-After` header.
+    #[must_use]
+    pub fn rate_limited(retry_after_secs: u64, body: serde_json::Value) -> Self {
+        Self::json(body)
+            .with_status(429)
+            .with_header("Retry-After", retry_after_secs.to_string())
+    }
+
+    /// Override the response status.
+    #[must_use]
+    pub const fn with_status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Append a response header.
+    #[must_use]
+    pub fn with_header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.push((name.to_string(), value.into()));
+        self
+    }
+
+    /// Delay the response by a deterministic number of milliseconds.
+    #[must_use]
+    pub const fn with_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.delay_ms = Some(delay_ms);
+        self
+    }
+
+    fn to_response(&self) -> HttpFixtureResponse {
+        let mut response = HttpFixtureResponse {
+            status: self.status,
+            headers: self.headers.clone(),
+            body: self.body.to_body(),
+            delay: self.delay_ms.map(Duration::from_millis),
+        };
+        if let Some(delay_ms) = self.delay_ms {
+            response = response.with_delay(Duration::from_millis(delay_ms));
+        }
+        response
+    }
+
+    fn redacted(&self) -> Self {
+        Self {
+            status: self.status,
+            headers: redact_headers(&self.headers),
+            body: self.body.redacted(),
+            delay_ms: self.delay_ms,
+        }
+    }
+}
+
+/// Serializable seeded route for a reusable HTTP fixture scenario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpFixtureRouteSpec {
+    /// Canonical scenario this route belongs to.
+    pub scenario_id: String,
+    /// Request method.
+    pub method: String,
+    /// Route path.
+    pub path: String,
+    /// Required query parameters.
+    pub query: Vec<(String, String)>,
+    /// Required request headers.
+    pub required_headers: Vec<(String, String)>,
+    /// Response sequence for this route.
+    pub responses: Vec<HttpFixtureResponseSpec>,
+}
+
+impl HttpFixtureRouteSpec {
+    /// Build a route spec for the given scenario id, method, and path.
+    #[must_use]
+    pub fn new(scenario_id: &str, method: &str, path: &str) -> Self {
+        Self {
+            scenario_id: scenario_id.to_string(),
+            method: method.to_ascii_uppercase(),
+            path: path.to_string(),
+            query: Vec::new(),
+            required_headers: Vec::new(),
+            responses: Vec::new(),
+        }
+    }
+
+    /// Require a specific query parameter.
+    #[must_use]
+    pub fn with_query(mut self, name: &str, value: &str) -> Self {
+        self.query.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    /// Require a specific request header.
+    #[must_use]
+    pub fn require_header(mut self, name: &str, value: &str) -> Self {
+        self.required_headers
+            .push((name.to_string(), value.to_string()));
+        self
+    }
+
+    /// Require an `Authorization: Bearer ...` header.
+    #[must_use]
+    pub fn require_bearer(self, token: &str) -> Self {
+        self.require_header("Authorization", &format!("Bearer {token}"))
+    }
+
+    /// Append a response to the route sequence.
+    #[must_use]
+    pub fn respond_with(mut self, response: HttpFixtureResponseSpec) -> Self {
+        self.responses.push(response);
+        self
+    }
+
+    fn to_route(&self) -> HttpFixtureRoute {
+        let mut route =
+            HttpFixtureRoute::new(&self.method, &self.path).for_scenario(&self.scenario_id);
+        for (name, value) in &self.query {
+            route = route.with_query(name, value);
+        }
+        for (name, value) in &self.required_headers {
+            route = route.require_header(name, value);
+        }
+        for response in &self.responses {
+            route = route.respond_with(response.to_response());
+        }
+        route
+    }
+
+    fn redacted(&self) -> Self {
+        Self {
+            scenario_id: self.scenario_id.clone(),
+            method: self.method.clone(),
+            path: self.path.clone(),
+            query: self.query.clone(),
+            required_headers: redact_headers(&self.required_headers),
+            responses: self
+                .responses
+                .iter()
+                .map(HttpFixtureResponseSpec::redacted)
+                .collect(),
+        }
+    }
+}
+
+/// Replay request recipe for an HTTP fixture scenario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpFixtureReplayRequest {
+    /// Operator-facing explanation of the replay step.
+    pub description: String,
+    /// Request method.
+    pub method: String,
+    /// Request path.
+    pub path: String,
+    /// Query parameters in wire order.
+    pub query: Vec<(String, String)>,
+    /// Request headers.
+    pub headers: Vec<(String, String)>,
+    /// Optional request body.
+    pub body: Option<String>,
+}
+
+impl HttpFixtureReplayRequest {
+    /// Build a replay request for the given method and path.
+    #[must_use]
+    pub fn new(description: &str, method: &str, path: &str) -> Self {
+        Self {
+            description: description.to_string(),
+            method: method.to_ascii_uppercase(),
+            path: path.to_string(),
+            query: Vec::new(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    /// Append a query parameter.
+    #[must_use]
+    pub fn with_query(mut self, name: &str, value: &str) -> Self {
+        self.query.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    /// Append a header.
+    #[must_use]
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    /// Attach a request body.
+    #[must_use]
+    pub fn with_body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    fn redacted(&self) -> Self {
+        Self {
+            description: self.description.clone(),
+            method: self.method.clone(),
+            path: self.path.clone(),
+            query: self.query.clone(),
+            headers: redact_headers_for_replay(&self.headers),
+            body: self.body.as_ref().map(|body| redact_text_value(body)),
+        }
+    }
+
+    fn shell_command(&self, base_url: &str) -> String {
+        let mut parts = vec![
+            "curl".to_string(),
+            "-sS".to_string(),
+            "-i".to_string(),
+            "-X".to_string(),
+            self.method.clone(),
+            shell_quote(&format!(
+                "{base_url}{}{}",
+                self.path,
+                render_query_string(&self.query)
+            )),
+        ];
+        for (name, value) in &self.headers {
+            parts.push("-H".to_string());
+            parts.push(shell_quote(&format!("{name}: {value}")));
+        }
+        if let Some(body) = &self.body {
+            parts.push("--data-binary".to_string());
+            parts.push(shell_quote(body));
+        }
+        parts.join(" ")
+    }
+}
+
+/// Seeded HTTP fixture scenario with routes and replay requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpFixtureScenarioSeed {
+    /// Canonical scenario definition.
+    pub definition: HttpFixtureScenarioDefinition,
+    /// Concrete routes mounted for this scenario.
+    pub routes: Vec<HttpFixtureRouteSpec>,
+    /// Replay requests that exercise the mounted routes.
+    pub replay_requests: Vec<HttpFixtureReplayRequest>,
+}
+
+impl HttpFixtureScenarioSeed {
+    /// Build a scenario seed from a canonical scenario kind.
+    #[must_use]
+    pub fn new(kind: HttpFixtureScenarioKind) -> Self {
+        canonical_http_fixture_scenario_seed(kind)
+    }
+
+    fn redacted(&self) -> Self {
+        Self {
+            definition: self.definition.clone(),
+            routes: self
+                .routes
+                .iter()
+                .map(HttpFixtureRouteSpec::redacted)
+                .collect(),
+            replay_requests: self
+                .replay_requests
+                .iter()
+                .map(HttpFixtureReplayRequest::redacted)
+                .collect(),
+        }
+    }
+}
+
+/// Reusable seeded HTTP fixture pack for truthful request-response acceptance runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpFixtureScenarioPack {
+    /// Version marker for the pack contract.
+    pub contract_version: String,
+    /// Required suite class from the acceptance taxonomy.
+    pub suite_class: String,
+    /// Stable fixture pack identifier.
+    pub fixture_id: String,
+    /// Transport truth exercised by the pack.
+    pub transport: String,
+    /// Existing helpers that should be promoted rather than replaced.
+    pub promoted_helpers: Vec<HttpFixtureHelperReference>,
+    /// Run-level artifacts every compliant harness should emit.
+    pub artifacts: Vec<HttpFixtureArtifactDescriptor>,
+    /// Seeded scenarios in this pack.
+    pub scenarios: Vec<HttpFixtureScenarioSeed>,
+}
+
+impl HttpFixtureScenarioPack {
+    /// Build a new empty pack using the canonical HTTP contract metadata.
+    #[must_use]
+    pub fn new(fixture_id: &str) -> Self {
+        let contract = canonical_http_fixture_contract();
+        Self {
+            contract_version: contract.contract_version,
+            suite_class: contract.suite_class,
+            fixture_id: fixture_id.to_string(),
+            transport: contract.transport,
+            promoted_helpers: contract.promoted_helpers,
+            artifacts: contract.artifacts,
+            scenarios: Vec::new(),
+        }
+    }
+
+    /// Build a pack from a selected set of canonical scenarios.
+    #[must_use]
+    pub fn from_scenarios<I>(fixture_id: &str, scenarios: I) -> Self
+    where
+        I: IntoIterator<Item = HttpFixtureScenarioKind>,
+    {
+        scenarios
+            .into_iter()
+            .fold(Self::new(fixture_id), |pack, kind| {
+                pack.with_scenario(HttpFixtureScenarioSeed::new(kind))
+            })
+    }
+
+    /// Build the full canonical pack with all required HTTP scenarios.
+    #[must_use]
+    pub fn canonical(fixture_id: &str) -> Self {
+        Self::from_scenarios(fixture_id, HttpFixtureScenarioKind::ALL)
+    }
+
+    /// Append a seeded scenario.
+    #[must_use]
+    pub fn with_scenario(mut self, scenario: HttpFixtureScenarioSeed) -> Self {
+        self.scenarios.push(scenario);
+        self
+    }
+
+    /// Mount every seeded route in this pack onto the provided fixture server.
+    pub fn mount(&self, fixture: &HttpFixtureServer) {
+        for scenario in &self.scenarios {
+            for route in &scenario.routes {
+                fixture.mount(route.to_route());
+            }
+        }
+    }
+
+    /// Serialize a redacted scenario manifest for persisted artifacts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scenario pack cannot be serialized to JSON.
+    #[must_use]
+    pub fn scenario_manifest(&self) -> serde_json::Value {
+        serde_json::to_value(self.redacted()).expect("HTTP fixture scenario pack should serialize")
+    }
+
+    /// Capture a redacted environment snapshot for replay artifacts.
+    #[must_use]
+    pub fn environment_snapshot(&self, fixture: &HttpFixtureServer) -> serde_json::Value {
+        serde_json::json!({
+            "fixture_id": self.fixture_id,
+            "suite_class": self.suite_class,
+            "transport": self.transport,
+            "base_url": fixture.base_url(),
+            "address": fixture.address().to_string(),
+            "scenario_ids": self
+                .scenarios
+                .iter()
+                .map(|scenario| scenario.definition.scenario_id.clone())
+                .collect::<Vec<_>>(),
+            "artifact_labels": self
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.label.clone())
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// Render a replay script for the mounted fixture pack.
+    #[must_use]
+    pub fn replay_script(&self, fixture: &HttpFixtureServer) -> String {
+        let base_url = fixture.base_url();
+        let mut script = String::from("#!/bin/sh\nset -eu\n\n");
+        script.push_str(
+            "# Start the owning Rust test or harness so the HTTP fixture is listening.\n",
+        );
+        let _ = writeln!(
+            script,
+            "# Fixture pack: {}\nBASE_URL={}\n",
+            self.fixture_id,
+            shell_quote(&base_url)
+        );
+        for scenario in &self.scenarios {
+            let _ = writeln!(
+                script,
+                "# {} ({})\n",
+                scenario.definition.summary, scenario.definition.scenario_id
+            );
+            for request in &scenario.replay_requests {
+                let _ = writeln!(
+                    script,
+                    "# {}\n{}\n",
+                    request.description,
+                    request.redacted().shell_command("$BASE_URL")
+                );
+            }
+            script.push('\n');
+        }
+        script
+    }
+
+    /// Capture the canonical artifact payloads for this fixture pack.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the environment snapshot or scenario manifest cannot be serialized.
+    #[must_use]
+    pub fn capture_artifacts(&self, fixture: &HttpFixtureServer) -> HttpFixtureArtifactBundle {
+        let exchanges = fixture.recorded_exchanges();
+        let logs_jsonl = render_exchange_jsonl(&exchanges);
+        let logs_stable_jsonl = logs_jsonl.clone();
+        let environment_json = self.environment_snapshot(fixture);
+        let scenario_manifest = self.scenario_manifest();
+        let replay_sh = self.replay_script(fixture);
+        let scan_input = [
+            logs_jsonl.as_str(),
+            logs_stable_jsonl.as_str(),
+            &serde_json::to_string(&environment_json)
+                .expect("environment snapshot should serialize"),
+            &serde_json::to_string(&scenario_manifest).expect("scenario manifest should serialize"),
+            replay_sh.as_str(),
+        ]
+        .join("\n");
+        let scan_report = LogRedactionScanner::new().scan_report(&scan_input);
+        let summary_txt = format!(
+            "fixture_id: {}\nbase_url: {}\nscenarios: {}\nrecorded_exchanges: {}\nscan_passed: {}\n",
+            self.fixture_id,
+            fixture.base_url(),
+            self.scenarios.len(),
+            exchanges.len(),
+            scan_report.passed()
+        );
+        let report_json = serde_json::json!({
+            "fixture_id": self.fixture_id,
+            "suite_class": self.suite_class,
+            "transport": self.transport,
+            "scenario_ids": self
+                .scenarios
+                .iter()
+                .map(|scenario| scenario.definition.scenario_id.clone())
+                .collect::<Vec<_>>(),
+            "recorded_exchange_count": exchanges.len(),
+            "recorded_exchanges": exchanges,
+            "artifact_labels": self
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.label.clone())
+                .collect::<Vec<_>>(),
+            "scan_report": scan_report,
+        });
+
+        HttpFixtureArtifactBundle {
+            logs_jsonl,
+            logs_stable_jsonl,
+            report_json,
+            summary_txt,
+            scan_report,
+            environment_json,
+            scenario_manifest,
+            replay_sh,
+        }
+    }
+
+    fn redacted(&self) -> Self {
+        Self {
+            contract_version: self.contract_version.clone(),
+            suite_class: self.suite_class.clone(),
+            fixture_id: self.fixture_id.clone(),
+            transport: self.transport.clone(),
+            promoted_helpers: self.promoted_helpers.clone(),
+            artifacts: self.artifacts.clone(),
+            scenarios: self
+                .scenarios
+                .iter()
+                .map(HttpFixtureScenarioSeed::redacted)
+                .collect(),
+        }
+    }
+}
+
+/// Canonical HTTP fixture artifact payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpFixtureArtifactBundle {
+    /// Schema-valid event stream for the fixture run.
+    pub logs_jsonl: String,
+    /// Stable normalized event stream for deterministic diffs.
+    pub logs_stable_jsonl: String,
+    /// Machine-readable report with exchanges and scan metadata.
+    pub report_json: serde_json::Value,
+    /// Human-readable operator summary.
+    pub summary_txt: String,
+    /// Secret and PII scan report for the emitted evidence.
+    pub scan_report: LogScanReport,
+    /// Redacted environment snapshot.
+    pub environment_json: serde_json::Value,
+    /// Redacted scenario manifest.
+    pub scenario_manifest: serde_json::Value,
+    /// Replay script for the mounted fixture pack.
+    pub replay_sh: String,
+}
+
+/// Assert that a seeded HTTP fixture pack declares the canonical artifact vocabulary.
+///
+/// # Panics
+///
+/// Panics if required metadata or artifact coverage is missing.
+pub fn assert_http_fixture_pack_complete(pack: &HttpFixtureScenarioPack) {
+    assert_eq!(
+        pack.suite_class, "local_non_mock",
+        "HTTP fixture packs must target the local_non_mock suite class"
+    );
+    assert!(
+        !pack.fixture_id.is_empty(),
+        "HTTP fixture packs must define a stable fixture_id"
+    );
+    assert!(
+        !pack.scenarios.is_empty(),
+        "HTTP fixture packs must declare at least one seeded scenario"
+    );
+
+    let scenario_ids: BTreeSet<&str> = pack
+        .scenarios
+        .iter()
+        .map(|scenario| scenario.definition.scenario_id.as_str())
+        .collect();
+    assert_eq!(
+        scenario_ids.len(),
+        pack.scenarios.len(),
+        "HTTP fixture scenario ids must be unique"
+    );
+
+    let declared_artifacts: BTreeSet<&str> = pack
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.label.as_str())
+        .collect();
+    let missing_labels: Vec<String> = canonical_http_fixture_contract()
+        .artifacts
+        .into_iter()
+        .filter(|artifact| !declared_artifacts.contains(artifact.label.as_str()))
+        .map(|artifact| artifact.label)
+        .collect();
+    assert!(
+        missing_labels.is_empty(),
+        "HTTP fixture packs are missing canonical artifact labels: {missing_labels:?}"
+    );
+}
+
+/// Return the canonical seeded scenario definition for one HTTP fixture behavior.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn canonical_http_fixture_scenario_seed(
+    kind: HttpFixtureScenarioKind,
+) -> HttpFixtureScenarioSeed {
+    let definition = HttpFixtureScenarioDefinition::from(kind);
+    match kind {
+        HttpFixtureScenarioKind::AuthBearer => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path())
+                    .require_bearer(DEFAULT_HTTP_FIXTURE_AUTH_TOKEN)
+                    .respond_with(HttpFixtureResponseSpec::json(serde_json::json!({
+                        "ok": true,
+                        "fixture": "auth-bearer",
+                    }))),
+            ],
+            replay_requests: vec![
+                HttpFixtureReplayRequest::new(
+                    "Authorized request against the bearer-gated route",
+                    "GET",
+                    kind.path(),
+                )
+                .with_header("Authorization", "Bearer <redacted>"),
+            ],
+        },
+        HttpFixtureScenarioKind::PaginationPage => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path())
+                    .with_query("page", "1")
+                    .respond_with(HttpFixtureResponseSpec::json(serde_json::json!({
+                        "items": [1, 2],
+                        "next_page": "2",
+                    }))),
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path())
+                    .with_query("page", "2")
+                    .respond_with(HttpFixtureResponseSpec::json(serde_json::json!({
+                        "items": [3],
+                        "next_page": serde_json::Value::Null,
+                    }))),
+            ],
+            replay_requests: vec![
+                HttpFixtureReplayRequest::new("First page traversal request", "GET", kind.path())
+                    .with_query("page", "1"),
+                HttpFixtureReplayRequest::new("Second page traversal request", "GET", kind.path())
+                    .with_query("page", "2"),
+            ],
+        },
+        HttpFixtureScenarioKind::RetryRateLimit => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path())
+                    .respond_with(HttpFixtureResponseSpec::rate_limited(
+                        1,
+                        serde_json::json!({ "error": "slow down" }),
+                    ))
+                    .respond_with(HttpFixtureResponseSpec::json(serde_json::json!({
+                        "jobs": [],
+                        "status": "ok",
+                    }))),
+            ],
+            replay_requests: vec![
+                HttpFixtureReplayRequest::new(
+                    "Initial request that should observe 429 + Retry-After",
+                    "GET",
+                    kind.path(),
+                ),
+                HttpFixtureReplayRequest::new(
+                    "Follow-up retry request that should succeed",
+                    "GET",
+                    kind.path(),
+                ),
+            ],
+        },
+        HttpFixtureScenarioKind::ErrorServer => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path()).respond_with(
+                    HttpFixtureResponseSpec::json(serde_json::json!({
+                        "error": "upstream failure",
+                        "status": 500,
+                    }))
+                    .with_status(500),
+                ),
+            ],
+            replay_requests: vec![HttpFixtureReplayRequest::new(
+                "Error-path request against the upstream failure route",
+                "GET",
+                kind.path(),
+            )],
+        },
+        HttpFixtureScenarioKind::RedirectTemporary => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path())
+                    .respond_with(HttpFixtureResponseSpec::redirect(302, "/v1/current")),
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", "/v1/current").respond_with(
+                    HttpFixtureResponseSpec::json(serde_json::json!({
+                        "migrated": true,
+                    })),
+                ),
+            ],
+            replay_requests: vec![HttpFixtureReplayRequest::new(
+                "Redirect-following request against the legacy route",
+                "GET",
+                kind.path(),
+            )],
+        },
+        HttpFixtureScenarioKind::UploadBinary => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "POST", kind.path())
+                    .require_header("Content-Type", "application/octet-stream")
+                    .respond_with(HttpFixtureResponseSpec::empty(201)),
+            ],
+            replay_requests: vec![
+                HttpFixtureReplayRequest::new(
+                    "Binary upload request against the fixture",
+                    "POST",
+                    kind.path(),
+                )
+                .with_header("Content-Type", "application/octet-stream")
+                .with_body(DEFAULT_HTTP_FIXTURE_UPLOAD_BODY),
+            ],
+        },
+        HttpFixtureScenarioKind::DownloadBinary => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path()).respond_with(
+                    HttpFixtureResponseSpec::binary_hex(
+                        DEFAULT_HTTP_FIXTURE_DOWNLOAD_HEX,
+                        "application/octet-stream",
+                    ),
+                ),
+            ],
+            replay_requests: vec![HttpFixtureReplayRequest::new(
+                "Binary download request against the fixture",
+                "GET",
+                kind.path(),
+            )],
+        },
+        HttpFixtureScenarioKind::TimeoutDelayedResponse => HttpFixtureScenarioSeed {
+            definition,
+            routes: vec![
+                HttpFixtureRouteSpec::new(kind.scenario_id(), "GET", kind.path()).respond_with(
+                    HttpFixtureResponseSpec::json(serde_json::json!({
+                        "slow": true,
+                    }))
+                    .with_delay_ms(DEFAULT_HTTP_FIXTURE_TIMEOUT_DELAY_MS),
+                ),
+            ],
+            replay_requests: vec![HttpFixtureReplayRequest::new(
+                "Slow request that should exceed a short caller timeout budget",
+                "GET",
+                kind.path(),
+            )],
+        },
+    }
+}
+
 /// Recorded HTTP request observed by the fixture server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedHttpRequest {
@@ -539,6 +1379,7 @@ impl HttpFixtureResponse {
 /// Scripted route matcher plus one or more responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpFixtureRoute {
+    scenario_id: Option<String>,
     method: String,
     path: String,
     query: Vec<(String, String)>,
@@ -551,6 +1392,7 @@ impl HttpFixtureRoute {
     #[must_use]
     pub fn new(method: &str, path: &str) -> Self {
         Self {
+            scenario_id: None,
             method: method.to_ascii_uppercase(),
             path: path.to_string(),
             query: Vec::new(),
@@ -589,6 +1431,13 @@ impl HttpFixtureRoute {
         Self::new("DELETE", path)
     }
 
+    /// Associate the route with a canonical scenario identifier.
+    #[must_use]
+    pub fn for_scenario(mut self, scenario_id: &str) -> Self {
+        self.scenario_id = Some(scenario_id.to_string());
+        self
+    }
+
     /// Require a specific query parameter.
     #[must_use]
     pub fn with_query(mut self, name: &str, value: &str) -> Self {
@@ -618,23 +1467,70 @@ impl HttpFixtureRoute {
     }
 }
 
+/// Redacted request record persisted in HTTP fixture artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedHttpRequestArtifact {
+    /// Request method.
+    pub method: String,
+    /// Raw request target.
+    pub target: String,
+    /// Path component without the query string.
+    pub path: String,
+    /// Query parameters in arrival order.
+    pub query: Vec<(String, String)>,
+    /// Redacted request headers.
+    pub headers: Vec<(String, String)>,
+    /// Structured payload snapshot.
+    pub payload: HttpFixturePayloadRecord,
+}
+
+/// Redacted response record persisted in HTTP fixture artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedHttpResponseArtifact {
+    /// Response status code.
+    pub status: u16,
+    /// Redacted response headers.
+    pub headers: Vec<(String, String)>,
+    /// Structured payload snapshot.
+    pub payload: HttpFixturePayloadRecord,
+    /// Optional delay injected before the response was written.
+    pub delay_ms: Option<u64>,
+}
+
+/// Structured request/response exchange observed by the HTTP fixture server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedHttpExchange {
+    /// Optional canonical scenario identifier for the matched route.
+    pub scenario_id: Option<String>,
+    /// Request/response sequence number within the matched route.
+    pub response_index: usize,
+    /// Recorded request metadata.
+    pub request: RecordedHttpRequestArtifact,
+    /// Recorded response metadata.
+    pub response: RecordedHttpResponseArtifact,
+}
+
 #[derive(Debug)]
 struct MountedRoute {
+    scenario_id: Option<String>,
     method: String,
     path: String,
     query: Vec<(String, String)>,
     required_headers: Vec<(String, String)>,
     responses: VecDeque<HttpFixtureResponse>,
+    responses_served: usize,
 }
 
 impl MountedRoute {
     fn from_route(route: HttpFixtureRoute) -> Self {
         Self {
+            scenario_id: route.scenario_id,
             method: route.method,
             path: route.path,
             query: route.query,
             required_headers: route.required_headers,
             responses: route.responses.into(),
+            responses_served: 0,
         }
     }
 
@@ -662,6 +1558,7 @@ impl MountedRoute {
 struct FixtureState {
     routes: Vec<MountedRoute>,
     requests: Vec<RecordedHttpRequest>,
+    exchanges: Vec<RecordedHttpExchange>,
 }
 
 /// Real local HTTP fixture server for non-mock request-response acceptance tests.
@@ -737,6 +1634,7 @@ impl HttpFixtureServer {
         let mut state = lock_fixture_state(&self.state);
         state.routes.clear();
         state.requests.clear();
+        state.exchanges.clear();
     }
 
     /// Return all recorded requests.
@@ -751,6 +1649,20 @@ impl HttpFixtureServer {
     pub fn drain_requests(&self) -> Vec<RecordedHttpRequest> {
         let mut state = lock_fixture_state(&self.state);
         std::mem::take(&mut state.requests)
+    }
+
+    /// Return all recorded request/response exchanges.
+    #[must_use]
+    pub fn recorded_exchanges(&self) -> Vec<RecordedHttpExchange> {
+        let state = lock_fixture_state(&self.state);
+        state.exchanges.clone()
+    }
+
+    /// Drain and return all recorded request/response exchanges.
+    #[must_use]
+    pub fn drain_exchanges(&self) -> Vec<RecordedHttpExchange> {
+        let mut state = lock_fixture_state(&self.state);
+        std::mem::take(&mut state.exchanges)
     }
 
     /// Assert that the fixture recorded the expected number of requests.
@@ -818,38 +1730,64 @@ fn run_accept_loop(listener: &TcpListener, state: &Mutex<FixtureState>, shutdown
                     }
                 };
 
-                let response = {
+                let (response, scenario_id, response_index) = {
                     let mut state = lock_fixture_state(state);
                     state.requests.push(request.clone());
                     let mut matched_exhausted_route = false;
-                    if let Some(response) = state.routes.iter_mut().find_map(|route| {
-                        if !route.matches(&request) {
-                            return None;
-                        }
-                        route.responses.pop_front().map_or_else(
-                            || {
-                                matched_exhausted_route = true;
-                                None
-                            },
-                            Some,
-                        )
-                    }) {
-                        response
+                    if let Some((response, scenario_id, response_index)) =
+                        state.routes.iter_mut().find_map(|route| {
+                            if !route.matches(&request) {
+                                return None;
+                            }
+                            route.responses.pop_front().map_or_else(
+                                || {
+                                    matched_exhausted_route = true;
+                                    None
+                                },
+                                |response| {
+                                    route.responses_served += 1;
+                                    Some((
+                                        response,
+                                        route.scenario_id.clone(),
+                                        route.responses_served,
+                                    ))
+                                },
+                            )
+                        })
+                    {
+                        (response, scenario_id, response_index)
                     } else if matched_exhausted_route {
-                        HttpFixtureResponse::text(500, "fixture route exhausted")
+                        (
+                            HttpFixtureResponse::text(500, "fixture route exhausted"),
+                            None,
+                            0,
+                        )
                     } else {
-                        HttpFixtureResponse::text(
-                            404,
-                            format!(
-                                "no scripted response for {} {}",
-                                request.method, request.target
+                        (
+                            HttpFixtureResponse::text(
+                                404,
+                                format!(
+                                    "no scripted response for {} {}",
+                                    request.method, request.target
+                                ),
                             ),
+                            None,
+                            0,
                         )
                     }
                 };
 
                 if let Some(delay) = response.delay {
                     thread::sleep(delay);
+                }
+                {
+                    let mut state = lock_fixture_state(state);
+                    state.exchanges.push(RecordedHttpExchange {
+                        scenario_id,
+                        response_index,
+                        request: capture_request_artifact(&request),
+                        response: capture_response_artifact(&response),
+                    });
                 }
                 let _ = write_response(&mut stream, &response);
             }
@@ -868,6 +1806,204 @@ fn lock_fixture_state(state: &Mutex<FixtureState>) -> MutexGuard<'_, FixtureStat
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn render_exchange_jsonl(exchanges: &[RecordedHttpExchange]) -> String {
+    let mut output = exchanges
+        .iter()
+        .map(|exchange| {
+            serde_json::to_string(exchange).expect("recorded HTTP exchange should serialize")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output
+}
+
+fn capture_request_artifact(request: &RecordedHttpRequest) -> RecordedHttpRequestArtifact {
+    RecordedHttpRequestArtifact {
+        method: request.method.clone(),
+        target: request.target.clone(),
+        path: request.path.clone(),
+        query: request.query.clone(),
+        headers: redact_headers(&request.headers),
+        payload: capture_payload(&request.body),
+    }
+}
+
+fn capture_response_artifact(response: &HttpFixtureResponse) -> RecordedHttpResponseArtifact {
+    RecordedHttpResponseArtifact {
+        status: response.status,
+        headers: redact_headers(&materialized_response_headers(response)),
+        payload: capture_payload(&response.body_bytes()),
+        delay_ms: response
+            .delay
+            .map(|delay| u64::try_from(delay.as_millis()).unwrap_or(u64::MAX)),
+    }
+}
+
+fn capture_payload(bytes: &[u8]) -> HttpFixturePayloadRecord {
+    let length = bytes.len();
+    let blake3 = blake3::hash(bytes).to_hex().to_string();
+    match std::str::from_utf8(bytes) {
+        Ok(text) => HttpFixturePayloadRecord {
+            encoding: HttpFixturePayloadEncoding::Utf8,
+            body: redact_text_value(text),
+            length,
+            blake3,
+        },
+        Err(_) => HttpFixturePayloadRecord {
+            encoding: HttpFixturePayloadEncoding::Hex,
+            body: hex::encode(bytes),
+            length,
+            blake3,
+        },
+    }
+}
+
+fn materialized_response_headers(response: &HttpFixtureResponse) -> Vec<(String, String)> {
+    let mut headers = response.headers.clone();
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        headers.push((
+            "Content-Length".to_string(),
+            response.body_bytes().len().to_string(),
+        ));
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("connection"))
+    {
+        headers.push(("Connection".to_string(), "close".to_string()));
+    }
+    headers
+}
+
+fn redact_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let redacted = if is_sensitive_header(name) {
+                "redacted".to_string()
+            } else {
+                redact_text_value(value)
+            };
+            (name.clone(), redacted)
+        })
+        .collect()
+}
+
+fn redact_headers_for_replay(headers: &[(String, String)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let redacted = if name.eq_ignore_ascii_case("authorization")
+                && value.to_ascii_lowercase().starts_with("bearer ")
+            {
+                "Bearer <redacted>".to_string()
+            } else if is_sensitive_header(name) {
+                "<redacted>".to_string()
+            } else {
+                redact_text_value(value)
+            };
+            (name.clone(), redacted)
+        })
+        .collect()
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-api-key"
+            | "api-key"
+            | "x-auth-token"
+    )
+}
+
+fn redact_text_value(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text).map_or_else(
+        |_| {
+            if text.to_ascii_lowercase().contains("bearer ") {
+                "redacted".to_string()
+            } else {
+                text.to_string()
+            }
+        },
+        |value| {
+            serde_json::to_string(&redact_json_value(&value))
+                .unwrap_or_else(|_| "redacted".to_string())
+        },
+    )
+}
+
+fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let redacted_value = if should_redact_key(key) {
+                        serde_json::Value::String("redacted".to_string())
+                    } else {
+                        redact_json_value(value)
+                    };
+                    (key.clone(), redacted_value)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact_json_value).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn should_redact_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("authorization")
+        || lower.contains("credential")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+}
+
+fn render_query_string(query: &[(String, String)]) -> String {
+    if query.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "?{}",
+            query
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        )
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:=+$?&".contains(&byte))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn read_http_request(stream: &mut TcpStream) -> io::Result<RecordedHttpRequest> {
@@ -1123,6 +2259,150 @@ mod tests {
         assert_eq!(value["artifacts"][0]["kind"], "jsonl");
         assert_eq!(value["scenarios"][0]["kind"], "auth_bearer");
         assert_eq!(value["scenarios"][0]["method"], "GET");
+    }
+
+    #[test]
+    fn canonical_http_fixture_pack_is_complete_and_canonical() {
+        let pack = HttpFixtureScenarioPack::canonical("shared-http-pack");
+        assert_http_fixture_pack_complete(&pack);
+
+        let scenario_ids = pack
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.definition.scenario_id.as_str())
+            .collect::<Vec<_>>();
+        let canonical_inventory = canonical_http_fixture_inventory();
+        let canonical_ids = canonical_inventory
+            .iter()
+            .map(|scenario| scenario.scenario_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(scenario_ids, canonical_ids);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn scenario_pack_mounts_routes_and_records_redacted_exchanges() {
+        let fixture = HttpFixtureServer::start().expect("fixture should bind");
+        let pack = HttpFixtureScenarioPack::from_scenarios(
+            "http-pack-redaction",
+            [
+                HttpFixtureScenarioKind::AuthBearer,
+                HttpFixtureScenarioKind::RetryRateLimit,
+            ],
+        );
+        pack.mount(&fixture);
+
+        let client = reqwest::Client::new();
+        let auth_response = client
+            .get(format!("{}/v1/protected", fixture.base_url()))
+            .bearer_auth(DEFAULT_HTTP_FIXTURE_AUTH_TOKEN)
+            .send()
+            .await
+            .expect("authorized request should succeed");
+        assert_eq!(auth_response.status(), reqwest::StatusCode::OK);
+
+        let first_retry = client
+            .get(format!("{}/v1/jobs", fixture.base_url()))
+            .send()
+            .await
+            .expect("first retry-path request should complete");
+        assert_eq!(first_retry.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+        let second_retry = client
+            .get(format!("{}/v1/jobs", fixture.base_url()))
+            .send()
+            .await
+            .expect("second retry-path request should complete");
+        assert_eq!(second_retry.status(), reqwest::StatusCode::OK);
+
+        let exchanges = fixture.recorded_exchanges();
+        assert_eq!(exchanges.len(), 3);
+        assert_eq!(
+            exchanges[0].scenario_id.as_deref(),
+            Some(HttpFixtureScenarioKind::AuthBearer.scenario_id())
+        );
+        assert_eq!(
+            exchanges[1].scenario_id.as_deref(),
+            Some(HttpFixtureScenarioKind::RetryRateLimit.scenario_id())
+        );
+        assert_eq!(exchanges[1].response.status, 429);
+        assert_eq!(exchanges[2].response.status, 200);
+        assert_eq!(
+            exchanges[0]
+                .request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.as_str()),
+            Some("redacted")
+        );
+
+        let serialized = serde_json::to_string(&exchanges).expect("exchanges should serialize");
+        assert!(!serialized.contains(DEFAULT_HTTP_FIXTURE_AUTH_TOKEN));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn scenario_pack_captures_redacted_replayable_artifacts() {
+        let fixture = HttpFixtureServer::start().expect("fixture should bind");
+        let pack = HttpFixtureScenarioPack::from_scenarios(
+            "http-pack-artifacts",
+            [
+                HttpFixtureScenarioKind::AuthBearer,
+                HttpFixtureScenarioKind::PaginationPage,
+                HttpFixtureScenarioKind::UploadBinary,
+            ],
+        );
+        pack.mount(&fixture);
+
+        let client = reqwest::Client::new();
+        client
+            .get(format!("{}/v1/protected", fixture.base_url()))
+            .bearer_auth(DEFAULT_HTTP_FIXTURE_AUTH_TOKEN)
+            .send()
+            .await
+            .expect("authorized request should succeed");
+        client
+            .get(format!("{}/v1/items?page=1", fixture.base_url()))
+            .send()
+            .await
+            .expect("pagination request should succeed");
+        client
+            .post(format!("{}/v1/upload", fixture.base_url()))
+            .header("Content-Type", "application/octet-stream")
+            .body(DEFAULT_HTTP_FIXTURE_UPLOAD_BODY.as_bytes().to_vec())
+            .send()
+            .await
+            .expect("upload request should succeed");
+
+        let bundle = pack.capture_artifacts(&fixture);
+
+        assert!(bundle.scan_report.passed());
+        assert!(bundle.logs_jsonl.contains("http.auth.bearer_required"));
+        assert!(!bundle.logs_jsonl.contains(DEFAULT_HTTP_FIXTURE_AUTH_TOKEN));
+        assert_eq!(bundle.report_json["recorded_exchange_count"], 3);
+        assert_eq!(
+            bundle.scenario_manifest["fixture_id"],
+            "http-pack-artifacts"
+        );
+        assert_eq!(
+            bundle.environment_json["artifact_labels"]
+                .as_array()
+                .map(Vec::len),
+            Some(8)
+        );
+        assert!(
+            bundle.environment_json["base_url"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("http://"))
+        );
+        assert!(bundle.replay_sh.contains("curl"));
+        assert!(
+            bundle
+                .replay_sh
+                .contains("Authorization: Bearer <redacted>")
+        );
+        assert!(bundle.replay_sh.contains("$BASE_URL/v1/items?page=1"));
+        assert!(bundle.summary_txt.contains("scan_passed: true"));
     }
 
     #[test]
@@ -1419,18 +2699,18 @@ mod tests {
         fixture.mount(
             HttpFixtureRoute::get("/v1/slow").respond_with(
                 HttpFixtureResponse::json(json!({ "slow": true }))
-                    .with_delay(Duration::from_millis(250)),
+                    .with_delay(Duration::from_millis(1_500)),
             ),
         );
 
         let client = reqwest::Client::new();
         let url = format!("{}/v1/slow", fixture.base_url());
         let request_task = fcp_async_core::task::spawn(async move {
-            fcp_async_core::time::timeout(Duration::from_millis(50), client.get(url).send()).await
+            fcp_async_core::time::timeout(Duration::from_millis(400), client.get(url).send()).await
         });
 
         let mut observed_request = false;
-        for _ in 0..50 {
+        for _ in 0..300 {
             if fixture.recorded_requests().len() == 1 {
                 observed_request = true;
                 break;

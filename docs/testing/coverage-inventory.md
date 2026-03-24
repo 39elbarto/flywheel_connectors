@@ -530,6 +530,260 @@ The family tables below therefore group connectors into planning families while 
 | apple-reminders | local | Y | N | N | N | N | N | N | undocumented | unit-only; no acceptance path |
 | zalouser | cli-process | N | N | N | N | N | N | N | undocumented | no crate-local tests; no acceptance path |
 
+## Pure-Unit Floor Pattern for Request-Response Connectors
+
+> Added by bead `flywheel_connectors-49z0b.16.2` (2026-03-23).  This section
+> defines the pure-unit test floor that downstream family sweeps should enforce.
+
+### Gold-Standard References
+
+- **Netlify** (34 tests, 100% pure) — comprehensive config validation, operation
+  contract verification, helper function testing, doctor/health/introspect
+  coverage.  Best example of a clean `pure_unit` floor.
+- **Shopify** (45 tests, 100% pure) — config + per-operation input validation +
+  auth type enforcement + operation contract verification.
+- **Slack** (61 tests, 93% pure) — exceptional batch-style operation metadata
+  validation.  Only 4 doctor tests use mocks and should move to `tests/`.
+
+### Pure-Unit Floor Checklist
+
+Every request-response connector's `src/` test modules MUST cover the following
+without any `wiremock`, `MockServer`, or `MockApiServer` imports:
+
+| Category | Minimum Tests | What To Verify |
+| --- | --- | --- |
+| Config parsing | 3-5 | Empty/missing fields, type validation, default values, bounds |
+| Auth mode enforcement | 2-3 | api_key vs credential_id rejection, both-present error |
+| Base URL policy | 2 | Approved hosts, localhost, HTTP rejection |
+| Error mapping | 3-5 | `ConnectorErrorMapping::to_fcp_error()`, `is_retryable()`, status codes |
+| Operation info | 5-10 | Count, unique IDs, safety tiers, risk levels, idempotency, capabilities |
+| Helper functions | 1-3 | `require_str`, path encoding, field extraction |
+| Manifest determinism | 1 | Manifest hash is stable across runs |
+| Doctor/health unconfigured | 2 | Doctor reports unhealthy, health reports not-ready |
+
+### Leakage Extraction Pattern
+
+For the 62 connectors with inline mock leakage (see per-file map above), the
+extraction follows two rules:
+
+1. **`client.rs` leaks** (47/62 connectors): Tests that spin up `MockServer` to
+   verify HTTP request construction belong in `tests/integration.rs` as
+   `deterministic_contract`.  Pure struct serialization, error mapping, and URL
+   encoding tests remain in `src/client.rs`.
+
+2. **`connector.rs` leaks** (24/62 connectors): Tests that mock upstream API for
+   `doctor`, `self_check`, or health checks belong in `tests/integration.rs`.
+   Config parsing, operation info, handshake field checking, and introspect
+   metadata tests remain in `src/connector.rs`.
+
+### Current Floor Quality by Connector (Representative Sample)
+
+| Connector | Tests | Pure % | Config | OpInfo | Auth | Error | Grade |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| netlify | 34 | 100% | 13 | 13 | — | — | A |
+| shopify | 45 | 100% | 14 | 7 | 7 | — | A- |
+| slack | 61 | 93% | — | 45+ | — | — | A |
+| anthropic | 80 | 68% | 5 | — | 9 | 15 | B |
+| stripe | 42 | 60% | 9 | — | 9 | 1 | B- |
+| brave-search | 3 | 100% | 3 | — | — | — | D |
+
+### Downstream Consumer Guidance
+
+- `49z0b.8.*` (messaging family) should use Slack's batch metadata pattern.
+- `49z0b.9.*` (productivity family) should use Netlify's config+contract pattern.
+- `49z0b.10.*` (dev-platform family) should use Shopify's input validation pattern.
+- `49z0b.11.*` (cloud/infra family) should use Stripe's URL safety pattern.
+- `49z0b.12.*` (commerce family) should use Shopify + Stripe combined.
+- `49z0b.13.*` (AI/search family) should use Anthropic's SSE parsing + error
+  classification pattern.
+
+## Pure-Unit Floor Pattern for Stateful, Local, and Bridge Connectors
+
+> Added by bead `flywheel_connectors-49z0b.16.3` (2026-03-23).
+
+### Stateful Connector Floor Checklist
+
+In addition to the request-response floor (config, auth, error mapping,
+operation info), stateful connectors MUST test these pure-unit categories:
+
+| Category | Minimum Tests | What To Verify |
+| --- | --- | --- |
+| Event normalization | 2-5 | Provider event → FCP `EventEnvelope` translation |
+| State machine transitions | 3-5 | Connect → Subscribe → Receive → Reconnect → Shutdown |
+| Cursor/offset handling | 2-3 | Pagination tokens, timestamp cursors, sequence numbers |
+| Config for stateful features | 2-3 | Buffer sizes, reconnect limits, heartbeat intervals |
+| Capability/domain mapping | 3-5 | Entity types → capabilities, channel types → permissions |
+
+### Current Floor Quality (Representative Sample)
+
+| Connector | Tests | Pure % | Config | Error | OpInfo | Events | State | Grade |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| discord | 180 | 85% | 14 | 57 | Y | 2 | — | B+ |
+| telegram | 218 | 70% | Y | Y | Y | — | — | B- |
+| homeassistant | 345 | 100% | Y | Y | 30+ | — | — | B |
+| imessage | 65 | 95% | 13 | Y | Y | — | 1 | B |
+| mattermost | 106 | 100% | Y | Y | Y | — | — | C+ |
+| apple-notes | 38 | 100% | 1 | — | — | — | — | D |
+
+### Critical Stateful Gaps
+
+- **Mattermost**: Socket lifecycle (connect → subscribe → ping → reconnect)
+  has zero functional tests despite declaring socket state fields.
+- **Telegram**: No cursor/offset tests despite supporting 1000-event buffering.
+- **Home Assistant**: No entity control state machine tests despite
+  21-variant `EntityDomain` enum.
+- **Apple Notes**: Only 1 test (platform check). Needs config, operation
+  info, and local-filesystem edge case coverage.
+
+### Downstream Consumer Guidance
+
+- `49z0b.8.*` (messaging) should prioritize socket lifecycle and event
+  normalization for Discord, Telegram, Mattermost, Matrix, Signal.
+- `49z0b.10.3` (browser/bridge) should prioritize bridge daemon detection
+  and local-process lifecycle for iMessage, browser.
+- `49z0b.11.2` (databases) should prioritize cursor/pagination and
+  connection pool state for PostgreSQL, DuckDB, Elasticsearch.
+- `49z0b.11.3` (storage) should prioritize upload/download state machine
+  and multipart progress for S3, GCS, Azure Blob.
+
+## HTTP Fixture Adoption Guide
+
+> Added by bead `flywheel_connectors-49z0b.4.3` (2026-03-23).
+
+### How To Use the HTTP Fixture for Connector Acceptance Tests
+
+All types are re-exported through `fcp_e2e`, so connector acceptance tests
+need only `fcp-e2e` as a dependency:
+
+```rust
+use fcp_e2e::{HttpFixtureServer, HttpFixtureRoute, HttpFixtureResponse};
+
+#[fcp_async_core::runtime::test]
+async fn connector_handles_pagination() {
+    let fixture = HttpFixtureServer::start().expect("fixture should bind");
+    fixture.mount(
+        HttpFixtureRoute::get("/v1/items")
+            .with_query("page", "1")
+            .respond_with(HttpFixtureResponse::json(
+                json!({ "items": [1, 2], "next": "2" }),
+            )),
+    );
+    // Point connector at fixture.base_url() instead of real API
+    // ... exercise pagination ...
+    fixture.assert_request_count(2);
+}
+```
+
+### Available Fixture Capabilities
+
+| Capability | How |
+| --- | --- |
+| Auth gating | `.require_header("Authorization", "Bearer tok")` |
+| Pagination | `.with_query("page", "N")` — mount one route per page |
+| Retry | Queue: `.respond_with(R1).respond_with(R2)` |
+| Error envelopes | `HttpFixtureResponse::json_status(500, body)` |
+| Redirects | `HttpFixtureResponse::redirect(302, "/new")` |
+| Binary upload | `HttpFixtureRoute::post(path)` + recorded body |
+| Binary download | `HttpFixtureResponse::binary(bytes, ct)` |
+| Timeouts | `.with_delay(Duration::from_secs(5))` |
+| Request recording | `fixture.recorded_requests()` |
+
+Streaming: `StreamingFixtureServer` (SSE, JSON-lines, heartbeats, connection
+drop, reconnect scripting).  Webhook: `WebhookIngressHarness` +
+`WebhookPayloadBuilder` (GitHub/Stripe/Slack signatures, retry, duplicates).
+All re-exported via `fcp_e2e`.
+
+## Stateful / Local Fixture Platform Matrix
+
+> Added by bead `flywheel_connectors-49z0b.6.3` (2026-03-23).
+
+Use this section together with `docs/V3_Connector_Acceptance_Contract.md`
+Section 6e and `crates/fwc/testdata/host_integration/fixture_matrix.json`.
+The contract defines which suite class is required; this matrix says where that
+suite may run, what it must preserve, and when later beads must escalate from
+`local_non_mock` into `host_e2e`.
+
+### Platform Matrix
+
+| Fixture Family | Minimum Suite Class | Generic CI | Dedicated Host Required When | Mandatory Artifact Bundle | Cleanup Guarantee |
+| --- | --- | --- | --- | --- | --- |
+| Relational DB / embedded storage | `local_non_mock`; add `host_e2e` for admin, policy, or receipt-heavy flows | Yes when the engine is embedded or containerized | Engine depends on platform services, non-portable filesystem behavior, or host policy enforcement | `logs.jsonl`, `report.json`, `environment.json`, `receipts.json`, `replay.sh`, plus fixture-specific dump/state artifact when needed | Unique DB/schema per run; drop or remove on success; preserve failing namespace and dump path in the bundle |
+| Object/blob / key-value / local store | `local_non_mock`; add `host_e2e` when presign, ACL, or sandbox receipts matter | Yes when a truthful local emulator exists | Behavior depends on provider ACL semantics, cloud IAM, or host-bound credential flow | `logs.jsonl`, `report.json`, `environment.json`, `receipts.json`, `replay.sh`, plus uploaded/downloaded artifact paths | Unique bucket/prefix/path per run; remove temporary objects on success; keep captured paths on failure |
+| Queue / pub-sub broker | `local_non_mock` + `host_e2e` | Yes for portable brokers or containerized fixtures | Broker or sidecar is device-bound, non-portable, or coupled to host supervision behavior | `logs.jsonl`, `report.json`, `environment.json`, `broker-state.json`, `receipts.json`, `replay.sh`, `session_transcript.json` when scripted delivery/reconnect semantics matter | Purge queues/topics/subscriptions on success; retain broker state and delivery IDs on failure |
+| Browser session / browser bridge | `local_non_mock` + `host_e2e` | Yes only on workers with a pinned browser binary, headless dependencies, and writable download directory | Coverage depends on macOS/browser automation, anti-bot flows, real desktop bridges, or non-portable browser install state | `logs.jsonl`, `report.json`, `environment.json`, `bridge-events.jsonl`, `downloads/`, `screenshots/`, `replay.sh`, `session_transcript.json` | Close tabs/sessions, delete ephemeral profile/download dirs on success, preserve artifacts on failure |
+| Local process / CLI | `local_non_mock` + `host_e2e` | Yes for hermetic, non-privileged tools | Tool mutates host state, depends on platform-native binaries, or must prove subprocess supervision through `fcp-host` | `logs.jsonl`, `report.json`, `environment.json`, `stdout.txt`, `stderr.txt`, `exit-status.json`, `tmp/`, `replay.sh` | Kill child processes, verify port/socket release, remove temp dir on success, preserve temp dir on failure |
+| Bridge / daemon / mobile-desktop helper | `local_non_mock` + `host_e2e` | No by default | Runtime depends on localhost daemons, device bridges, OS services, or socket/RPC boundaries that generic workers do not own | `logs.jsonl`, `report.json`, `environment.json`, `bridge-events.jsonl`, `daemon-stdout.txt`, `daemon-stderr.txt`, `receipts.json`, `replay.sh`, `session_transcript.json` | Assert clean disconnect; stop helper daemon if the suite started it; leftover PID/socket is a failure unless explicitly documented |
+| Local-platform / macOS-only automation | `local_non_mock`; add `host_e2e` when the connector is expected to run through `fcp-host` / `fwc` | No | Platform API, entitlement, desktop automation, or physical-device coupling is intrinsic to the connector | `logs.jsonl`, `report.json`, `environment.json`, `replay.sh`, plus platform-specific captured output directory | Never claim generic CI readiness; remove only the ephemeral state created by the test; preserve workstation-only artifacts for rerun |
+
+### Skip Policy
+
+- Skip only for explicit reasons: platform mismatch, missing prerequisite,
+  unavailable dedicated host class, or unsafe shared environment.
+- Every skip must emit `environment.json` or an equivalent prerequisite record
+  naming the failed check, expected platform, and rerun command.
+- Use stable skip labels so downstream automation can route correctly:
+  `requires_docker`, `requires_browser`, `requires_bridge_daemon`,
+  `requires_macos`, `requires_device_lab`, `requires_provider_sandbox`.
+- Do not silently downgrade a required `host_e2e` or `live` suite into
+  `deterministic_contract`. If the required boundary is unavailable, leave the
+  bead open and document the blocker.
+- If cleanup cannot be guaranteed in shared CI, quarantine the suite behind a
+  dedicated host instead of pretending it is generic-CI safe.
+
+### Cleanup Guarantees
+
+- Namespace every mutable resource by run id: DB/schema names, queue/topic
+  names, temp dirs, download dirs, pid files, sandbox workspaces.
+- On success, teardown must remove ephemeral state created by the suite and
+  verify the helper process, browser session, or container exited cleanly.
+- On failure, preserve the run bundle and any temp directory named in the
+  report so a future agent can replay rather than guess.
+- Destructive `host_e2e` or `live` runs must record the cleanup expectation and
+  sandbox identity in redacted form.
+- Leaked child processes, bound ports, leftover topics, or undeleted temp
+  directories are acceptance failures unless the suite is explicitly documented
+  as preservation-only.
+
+### When `host_e2e` Must Be Added On Top Of `local_non_mock`
+
+1. The connector must prove manifest loading, sandbox policy, receipts, or
+   `doctor`/readiness output through the real `fcp-host` subprocess boundary.
+2. Safety or risk controls live at the host layer rather than inside the
+   connector-local fixture alone.
+3. Subprocess supervision, stdio/JSON-RPC framing, reconnect handling, or
+   restart behavior is part of the truth being verified.
+4. Later sweeps need replayable host artifacts (`trace.jsonl`, `summary.json`,
+   `environment.json`, `replay.sh`) in addition to the connector-local bundle.
+
+### Practical Adoption Pattern
+
+1. Start with the family-specific `local_non_mock` harness in `fcp-testkit`
+   and capture the equivalent artifact bundle named in the matrix above.
+2. Reuse the same scenario identifier when promoting that fixture into
+   `fcp-e2e` / `fwc`; `crates/fwc/testdata/host_integration/fixture_matrix.json`
+   is the seed inventory for host-backed fixture IDs and coverage modes.
+3. For `host_e2e`, preserve the host bundle required by the V3 contract:
+   `trace.jsonl`, `summary.json`, `environment.json`, and `replay.sh`, plus the
+   family-specific local artifacts (`broker-state.json`, `stdout.txt`,
+   `bridge-events.jsonl`, `session_transcript.json`, and similar).
+4. Promote queue, browser, local-process, and bridge families to
+   `host_e2e` by default. Promote DB/storage/local-platform families whenever
+   host policy, receipts, risky mutations, or subprocess lifecycle are part of
+   the acceptance story.
+
+### Downstream Consumer Guidance
+
+- `49z0b.11.2` and `49z0b.11.3` should treat DB/storage suites as generic-CI
+  safe only when a truthful local engine or emulator exists and cleanup is
+  deterministic.
+- `49z0b.10.3`, `49z0b.8.2`, and `49z0b.8.3` should assume browser/bridge
+  coverage requires both `local_non_mock` and `host_e2e`, with dedicated-host
+  routing for device-bound or daemon-bound scenarios.
+- `49z0b.9.3` should treat Apple Notes, Apple Reminders, and similar
+  local-platform connectors as dedicated-host work from the start.
+- `49z0b.14.3` should consume the stable skip labels above when building
+  quarantine/nightly routing, rather than inventing new reason strings.
+
 ## What This Means For Wave Planning
 
 - The next policy bead should treat connector `no_mock` acceptance as essentially absent. The only real connector-side non-mock evidence today is the small verification-bundle set documented above.

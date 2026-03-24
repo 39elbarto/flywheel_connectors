@@ -146,11 +146,13 @@ pub fn get_debug_techniques() -> Vec<DebugTechnique> {
                 "jq '.' artifacts/e2e/workflow/replayable_failure/summary.json".into(),
                 "jq -c '.' artifacts/e2e/workflow/replayable_failure/trace.jsonl".into(),
                 "jq '.' artifacts/e2e/workflow/replayable_failure/environment.json".into(),
+                "jq '{scenario_id, run_id, transport, outcome, summary}' artifacts/e2e/workflow/replayable_failure/session_transcript.json".into(),
             ],
             tips: vec![
                 "Use `summary.json` first when you need counts, join keys, or availability states.".into(),
                 "Drop into `trace.jsonl` only after you know which phase or request id is suspicious."
                     .into(),
+                "Use `session_transcript.json` when reconnect, duplicate-delivery, or per-step lifecycle ordering is the real question.".into(),
                 "Treat `environment.json` as the replay context, not as live truth about the current host."
                     .into(),
             ],
@@ -774,6 +776,36 @@ pub fn get_artifact_sections() -> Vec<ArtifactSection> {
             ],
         },
         ArtifactSection {
+            name: "session_transcript.json".into(),
+            path: "artifacts/<layer>/<suite>/<case>/<timestamp>/session_transcript.json".into(),
+            purpose:
+                "Structured session-lifecycle transcript for websocket, SSE, long-poll, or webhook ingress runs, including per-step outcomes and aggregate counts."
+                    .into(),
+            identifiers: vec![
+                "scenario_id".into(),
+                "run_id".into(),
+                "transport".into(),
+                "correlation_id".into(),
+            ],
+            fastest_answers: vec![
+                "Which step failed in the session lifecycle, and was it pass, fail, skip, or timeout?"
+                    .into(),
+                "Did reconnect, silence, webhook delivery, or ack-related steps occur in the expected order?"
+                    .into(),
+                "Which correlation id or run id should I join back to the broader E2E bundle?"
+                    .into(),
+            ],
+            follow_up_commands: vec![
+                "jq '{scenario_id, run_id, transport, outcome, summary}' artifacts/e2e/workflow/replayable_failure/session_transcript.json".into(),
+                "jq '.entries[] | {step_index, outcome, correlation_id}' artifacts/e2e/workflow/replayable_failure/session_transcript.json".into(),
+            ],
+            references: vec![
+                "crates/fcp-testkit/src/session_script.rs".into(),
+                "crates/fcp-e2e/src/lib.rs".into(),
+                "docs/testing/e2e_log_schema.md".into(),
+            ],
+        },
+        ArtifactSection {
             name: "replay.sh".into(),
             path: "artifacts/<layer>/<suite>/<case>/<timestamp>/replay.sh".into(),
             purpose:
@@ -920,10 +952,15 @@ pub fn get_failure_class_guides() -> Vec<FailureClassGuide> {
             symptoms:
                 "A long-running operation behaves differently between the host event stream and the final watched status."
                     .into(),
-            artifact_sections: vec!["trace.jsonl".into(), "summary.json".into()],
+            artifact_sections: vec![
+                "trace.jsonl".into(),
+                "summary.json".into(),
+                "session_transcript.json".into(),
+            ],
             first_commands: vec![
                 "fwc tail github --host http://127.0.0.1:8787 --cursor <CURSOR> --event-type health-check --json".into(),
                 "fwc watch <REQUEST_ID> --host http://127.0.0.1:8787 --json".into(),
+                "jq '{transport, outcome, summary}' artifacts/e2e/workflow/replayable_failure/session_transcript.json".into(),
             ],
             likely_causes: vec![
                 "The wrong cursor was resumed or the requested event type filtered out the interesting transition."
@@ -933,6 +970,31 @@ pub fn get_failure_class_guides() -> Vec<FailureClassGuide> {
             ],
             recovery_guidance:
                 "Inspect resume metadata and truthfulness phase markers together; do not trust watch output alone when reconnect paths are involved."
+                    .into(),
+        },
+        FailureClassGuide {
+            name: "webhook-redelivery-or-ack-mismatch".into(),
+            symptoms:
+                "Webhook ingress appears flaky because duplicate delivery, retries, or acknowledgement behavior diverges from what the connector reports."
+                    .into(),
+            artifact_sections: vec![
+                "session_transcript.json".into(),
+                "summary.json".into(),
+                "replay.sh".into(),
+            ],
+            first_commands: vec![
+                "jq '.entries[] | select(.step.action == \"webhook_deliver\" or .step.action == \"webhook_expect_ack\")' artifacts/e2e/workflow/replayable_failure/session_transcript.json".into(),
+                "jq '.truthfulness | {receipt_ids, host_request_ids}' artifacts/e2e/workflow/replayable_failure/summary.json".into(),
+                "bash artifacts/e2e/workflow/replayable_failure/replay.sh".into(),
+            ],
+            likely_causes: vec![
+                "The harness observed retries or duplicate deliveries, but the connector collapsed them into a single opaque success."
+                    .into(),
+                "Webhook acknowledgement timing or idempotency handling changed without updating the session transcript expectations."
+                    .into(),
+            ],
+            recovery_guidance:
+                "Inspect the session transcript before the raw trace so duplicate-delivery order, retry counts, and acknowledgement steps stay explicit."
                     .into(),
         },
         FailureClassGuide {
@@ -975,7 +1037,7 @@ pub fn get_extension_guides() -> Vec<ExtensionGuide> {
                     .into(),
                 "Emit trace entries with `TruthContext` markers so `summary.json` gains the right availability states, phases, and join ids."
                     .into(),
-                "Capture `trace.jsonl`, `summary.json`, `environment.json`, and `replay.sh` together so the rerun story stays complete."
+                "Capture `trace.jsonl`, `summary.json`, `environment.json`, `session_transcript.json`, and `replay.sh` together so the rerun story stays complete."
                     .into(),
             ],
             verification_commands: vec![
@@ -1711,6 +1773,7 @@ mod tests {
         assert!(names.contains("trace.jsonl"));
         assert!(names.contains("summary.json"));
         assert!(names.contains("environment.json"));
+        assert!(names.contains("session_transcript.json"));
         assert!(names.contains("replay.sh"));
     }
 

@@ -974,6 +974,12 @@ impl ArtifactBundle {
         self.root.join("environment.json")
     }
 
+    /// Path to `session_transcript.json` within the bundle.
+    #[must_use]
+    pub fn session_transcript_path(&self) -> PathBuf {
+        self.root.join("session_transcript.json")
+    }
+
     /// Path to `replay.sh` within the bundle.
     #[must_use]
     pub fn replay_script_path(&self) -> PathBuf {
@@ -993,6 +999,7 @@ impl ArtifactBundle {
             self.trace_path(),
             self.summary_path(),
             self.environment_path(),
+            self.session_transcript_path(),
             self.replay_script_path(),
         ]
     }
@@ -1004,6 +1011,10 @@ impl ArtifactBundle {
             ("trace_jsonl".to_string(), self.trace_path()),
             ("summary_json".to_string(), self.summary_path()),
             ("environment_json".to_string(), self.environment_path()),
+            (
+                "session_transcript_json".to_string(),
+                self.session_transcript_path(),
+            ),
             ("replay_sh".to_string(), self.replay_script_path()),
         ])
     }
@@ -1686,7 +1697,7 @@ pub fn create_bundle(
     let manifest = ArtifactManifest::new(
         ctx.scenario_id.clone(),
         ctx.trace_id.clone(),
-        4, // trace.jsonl, summary.json, environment.json, replay.sh
+        5, // trace.jsonl, summary.json, environment.json, session_transcript.json, replay.sh
         0, // no actual bytes written in-memory
         outcome,
     )
@@ -2364,7 +2375,7 @@ mod tests {
         let tid = TraceId::from_string("t");
         let bundle = ArtifactBundle::new(&base, &sid, &tid);
         let files = bundle.expected_files();
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 5);
     }
 
     #[test]
@@ -2377,6 +2388,7 @@ mod tests {
         assert!(artifacts.contains_key("trace_jsonl"));
         assert!(artifacts.contains_key("summary_json"));
         assert!(artifacts.contains_key("environment_json"));
+        assert!(artifacts.contains_key("session_transcript_json"));
         assert!(artifacts.contains_key("replay_sh"));
     }
 
@@ -2405,6 +2417,19 @@ mod tests {
         let tid = TraceId::from_string("t");
         let bundle = ArtifactBundle::new(&base, &sid, &tid);
         assert!(bundle.environment_path().ends_with("environment.json"));
+    }
+
+    #[test]
+    fn artifact_bundle_session_transcript_path() {
+        let base = PathBuf::from("/tmp/bp");
+        let sid = ScenarioId::new(ScenarioLayer::Snapshot, "s", "c");
+        let tid = TraceId::from_string("t");
+        let bundle = ArtifactBundle::new(&base, &sid, &tid);
+        assert!(
+            bundle
+                .session_transcript_path()
+                .ends_with("session_transcript.json")
+        );
     }
 
     #[test]
@@ -2944,7 +2969,7 @@ mod tests {
         let (bundle, manifest) = create_bundle(&base, &ctx, &new_trace_log(), BundleOutcome::Pass);
         assert!(bundle.bundle_id.starts_with("unit:routing:alias_test@"));
         assert!(manifest.outcome.is_pass());
-        assert_eq!(manifest.file_count, 4);
+        assert_eq!(manifest.file_count, 5);
         assert_eq!(manifest.log_summary.total_entries, 0);
         assert!(manifest.truthfulness.command_availabilities.is_empty());
     }
@@ -3926,6 +3951,7 @@ mod tests {
         assert!(names.contains(&"trace.jsonl".to_string()));
         assert!(names.contains(&"summary.json".to_string()));
         assert!(names.contains(&"environment.json".to_string()));
+        assert!(names.contains(&"session_transcript.json".to_string()));
         assert!(names.contains(&"replay.sh".to_string()));
     }
 
@@ -3989,6 +4015,7 @@ mod tests {
         assert!(summary.contains("Bundle:"));
         assert!(summary.contains("trace_jsonl"));
         assert!(summary.contains("summary_json"));
+        assert!(summary.contains("session_transcript_json"));
     }
 
     #[test]

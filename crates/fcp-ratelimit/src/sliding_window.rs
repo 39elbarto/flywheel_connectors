@@ -40,7 +40,7 @@ impl SlidingWindow {
     /// Remove expired timestamps from the locked deque.
     fn cleanup_locked(&self, timestamps: &mut VecDeque<Instant>, now: Instant) {
         while let Some(front) = timestamps.front() {
-            if now.saturating_duration_since(*front) > self.window {
+            if now.saturating_duration_since(*front) >= self.window {
                 timestamps.pop_front();
             } else {
                 break;
@@ -263,6 +263,7 @@ impl RateLimiter for FixedWindow {
         }
 
         let elapsed = now.saturating_duration_since(state.window_start);
+        drop(state);
         self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
     }
 
@@ -287,6 +288,7 @@ impl RateLimiter for FixedWindow {
         } else {
             let remaining = self.limit.saturating_sub(state.count);
             let reset_after = self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+            drop(state);
 
             RateLimitState {
                 limit: self.limit,

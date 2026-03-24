@@ -170,11 +170,13 @@ impl PcsGroupState {
             });
         }
 
-        let member_index = members
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (m.node_id.as_str().to_string(), i))
-            .collect();
+        let mut member_index = HashMap::with_capacity(members.len());
+        for (i, m) in members.iter().enumerate() {
+            if member_index.contains_key(m.node_id.as_str()) {
+                return Err(PcsError::DuplicateMember(m.node_id.as_str().to_string()));
+            }
+            member_index.insert(m.node_id.as_str().to_string(), i);
+        }
 
         Ok(Self {
             zone_id,
@@ -345,11 +347,8 @@ impl PcsGroupState {
             });
         }
 
-        // Reject duplicate node IDs to prevent member_index corruption.
-        if self.member_index.contains_key(member.node_id.as_str()) {
-            return Err(PcsError::DuplicateMember(
-                member.node_id.as_str().to_string(),
-            ));
+        if self.is_member(&member.node_id) {
+            return Err(PcsError::DuplicateMember(member.node_id.as_str().to_string()));
         }
 
         self.member_index

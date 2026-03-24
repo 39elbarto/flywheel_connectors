@@ -241,25 +241,99 @@ impl AppleRemindersClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn list_reminders_invocation_uses_default_list() {
-        let client = AppleRemindersClient::from_config(&AppleRemindersConfig {
+    fn client_with_list() -> AppleRemindersClient {
+        AppleRemindersClient::from_config(&AppleRemindersConfig {
             default_list: Some("Personal".into()),
             osascript_path: "/usr/bin/osascript".into(),
         })
-        .expect("client should build");
-        let invocation = client.list_reminders_invocation(None);
+        .unwrap()
+    }
+
+    fn client_no_list() -> AppleRemindersClient {
+        AppleRemindersClient::from_config(&AppleRemindersConfig {
+            default_list: None,
+            osascript_path: "/usr/bin/osascript".into(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn list_reminders_invocation_uses_default_list() {
+        let invocation = client_with_list().list_reminders_invocation(None);
         assert_eq!(invocation.args, vec!["Personal"]);
     }
 
     #[test]
+    fn list_reminders_invocation_overrides_default() {
+        let invocation = client_with_list().list_reminders_invocation(Some("Work"));
+        assert_eq!(invocation.args, vec!["Work"]);
+    }
+
+    #[test]
+    fn list_reminders_invocation_empty_when_no_default() {
+        let invocation = client_no_list().list_reminders_invocation(None);
+        assert_eq!(invocation.args, vec![""]);
+    }
+
+    #[test]
     fn list_lists_invocation_has_no_args() {
-        let client = AppleRemindersClient::from_config(&AppleRemindersConfig {
-            default_list: None,
-            osascript_path: "/usr/bin/osascript".into(),
-        })
-        .expect("client should build");
-        let invocation = client.list_lists_invocation();
+        let invocation = client_no_list().list_lists_invocation();
         assert!(invocation.args.is_empty());
+    }
+
+    #[test]
+    fn create_invocation_passes_title_and_list() {
+        let invocation = client_with_list().create_reminder_invocation("Buy milk", Some("Shopping"));
+        assert_eq!(invocation.args, vec!["Buy milk", "Shopping"]);
+    }
+
+    #[test]
+    fn create_invocation_uses_default_list() {
+        let invocation = client_with_list().create_reminder_invocation("Buy milk", None);
+        assert_eq!(invocation.args, vec!["Buy milk", "Personal"]);
+    }
+
+    #[test]
+    fn create_invocation_empty_list_when_none() {
+        let invocation = client_no_list().create_reminder_invocation("Buy milk", None);
+        assert_eq!(invocation.args, vec!["Buy milk", ""]);
+    }
+
+    #[test]
+    fn complete_invocation_passes_id() {
+        let invocation = client_with_list().complete_reminder_invocation("rem-123");
+        assert_eq!(invocation.args, vec!["rem-123"]);
+    }
+
+    #[test]
+    fn create_rejects_empty_title() {
+        let err = client_with_list().create_reminder("  ", None);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn complete_rejects_empty_id() {
+        let err = client_with_list().complete_reminder("  ");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn list_lists_script_tells_reminders() {
+        assert!(LIST_LISTS_SCRIPT.contains("tell application \"Reminders\""));
+    }
+
+    #[test]
+    fn list_reminders_script_includes_completed() {
+        assert!(LIST_REMINDERS_SCRIPT.contains("completed of theReminder"));
+    }
+
+    #[test]
+    fn create_script_makes_new_reminder() {
+        assert!(CREATE_REMINDER_SCRIPT.contains("make new reminder"));
+    }
+
+    #[test]
+    fn complete_script_sets_completed_true() {
+        assert!(COMPLETE_REMINDER_SCRIPT.contains("set completed of theReminder to true"));
     }
 }

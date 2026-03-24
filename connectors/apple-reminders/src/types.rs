@@ -48,4 +48,41 @@ mod tests {
             AppleRemindersConfig::from_value(serde_json::json!({})).expect("config should parse");
         assert_eq!(config.osascript_path, "/usr/bin/osascript");
     }
+
+    #[test]
+    fn config_defaults_list_to_none() {
+        let config = AppleRemindersConfig::from_value(serde_json::json!({})).unwrap();
+        assert!(config.default_list.is_none());
+    }
+
+    #[test]
+    fn config_accepts_custom_list() {
+        let config = AppleRemindersConfig::from_value(serde_json::json!({
+            "default_list": "Work"
+        }))
+        .unwrap();
+        assert_eq!(config.default_list.as_deref(), Some("Work"));
+    }
+
+    #[test]
+    fn config_accepts_custom_osascript() {
+        let config = AppleRemindersConfig::from_value(serde_json::json!({
+            "osascript_path": "/opt/bin/osascript"
+        }))
+        .unwrap();
+        assert_eq!(config.osascript_path, "/opt/bin/osascript");
+    }
+
+    #[test]
+    fn config_rejects_empty_osascript_path() {
+        let result = AppleRemindersConfig::from_value(serde_json::json!({
+            "osascript_path": "  "
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_accepts_empty_json() {
+        assert!(AppleRemindersConfig::from_value(serde_json::json!({})).is_ok());
+    }
 }

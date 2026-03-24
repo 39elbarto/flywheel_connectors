@@ -12,6 +12,7 @@
 #![allow(clippy::needless_pass_by_value)] // API ergonomics for TimedResult/TimedValue
 
 pub mod evidence;
+pub mod host_e2e;
 mod logging;
 mod subprocess;
 

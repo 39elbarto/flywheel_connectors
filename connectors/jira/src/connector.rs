@@ -3587,7 +3587,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_without_config() {
-        let connector = JiraConnector::new();
+        let mut connector = JiraConnector::new();
         let signing_key = Ed25519SigningKey::generate();
         let token = generate_valid_token(&signing_key, "jira.get_issue");
         let result = connector

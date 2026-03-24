@@ -79,6 +79,21 @@ impl OutlookClient {
         }
     }
 
+    fn escape_search_phrase(query: &str) -> OutlookResult<String> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(OutlookError::Config("query must not be empty".into()));
+        }
+        if trimmed.chars().any(char::is_control) {
+            return Err(OutlookError::Config(
+                "query contains invalid control characters".into(),
+            ));
+        }
+
+        let escaped = trimmed.replace('\\', r"\\").replace('"', "\\\"");
+        Ok(format!("\"{escaped}\""))
+    }
+
     async fn graph_get(&self, path: &str) -> OutlookResult<Value> {
         let url = format!("{}{path}", self.base_url);
         let response = self
@@ -165,14 +180,12 @@ impl OutlookClient {
     }
 
     pub async fn search_messages(&self, query: &str, top: Option<u32>) -> OutlookResult<Value> {
-        if query.trim().is_empty() {
-            return Err(OutlookError::Config("query must not be empty".into()));
-        }
         let limit = Self::normalize_top(top)?;
+        let escaped_query = Self::escape_search_phrase(query)?;
         let encoded_query =
-            url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
+            url::form_urlencoded::byte_serialize(escaped_query.as_bytes()).collect::<String>();
         let path = format!(
-            "/me/messages?$search=\"{encoded_query}\"&$top={limit}&$select=id,subject,from,receivedDateTime,bodyPreview"
+            "/me/messages?$search={encoded_query}&$top={limit}&$select=id,subject,from,receivedDateTime,bodyPreview"
         );
         self.graph_get(&path).await
     }
@@ -275,7 +288,7 @@ impl OutlookClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -335,6 +348,25 @@ mod tests {
         assert!(matches!(err, OutlookError::Config(_)));
     }
 
+    #[test]
+    fn escape_search_phrase_wraps_and_escapes_special_characters() {
+        let escaped = OutlookClient::escape_search_phrase("subject:\"Quarterly\" \\ archive")
+            .expect("search phrase should escape correctly");
+        assert_eq!(escaped, r#""subject:\"Quarterly\" \\ archive""#);
+    }
+
+    #[test]
+    fn escape_search_phrase_rejects_invalid_input() {
+        assert!(matches!(
+            OutlookClient::escape_search_phrase("   "),
+            Err(OutlookError::Config(_))
+        ));
+        assert!(matches!(
+            OutlookClient::escape_search_phrase("hello\u{0000}world"),
+            Err(OutlookError::Config(_))
+        ));
+    }
+
     #[fcp_async_core::runtime::test]
     async fn list_folders_rejects_non_json_success_payload() {
         let server = MockServer::start().await;
@@ -383,6 +415,34 @@ mod tests {
             .expect("202 Accepted without a body should succeed");
 
         assert_eq!(response, json!({ "status": "ok" }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn search_messages_escapes_quotes_and_backslashes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1.0/me/messages"))
+            .and(query_param(
+                "$search",
+                "\"subject:\\\"Quarterly\\\" \\\\ archive\"",
+            ))
+            .and(query_param("$top", "7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+            .mount(&server)
+            .await;
+
+        let config = OutlookConfig {
+            access_token: "tok".into(),
+            graph_host: server.uri(),
+            request_timeout_ms: 5_000,
+        };
+        let client = OutlookClient::from_config(&config).expect("client should build");
+        let response = client
+            .search_messages("subject:\"Quarterly\" \\ archive", Some(7))
+            .await
+            .expect("escaped search should succeed");
+
+        assert_eq!(response, json!({ "value": [] }));
     }
 
     #[fcp_async_core::runtime::test]

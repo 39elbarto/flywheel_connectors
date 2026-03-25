@@ -598,7 +598,10 @@ mod tests {
     #[test]
     fn prometheus_text_format_returns_non_empty() {
         let text = prometheus_text_format();
-        assert!(!text.is_empty(), "prometheus text format should return content");
+        assert!(
+            !text.is_empty(),
+            "prometheus text format should return content"
+        );
         assert!(text.starts_with('#'), "should start with comment line");
     }
 

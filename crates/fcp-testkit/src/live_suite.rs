@@ -25,21 +25,23 @@
 //!         return;
 //!     }
 //!
-//!     let env = LiveEnvironment::load("stripe").unwrap();
-//!     let budget = env.cost_budget();
-//!     let _cleanup = env.cleanup_guard();
+//!     let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+//!         .with_env_secret("api_key", "STRIPE_TEST_KEY", "Stripe test-mode API key")
+//!         .with_account_setup("Use a dedicated Stripe test-mode account")
+//!         .with_budget(1.0);
+//!     let env = LiveEnvironment::from_manifest(manifest);
 //!
 //!     // ... run live test with real Stripe test-mode keys ...
 //!
-//!     budget.record_api_call("payment_intents.create", 0.01);
-//!     assert!(budget.within_limits());
+//!     env.budget.record_api_call("payment_intents.create", 0.01);
+//!     assert!(env.budget.within_limits());
 //! }
 //! ```
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -68,7 +70,7 @@ pub enum LiveTier {
 impl LiveTier {
     /// The environment variable that gates this tier.
     #[must_use]
-    pub fn gate_env_var(self) -> &'static str {
+    pub const fn gate_env_var(self) -> &'static str {
         match self {
             Self::LocalSufficient => "FCP_LIVE_LOCAL",
             Self::SandboxRequired => "FCP_LIVE_SANDBOX",
@@ -105,15 +107,14 @@ impl LiveGate {
         let enabled = match tier {
             LiveTier::LocalSufficient => true,
             _ => std::env::var(tier.gate_env_var())
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         };
         Self { tier, enabled }
     }
 
     /// Create a gate with an explicit enabled state (for testing).
     #[must_use]
-    pub fn with_state(tier: LiveTier, enabled: bool) -> Self {
+    pub const fn with_state(tier: LiveTier, enabled: bool) -> Self {
         Self { tier, enabled }
     }
 
@@ -143,13 +144,13 @@ impl LiveGate {
 
     /// Whether this gate allows the test to proceed.
     #[must_use]
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// The tier this gate checks.
     #[must_use]
-    pub fn tier(&self) -> LiveTier {
+    pub const fn tier(&self) -> LiveTier {
         self.tier
     }
 
@@ -194,7 +195,7 @@ pub enum SecretSource {
 /// A single secret requirement for a live suite.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRequirement {
-    /// Logical name (e.g., "api_key", "client_secret").
+    /// Logical name (e.g., `api_key`, `client_secret`).
     pub name: String,
     /// Where to load the secret from.
     pub source: SecretSource,
@@ -221,7 +222,9 @@ impl SecretBag {
         for req in requirements {
             let value = match &req.source {
                 SecretSource::EnvVar(var) => std::env::var(var).ok(),
-                SecretSource::File(path) => std::fs::read_to_string(path).ok().map(|s| s.trim().to_owned()),
+                SecretSource::File(path) => std::fs::read_to_string(path)
+                    .ok()
+                    .map(|s| s.trim().to_owned()),
                 SecretSource::TestDefault(val) => Some(val.clone()),
             };
 
@@ -264,9 +267,14 @@ impl SecretBag {
     /// Panics if the secret is not loaded.
     #[must_use]
     pub fn require(&self, name: &str) -> &str {
-        self.secrets.get(name).map(String::as_str).unwrap_or_else(|| {
-            panic!("Required secret '{name}' not loaded. Check environment or secret configuration.")
-        })
+        self.secrets.get(name).map_or_else(
+            || {
+                panic!(
+                    "Required secret '{name}' not loaded. Check environment or secret configuration."
+                )
+            },
+            String::as_str,
+        )
     }
 
     /// Number of loaded secrets.
@@ -292,6 +300,111 @@ impl fmt::Debug for SecretBag {
     }
 }
 
+/// Loaded non-secret environment variables for a live suite run.
+#[derive(Clone)]
+pub struct EnvVarBag {
+    values: HashMap<String, String>,
+    missing: Vec<String>,
+    defaults_used: Vec<String>,
+}
+
+impl EnvVarBag {
+    /// Load environment variables from the given requirements.
+    #[must_use]
+    pub fn load(requirements: &[EnvVarRequirement]) -> Self {
+        let mut values = HashMap::new();
+        let mut missing = Vec::new();
+        let mut defaults_used = Vec::new();
+
+        for req in requirements {
+            match std::env::var(&req.name) {
+                Ok(value) if !value.trim().is_empty() => {
+                    values.insert(req.name.clone(), value);
+                }
+                _ => {
+                    if let Some(default) = &req.default {
+                        values.insert(req.name.clone(), default.clone());
+                        defaults_used.push(req.name.clone());
+                    } else {
+                        missing.push(req.name.clone());
+                    }
+                }
+            }
+        }
+
+        Self {
+            values,
+            missing,
+            defaults_used,
+        }
+    }
+
+    /// Whether all required environment variables are available.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty()
+    }
+
+    /// Names of missing required environment variables.
+    #[must_use]
+    pub fn missing_vars(&self) -> &[String] {
+        &self.missing
+    }
+
+    /// Names of variables satisfied by defaults.
+    #[must_use]
+    pub fn defaults_used(&self) -> &[String] {
+        &self.defaults_used
+    }
+
+    /// Get a loaded environment variable by name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
+    }
+
+    /// Number of loaded environment variables.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether no environment variables were loaded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Produce a redaction-safe summary suitable for JSONL evidence.
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        let mut loaded_keys: Vec<&str> = self.values.keys().map(String::as_str).collect();
+        loaded_keys.sort_unstable();
+
+        serde_json::json!({
+            "loaded_count": self.values.len(),
+            "loaded_keys": loaded_keys,
+            "missing": self.missing,
+            "defaults_used": self.defaults_used,
+            "complete": self.is_complete(),
+        })
+    }
+}
+
+impl fmt::Debug for EnvVarBag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut loaded_keys: Vec<&str> = self.values.keys().map(String::as_str).collect();
+        loaded_keys.sort_unstable();
+
+        f.debug_struct("EnvVarBag")
+            .field("loaded_count", &self.values.len())
+            .field("loaded_keys", &loaded_keys)
+            .field("missing", &self.missing)
+            .field("defaults_used", &self.defaults_used)
+            .finish()
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cost Budget — Per-test-run spending limits
 // ─────────────────────────────────────────────────────────────────────────────
@@ -310,7 +423,7 @@ pub struct CostBudget {
 /// A single cost entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct CostEntry {
-    /// Operation that incurred the cost (e.g., "payment_intents.create").
+    /// Operation that incurred the cost (e.g., `payment_intents.create`).
     pub operation: String,
     /// Estimated cost in USD.
     pub cost_usd: f64,
@@ -341,7 +454,8 @@ impl CostBudget {
     pub fn record_api_call(&self, operation: &str, cost_usd: f64) {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let hundredths = (cost_usd * 10_000.0) as u64;
-        self.spent_hundredths.fetch_add(hundredths, Ordering::Relaxed);
+        self.spent_hundredths
+            .fetch_add(hundredths, Ordering::Relaxed);
 
         if let Ok(mut log) = self.log.lock() {
             log.push(CostEntry {
@@ -388,6 +502,29 @@ impl CostBudget {
         self.log.lock().map(|l| l.clone()).unwrap_or_default()
     }
 
+    /// Whether spending has exceeded the given percentage of the budget.
+    /// For example, `exceeds_threshold(0.80)` returns true if more than 80%
+    /// of the budget has been spent.
+    #[must_use]
+    pub fn exceeds_threshold(&self, fraction: f64) -> bool {
+        let spent = self.total_spent_usd();
+        spent > self.max_usd() * fraction
+    }
+
+    /// Check budget status and return a human-readable alert level.
+    #[must_use]
+    pub fn alert_level(&self) -> BudgetAlert {
+        if !self.within_limits() {
+            BudgetAlert::Exceeded
+        } else if self.exceeds_threshold(0.90) {
+            BudgetAlert::Critical
+        } else if self.exceeds_threshold(0.75) {
+            BudgetAlert::Warning
+        } else {
+            BudgetAlert::Ok
+        }
+    }
+
     /// Produce a summary suitable for JSONL evidence.
     #[must_use]
     pub fn summary(&self) -> Value {
@@ -396,8 +533,47 @@ impl CostBudget {
             "total_spent_usd": self.total_spent_usd(),
             "remaining_usd": self.remaining_usd(),
             "within_limits": self.within_limits(),
+            "alert_level": self.alert_level().as_str(),
             "api_call_count": self.entries().len(),
         })
+    }
+}
+
+/// Budget alert levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetAlert {
+    /// Spending is within normal limits (< 75%).
+    Ok,
+    /// Spending is approaching the limit (75-90%).
+    Warning,
+    /// Spending is near the limit (> 90%).
+    Critical,
+    /// Budget has been exceeded.
+    Exceeded,
+}
+
+impl BudgetAlert {
+    /// String representation for evidence output.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+            Self::Exceeded => "exceeded",
+        }
+    }
+
+    /// Whether this alert level indicates a problem.
+    #[must_use]
+    pub const fn is_problem(&self) -> bool {
+        matches!(self, Self::Warning | Self::Critical | Self::Exceeded)
+    }
+}
+
+impl fmt::Display for BudgetAlert {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -445,7 +621,10 @@ impl SyntheticTenant {
     /// Generate a resource name with a suffix.
     #[must_use]
     pub fn resource_name(&self, suffix: &str) -> String {
-        format!("fcp-test-{}-{}-{}-{}", self.connector, suffix, self.run_id, self.date)
+        format!(
+            "fcp-test-{}-{}-{}-{}",
+            self.connector, suffix, self.run_id, self.date
+        )
     }
 
     /// Generate an email-safe identifier for sandbox accounts.
@@ -563,13 +742,15 @@ impl CleanupGuard {
                     error: None,
                 },
                 Err(e) => {
-                    let error_msg = if let Some(s) = e.downcast_ref::<&str>() {
-                        (*s).to_owned()
-                    } else if let Some(s) = e.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "Unknown panic during cleanup".to_owned()
-                    };
+                    let error_msg = e.downcast_ref::<&str>().map_or_else(
+                        || {
+                            e.downcast_ref::<String>().map_or_else(
+                                || "Unknown panic during cleanup".to_owned(),
+                                Clone::clone,
+                            )
+                        },
+                        |s| (*s).to_owned(),
+                    );
                     CleanupResult {
                         description: desc,
                         success: false,
@@ -697,6 +878,36 @@ pub enum CleanupStrategy {
     AutoExpire { ttl_hours: u32 },
 }
 
+impl CleanupStrategy {
+    /// Whether this cleanup strategy expects synthetic-tenant-scoped resources.
+    #[must_use]
+    pub const fn uses_synthetic_tenant(&self) -> bool {
+        matches!(self, Self::PrefixDelete | Self::AutoExpire { .. })
+    }
+
+    /// Produce a structured summary suitable for JSONL evidence.
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        match self {
+            Self::None => serde_json::json!({ "kind": "none" }),
+            Self::PrefixDelete => serde_json::json!({
+                "kind": "prefix_delete",
+                "uses_synthetic_tenant": true,
+            }),
+            Self::Script(path) => serde_json::json!({
+                "kind": "script",
+                "script": path,
+                "uses_synthetic_tenant": false,
+            }),
+            Self::AutoExpire { ttl_hours } => serde_json::json!({
+                "kind": "auto_expire",
+                "ttl_hours": ttl_hours,
+                "uses_synthetic_tenant": true,
+            }),
+        }
+    }
+}
+
 /// Rate limit awareness for live tests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
@@ -706,6 +917,18 @@ pub struct RateLimitConfig {
     pub min_delay_ms: u64,
     /// Whether to use exponential backoff on 429 responses.
     pub backoff_on_429: bool,
+}
+
+impl RateLimitConfig {
+    /// Produce a structured summary suitable for JSONL evidence.
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        serde_json::json!({
+            "max_rps": self.max_rps,
+            "min_delay_ms": self.min_delay_ms,
+            "backoff_on_429": self.backoff_on_429,
+        })
+    }
 }
 
 impl EnvironmentManifest {
@@ -743,6 +966,57 @@ impl EnvironmentManifest {
         }
     }
 
+    /// Create a manifest for a Tier C (device-required) connector.
+    #[must_use]
+    pub fn device(connector: &str, provider: &str) -> Self {
+        Self {
+            connector: connector.to_owned(),
+            tier: LiveTier::DeviceRequired,
+            provider: provider.to_owned(),
+            secrets: Vec::new(),
+            env_vars: Vec::new(),
+            account_setup: String::new(),
+            budget_usd: 1.0,
+            cleanup: CleanupStrategy::None,
+            rate_limits: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Create a manifest for a Tier D (live-read-only) connector.
+    #[must_use]
+    pub fn read_only(connector: &str, provider: &str) -> Self {
+        Self {
+            connector: connector.to_owned(),
+            tier: LiveTier::LiveReadOnly,
+            provider: provider.to_owned(),
+            secrets: Vec::new(),
+            env_vars: Vec::new(),
+            account_setup: String::new(),
+            budget_usd: 1.0,
+            cleanup: CleanupStrategy::None,
+            rate_limits: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Create a manifest for a Tier E (live-write-required) connector.
+    #[must_use]
+    pub fn live_write(connector: &str, provider: &str) -> Self {
+        Self {
+            connector: connector.to_owned(),
+            tier: LiveTier::LiveWriteRequired,
+            provider: provider.to_owned(),
+            secrets: Vec::new(),
+            env_vars: Vec::new(),
+            account_setup: String::new(),
+            budget_usd: 1.0,
+            cleanup: CleanupStrategy::PrefixDelete,
+            rate_limits: None,
+            metadata: HashMap::new(),
+        }
+    }
+
     /// Add a secret requirement sourced from an environment variable.
     #[must_use]
     pub fn with_env_secret(mut self, name: &str, env_var: &str, description: &str) -> Self {
@@ -757,7 +1031,13 @@ impl EnvironmentManifest {
 
     /// Add an optional secret with a test-mode default.
     #[must_use]
-    pub fn with_test_default_secret(mut self, name: &str, env_var: &str, default: &str, description: &str) -> Self {
+    pub fn with_test_default_secret(
+        mut self,
+        name: &str,
+        env_var: &str,
+        default: &str,
+        description: &str,
+    ) -> Self {
         self.secrets.push(SecretRequirement {
             name: name.to_owned(),
             source: if std::env::var(env_var).is_ok() {
@@ -771,16 +1051,38 @@ impl EnvironmentManifest {
         self
     }
 
+    /// Add a required non-secret environment variable.
+    #[must_use]
+    pub fn with_env_var(mut self, name: &str, description: &str) -> Self {
+        self.env_vars.push(EnvVarRequirement {
+            name: name.to_owned(),
+            default: None,
+            description: description.to_owned(),
+        });
+        self
+    }
+
+    /// Add a non-secret environment variable with a safe default.
+    #[must_use]
+    pub fn with_env_var_default(mut self, name: &str, default: &str, description: &str) -> Self {
+        self.env_vars.push(EnvVarRequirement {
+            name: name.to_owned(),
+            default: Some(default.to_owned()),
+            description: description.to_owned(),
+        });
+        self
+    }
+
     /// Set account setup instructions.
     #[must_use]
     pub fn with_account_setup(mut self, instructions: &str) -> Self {
-        self.account_setup = instructions.to_owned();
+        instructions.clone_into(&mut self.account_setup);
         self
     }
 
     /// Set cost budget.
     #[must_use]
-    pub fn with_budget(mut self, budget_usd: f64) -> Self {
+    pub const fn with_budget(mut self, budget_usd: f64) -> Self {
         self.budget_usd = budget_usd;
         self
     }
@@ -792,6 +1094,13 @@ impl EnvironmentManifest {
         self
     }
 
+    /// Add arbitrary metadata to the manifest.
+    #[must_use]
+    pub fn with_metadata(mut self, key: &str, value: Value) -> Self {
+        self.metadata.insert(key.to_owned(), value);
+        self
+    }
+
     /// Set rate limit configuration.
     #[must_use]
     pub fn with_rate_limits(mut self, max_rps: f64, backoff_on_429: bool) -> Self {
@@ -799,7 +1108,7 @@ impl EnvironmentManifest {
             max_rps,
             min_delay_ms: if max_rps > 0.0 {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let ms = (1000.0 / max_rps) as u64;
+                let ms = (1000.0 / max_rps).ceil().max(1.0) as u64;
                 ms
             } else {
                 1000
@@ -813,6 +1122,12 @@ impl EnvironmentManifest {
     #[must_use]
     pub fn load_secrets(&self) -> SecretBag {
         SecretBag::load(&self.secrets)
+    }
+
+    /// Load all non-secret environment variables declared in this manifest.
+    #[must_use]
+    pub fn load_env_vars(&self) -> EnvVarBag {
+        EnvVarBag::load(&self.env_vars)
     }
 
     /// Create a cost budget from this manifest's budget setting.
@@ -839,6 +1154,14 @@ impl EnvironmentManifest {
     pub fn validate(&self) -> Vec<String> {
         let mut problems = Vec::new();
 
+        if self.connector.trim().is_empty() {
+            problems.push("Environment manifest requires a non-empty connector id".to_owned());
+        }
+
+        if self.provider.trim().is_empty() {
+            problems.push("Environment manifest requires a non-empty provider name".to_owned());
+        }
+
         // Check gate
         let gate = LiveGate::for_tier(self.tier);
         if !gate.is_enabled() {
@@ -851,9 +1174,56 @@ impl EnvironmentManifest {
             problems.push(format!("Missing required secret: {missing}"));
         }
 
+        // Check non-secret environment variables
+        let env_vars = self.load_env_vars();
+        for missing in env_vars.missing_vars() {
+            problems.push(format!("Missing required environment variable: {missing}"));
+        }
+
         // Check budget
-        if self.tier != LiveTier::LocalSufficient && self.budget_usd <= 0.0 {
+        if !self.budget_usd.is_finite() || self.budget_usd < 0.0 {
+            problems.push("Live suite budget must be a finite, non-negative number".to_owned());
+        } else if self.tier != LiveTier::LocalSufficient && self.budget_usd <= 0.0 {
             problems.push("Live suite requires a cost budget > $0".to_owned());
+        }
+
+        if self.tier != LiveTier::LocalSufficient && self.account_setup.trim().is_empty() {
+            problems.push(
+                "Live suite requires account setup guidance for sandbox, device, or live runs"
+                    .to_owned(),
+            );
+        }
+
+        match &self.cleanup {
+            CleanupStrategy::None
+                if matches!(
+                    self.tier,
+                    LiveTier::SandboxRequired | LiveTier::LiveWriteRequired
+                ) =>
+            {
+                problems.push(
+                    "Mutation-capable live suites must declare a cleanup strategy".to_owned(),
+                );
+            }
+            CleanupStrategy::Script(path) if path.trim().is_empty() => {
+                problems.push("Cleanup script path must not be empty".to_owned());
+            }
+            CleanupStrategy::AutoExpire { ttl_hours } if *ttl_hours == 0 => {
+                problems.push("Auto-expire cleanup requires ttl_hours > 0".to_owned());
+            }
+            CleanupStrategy::None
+            | CleanupStrategy::PrefixDelete
+            | CleanupStrategy::Script(_)
+            | CleanupStrategy::AutoExpire { .. } => {}
+        }
+
+        if let Some(rate_limits) = &self.rate_limits {
+            if !rate_limits.max_rps.is_finite() || rate_limits.max_rps <= 0.0 {
+                problems.push("Rate-limit max_rps must be a finite value > 0".to_owned());
+            }
+            if rate_limits.min_delay_ms == 0 {
+                problems.push("Rate-limit min_delay_ms must be > 0".to_owned());
+            }
         }
 
         problems
@@ -862,14 +1232,34 @@ impl EnvironmentManifest {
     /// Produce a summary suitable for JSONL evidence.
     #[must_use]
     pub fn evidence_summary(&self) -> Value {
+        let mut metadata_keys: Vec<&str> = self.metadata.keys().map(String::as_str).collect();
+        metadata_keys.sort_unstable();
+
+        let required_env_vars = self
+            .env_vars
+            .iter()
+            .filter(|requirement| requirement.default.is_none())
+            .count();
+        let env_vars_with_defaults = self
+            .env_vars
+            .iter()
+            .filter(|requirement| requirement.default.is_some())
+            .count();
+
         serde_json::json!({
             "connector": self.connector,
             "tier": self.tier.to_string(),
             "provider": self.provider,
             "secret_count": self.secrets.len(),
+            "env_var_count": self.env_vars.len(),
+            "required_env_var_count": required_env_vars,
+            "defaulted_env_var_count": env_vars_with_defaults,
+            "account_setup_configured": !self.account_setup.trim().is_empty(),
             "budget_usd": self.budget_usd,
-            "cleanup_strategy": format!("{:?}", self.cleanup),
-            "has_rate_limits": self.rate_limits.is_some(),
+            "cleanup_strategy": self.cleanup.summary(),
+            "rate_limits": self.rate_limits.as_ref().map(RateLimitConfig::summary),
+            "synthetic_tenant_expected": self.cleanup.uses_synthetic_tenant(),
+            "metadata_keys": metadata_keys,
         })
     }
 }
@@ -884,6 +1274,8 @@ pub struct LiveEnvironment {
     pub manifest: EnvironmentManifest,
     /// Loaded secrets.
     pub secrets: SecretBag,
+    /// Loaded non-secret environment variables.
+    pub env_vars: EnvVarBag,
     /// Cost budget tracker.
     pub budget: Arc<CostBudget>,
     /// Synthetic tenant for resource naming.
@@ -897,12 +1289,14 @@ impl LiveEnvironment {
     #[must_use]
     pub fn from_manifest(manifest: EnvironmentManifest) -> Self {
         let secrets = manifest.load_secrets();
+        let env_vars = manifest.load_env_vars();
         let budget = Arc::new(manifest.cost_budget());
         let tenant = manifest.synthetic_tenant();
         let cleanup = manifest.cleanup_guard();
         Self {
             manifest,
             secrets,
+            env_vars,
             budget,
             tenant,
             cleanup,
@@ -913,6 +1307,7 @@ impl LiveEnvironment {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.secrets.is_complete()
+            && self.env_vars.is_complete()
             && LiveGate::for_tier(self.manifest.tier).is_enabled()
     }
 
@@ -929,13 +1324,270 @@ impl LiveEnvironment {
             "manifest": self.manifest.evidence_summary(),
             "secrets_loaded": self.secrets.len(),
             "secrets_missing": self.secrets.missing_secrets(),
+            "env_vars": self.env_vars.summary(),
             "budget": self.budget.summary(),
             "tenant_prefix": self.tenant.prefix(),
+            "tenant_identity": self.tenant.run_prefix(),
+            "cleanup_expectations": self.manifest.cleanup.summary(),
             "ready": self.is_ready(),
         })
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stale Resource Scanner — Find orphaned synthetic test resources
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result of scanning for stale synthetic test resources.
+#[derive(Debug, Clone, Serialize)]
+pub struct StaleResourceReport {
+    /// Resources identified as stale.
+    pub stale: Vec<StaleResource>,
+    /// Total resources scanned.
+    pub scanned: usize,
+    /// Maximum age in days used for the scan.
+    pub max_age_days: u32,
+}
+
+/// A single stale resource.
+#[derive(Debug, Clone, Serialize)]
+pub struct StaleResource {
+    /// Resource name or identifier.
+    pub name: String,
+    /// Which connector created it.
+    pub connector: Option<String>,
+    /// Estimated age in days.
+    pub age_days: Option<i64>,
+}
+
+impl StaleResourceReport {
+    /// Scan a list of resource names for stale synthetic test resources.
+    #[must_use]
+    pub fn scan(resource_names: &[&str], max_age_days: u32) -> Self {
+        let mut stale = Vec::new();
+        for &name in resource_names {
+            if !SyntheticTenant::is_synthetic(name) {
+                continue;
+            }
+            if SyntheticTenant::is_stale(name, max_age_days) {
+                // Extract connector name from "fcp-test-{connector}-..."
+                let connector = name
+                    .strip_prefix("fcp-test-")
+                    .and_then(|rest| rest.split('-').next())
+                    .map(str::to_owned);
+
+                // Estimate age from date suffix
+                let age_days = if name.len() >= 8 {
+                    let date_part = &name[name.len() - 8..];
+                    chrono::NaiveDate::parse_from_str(date_part, "%Y%m%d")
+                        .ok()
+                        .map(|date| {
+                            Utc::now()
+                                .date_naive()
+                                .signed_duration_since(date)
+                                .num_days()
+                        })
+                } else {
+                    None
+                };
+
+                stale.push(StaleResource {
+                    name: name.to_owned(),
+                    connector,
+                    age_days,
+                });
+            }
+        }
+        Self {
+            scanned: resource_names.len(),
+            max_age_days,
+            stale,
+        }
+    }
+
+    /// Whether any stale resources were found.
+    #[must_use]
+    pub fn has_stale(&self) -> bool {
+        !self.stale.is_empty()
+    }
+
+    /// Produce a summary suitable for JSONL evidence.
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        serde_json::json!({
+            "scanned": self.scanned,
+            "max_age_days": self.max_age_days,
+            "stale_count": self.stale.len(),
+            "stale_resources": self.stale.iter().map(|s| serde_json::json!({
+                "name": s.name,
+                "connector": s.connector,
+                "age_days": s.age_days,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Manifest Loading — Load manifests from JSON files
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl EnvironmentManifest {
+    /// Load a manifest from a JSON file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or parsed.
+    pub fn from_json_file(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse {} as JSON: {e}", path.display()))
+    }
+
+    /// Serialize this manifest to JSON bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails.
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self).map_err(|e| format!("Manifest serialization error: {e}"))
+    }
+
+    /// Collect all prerequisite problems into a structured report.
+    #[must_use]
+    pub fn prerequisite_report(&self) -> PrerequisiteReport {
+        let problems = self.validate();
+        let secrets = self.load_secrets();
+        let env_vars = self.load_env_vars();
+        let gate = LiveGate::for_tier(self.tier);
+        let mut metadata_keys: Vec<String> = self.metadata.keys().cloned().collect();
+        metadata_keys.sort_unstable();
+
+        let budget_configured = if !self.budget_usd.is_finite() || self.budget_usd < 0.0 {
+            false
+        } else {
+            self.tier == LiveTier::LocalSufficient || self.budget_usd > 0.0
+        };
+        let cleanup_configured = match &self.cleanup {
+            CleanupStrategy::None => !matches!(
+                self.tier,
+                LiveTier::SandboxRequired | LiveTier::LiveWriteRequired
+            ),
+            CleanupStrategy::PrefixDelete => true,
+            CleanupStrategy::Script(path) => !path.trim().is_empty(),
+            CleanupStrategy::AutoExpire { ttl_hours } => *ttl_hours > 0,
+        };
+
+        PrerequisiteReport {
+            connector: self.connector.clone(),
+            provider: self.provider.clone(),
+            tier: self.tier,
+            gate_enabled: gate.is_enabled(),
+            gate_env_var: gate.tier().gate_env_var().to_owned(),
+            secrets_complete: secrets.is_complete(),
+            secrets_loaded: secrets.len(),
+            secrets_missing: secrets.missing_secrets().to_vec(),
+            env_vars_complete: env_vars.is_complete(),
+            env_vars_loaded: env_vars.len(),
+            env_vars_missing: env_vars.missing_vars().to_vec(),
+            env_vars_defaults_used: env_vars.defaults_used().to_vec(),
+            account_setup_configured: self.tier == LiveTier::LocalSufficient
+                || !self.account_setup.trim().is_empty(),
+            budget_configured,
+            cleanup_configured,
+            cleanup_strategy: self.cleanup.summary(),
+            rate_limits: self.rate_limits.as_ref().map(RateLimitConfig::summary),
+            synthetic_tenant_expected: self.cleanup.uses_synthetic_tenant(),
+            metadata_keys,
+            problems,
+        }
+    }
+}
+
+/// Structured report of all prerequisites for a live suite run.
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct PrerequisiteReport {
+    /// Connector identifier.
+    pub connector: String,
+    /// Human-readable provider name.
+    pub provider: String,
+    /// Live tier.
+    pub tier: LiveTier,
+    /// Whether the tier gate is enabled.
+    pub gate_enabled: bool,
+    /// Environment variable that enables this tier.
+    pub gate_env_var: String,
+    /// Whether all required secrets are present.
+    pub secrets_complete: bool,
+    /// Number of loaded secrets.
+    pub secrets_loaded: usize,
+    /// Names of missing required secrets.
+    pub secrets_missing: Vec<String>,
+    /// Whether all required env vars are present.
+    pub env_vars_complete: bool,
+    /// Number of loaded env vars.
+    pub env_vars_loaded: usize,
+    /// Names of missing required env vars.
+    pub env_vars_missing: Vec<String>,
+    /// Names of env vars satisfied by defaults.
+    pub env_vars_defaults_used: Vec<String>,
+    /// Whether account setup guidance is present for the tier.
+    pub account_setup_configured: bool,
+    /// Whether a valid budget is configured.
+    pub budget_configured: bool,
+    /// Whether a cleanup strategy is configured for mutation-capable tiers.
+    pub cleanup_configured: bool,
+    /// Structured cleanup strategy summary.
+    pub cleanup_strategy: Value,
+    /// Structured rate-limit summary, when declared.
+    pub rate_limits: Option<Value>,
+    /// Whether this suite expects synthetic-tenant scoping.
+    pub synthetic_tenant_expected: bool,
+    /// Sorted metadata keys included with the manifest.
+    pub metadata_keys: Vec<String>,
+    /// All validation problems.
+    pub problems: Vec<String>,
+}
+
+impl PrerequisiteReport {
+    /// Whether all prerequisites are met.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.problems.is_empty()
+    }
+
+    /// Produce a summary suitable for JSONL evidence.
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        serde_json::json!({
+            "connector": self.connector,
+            "provider": self.provider,
+            "tier": self.tier.to_string(),
+            "ready": self.is_ready(),
+            "gate_enabled": self.gate_enabled,
+            "gate_env_var": self.gate_env_var,
+            "secrets_complete": self.secrets_complete,
+            "secrets_loaded": self.secrets_loaded,
+            "secrets_missing": self.secrets_missing,
+            "env_vars_complete": self.env_vars_complete,
+            "env_vars_loaded": self.env_vars_loaded,
+            "env_vars_missing": self.env_vars_missing,
+            "env_vars_defaults_used": self.env_vars_defaults_used,
+            "account_setup_configured": self.account_setup_configured,
+            "budget_configured": self.budget_configured,
+            "cleanup_configured": self.cleanup_configured,
+            "cleanup_strategy": self.cleanup_strategy,
+            "rate_limits": self.rate_limits,
+            "synthetic_tenant_expected": self.synthetic_tenant_expected,
+            "metadata_keys": self.metadata_keys,
+            "problem_count": self.problems.len(),
+            "problems": self.problems,
+        })
+    }
+}
+
+#[allow(clippy::missing_fields_in_debug)]
 impl fmt::Debug for LiveEnvironment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LiveEnvironment")
@@ -943,7 +1595,8 @@ impl fmt::Debug for LiveEnvironment {
             .field("tier", &self.manifest.tier)
             .field("ready", &self.is_ready())
             .field("secrets", &self.secrets)
-            .finish()
+            .field("env_vars", &self.env_vars)
+            .finish_non_exhaustive()
     }
 }
 
@@ -972,7 +1625,10 @@ mod tests {
         assert_eq!(LiveTier::LiveReadOnly.to_string(), "live_read_only");
         assert_eq!(LiveTier::LocalSufficient.to_string(), "local_sufficient");
         assert_eq!(LiveTier::DeviceRequired.to_string(), "device_required");
-        assert_eq!(LiveTier::LiveWriteRequired.to_string(), "live_write_required");
+        assert_eq!(
+            LiveTier::LiveWriteRequired.to_string(),
+            "live_write_required"
+        );
     }
 
     // ── LiveGate ────────────────────────────────────────────────────────
@@ -1117,7 +1773,51 @@ mod tests {
     #[should_panic(expected = "Required secret")]
     fn secret_bag_require_panics_on_missing() {
         let bag = SecretBag::load(&[]);
-        bag.require("nonexistent");
+        let _ = bag.require("nonexistent");
+    }
+
+    // ── EnvVarBag ──────────────────────────────────────────────────────
+
+    #[test]
+    fn env_var_bag_loads_default_when_missing() {
+        let requirements = vec![EnvVarRequirement {
+            name: "FCP_TESTKIT_OPTIONAL_REGION".to_owned(),
+            default: Some("us-east-1".to_owned()),
+            description: "Default test region".to_owned(),
+        }];
+
+        let bag = EnvVarBag::load(&requirements);
+        assert!(bag.is_complete());
+        assert_eq!(bag.get("FCP_TESTKIT_OPTIONAL_REGION"), Some("us-east-1"));
+        assert_eq!(bag.defaults_used(), &["FCP_TESTKIT_OPTIONAL_REGION"]);
+    }
+
+    #[test]
+    fn env_var_bag_reports_missing_required_var() {
+        let requirements = vec![EnvVarRequirement {
+            name: "FCP_TESTKIT_REQUIRED_REGION_4242".to_owned(),
+            default: None,
+            description: "Required region".to_owned(),
+        }];
+
+        let bag = EnvVarBag::load(&requirements);
+        assert!(!bag.is_complete());
+        assert_eq!(bag.missing_vars(), &["FCP_TESTKIT_REQUIRED_REGION_4242"]);
+        assert!(bag.get("FCP_TESTKIT_REQUIRED_REGION_4242").is_none());
+    }
+
+    #[test]
+    fn env_var_bag_debug_does_not_print_values() {
+        let requirements = vec![EnvVarRequirement {
+            name: "FCP_TESTKIT_DEFAULT_PROFILE".to_owned(),
+            default: Some("sandbox".to_owned()),
+            description: "Profile".to_owned(),
+        }];
+
+        let bag = EnvVarBag::load(&requirements);
+        let debug_output = format!("{bag:?}");
+        assert!(debug_output.contains("loaded_keys"));
+        assert!(!debug_output.contains("sandbox"));
     }
 
     // ── CostBudget ──────────────────────────────────────────────────────
@@ -1209,34 +1909,49 @@ mod tests {
 
     #[test]
     fn synthetic_tenant_is_synthetic() {
-        assert!(SyntheticTenant::is_synthetic("fcp-test-stripe-customer-abc-20260324"));
+        assert!(SyntheticTenant::is_synthetic(
+            "fcp-test-stripe-customer-abc-20260324"
+        ));
         assert!(!SyntheticTenant::is_synthetic("my-real-resource"));
         assert!(!SyntheticTenant::is_synthetic(""));
     }
 
     #[test]
     fn synthetic_tenant_belongs_to_connector() {
-        assert!(SyntheticTenant::belongs_to_connector("fcp-test-stripe-customer-abc", "stripe"));
-        assert!(!SyntheticTenant::belongs_to_connector("fcp-test-aws-bucket-xyz", "stripe"));
+        assert!(SyntheticTenant::belongs_to_connector(
+            "fcp-test-stripe-customer-abc",
+            "stripe"
+        ));
+        assert!(!SyntheticTenant::belongs_to_connector(
+            "fcp-test-aws-bucket-xyz",
+            "stripe"
+        ));
     }
 
     #[test]
     fn synthetic_tenant_staleness_detection() {
         // A date from 100 days ago should be stale
-        let old_name = format!("fcp-test-stripe-customer-abc-{}",
-            (Utc::now() - chrono::Duration::days(100)).format("%Y%m%d"));
+        let old_name = format!(
+            "fcp-test-stripe-customer-abc-{}",
+            (Utc::now() - chrono::Duration::days(100)).format("%Y%m%d")
+        );
         assert!(SyntheticTenant::is_stale(&old_name, 30));
 
         // Today's date should not be stale
-        let fresh_name = format!("fcp-test-stripe-customer-abc-{}",
-            Utc::now().format("%Y%m%d"));
+        let fresh_name = format!(
+            "fcp-test-stripe-customer-abc-{}",
+            Utc::now().format("%Y%m%d")
+        );
         assert!(!SyntheticTenant::is_stale(&fresh_name, 30));
     }
 
     #[test]
     fn synthetic_tenant_staleness_bad_format() {
         // Non-date suffix should not be considered stale
-        assert!(!SyntheticTenant::is_stale("fcp-test-stripe-customer-abc-notadate", 30));
+        assert!(!SyntheticTenant::is_stale(
+            "fcp-test-stripe-customer-abc-notadate",
+            30
+        ));
         assert!(!SyntheticTenant::is_stale("short", 30));
     }
 
@@ -1248,11 +1963,26 @@ mod tests {
         let guard = CleanupGuard::new();
 
         let o1 = Arc::clone(&order);
-        guard.register("first", Box::new(move || { o1.lock().unwrap().push(1); }));
+        guard.register(
+            "first",
+            Box::new(move || {
+                o1.lock().unwrap().push(1);
+            }),
+        );
         let o2 = Arc::clone(&order);
-        guard.register("second", Box::new(move || { o2.lock().unwrap().push(2); }));
+        guard.register(
+            "second",
+            Box::new(move || {
+                o2.lock().unwrap().push(2);
+            }),
+        );
         let o3 = Arc::clone(&order);
-        guard.register("third", Box::new(move || { o3.lock().unwrap().push(3); }));
+        guard.register(
+            "third",
+            Box::new(move || {
+                o3.lock().unwrap().push(3);
+            }),
+        );
 
         let results = guard.run_cleanup();
         assert_eq!(results.len(), 3);
@@ -1317,26 +2047,64 @@ mod tests {
     fn manifest_sandbox_builder() {
         let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
             .with_env_secret("api_key", "STRIPE_TEST_KEY", "Stripe test-mode API key")
+            .with_env_var("STRIPE_ACCOUNT_ID", "Stripe account identifier")
             .with_budget(2.0)
             .with_rate_limits(10.0, true)
             .with_account_setup("Create a Stripe test-mode account at dashboard.stripe.com")
-            .with_cleanup(CleanupStrategy::AutoExpire { ttl_hours: 24 });
+            .with_cleanup(CleanupStrategy::AutoExpire { ttl_hours: 24 })
+            .with_metadata("suite_owner", Value::String("payments".to_owned()));
 
         assert_eq!(manifest.connector, "stripe");
         assert_eq!(manifest.tier, LiveTier::SandboxRequired);
         assert_eq!(manifest.secrets.len(), 1);
+        assert_eq!(manifest.env_vars.len(), 1);
         assert!((manifest.budget_usd - 2.0).abs() < f64::EPSILON);
         assert!(manifest.rate_limits.is_some());
         let rl = manifest.rate_limits.unwrap();
         assert!((rl.max_rps - 10.0).abs() < f64::EPSILON);
         assert!(rl.backoff_on_429);
         assert_eq!(rl.min_delay_ms, 100);
+        assert_eq!(
+            manifest.metadata["suite_owner"],
+            Value::String("payments".to_owned())
+        );
+    }
+
+    #[test]
+    fn manifest_device_builder_defaults() {
+        let manifest = EnvironmentManifest::device("hue", "Philips Hue");
+        assert_eq!(manifest.tier, LiveTier::DeviceRequired);
+        assert_eq!(manifest.provider, "Philips Hue");
+        assert!(matches!(manifest.cleanup, CleanupStrategy::None));
+        assert!((manifest.budget_usd - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn manifest_read_only_builder_defaults() {
+        let manifest = EnvironmentManifest::read_only("reddit", "Reddit");
+        assert_eq!(manifest.tier, LiveTier::LiveReadOnly);
+        assert_eq!(manifest.provider, "Reddit");
+        assert!(matches!(manifest.cleanup, CleanupStrategy::None));
+        assert!((manifest.budget_usd - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn manifest_live_write_builder_defaults() {
+        let manifest = EnvironmentManifest::live_write("line", "LINE");
+        assert_eq!(manifest.tier, LiveTier::LiveWriteRequired);
+        assert_eq!(manifest.provider, "LINE");
+        assert!(matches!(manifest.cleanup, CleanupStrategy::PrefixDelete));
+        assert!((manifest.budget_usd - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn manifest_with_test_default_secret() {
-        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
-            .with_test_default_secret("mode", "STRIPE_MODE", "test", "Mode selector");
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe").with_test_default_secret(
+            "mode",
+            "STRIPE_MODE",
+            "test",
+            "Mode selector",
+        );
         assert_eq!(manifest.secrets.len(), 1);
         // The secret should resolve to "test" default since STRIPE_MODE is not set
         let bag = manifest.load_secrets();
@@ -1348,18 +2116,78 @@ mod tests {
         // Test validation logic using a sandbox manifest: the gate check
         // reads the real env (FCP_LIVE_SANDBOX likely unset), so validation
         // should report the missing gate.
-        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
-            .with_budget(1.0);
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe").with_budget(1.0);
         let problems = manifest.validate();
         // In CI without FCP_LIVE_SANDBOX=1, this should have at least the gate problem
         assert!(problems.iter().any(|p| p.contains("FCP_LIVE_SANDBOX")));
     }
 
     #[test]
+    fn manifest_validate_reports_missing_required_env_var() {
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+            .with_env_var("FCP_TESTKIT_REQUIRED_REGION_5555", "Required region")
+            .with_account_setup("Use a dedicated Stripe test-mode account")
+            .with_budget(1.0);
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("FCP_TESTKIT_REQUIRED_REGION_5555"))
+        );
+    }
+
+    #[test]
+    fn manifest_validate_requires_account_setup_for_non_local_runs() {
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe").with_budget(1.0);
+        let problems = manifest.validate();
+        assert!(problems.iter().any(|p| p.contains("account setup")));
+    }
+
+    #[test]
+    fn manifest_validate_requires_cleanup_for_mutation_capable_tiers() {
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+            .with_account_setup("Use a dedicated Stripe test-mode account")
+            .with_budget(1.0)
+            .with_cleanup(CleanupStrategy::None);
+        let problems = manifest.validate();
+        assert!(problems.iter().any(|p| p.contains("cleanup strategy")));
+    }
+
+    #[test]
+    fn manifest_validate_rejects_invalid_rate_limits() {
+        let mut manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+            .with_account_setup("Use a dedicated Stripe test-mode account")
+            .with_budget(1.0);
+        manifest.rate_limits = Some(RateLimitConfig {
+            max_rps: 0.0,
+            min_delay_ms: 0,
+            backoff_on_429: true,
+        });
+
+        let problems = manifest.validate();
+        assert!(problems.iter().any(|p| p.contains("max_rps")));
+        assert!(problems.iter().any(|p| p.contains("min_delay_ms")));
+    }
+
+    #[test]
+    fn manifest_with_rate_limits_clamps_min_delay_to_one_ms() {
+        let manifest = EnvironmentManifest::read_only("reddit", "Reddit")
+            .with_account_setup("Use a dedicated Reddit API test account")
+            .with_rate_limits(5_000.0, true);
+
+        let rate_limits = manifest.rate_limits.expect("rate limit config");
+        assert!((rate_limits.max_rps - 5_000.0).abs() < f64::EPSILON);
+        assert_eq!(rate_limits.min_delay_ms, 1);
+    }
+
+    #[test]
     fn manifest_validate_reports_missing_secrets() {
         // Use a never-set env var for the secret
-        let manifest = EnvironmentManifest::local("sqlite")
-            .with_env_secret("api_key", "FCP_TESTKIT_INTERNAL_NEVER_SET_7777", "key");
+        let manifest = EnvironmentManifest::local("sqlite").with_env_secret(
+            "api_key",
+            "FCP_TESTKIT_INTERNAL_NEVER_SET_7777",
+            "key",
+        );
         let problems = manifest.validate();
         assert!(problems.iter().any(|p| p.contains("api_key")));
     }
@@ -1367,17 +2195,21 @@ mod tests {
     #[test]
     fn manifest_evidence_summary() {
         let manifest = EnvironmentManifest::sandbox("aws", "Amazon Web Services")
-            .with_budget(5.0);
+            .with_budget(5.0)
+            .with_account_setup("Use a dedicated AWS sandbox account")
+            .with_env_var_default("AWS_REGION", "us-east-1", "AWS region");
         let summary = manifest.evidence_summary();
         assert_eq!(summary["connector"], "aws");
         assert_eq!(summary["tier"], "sandbox_required");
         assert_eq!(summary["provider"], "Amazon Web Services");
+        assert_eq!(summary["env_var_count"], 1);
+        assert_eq!(summary["account_setup_configured"], true);
+        assert_eq!(summary["cleanup_strategy"]["kind"], "prefix_delete");
     }
 
     #[test]
     fn manifest_cost_budget() {
-        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
-            .with_budget(3.50);
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe").with_budget(3.50);
         let budget = manifest.cost_budget();
         assert!((budget.max_usd() - 3.50).abs() < f64::EPSILON);
     }
@@ -1403,10 +2235,25 @@ mod tests {
     fn live_environment_sandbox_not_ready_without_gate() {
         // FCP_LIVE_SANDBOX is not set in test env, so sandbox env is not ready
         let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+            .with_account_setup("Use a dedicated Stripe test-mode account")
             .with_budget(1.0);
         let env = LiveEnvironment::from_manifest(manifest);
         assert!(!env.is_ready());
         assert!(!env.problems().is_empty());
+    }
+
+    #[test]
+    fn live_environment_not_ready_without_required_env_var() {
+        let manifest = EnvironmentManifest::local("sqlite")
+            .with_env_var("FCP_TESTKIT_REQUIRED_REGION_6060", "Required region");
+        let env = LiveEnvironment::from_manifest(manifest);
+        assert!(!env.is_ready());
+        assert!(!env.env_vars.is_complete());
+        assert!(
+            env.problems()
+                .iter()
+                .any(|problem| problem.contains("FCP_TESTKIT_REQUIRED_REGION_6060"))
+        );
     }
 
     #[test]
@@ -1418,12 +2265,18 @@ mod tests {
         assert_eq!(summary["manifest"]["connector"], "duckdb");
         assert!(summary["budget"].is_object());
         assert!(summary["tenant_prefix"].is_string());
+        assert!(summary["tenant_identity"].is_string());
+        assert!(summary["env_vars"].is_object());
+        assert!(summary["cleanup_expectations"].is_object());
     }
 
     #[test]
     fn live_environment_debug_does_not_leak() {
-        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
-            .with_env_secret("key", "FCP_STRIPE_TEST_KEY_NEVER", "test key");
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe").with_env_secret(
+            "key",
+            "FCP_STRIPE_TEST_KEY_NEVER",
+            "test key",
+        );
         let env = LiveEnvironment::from_manifest(manifest);
         let debug = format!("{env:?}");
         assert!(!debug.contains("FCP_STRIPE_TEST_KEY_NEVER"));
@@ -1508,5 +2361,323 @@ mod tests {
         assert!((parsed.max_rps - 5.0).abs() < f64::EPSILON);
         assert_eq!(parsed.min_delay_ms, 200);
         assert!(parsed.backoff_on_429);
+    }
+
+    // ── BudgetAlert ───────────────────────────────────────────────────────
+
+    #[test]
+    fn budget_alert_ok_when_under_75_percent() {
+        let budget = CostBudget::new(1.0);
+        budget.record_api_call("op", 0.50); // 50%
+        assert_eq!(budget.alert_level(), BudgetAlert::Ok);
+        assert!(!budget.alert_level().is_problem());
+    }
+
+    #[test]
+    fn budget_alert_warning_at_75_percent() {
+        let budget = CostBudget::new(1.0);
+        budget.record_api_call("op", 0.80); // 80%
+        assert_eq!(budget.alert_level(), BudgetAlert::Warning);
+        assert!(budget.alert_level().is_problem());
+    }
+
+    #[test]
+    fn budget_alert_critical_at_90_percent() {
+        let budget = CostBudget::new(1.0);
+        budget.record_api_call("op", 0.95); // 95%
+        assert_eq!(budget.alert_level(), BudgetAlert::Critical);
+        assert!(budget.alert_level().is_problem());
+    }
+
+    #[test]
+    fn budget_alert_exceeded_over_limit() {
+        let budget = CostBudget::new(1.0);
+        budget.record_api_call("op", 1.50); // 150%
+        assert_eq!(budget.alert_level(), BudgetAlert::Exceeded);
+        assert!(budget.alert_level().is_problem());
+    }
+
+    #[test]
+    fn budget_alert_display() {
+        assert_eq!(BudgetAlert::Ok.to_string(), "ok");
+        assert_eq!(BudgetAlert::Warning.to_string(), "warning");
+        assert_eq!(BudgetAlert::Critical.to_string(), "critical");
+        assert_eq!(BudgetAlert::Exceeded.to_string(), "exceeded");
+    }
+
+    #[test]
+    fn budget_exceeds_threshold() {
+        let budget = CostBudget::new(10.0);
+        budget.record_api_call("op", 8.0); // 80%
+        assert!(budget.exceeds_threshold(0.75));
+        assert!(!budget.exceeds_threshold(0.85));
+    }
+
+    #[test]
+    fn budget_summary_includes_alert_level() {
+        let budget = CostBudget::new(1.0);
+        budget.record_api_call("op", 0.10);
+        let summary = budget.summary();
+        assert_eq!(summary["alert_level"], "ok");
+    }
+
+    // ── StaleResourceReport ──────────────────────────────────────────────
+
+    #[test]
+    fn stale_resource_scan_finds_old_resources() {
+        let old_date = (Utc::now() - chrono::Duration::days(45)).format("%Y%m%d");
+        let old_name = format!("fcp-test-stripe-customer-abc-{old_date}");
+        let fresh_name = format!("fcp-test-stripe-order-xyz-{}", Utc::now().format("%Y%m%d"));
+        let non_synthetic = "my-prod-resource";
+
+        let names = [old_name.as_str(), fresh_name.as_str(), non_synthetic];
+        let report = StaleResourceReport::scan(&names, 30);
+
+        assert_eq!(report.scanned, 3);
+        assert!(report.has_stale());
+        assert_eq!(report.stale.len(), 1);
+        assert_eq!(report.stale[0].name, old_name);
+        assert_eq!(report.stale[0].connector.as_deref(), Some("stripe"));
+        assert!(report.stale[0].age_days.unwrap() >= 44);
+    }
+
+    #[test]
+    fn stale_resource_scan_empty_when_all_fresh() {
+        let fresh = format!("fcp-test-aws-bucket-abc-{}", Utc::now().format("%Y%m%d"));
+        let names = [fresh.as_str()];
+        let report = StaleResourceReport::scan(&names, 30);
+        assert!(!report.has_stale());
+        assert_eq!(report.stale.len(), 0);
+    }
+
+    #[test]
+    fn stale_resource_scan_ignores_non_synthetic() {
+        let names = ["production-database", "staging-bucket", "test-server"];
+        let report = StaleResourceReport::scan(&names, 1);
+        assert!(!report.has_stale());
+    }
+
+    #[test]
+    fn stale_resource_summary_structure() {
+        let old_date = (Utc::now() - chrono::Duration::days(60)).format("%Y%m%d");
+        let old_name = format!("fcp-test-gcp-vm-run1-{old_date}");
+        let names = [old_name.as_str()];
+        let report = StaleResourceReport::scan(&names, 30);
+        let summary = report.summary();
+        assert_eq!(summary["scanned"], 1);
+        assert_eq!(summary["stale_count"], 1);
+        assert!(summary["stale_resources"].is_array());
+    }
+
+    // ── PrerequisiteReport ───────────────────────────────────────────────
+
+    #[test]
+    fn prerequisite_report_local_is_ready() {
+        let manifest = EnvironmentManifest::local("sqlite");
+        let report = manifest.prerequisite_report();
+        assert!(report.is_ready());
+        assert!(report.gate_enabled);
+        assert_eq!(report.gate_env_var, "FCP_LIVE_LOCAL");
+        assert!(report.secrets_complete);
+        assert!(report.env_vars_complete);
+        assert!(report.account_setup_configured);
+        assert!(report.budget_configured);
+        assert!(report.cleanup_configured);
+    }
+
+    #[test]
+    fn prerequisite_report_sandbox_missing_gate() {
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+            .with_account_setup("Use Stripe test mode")
+            .with_budget(1.0);
+        let report = manifest.prerequisite_report();
+        // FCP_LIVE_SANDBOX is not set in test env
+        assert!(!report.gate_enabled);
+        assert!(!report.is_ready());
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("FCP_LIVE_SANDBOX"))
+        );
+    }
+
+    #[test]
+    fn prerequisite_report_missing_secrets() {
+        let manifest = EnvironmentManifest::local("test").with_env_secret(
+            "api_key",
+            "FCP_NEVER_SET_PREREQ_TEST",
+            "key",
+        );
+        let report = manifest.prerequisite_report();
+        assert!(!report.secrets_complete);
+        assert_eq!(report.secrets_missing, vec!["api_key"]);
+    }
+
+    #[test]
+    fn prerequisite_report_detects_missing_account_setup() {
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe").with_budget(1.0);
+        let report = manifest.prerequisite_report();
+        assert!(!report.account_setup_configured);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("account setup"))
+        );
+    }
+
+    #[test]
+    fn prerequisite_report_detects_invalid_cleanup_configuration() {
+        let manifest = EnvironmentManifest::local("sqlite")
+            .with_cleanup(CleanupStrategy::Script("   ".to_owned()));
+        let report = manifest.prerequisite_report();
+        assert!(!report.cleanup_configured);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("Cleanup script path"))
+        );
+    }
+
+    #[test]
+    fn prerequisite_report_summary_includes_contract_context() {
+        let manifest = EnvironmentManifest::sandbox("aws", "AWS")
+            .with_account_setup("Use a dedicated test account")
+            .with_budget(5.0)
+            .with_env_var_default("AWS_REGION", "us-east-1", "AWS region")
+            .with_rate_limits(4.0, true)
+            .with_metadata("suite_owner", Value::String("cloud".to_owned()));
+        let summary = manifest.prerequisite_report().summary();
+        assert_eq!(summary["provider"], "AWS");
+        assert_eq!(summary["gate_env_var"], "FCP_LIVE_SANDBOX");
+        assert_eq!(summary["env_vars_defaults_used"][0], "AWS_REGION");
+        assert_eq!(summary["cleanup_strategy"]["kind"], "prefix_delete");
+        assert_eq!(summary["rate_limits"]["max_rps"], 4.0);
+        assert_eq!(summary["synthetic_tenant_expected"], true);
+        assert_eq!(summary["metadata_keys"][0], "suite_owner");
+    }
+
+    #[test]
+    fn prerequisite_report_summary_structure() {
+        let manifest = EnvironmentManifest::local("sqlite");
+        let report = manifest.prerequisite_report();
+        let summary = report.summary();
+        assert!(summary["ready"].as_bool().unwrap());
+        assert_eq!(summary["connector"], "sqlite");
+        assert_eq!(summary["provider"], "local");
+        assert!(summary["gate_enabled"].as_bool().unwrap());
+        assert_eq!(summary["gate_env_var"], "FCP_LIVE_LOCAL");
+        assert!(summary["secrets_complete"].as_bool().unwrap());
+        assert!(summary["env_vars_complete"].as_bool().unwrap());
+        assert!(summary["account_setup_configured"].as_bool().unwrap());
+        assert!(summary["budget_configured"].as_bool().unwrap());
+        assert!(summary["cleanup_configured"].as_bool().unwrap());
+        assert_eq!(summary["problem_count"], 0);
+    }
+
+    // ── Manifest JSON serialization ──────────────────────────────────────
+
+    #[test]
+    fn manifest_to_json_and_back() {
+        let manifest = EnvironmentManifest::sandbox("aws", "AWS")
+            .with_env_secret("access_key", "AWS_ACCESS_KEY_ID", "AWS access key")
+            .with_env_var_default("AWS_REGION", "us-east-1", "AWS region")
+            .with_budget(5.0)
+            .with_account_setup("Use a dedicated test account")
+            .with_rate_limits(10.0, true);
+
+        let json = manifest.to_json().unwrap();
+        let parsed: EnvironmentManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector, "aws");
+        assert_eq!(parsed.tier, LiveTier::SandboxRequired);
+        assert_eq!(parsed.secrets.len(), 1);
+        assert_eq!(parsed.env_vars.len(), 1);
+        assert!((parsed.budget_usd - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn manifest_from_json_file_nonexistent() {
+        let result =
+            EnvironmentManifest::from_json_file(std::path::Path::new("/nonexistent/manifest.json"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to read"));
+    }
+
+    // ── CleanupStrategy helpers ──────────────────────────────────────────
+
+    #[test]
+    fn cleanup_strategy_uses_synthetic_tenant() {
+        assert!(!CleanupStrategy::None.uses_synthetic_tenant());
+        assert!(CleanupStrategy::PrefixDelete.uses_synthetic_tenant());
+        assert!(!CleanupStrategy::Script("/bin/cleanup.sh".to_owned()).uses_synthetic_tenant());
+        assert!(CleanupStrategy::AutoExpire { ttl_hours: 24 }.uses_synthetic_tenant());
+    }
+
+    #[test]
+    fn cleanup_strategy_summary_shapes() {
+        let none = CleanupStrategy::None.summary();
+        assert_eq!(none["kind"], "none");
+
+        let prefix = CleanupStrategy::PrefixDelete.summary();
+        assert_eq!(prefix["kind"], "prefix_delete");
+        assert!(prefix["uses_synthetic_tenant"].as_bool().unwrap());
+
+        let script = CleanupStrategy::Script("/tmp/clean.sh".to_owned()).summary();
+        assert_eq!(script["kind"], "script");
+        assert_eq!(script["script"], "/tmp/clean.sh");
+
+        let auto = CleanupStrategy::AutoExpire { ttl_hours: 48 }.summary();
+        assert_eq!(auto["kind"], "auto_expire");
+        assert_eq!(auto["ttl_hours"], 48);
+    }
+
+    // ── RateLimitConfig ──────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_config_summary() {
+        let config = RateLimitConfig {
+            max_rps: 10.0,
+            min_delay_ms: 100,
+            backoff_on_429: true,
+        };
+        let summary = config.summary();
+        assert_eq!(summary["max_rps"], 10.0);
+        assert_eq!(summary["min_delay_ms"], 100);
+        assert!(summary["backoff_on_429"].as_bool().unwrap());
+    }
+
+    // ── EnvVarBag extras ─────────────────────────────────────────────────
+
+    #[test]
+    fn env_var_bag_len_and_is_empty() {
+        let empty = EnvVarBag::load(&[]);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+
+        let requirements = vec![EnvVarRequirement {
+            name: "X".to_owned(),
+            default: Some("y".to_owned()),
+            description: String::new(),
+        }];
+        let loaded = EnvVarBag::load(&requirements);
+        assert!(!loaded.is_empty());
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn env_var_bag_summary_structure() {
+        let requirements = vec![EnvVarRequirement {
+            name: "FCP_TESTKIT_REGION_SUMM".to_owned(),
+            default: Some("us-west-2".to_owned()),
+            description: "Region".to_owned(),
+        }];
+        let bag = EnvVarBag::load(&requirements);
+        let summary = bag.summary();
+        assert!(summary["complete"].as_bool().unwrap());
+        assert_eq!(summary["loaded_count"], 1);
+        assert!(summary["loaded_keys"].is_array());
+        assert_eq!(summary["defaults_used"][0], "FCP_TESTKIT_REGION_SUMM");
     }
 }

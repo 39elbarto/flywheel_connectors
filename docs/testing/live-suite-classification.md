@@ -188,6 +188,73 @@ in default CI.
 | **Weekly** | Tier C `device_required` (where device lab available) | Manual trigger |
 | **Weekly** | Tier E `live_write_required` | `FCP_LIVE_WRITE=1` + isolated accounts |
 
+## Standard Live-Suite Prerequisites
+
+Bead `49z0b.14.2` standardizes the per-connector prerequisite declaration
+through `fcp_testkit::live_suite::EnvironmentManifest`. Connectors in Tier
+B/C/D/E should use that layer instead of ad hoc env-var checks or one-off
+cleanup notes.
+
+### Required Manifest Fields
+
+Every live-capable connector should declare all of the following:
+
+- connector id and provider name
+- tier gate: `sandbox`, `device`, `read_only`, or `live_write`
+- required secrets and any required non-secret environment variables
+- explicit account setup guidance for the sandbox, test tenant, device lab, or
+  dedicated workspace required to run safely
+- per-run budget ceiling in USD
+- cleanup strategy
+- rate-limit guidance when the provider enforces quotas or anti-abuse delays
+- optional metadata needed by evidence collectors or nightly orchestration
+
+Use the constructor that matches the classification table:
+
+- Tier A: `EnvironmentManifest::local(...)`
+- Tier B: `EnvironmentManifest::sandbox(...)`
+- Tier C: `EnvironmentManifest::device(...)`
+- Tier D: `EnvironmentManifest::read_only(...)`
+- Tier E: `EnvironmentManifest::live_write(...)`
+
+### Gate Mapping
+
+| Tier | Gate | Expected Secret Boundary |
+| --- | --- | --- |
+| Tier B `sandbox_required` | `FCP_LIVE_SANDBOX=1` | provider sandbox / test account |
+| Tier C `device_required` | `FCP_LIVE_DEVICE=1` | dedicated device, lab host, or platform account |
+| Tier D `live_read_only` | `FCP_LIVE_READ=1` | read-only or low-risk API key |
+| Tier E `live_write_required` | `FCP_LIVE_WRITE=1` | isolated mutation-capable test tenant |
+
+### Safety Rules For Repeated Automated Use
+
+- Never point these suites at production credentials, production tenants, or a
+  shared personal account.
+- Namespace mutable resources with a synthetic tenant or other run-specific
+  prefix so later cleanup and forensic inspection stay deterministic.
+- Tier B and Tier E suites must declare a cleanup strategy. Tier C suites may
+  use `CleanupStrategy::None` only when the device/local platform boundary does
+  not create cloud-side mutable state that the suite itself is responsible for
+  removing.
+- Rate-limit metadata should be truthful enough for nightly orchestration to
+  slow down or quarantine a connector rather than burn quota blindly.
+- Missing prerequisites should fail as an explicit gated skip with actionable
+  remediation, not as a mysterious auth or network error mid-run.
+
+### Evidence Bundle Expectations
+
+For Tier B/C/D/E runs, `environment.json` or the connector-local equivalent
+should preserve enough redaction-safe context to explain why a run was safe and
+repeatable:
+
+- suite class and live tier
+- redacted secret/env-var presence, not raw values
+- account setup or sandbox identity in redacted form
+- budget ceiling and observed spend summary
+- cleanup expectations and whether mutation was exercised
+- synthetic tenant identity or equivalent run namespace
+- rate-limit guidance used during the run
+
 ## Downstream Consumer Mapping
 
 - `49z0b.14.2`: Use the Tier B/C/D/E classifications to design the secret

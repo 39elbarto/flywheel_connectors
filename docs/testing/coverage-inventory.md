@@ -14,8 +14,9 @@
 > as raw scan provenance, but bead `flywheel_connectors-49z0b.16.1` found that
 > those legacy columns do not map 1:1 onto the closed suite classes from the V3
 > contract. The addendum sections below supersede any contradictory reading of
-> those legacy columns until `flywheel_connectors-49z0b.15.1` lands an automated
-> suite-class scanner.
+> those legacy columns. For the current machine-enforced answer, run
+> `scripts/ci/test_coverage_scan.sh`; this document remains the narrative
+> baseline and remediation inventory behind that scanner.
 
 ## Scope and Interpretation
 

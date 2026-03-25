@@ -348,7 +348,9 @@ impl PcsGroupState {
         }
 
         if self.is_member(&member.node_id) {
-            return Err(PcsError::DuplicateMember(member.node_id.as_str().to_string()));
+            return Err(PcsError::DuplicateMember(
+                member.node_id.as_str().to_string(),
+            ));
         }
 
         self.member_index

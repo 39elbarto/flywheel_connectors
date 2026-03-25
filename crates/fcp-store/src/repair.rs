@@ -4625,7 +4625,10 @@ mod tests {
         controller.evaluate_zone(&zone, &store, &policies).await;
 
         let stats = controller.stats();
-        assert_eq!(stats.queue_depth, 1, "one object below target should be queued");
+        assert_eq!(
+            stats.queue_depth, 1,
+            "one object below target should be queued"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -4665,7 +4668,10 @@ mod tests {
         controller.evaluate_zone(&zone, &store, &policies).await;
 
         let stats = controller.stats();
-        assert_eq!(stats.queue_depth, 2, "both deficit objects should be queued");
+        assert_eq!(
+            stats.queue_depth, 2,
+            "both deficit objects should be queued"
+        );
 
         // Higher priority item (worse coverage) should be dequeued first
         let first = controller.next_repair().unwrap();
@@ -4717,7 +4723,10 @@ mod tests {
             .await;
 
         assert_eq!(plan.object_count_below_target, 0);
-        assert!(plan.actions.is_empty(), "no actions needed for healthy objects");
+        assert!(
+            plan.actions.is_empty(),
+            "no actions needed for healthy objects"
+        );
     }
 
     // --- Acceptance: repair loop convergence ---
@@ -4755,7 +4764,11 @@ mod tests {
         }
 
         assert_eq!(processed, 5, "all queued items should be processed");
-        assert_eq!(controller.stats().queue_depth, 0, "queue should drain to zero");
+        assert_eq!(
+            controller.stats().queue_depth,
+            0,
+            "queue should drain to zero"
+        );
         assert_eq!(controller.stats().repairs_succeeded, 5);
         assert_eq!(controller.stats().symbols_added, 25);
     }
@@ -4840,7 +4853,10 @@ mod tests {
         assert!(r1.is_some(), "first repair should pass rate limit");
         assert!(r2.is_some(), "second repair should pass rate limit");
         assert!(r3.is_none(), "third repair should be rate limited");
-        assert!(controller.stats().rate_limited > 0, "rate limit counter should increment");
+        assert!(
+            controller.stats().rate_limited > 0,
+            "rate limit counter should increment"
+        );
     }
 
     // --- Acceptance: deduplication in queue ---
@@ -4915,6 +4931,9 @@ mod tests {
         // The object is available (100% coverage) but fails source-diversity policy
         // (1 node vs 3 required), so needs_repair returns true and queues it.
         let stats = controller.stats();
-        assert_eq!(stats.queue_depth, 1, "diversity-deficit object should be queued for repair");
+        assert_eq!(
+            stats.queue_depth, 1,
+            "diversity-deficit object should be queued for repair"
+        );
     }
 }

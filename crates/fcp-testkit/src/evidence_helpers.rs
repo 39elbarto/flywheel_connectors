@@ -21,6 +21,7 @@
 use crate::database_helpers::{
     CleanupVerificationResult, FixtureMutationRecord, FixtureSeedRecord,
 };
+use crate::live_suite::LiveEnvironment;
 use serde_json::{Value, json};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -218,6 +219,29 @@ impl EvidenceCollector {
             "total_artifacts": self.total_artifacts(),
         })
     }
+}
+
+/// Render a redaction-safe live-suite environment snapshot suitable for
+/// `environment.json` bundles.
+///
+/// This helper adds the V3 acceptance-contract routing fields on top of the
+/// structured live-suite evidence summary so nightly/live orchestration can
+/// reason about tier, gate, and mutation mode without exposing raw secrets.
+#[must_use]
+pub fn render_live_environment_json(
+    environment: &LiveEnvironment,
+    suite_class: &str,
+    mutation_mode: &str,
+) -> Value {
+    json!({
+        "suite_class": suite_class,
+        "connector": environment.manifest.connector,
+        "provider": environment.manifest.provider,
+        "live_tier": environment.manifest.tier.to_string(),
+        "gate_env_var": environment.manifest.tier.gate_env_var(),
+        "mutation_mode": mutation_mode,
+        "live_environment": environment.evidence_summary(),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -481,6 +505,7 @@ pub fn assert_mutations_have_cleanup_verifications(collector: &EvidenceCollector
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::live_suite::{EnvironmentManifest, LiveEnvironment};
 
     #[test]
     fn collector_empty_by_default() {
@@ -533,6 +558,47 @@ mod tests {
         assert_eq!(j["audit_events"], 1);
         assert_eq!(j["receipts"], 1);
         assert_eq!(j["total_artifacts"], 2);
+    }
+
+    #[test]
+    fn render_live_environment_json_includes_contract_fields() {
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+            .with_account_setup("Use a dedicated Stripe test-mode account")
+            .with_budget(1.0)
+            .with_env_var_default("FCP_TESTKIT_REGION", "us-east-1", "Default region");
+        let environment = LiveEnvironment::from_manifest(manifest);
+
+        let snapshot = render_live_environment_json(&environment, "live", "dry_run_only");
+
+        assert_eq!(snapshot["suite_class"], "live");
+        assert_eq!(snapshot["connector"], "stripe");
+        assert_eq!(snapshot["provider"], "Stripe");
+        assert_eq!(snapshot["live_tier"], "sandbox_required");
+        assert_eq!(snapshot["gate_env_var"], "FCP_LIVE_SANDBOX");
+        assert_eq!(snapshot["mutation_mode"], "dry_run_only");
+        assert!(snapshot["live_environment"].is_object());
+    }
+
+    #[test]
+    fn render_live_environment_json_does_not_leak_default_values() {
+        let manifest = EnvironmentManifest::sandbox("stripe", "Stripe")
+            .with_test_default_secret(
+                "mode",
+                "FCP_TESTKIT_UNUSED_LIVE_SECRET",
+                "danger-secret",
+                "Test mode secret",
+            )
+            .with_env_var_default("FCP_TESTKIT_REGION", "eu-west-1", "Default region")
+            .with_account_setup("Use a dedicated Stripe test-mode account")
+            .with_budget(1.0);
+        let environment = LiveEnvironment::from_manifest(manifest);
+
+        let snapshot = render_live_environment_json(&environment, "live", "denial");
+        let serialized = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+
+        assert!(!serialized.contains("danger-secret"));
+        assert!(!serialized.contains("eu-west-1"));
+        assert_eq!(snapshot["mutation_mode"], "denial");
     }
 
     #[test]

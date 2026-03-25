@@ -20,12 +20,13 @@ enum Auth {
     CredentialId { _id: String },
 }
 
-
 impl std::fmt::Debug for Auth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
-            Self::CredentialId { _id: id } => f.debug_struct("CredentialId").field("_id", id).finish(),
+            Self::CredentialId { _id: id } => {
+                f.debug_struct("CredentialId").field("_id", id).finish()
+            }
         }
     }
 }
@@ -57,7 +58,6 @@ struct ElevenLabsConfig {
     base_url: String,
     request_timeout_ms: u64,
 }
-
 
 impl std::fmt::Debug for ElevenLabsConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,7 +128,6 @@ struct ElevenLabsClient {
     auth: Auth,
     base_url: String,
 }
-
 
 impl std::fmt::Debug for ElevenLabsClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

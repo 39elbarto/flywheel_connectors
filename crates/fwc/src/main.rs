@@ -22654,7 +22654,7 @@ mod tests {
         host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
         host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
         mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
-        serve_mcp,
+        serve_mcp, try_host_mcp_tool_definitions, try_host_tool_operation_info,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;

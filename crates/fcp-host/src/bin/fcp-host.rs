@@ -2671,22 +2671,37 @@ async fn connector_inventory_apply_handler(
         };
 
         let current_inventory = state.registry.inventory().await;
-        let current = current_inventory
+        let current = match current_inventory
             .iter()
             .find(|entry| entry.id == request.connector.id)
             .cloned()
-            .ok_or_else(|| {
-                map_host_error(HostError::Internal(format!(
-                    "connector '{}' was missing from the live registry immediately after apply",
+        {
+            Some(entry) => entry,
+            None => {
+                let rollback_note =
+                    rollback_connector_inventory(&state, &connectors_file, &previous_configs).await;
+                return Err(map_host_error(HostError::Internal(format!(
+                    "connector '{}' was missing from the live registry immediately after apply; {rollback_note}",
                     request.connector.id
-                )))
-            })?;
-        let admin_state = state
+                ))));
+            }
+        };
+        let admin_state = match state
             .lifecycle
             .reconcile_registered_connectors(&state.registry.list().await)
             .await
-            .map_err(map_lifecycle_host_error)
-            .map_err(map_host_error)?;
+        {
+            Ok(report) => report,
+            Err(err) => {
+                let rollback_note =
+                    rollback_connector_inventory(&state, &connectors_file, &previous_configs).await;
+                return Err(map_host_error(HostError::Internal(format!(
+                    "failed to reconcile admin state after live connector inventory mutation for '{}': {}; {rollback_note}",
+                    request.connector.id,
+                    map_lifecycle_host_error(err)
+                ))));
+            }
+        };
         (apply, current_inventory, current, Some(admin_state))
     };
 
@@ -2903,7 +2918,18 @@ async fn rollback_connector_inventory(
         Ok(_) => "live registry rolled back".to_string(),
         Err(err) => format!("live registry rollback also failed: {err}"),
     };
-    format!("{file_note}; {registry_note}")
+    let lifecycle_note = match state
+        .lifecycle
+        .reconcile_registered_connectors(&state.registry.list().await)
+        .await
+    {
+        Ok(_) => "admin state reconciled after rollback".to_string(),
+        Err(err) => format!(
+            "admin-state rollback reconciliation also failed: {}",
+            map_lifecycle_host_error(err)
+        ),
+    };
+    format!("{file_note}; {registry_note}; {lifecycle_note}")
 }
 
 async fn apply_connector_config_payload(
@@ -2962,16 +2988,36 @@ async fn apply_connector_config_payload(
     };
 
     let current_inventory = state.registry.inventory().await;
-    let current_entry = find_connector_inventory_entry(&current_inventory, connector_id)
+    let current_entry = match find_connector_inventory_entry(&current_inventory, connector_id)
         .cloned()
-        .ok_or_else(|| {
-            HostError::Internal(format!(
-                "connector '{connector_id}' was missing from the live registry immediately after config apply"
-            ))
-        })?;
+    {
+        Some(entry) => entry,
+        None => {
+            let rollback_note =
+                rollback_connector_inventory(state, &connectors_file, &previous_configs).await;
+            return Err(HostError::Internal(format!(
+                "connector '{connector_id}' was missing from the live registry immediately after config apply; {rollback_note}"
+            )));
+        }
+    };
     let current_payload = connector_config_payload(&current_entry);
     let current = SanitizedConnectorConfig::from_payload(current_payload.clone())
         .map_err(map_lifecycle_host_error)?;
+    let admin_state = match state
+        .lifecycle
+        .reconcile_registered_connectors(&state.registry.list().await)
+        .await
+    {
+        Ok(report) => report,
+        Err(err) => {
+            let rollback_note =
+                rollback_connector_inventory(state, &connectors_file, &previous_configs).await;
+            return Err(HostError::Internal(format!(
+                "failed to reconcile admin state after live connector config mutation for '{connector_id}': {}; {rollback_note}",
+                map_lifecycle_host_error(err)
+            )));
+        }
+    };
     let revision = match state
         .lifecycle
         .append_config_revision(
@@ -2992,11 +3038,6 @@ async fn apply_connector_config_payload(
             )));
         }
     };
-    let admin_state = state
-        .lifecycle
-        .reconcile_registered_connectors(&state.registry.list().await)
-        .await
-        .map_err(map_lifecycle_host_error)?;
     let diff = diff_sanitized_config_values(&current_context.raw_payload, &current_payload)
         .map_err(map_lifecycle_host_error)?;
 
@@ -4763,6 +4804,49 @@ mod tests {
         }
     }
 
+    fn failing_admin_state_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let blocker = dir.path().join("admin-state-blocker");
+        std::fs::write(&blocker, "block persistence here").expect("write blocker file");
+        blocker.join("state.json")
+    }
+
+    async fn test_app_state_with_connectors_file(
+        configs: Vec<ConnectorConfig>,
+        connectors_file: std::path::PathBuf,
+        lifecycle: Arc<HostAdminStateStore>,
+    ) -> Arc<AppState> {
+        write_connector_configs_file(&connectors_file, &configs).expect("write connectors file");
+        let registry = Arc::new(
+            SubprocessRegistry::from_configs(configs)
+                .await
+                .expect("registry should load"),
+        );
+        let doctor = DoctorService::new(Arc::clone(&registry));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let discovery = Arc::new(DiscoveryEndpoint::new(
+            Arc::clone(&registry),
+            Arc::clone(&budget),
+        ));
+        let rollout = Arc::new(RolloutController::new(
+            Arc::clone(&registry),
+            Arc::clone(&lifecycle),
+        ));
+        Arc::new(AppState {
+            registry,
+            doctor,
+            budget,
+            discovery,
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle,
+            rollout,
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            connectors_file: Some(connectors_file),
+            started_at: Instant::now(),
+        })
+    }
+
     fn rollout_handler_test_policy() -> RolloutPolicy {
         RolloutPolicy::builder()
             .canary_percent(5)
@@ -5803,5 +5887,97 @@ mod tests {
             reloaded.pinned_version(&connector_id).await,
             Some(current_version)
         );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn connector_inventory_apply_rolls_back_when_reconciliation_fails() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping inventory rollback test");
+            return;
+        }
+
+        let work_dir = tempfile::tempdir().expect("tempdir");
+        let lifecycle_dir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = work_dir.path().join("connectors.json");
+        let connector_id = "fcp.test.rollback.inventory:utility:1.0.0";
+        let original = subprocess_test_connector_config(connector_id);
+        let lifecycle = Arc::new(
+            HostAdminStateStore::with_state_path(failing_admin_state_path(&lifecycle_dir))
+                .expect("lifecycle store should load"),
+        );
+        let state = test_app_state_with_connectors_file(
+            vec![original.clone()],
+            connectors_file.clone(),
+            lifecycle,
+        )
+        .await;
+
+        let mut updated = original.clone();
+        updated.name = Some("Updated Name".to_string());
+        updated.categories.push("rollback-check".to_string());
+
+        let err = connector_inventory_apply_handler(
+            State(Arc::clone(&state)),
+            Json(ConnectorInventoryMutationRequest {
+                kind: ConnectorInventoryMutationKind::Update,
+                dry_run: false,
+                connector: updated,
+            }),
+        )
+        .await
+        .expect_err("reconciliation failure should surface");
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("failed to reconcile admin state"));
+
+        let persisted = read_connector_configs_file(&connectors_file)
+            .expect("connectors file should remain readable");
+        assert_eq!(persisted, vec![original.clone()]);
+
+        let inventory = state.registry.inventory().await;
+        assert_eq!(inventory, vec![original]);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn connector_config_apply_rolls_back_when_reconciliation_fails() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping config rollback test");
+            return;
+        }
+
+        let work_dir = tempfile::tempdir().expect("tempdir");
+        let lifecycle_dir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = work_dir.path().join("connectors.json");
+        let connector_id = ConnectorId::from_static("fcp.test.rollback.config:utility:1.0.0");
+        let mut original = subprocess_test_connector_config(connector_id.as_str());
+        original.config = Some(json!({ "profile": "v1" }));
+        let lifecycle = Arc::new(
+            HostAdminStateStore::with_state_path(failing_admin_state_path(&lifecycle_dir))
+                .expect("lifecycle store should load"),
+        );
+        let state = test_app_state_with_connectors_file(
+            vec![original.clone()],
+            connectors_file.clone(),
+            lifecycle,
+        )
+        .await;
+
+        let err = apply_connector_config_payload(
+            state.as_ref(),
+            &connector_id,
+            json!({ "profile": "v2" }),
+            None,
+            Some("test-suite".to_string()),
+            Some("upgrade".to_string()),
+        )
+        .await
+        .expect_err("reconciliation failure should roll back config");
+        assert!(err.to_string().contains("failed to reconcile admin state"));
+
+        let persisted = read_connector_configs_file(&connectors_file)
+            .expect("connectors file should remain readable");
+        assert_eq!(persisted, vec![original.clone()]);
+
+        let inventory = state.registry.inventory().await;
+        assert_eq!(inventory, vec![original]);
     }
 }

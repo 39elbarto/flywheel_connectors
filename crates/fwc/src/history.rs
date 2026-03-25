@@ -14,28 +14,62 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+const MAX_LOG_SIZE_ENV_VAR: &str = "FWC_MAX_LOG_SIZE_BYTES";
+const MAX_ROTATED_FILES_ENV_VAR: &str = "FWC_MAX_ROTATED_FILES";
+const DEFAULT_LIMIT_ENV_VAR: &str = "FWC_HISTORY_DEFAULT_LIMIT";
+
+fn env_or_with<T, F>(var: &str, default: T, mut get_env: F) -> T
+where
+    T: std::str::FromStr,
+    F: FnMut(&str) -> Option<String>,
+{
+    get_env(var).and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
-    std::env::var(var)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    env_or_with(var, default, |key| std::env::var(key).ok())
 }
 
 /// Maximum log file size before rotation (default 10 MB).
-/// Override: `FWC_max_log_size()_BYTES`.
+/// Override: `FWC_MAX_LOG_SIZE_BYTES`.
 fn max_log_size() -> u64 {
-    env_or("FWC_max_log_size()_BYTES", 10 * 1024 * 1024)
+    max_log_size_with(|key| std::env::var(key).ok())
+}
+
+fn max_log_size_with<F>(get_env: F) -> u64
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    env_or_with(MAX_LOG_SIZE_ENV_VAR, 10 * 1024 * 1024, get_env)
 }
 
 /// Maximum number of rotated log files to keep (default 5).
-/// Override: `FWC_max_rotated_files()`.
+/// Override: `FWC_MAX_ROTATED_FILES`.
 fn max_rotated_files() -> usize {
-    env_or("FWC_max_rotated_files()", 5)
+    max_rotated_files_with(|key| std::env::var(key).ok())
+}
+
+fn max_rotated_files_with<F>(get_env: F) -> usize
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    env_or_with(MAX_ROTATED_FILES_ENV_VAR, 5, get_env)
 }
 
 /// Default number of entries to return (default 20).
 /// Override: `FWC_HISTORY_DEFAULT_LIMIT`.
 const DEFAULT_LIMIT: usize = 20;
+
+fn default_limit() -> usize {
+    default_limit_with(|key| std::env::var(key).ok())
+}
+
+fn default_limit_with<F>(get_env: F) -> usize
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    env_or_with(DEFAULT_LIMIT_ENV_VAR, DEFAULT_LIMIT, get_env)
+}
 
 // ── Entry types ─────────────────────────────────────────────────────────
 
@@ -127,7 +161,7 @@ pub struct HistoryFilter {
 impl HistoryFilter {
     pub fn new() -> Self {
         Self {
-            limit: DEFAULT_LIMIT,
+            limit: default_limit(),
             ..Default::default()
         }
     }
@@ -942,6 +976,43 @@ mod tests {
         assert!(filter.entry_id.is_none());
     }
 
+    #[test]
+    fn max_log_size_reads_env_override() {
+        let value = max_log_size_with(|key| (key == MAX_LOG_SIZE_ENV_VAR).then(|| "2048".into()));
+        assert_eq!(value, 2048);
+    }
+
+    #[test]
+    fn max_rotated_files_reads_env_override() {
+        let value =
+            max_rotated_files_with(|key| (key == MAX_ROTATED_FILES_ENV_VAR).then(|| "9".into()));
+        assert_eq!(value, 9);
+    }
+
+    #[test]
+    fn default_limit_reads_env_override() {
+        let value = default_limit_with(|key| (key == DEFAULT_LIMIT_ENV_VAR).then(|| "42".into()));
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn invalid_history_env_values_fall_back_to_defaults() {
+        assert_eq!(
+            max_log_size_with(|key| (key == MAX_LOG_SIZE_ENV_VAR).then(|| "invalid".into())),
+            10 * 1024 * 1024
+        );
+        assert_eq!(
+            max_rotated_files_with(|key| {
+                (key == MAX_ROTATED_FILES_ENV_VAR).then(|| "oops".into())
+            }),
+            5
+        );
+        assert_eq!(
+            default_limit_with(|key| (key == DEFAULT_LIMIT_ENV_VAR).then(|| "".into())),
+            DEFAULT_LIMIT
+        );
+    }
+
     // ── Entry with all optional fields ──────────────────────────────
 
     #[test]
@@ -1318,7 +1389,7 @@ mod tests {
         let new = HistoryFilter::new();
         assert!(def.connector.is_none());
         assert!(new.connector.is_none());
-        // Default has limit 0, new has DEFAULT_LIMIT
+        // Default uses the derive fallback; new applies the CLI-visible default limit.
         assert_eq!(new.limit, DEFAULT_LIMIT);
     }
 

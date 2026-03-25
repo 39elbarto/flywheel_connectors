@@ -147,7 +147,7 @@ impl StreamHealthTracker {
     pub const fn record_disconnect(&mut self) {
         self.reconnect_count = self.reconnect_count.saturating_add(1);
         self.connected_since = None;
-        if self.reconnect_count > self.config.max_reconnect_attempts {
+        if self.reconnect_count >= self.config.max_reconnect_attempts {
             self.state = StreamHealthState::Unhealthy;
         } else {
             self.state = StreamHealthState::Reconnecting;
@@ -410,9 +410,23 @@ mod tests {
         let mut tracker = fast_tracker(); // max_reconnect_attempts = 3
         tracker.record_disconnect(); // 1
         tracker.record_disconnect(); // 2
-        tracker.record_disconnect(); // 3
-        tracker.record_disconnect(); // 4 > 3
+        assert_eq!(tracker.state(), StreamHealthState::Reconnecting);
+        tracker.record_disconnect(); // 3 >= 3
         assert_eq!(tracker.state(), StreamHealthState::Unhealthy);
+    }
+
+    #[test]
+    fn zero_max_reconnect_attempts_fails_first_disconnect() {
+        let mut tracker = StreamHealthTracker::new(StreamHealthConfig {
+            heartbeat_timeout: Duration::from_millis(50),
+            zombie_timeout: Duration::from_millis(200),
+            max_reconnect_attempts: 0,
+        });
+
+        tracker.record_disconnect();
+
+        assert_eq!(tracker.state(), StreamHealthState::Unhealthy);
+        assert_eq!(tracker.snapshot().reconnect_count, 1);
     }
 
     #[test]
@@ -775,17 +789,14 @@ mod tests {
         // Simulate: repeated reconnect attempts exceeding max_reconnect_attempts.
         let mut tracker = fast_tracker(); // max = 3
 
-        // Disconnect 4 times without a successful reconnect
+        // Disconnect until the reconnect budget is exhausted.
         tracker.record_disconnect(); // 1 → Reconnecting
         assert_eq!(tracker.state(), StreamHealthState::Reconnecting);
 
         tracker.record_disconnect(); // 2 → Reconnecting
         assert_eq!(tracker.state(), StreamHealthState::Reconnecting);
 
-        tracker.record_disconnect(); // 3 → Reconnecting
-        assert_eq!(tracker.state(), StreamHealthState::Reconnecting);
-
-        tracker.record_disconnect(); // 4 > max(3) → Unhealthy
+        tracker.record_disconnect(); // 3 >= max(3) → Unhealthy
         assert_eq!(tracker.state(), StreamHealthState::Unhealthy);
 
         // Manual reset recovers

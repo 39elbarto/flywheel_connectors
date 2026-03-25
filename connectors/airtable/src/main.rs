@@ -35,6 +35,11 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use fcp_airtable::connector::AirtableConnector;
 
+struct ProtocolResponse {
+    body: serde_json::Value,
+    should_exit: bool,
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
@@ -64,9 +69,12 @@ fn run_fcp_loop() -> Result<()> {
 
         let response = runtime.block_on(async { handle_message(&mut connector, &line).await });
 
-        let response_json = serde_json::to_string(&response)?;
+        let response_json = serde_json::to_string(&response.body)?;
         writeln!(stdout, "{response_json}")?;
         stdout.flush()?;
+        if response.should_exit {
+            break;
+        }
     }
 
     Ok(())
@@ -88,10 +96,15 @@ fn parse_error_response(error: impl std::fmt::Display) -> serde_json::Value {
 }
 
 /// Handle a single FCP message.
-async fn handle_message(connector: &mut AirtableConnector, message: &str) -> serde_json::Value {
+async fn handle_message(connector: &mut AirtableConnector, message: &str) -> ProtocolResponse {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
-        Err(e) => return parse_error_response(e),
+        Err(e) => {
+            return ProtocolResponse {
+                body: parse_error_response(e),
+                should_exit: false,
+            };
+        }
     };
 
     let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -101,6 +114,7 @@ async fn handle_message(connector: &mut AirtableConnector, message: &str) -> ser
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
+    let is_shutdown_request = method == "shutdown";
     let result = match method {
         "configure" => connector.handle_configure(params).await,
         "handshake" => connector.handle_handshake(params).await,
@@ -117,6 +131,8 @@ async fn handle_message(connector: &mut AirtableConnector, message: &str) -> ser
         }),
     };
 
+    let should_exit = is_shutdown_request && result.is_ok();
+
     match result {
         Ok(value) => {
             let mut response = serde_json::json!({
@@ -126,7 +142,10 @@ async fn handle_message(connector: &mut AirtableConnector, message: &str) -> ser
             if let Some(id) = id {
                 response["id"] = id;
             }
-            response
+            ProtocolResponse {
+                body: response,
+                should_exit,
+            }
         }
         Err(e) => {
             let err_response = e.to_response();
@@ -137,7 +156,10 @@ async fn handle_message(connector: &mut AirtableConnector, message: &str) -> ser
             if let Some(id) = id {
                 response["id"] = id;
             }
-            response
+            ProtocolResponse {
+                body: response,
+                should_exit,
+            }
         }
     }
 }
@@ -158,13 +180,43 @@ mod tests {
         let mut connector = AirtableConnector::new();
         let response = handle_message(&mut connector, "{not json").await;
 
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert!(response["id"].is_null());
-        assert_eq!(response["error"]["code"], "FCP-1001");
+        assert!(!response.should_exit);
+        assert_eq!(response.body["jsonrpc"], "2.0");
+        assert!(response.body["id"].is_null());
+        assert_eq!(response.body["error"]["code"], "FCP-1001");
         assert!(
-            response["error"]["message"]
+            response.body["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.starts_with("Invalid JSON:"))
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_requests_exit_after_acknowledgement() {
+        let mut connector = AirtableConnector::new();
+        let response = handle_message(
+            &mut connector,
+            r#"{"jsonrpc":"2.0","id":7,"method":"shutdown","params":{}}"#,
+        )
+        .await;
+
+        assert!(response.should_exit);
+        assert_eq!(response.body["jsonrpc"], "2.0");
+        assert_eq!(response.body["id"], 7);
+        assert_eq!(response.body["result"]["status"], "shutdown");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn non_shutdown_requests_keep_protocol_loop_running() {
+        let mut connector = AirtableConnector::new();
+        let response = handle_message(
+            &mut connector,
+            r#"{"jsonrpc":"2.0","id":9,"method":"health","params":{}}"#,
+        )
+        .await;
+
+        assert!(!response.should_exit);
+        assert_eq!(response.body["jsonrpc"], "2.0");
+        assert_eq!(response.body["id"], 9);
     }
 }

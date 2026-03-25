@@ -8,7 +8,7 @@ use std::time::Duration;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url};
 
 use crate::{
     error::{PlaidError, PlaidResult},
@@ -17,10 +17,6 @@ use crate::{
         PlaidApiError, PlaidItem, TransactionsSyncResponse,
     },
 };
-
-/// Well-known Plaid sandbox URL. **Not a safe default** — sandbox uses fake data.
-/// Connectors must always receive an explicit environment selection from configuration.
-const SANDBOX_BASE_URL: &str = "https://sandbox.plaid.com";
 
 /// Plaid REST API client.
 pub struct PlaidClient {
@@ -34,8 +30,9 @@ pub struct PlaidClient {
 }
 
 impl PlaidClient {
-    /// Create a new Plaid client with client_id and secret.
-    pub fn new(client_id: &str, secret: &str) -> PlaidResult<Self> {
+    /// Create a new Plaid client with an explicit base URL.
+    pub fn new(client_id: &str, secret: &str, base_url: &str) -> PlaidResult<Self> {
+        let base_url = normalize_base_url(base_url)?;
         let http = Client::builder()
             .user_agent("fcp-plaid/0.1.0")
             .build()
@@ -43,7 +40,7 @@ impl PlaidClient {
 
         Ok(Self {
             http,
-            base_url: SANDBOX_BASE_URL.to_string(),
+            base_url,
             client_id: client_id.to_string(),
             secret: secret.to_string(),
             max_retries: 2,
@@ -60,13 +57,6 @@ impl PlaidClient {
     /// Trigger graceful shutdown.
     pub fn shutdown(&self) {
         self.runtime.shutdown();
-    }
-
-    /// Set a custom base URL (for testing).
-    #[must_use]
-    pub fn with_base_url(mut self, url: &str) -> Self {
-        self.base_url = url.to_string();
-        self
     }
 
     /// Set the maximum number of retries.
@@ -419,6 +409,32 @@ impl PlaidClient {
     }
 }
 
+fn normalize_base_url(base_url: &str) -> PlaidResult<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(PlaidError::InvalidConfig(
+            "base_url must not be empty".into(),
+        ));
+    }
+
+    let parsed = Url::parse(trimmed)
+        .map_err(|error| PlaidError::InvalidConfig(format!("invalid base_url: {error}")))?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(PlaidError::InvalidConfig(
+            "base_url must use http or https".into(),
+        ));
+    }
+
+    if parsed.host_str().is_none() {
+        return Err(PlaidError::InvalidConfig(
+            "base_url must include a host".into(),
+        ));
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +442,14 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    fn client_with_credentials(client_id: &str, secret: &str, base_url: &str) -> PlaidClient {
+        PlaidClient::new(client_id, secret, base_url).unwrap()
+    }
+
+    fn test_client(base_url: &str) -> PlaidClient {
+        client_with_credentials("test_client_id", "test_secret", base_url)
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_link_token_create() {
@@ -441,9 +465,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = test_client(&mock_server.uri());
 
         let result = client
             .link_token_create(
@@ -472,9 +494,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = test_client(&mock_server.uri());
 
         let result = client
             .token_exchange("public-sandbox-abc123")
@@ -516,9 +536,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = test_client(&mock_server.uri());
 
         let (accounts, item) = client
             .accounts_get("access-sandbox-xxx", None)
@@ -556,9 +574,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = test_client(&mock_server.uri());
 
         let accounts = client
             .accounts_balance_get("access-sandbox-xxx", None)
@@ -595,9 +611,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = test_client(&mock_server.uri());
 
         let result = client
             .transactions_sync("access-sandbox-xxx", None, Some(100))
@@ -641,9 +655,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = test_client(&mock_server.uri());
 
         let (accounts, numbers) = client.auth_get("access-sandbox-xxx").await.unwrap();
         assert_eq!(accounts.len(), 1);
@@ -661,10 +673,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
+        let client = test_client(&mock_server.uri()).with_retry_config(0);
 
         let result = client.accounts_get("access-sandbox-xxx", None).await;
         assert!(result.is_err());
@@ -685,9 +694,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("bad_id", "bad_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
+        let client = client_with_credentials("bad_id", "bad_secret", &mock_server.uri())
             .with_retry_config(0);
 
         let result = client.accounts_get("access-sandbox-xxx", None).await;
@@ -709,10 +716,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("test_client_id", "test_secret")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(1);
+        let client = test_client(&mock_server.uri()).with_retry_config(1);
 
         let result = client.accounts_get("access-sandbox-xxx", None).await;
         assert!(result.is_err());
@@ -749,29 +753,30 @@ mod tests {
 
     #[test]
     fn client_new_succeeds() {
-        let client = PlaidClient::new("test_id", "test_secret").unwrap();
+        let client =
+            PlaidClient::new("test_id", "test_secret", "https://sandbox.plaid.com").unwrap();
         // Just verify it doesn't panic
         let _ = format!("{:p}", &client);
     }
 
     #[test]
-    fn client_with_base_url_overrides() {
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url("http://custom.plaid.io");
-        // Verify the builder chain works
+    fn client_new_trims_trailing_slash() {
+        let client = PlaidClient::new("id", "sec", "https://sandbox.plaid.com/").unwrap();
         let _ = format!("{:p}", &client);
     }
 
     #[test]
     fn client_with_retry_config() {
-        let client = PlaidClient::new("id", "sec").unwrap().with_retry_config(5);
+        let client = PlaidClient::new("id", "sec", "https://sandbox.plaid.com")
+            .unwrap()
+            .with_retry_config(5);
         let _ = format!("{:p}", &client);
     }
 
     #[test]
     fn client_auth_body_injects_credentials() {
-        let client = PlaidClient::new("my_client_id", "my_secret").unwrap();
+        let client =
+            PlaidClient::new("my_client_id", "my_secret", "https://sandbox.plaid.com").unwrap();
         let mut body = serde_json::json!({"access_token": "tok123"});
         client.auth_body(&mut body);
         assert_eq!(body["client_id"], "my_client_id");
@@ -782,7 +787,7 @@ mod tests {
 
     #[test]
     fn client_auth_body_on_non_object_is_noop() {
-        let client = PlaidClient::new("id", "sec").unwrap();
+        let client = PlaidClient::new("id", "sec", "https://sandbox.plaid.com").unwrap();
         let mut body = serde_json::json!("just a string");
         client.auth_body(&mut body);
         // Should be unchanged since it's not an object
@@ -791,7 +796,7 @@ mod tests {
 
     #[test]
     fn client_auth_body_overwrites_existing_credentials() {
-        let client = PlaidClient::new("new_id", "new_sec").unwrap();
+        let client = PlaidClient::new("new_id", "new_sec", "https://sandbox.plaid.com").unwrap();
         let mut body = serde_json::json!({
             "client_id": "old_id",
             "secret": "old_sec"
@@ -801,11 +806,24 @@ mod tests {
         assert_eq!(body["secret"], "new_sec");
     }
 
-    // ── Default base URL constant ───────────────────────────────────────
+    #[test]
+    fn client_new_rejects_empty_base_url() {
+        let error = PlaidClient::new("id", "sec", "")
+            .err()
+            .expect("empty base_url must be rejected");
+        assert!(
+            matches!(error, PlaidError::InvalidConfig(message) if message.contains("base_url must not be empty"))
+        );
+    }
 
     #[test]
-    fn sandbox_base_url_is_correct() {
-        assert_eq!(SANDBOX_BASE_URL, "https://sandbox.plaid.com");
+    fn client_new_rejects_non_http_scheme() {
+        let error = PlaidClient::new("id", "sec", "ftp://sandbox.plaid.com")
+            .err()
+            .expect("non-http schemes must be rejected");
+        assert!(
+            matches!(error, PlaidError::InvalidConfig(message) if message.contains("http or https"))
+        );
     }
 
     // ── Additional wiremock API edge case tests ─────────────────────────
@@ -824,9 +842,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let user = serde_json::json!({"client_user_id": "custom-user-123"});
         let result = client
@@ -858,9 +874,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let result = client
             .transactions_get("access-tok", "2026-01-01", "2026-03-01", None)
@@ -883,9 +897,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let opts = serde_json::json!({"count": 100, "offset": 0});
         let result = client
@@ -911,9 +923,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let result = client
             .transactions_sync("access-tok", Some("cursor-prev"), Some(50))
@@ -937,9 +947,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let result = client.identity_get("access-tok").await.unwrap();
         assert_eq!(result.len(), 1);
@@ -959,9 +967,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let result = client.investments_holdings_get("access-tok").await.unwrap();
         assert!(result.get("holdings").is_some());
@@ -998,9 +1004,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let (accounts, liabilities) = client.liabilities_get("access-tok").await.unwrap();
         assert_eq!(accounts.len(), 1);
@@ -1024,9 +1028,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let opts = serde_json::json!({"account_ids": ["acc1"]});
         let (accounts, item) = client
@@ -1049,9 +1051,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
+        let client = client_with_credentials("id", "sec", &mock_server.uri());
 
         let opts = serde_json::json!({"account_ids": ["acc1"]});
         let accounts = client
@@ -1075,10 +1075,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
+        let client = client_with_credentials("id", "sec", &mock_server.uri()).with_retry_config(0);
 
         let result = client.accounts_get("access-tok", None).await;
         assert!(result.is_err());
@@ -1112,10 +1109,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
+        let client = client_with_credentials("id", "sec", &mock_server.uri()).with_retry_config(0);
 
         let result = client.auth_get("bad-token").await;
         assert!(result.is_err());
@@ -1144,10 +1138,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
+        let client = client_with_credentials("id", "sec", &mock_server.uri()).with_retry_config(0);
 
         let result = client.accounts_get("access-tok", None).await;
         assert!(result.is_err());

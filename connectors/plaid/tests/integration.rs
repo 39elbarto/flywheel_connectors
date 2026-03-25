@@ -67,6 +67,10 @@ async fn setup_configure(connector: &mut PlaidConnector, base_url: &str) {
         .expect("configure");
 }
 
+fn build_client(client_id: &str, secret: &str, base_url: &str) -> PlaidClient {
+    PlaidClient::new(client_id, secret, base_url).expect("plaid client")
+}
+
 // ============================================================================
 // 1. Request/response parsing
 // ============================================================================
@@ -85,9 +89,7 @@ async fn parse_link_token_create_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client
         .link_token_create(
@@ -117,9 +119,7 @@ async fn parse_token_exchange_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client.token_exchange("public-sandbox-xyz").await.unwrap();
     assert_eq!(result.access_token, "access-sandbox-abc123");
@@ -158,9 +158,7 @@ async fn parse_accounts_get_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let (accounts, item) = client
         .accounts_get("access-sandbox-xxx", None)
@@ -205,9 +203,7 @@ async fn parse_transactions_sync_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client
         .transactions_sync("access-sandbox-xxx", Some("cursor-page1"), Some(100))
@@ -252,9 +248,7 @@ async fn parse_accounts_balance_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let accounts = client
         .accounts_balance_get("access-sandbox-xxx", None)
@@ -283,10 +277,7 @@ async fn error_401_maps_to_unauthorized() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("bad_id", "bad_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("bad_id", "bad_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .accounts_get("access-sandbox-xxx", None)
@@ -313,10 +304,7 @@ async fn error_403_maps_to_unauthorized() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("test_id", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .accounts_get("access-sandbox-xxx", None)
@@ -339,10 +327,7 @@ async fn error_429_maps_to_rate_limited() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("test_id", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .accounts_get("access-sandbox-xxx", None)
@@ -365,10 +350,7 @@ async fn error_500_maps_to_external_retryable() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("test_id", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .accounts_get("access-sandbox-xxx", None)
@@ -412,10 +394,8 @@ async fn client_id_not_in_error_messages() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("SENSITIVE_CLIENT_ID", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client =
+        build_client("SENSITIVE_CLIENT_ID", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .accounts_get("access-sandbox-xxx", None)
@@ -438,10 +418,8 @@ async fn secret_not_in_error_messages() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "SUPERSECRET_VALUE_9876")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client =
+        build_client("test_id", "SUPERSECRET_VALUE_9876", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .accounts_get("access-sandbox-xxx", None)
@@ -519,9 +497,7 @@ async fn transactions_sync_cursor_advances() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     // Initial sync with no cursor
     let result = client
@@ -571,9 +547,7 @@ async fn transactions_sync_has_more_pagination() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client
         .transactions_sync("access-sandbox-xxx", Some("cursor-page2"), Some(50))
@@ -765,9 +739,7 @@ async fn parse_auth_get_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let (accounts, numbers) = client.auth_get("access-sandbox-xxx").await.unwrap();
     assert_eq!(accounts.len(), 1);
@@ -796,9 +768,7 @@ async fn parse_auth_get_empty_numbers() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let (accounts, numbers) = client.auth_get("access-sandbox-xxx").await.unwrap();
     assert!(accounts.is_empty());
@@ -835,9 +805,7 @@ async fn parse_identity_get_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let accounts = client.identity_get("access-sandbox-xxx").await.unwrap();
     assert_eq!(accounts.len(), 1);
@@ -858,9 +826,7 @@ async fn parse_identity_get_empty_accounts() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let accounts = client.identity_get("access-sandbox-xxx").await.unwrap();
     assert!(accounts.is_empty());
@@ -911,9 +877,7 @@ async fn parse_investments_holdings_get_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client
         .investments_holdings_get("access-sandbox-xxx")
@@ -941,9 +905,7 @@ async fn parse_investments_holdings_get_empty() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client
         .investments_holdings_get("access-sandbox-xxx")
@@ -998,9 +960,7 @@ async fn parse_liabilities_get_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let (accounts, liabilities) = client.liabilities_get("access-sandbox-xxx").await.unwrap();
     assert_eq!(accounts.len(), 1);
@@ -1031,9 +991,7 @@ async fn parse_liabilities_get_empty() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let (accounts, liabilities) = client.liabilities_get("access-sandbox-xxx").await.unwrap();
     assert!(accounts.is_empty());
@@ -1080,9 +1038,7 @@ async fn parse_transactions_get_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client
         .transactions_get("access-sandbox-xxx", "2026-02-01", "2026-02-28", None)
@@ -1108,9 +1064,7 @@ async fn parse_transactions_get_with_options() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let options = json!({ "count": 50, "offset": 100 });
     let result = client
@@ -1473,10 +1427,7 @@ async fn error_401_on_auth_get() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("bad_id", "bad_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("bad_id", "bad_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client.auth_get("access-sandbox-xxx").await.unwrap_err();
     assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
@@ -1496,10 +1447,7 @@ async fn error_401_on_identity_get() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("bad_id", "bad_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("bad_id", "bad_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client.identity_get("access-sandbox-xxx").await.unwrap_err();
     assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
@@ -1519,10 +1467,7 @@ async fn error_400_on_investments_holdings_get() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("test_id", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .investments_holdings_get("access-sandbox-xxx")
@@ -1550,10 +1495,7 @@ async fn error_500_on_liabilities_get() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("test_id", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .liabilities_get("access-sandbox-xxx")
@@ -1572,10 +1514,7 @@ async fn error_429_on_transactions_get() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("test_id", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .transactions_get("access-sandbox-xxx", "2026-01-01", "2026-01-31", None)
@@ -2277,9 +2216,7 @@ async fn parse_accounts_get_multiple_accounts() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let (accounts, _item) = client
         .accounts_get("access-sandbox-multi", None)
@@ -2305,9 +2242,7 @@ async fn transactions_sync_empty_response() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let result = client
         .transactions_sync("access-sandbox-xxx", Some("cursor-prev"), Some(100))
@@ -2334,9 +2269,7 @@ async fn link_token_create_with_custom_user() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url());
+    let client = build_client("test_id", "test_secret", &mock.base_url());
 
     let user = json!({
         "client_user_id": "custom-user-123",
@@ -2372,10 +2305,7 @@ async fn error_400_with_plaid_error_body() {
         .mount(mock.inner())
         .await;
 
-    let client = PlaidClient::new("test_id", "test_secret")
-        .unwrap()
-        .with_base_url(&mock.base_url())
-        .with_retry_config(0);
+    let client = build_client("test_id", "test_secret", &mock.base_url()).with_retry_config(0);
 
     let err = client
         .accounts_get("access-sandbox-bad", None)

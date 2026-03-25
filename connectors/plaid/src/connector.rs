@@ -254,11 +254,10 @@ impl PlaidConnector {
 
         self.client = match &config.auth {
             PlaidAuthMode::Secret(secret) => {
-                let client = PlaidClient::new(&config.client_id, secret)
+                let client = PlaidClient::new(&config.client_id, secret, &config.base_url)
                     .map_err(|e| FcpError::Internal {
                         message: format!("Failed to create HTTP client: {e}"),
-                    })?
-                    .with_base_url(&config.base_url);
+                    })?;
                 Some(client)
             }
             PlaidAuthMode::CredentialId(id) => {
@@ -1478,11 +1477,8 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = PlaidConnector::new();
-        connector.client = Some(
-            PlaidClient::new("test_id", "test_secret")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
-        );
+        connector.client =
+            Some(PlaidClient::new("test_id", "test_secret", "http://localhost:9999").unwrap());
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();

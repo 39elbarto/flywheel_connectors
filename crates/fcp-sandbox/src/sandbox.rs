@@ -156,6 +156,31 @@ impl CompiledPolicy {
         section: &SandboxSection,
         state_dir: Option<PathBuf>,
     ) -> Result<Self, SandboxError> {
+        // Validate resource limits — zero values make execution impossible
+        if section.memory_mb == 0 {
+            return Err(SandboxError::InvalidConfig(
+                "memory_mb must be > 0: zero memory limit makes execution impossible".into(),
+            ));
+        }
+        if section.wall_clock_timeout_ms == 0 {
+            return Err(SandboxError::InvalidConfig(
+                "wall_clock_timeout_ms must be > 0: zero timeout makes execution impossible".into(),
+            ));
+        }
+        if section.cpu_percent == 0 {
+            return Err(SandboxError::InvalidConfig(
+                "cpu_percent must be > 0: zero CPU makes execution impossible".into(),
+            ));
+        }
+        if section.cpu_percent > 100 {
+            return Err(SandboxError::InvalidConfig(
+                format!(
+                    "cpu_percent must be <= 100, got {}: invalid percentage",
+                    section.cpu_percent
+                ),
+            ));
+        }
+
         // Expand special paths
         let readonly_paths = compile_paths(
             &section.fs_readonly_paths,
@@ -966,8 +991,9 @@ mod tests {
     fn test_compiled_policy_zero_memory() {
         let mut section = test_sandbox_section();
         section.memory_mb = 0;
-        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
-        assert_eq!(policy.memory_limit_bytes, 0);
+        let err = CompiledPolicy::from_manifest(&section, None).unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)));
+        assert!(err.to_string().contains("memory_mb"));
     }
 
     #[test]
@@ -984,6 +1010,34 @@ mod tests {
         section.cpu_percent = 1;
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
         assert_eq!(policy.cpu_percent, 1);
+    }
+
+    #[test]
+    fn test_compiled_policy_zero_cpu() {
+        let mut section = test_sandbox_section();
+        section.cpu_percent = 0;
+        let err = CompiledPolicy::from_manifest(&section, None).unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)));
+        assert!(err.to_string().contains("cpu_percent"));
+    }
+
+    #[test]
+    fn test_compiled_policy_cpu_over_100() {
+        let mut section = test_sandbox_section();
+        section.cpu_percent = 101;
+        let err = CompiledPolicy::from_manifest(&section, None).unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)));
+        assert!(err.to_string().contains("cpu_percent"));
+        assert!(err.to_string().contains("101"));
+    }
+
+    #[test]
+    fn test_compiled_policy_cpu_max_u8() {
+        let mut section = test_sandbox_section();
+        section.cpu_percent = 255;
+        let err = CompiledPolicy::from_manifest(&section, None).unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)));
+        assert!(err.to_string().contains("255"));
     }
 
     #[test]
@@ -1265,8 +1319,9 @@ mod tests {
     fn test_compiled_policy_zero_timeout() {
         let mut section = test_sandbox_section();
         section.wall_clock_timeout_ms = 0;
-        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
-        assert_eq!(policy.wall_clock_timeout, Duration::from_millis(0));
+        let err = CompiledPolicy::from_manifest(&section, None).unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)));
+        assert!(err.to_string().contains("wall_clock_timeout_ms"));
     }
 
     #[test]

@@ -98,6 +98,11 @@ impl XorFilterPlaceholder {
         let word_idx = idx / 64;
         let bit_idx = idx % 64;
 
+        let max_words = self.bit_capacity() / 64;
+        if word_idx >= max_words {
+            return; // index exceeds declared capacity — ignore silently
+        }
+
         while self.bits.len() <= word_idx {
             self.bits.push(0);
         }
@@ -877,9 +882,14 @@ impl GossipConfig {
     /// baseline/upgradeable state.
     #[must_use]
     pub const fn max_iblt_bytes(&self) -> usize {
+        /// 16 MB hard cap to prevent saturating_mul from returning usize::MAX.
+        const MAX_IBLT_BYTES_CAP: usize = 16 * 1024 * 1024;
+
         let derived = self.reconciliation_batch_size.saturating_mul(48);
         if derived < MIN_IBLT_BYTES_BUDGET {
             MIN_IBLT_BYTES_BUDGET
+        } else if derived > MAX_IBLT_BYTES_CAP {
+            MAX_IBLT_BYTES_CAP
         } else {
             derived
         }

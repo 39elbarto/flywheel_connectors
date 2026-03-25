@@ -111,6 +111,9 @@ pub enum FrameError {
     #[error("invalid symbol size (must be > 0)")]
     InvalidSymbolSize,
 
+    #[error("invalid flags: {reason}")]
+    InvalidFlags { reason: String },
+
     #[error("invalid utf-8 string")]
     InvalidUtf8,
 }
@@ -189,6 +192,18 @@ impl FcpsFrameHeader {
 
         let flags_bits = u16::from_le_bytes([bytes[6], bytes[7]]);
         let flags = FrameFlags::from_bits_truncate(flags_bits);
+
+        // Reject mutually exclusive flag combinations
+        if flags.contains(FrameFlags::ERROR) && flags.contains(FrameFlags::RESPONSE) {
+            return Err(FrameError::InvalidFlags {
+                reason: "ERROR and RESPONSE are mutually exclusive".into(),
+            });
+        }
+        if flags.contains(FrameFlags::STREAM_END) && !flags.contains(FrameFlags::STREAMING) {
+            return Err(FrameError::InvalidFlags {
+                reason: "STREAM_END requires STREAMING to be set".into(),
+            });
+        }
 
         let symbol_count_bytes: [u8; 4] =
             bytes[8..12].try_into().map_err(|_| FrameError::TooShort {
@@ -340,23 +355,27 @@ pub struct FcpsFrame {
 
 impl FcpsFrame {
     /// Encode the complete frame to bytes.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    /// Returns `FrameError::LengthMismatch` if the header's `total_payload_len`
+    /// does not match the actual computed payload size.
+    pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         let header_bytes = self.header.encode();
         let payload_len: usize = self.symbols.iter().map(SymbolRecord::wire_size).sum();
 
-        // Ensure header claim matches actual payload
-        debug_assert_eq!(
-            self.header.total_payload_len as usize, payload_len,
-            "header.total_payload_len mismatch"
-        );
+        if self.header.total_payload_len as usize != payload_len {
+            return Err(FrameError::LengthMismatch {
+                claimed: self.header.total_payload_len as usize,
+                computed: payload_len,
+            });
+        }
 
         let mut buf = Vec::with_capacity(FCPS_HEADER_LEN + payload_len);
         buf.extend_from_slice(&header_bytes);
         for symbol in &self.symbols {
             buf.extend_from_slice(&symbol.encode());
         }
-        buf
+        Ok(buf)
     }
 
     /// Decode a complete frame from bytes with MTU enforcement.
@@ -851,23 +870,24 @@ impl SignedFcpsFrame {
     /// * `source_id` - The source node's Tailscale ID
     /// * `timestamp` - Unix timestamp in seconds
     /// * `signing_key` - Ed25519 signing key
-    #[must_use]
+    /// # Errors
+    /// Returns `FrameError` if the frame cannot be encoded (e.g. payload length mismatch).
     pub fn new(
         frame: FcpsFrame,
         source_id: TailscaleNodeId,
         timestamp: u64,
         signing_key: &Ed25519SigningKey,
-    ) -> Self {
-        let frame_bytes = frame.encode();
+    ) -> Result<Self, FrameError> {
+        let frame_bytes = frame.encode()?;
         let transcript = Self::build_transcript(&source_id, timestamp, &frame_bytes);
         let signature = signing_key.sign(&transcript);
 
-        Self {
+        Ok(Self {
             frame,
             source_id,
             timestamp,
             signature,
-        }
+        })
     }
 
     /// Build the signature transcript.
@@ -898,7 +918,11 @@ impl SignedFcpsFrame {
     /// # Errors
     /// Returns `CryptoError` if signature verification fails.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
-        let frame_bytes = self.frame.encode();
+        // encode() validated at construction time in new(); infallible for well-formed frames
+        let frame_bytes = self
+            .frame
+            .encode()
+            .expect("frame was validated at construction");
         let transcript = Self::build_transcript(&self.source_id, self.timestamp, &frame_bytes);
         verifying_key.verify(&transcript, &self.signature)
     }
@@ -917,7 +941,11 @@ impl SignedFcpsFrame {
     /// Panics if `source_id` exceeds `u16::MAX` bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let frame_bytes = self.frame.encode();
+        // encode() validated at construction time in new(); infallible for well-formed frames
+        let frame_bytes = self
+            .frame
+            .encode()
+            .expect("frame was validated at construction");
         let source_id_bytes = self.source_id.as_str().as_bytes();
 
         assert!(

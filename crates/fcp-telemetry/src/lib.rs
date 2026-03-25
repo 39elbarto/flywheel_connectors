@@ -46,10 +46,11 @@ pub use tracing_layer::{
 // Export the legacy string-based TraceContext under a distinct name
 pub use tracing_layer::TraceContext as LegacyTraceContext;
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Global telemetry state.
 static TELEMETRY: OnceLock<TelemetryState> = OnceLock::new();
+static TELEMETRY_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Internal telemetry state.
 struct TelemetryState {
@@ -209,6 +210,48 @@ impl TelemetryConfig {
     }
 }
 
+fn init_telemetry_with<L, P, O>(
+    state: &OnceLock<TelemetryState>,
+    config: TelemetryConfig,
+    otlp_enabled: bool,
+    init_logging_fn: L,
+    init_prometheus_fn: P,
+    init_otlp_fn: O,
+) -> Result<(), TelemetryError>
+where
+    L: Fn(&TelemetryConfig) -> Result<(), TelemetryError>,
+    P: Fn(u16) -> Result<(), TelemetryError>,
+    O: Fn(&str, &str) -> Result<(), TelemetryError>,
+{
+    if state.get().is_some() {
+        return Ok(());
+    }
+
+    let _guard = TELEMETRY_INIT_LOCK
+        .lock()
+        .map_err(|_| TelemetryError::Config("telemetry init lock poisoned".to_string()))?;
+
+    if state.get().is_some() {
+        return Ok(());
+    }
+
+    init_logging_fn(&config)?;
+
+    if config.prometheus_enabled {
+        init_prometheus_fn(config.prometheus_port)?;
+    }
+
+    if otlp_enabled && config.otlp_enabled {
+        if let Some(ref endpoint) = config.otlp_endpoint {
+            init_otlp_fn(&config.service_name, endpoint)?;
+        }
+    }
+
+    let _ = state.set(TelemetryState { config });
+
+    Ok(())
+}
+
 /// Initialize the telemetry system.
 ///
 /// This should be called once at application startup. Subsequent calls are no-ops.
@@ -217,25 +260,14 @@ impl TelemetryConfig {
 ///
 /// Returns an error if telemetry initialization fails.
 pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
-    // Initialize logging
-    init_logging(&config)?;
-
-    // Initialize metrics if Prometheus enabled
-    if config.prometheus_enabled {
-        init_prometheus_exporter(config.prometheus_port)?;
-    }
-
-    // Initialize OTLP tracing if enabled
-    if config.otlp_enabled {
-        if let Some(ref endpoint) = config.otlp_endpoint {
-            init_otlp_tracer(&config.service_name, endpoint)?;
-        }
-    }
-
-    // Store config
-    let _ = TELEMETRY.set(TelemetryState { config });
-
-    Ok(())
+    init_telemetry_with(
+        &TELEMETRY,
+        config,
+        true,
+        init_logging,
+        init_prometheus_exporter,
+        init_otlp_tracer,
+    )
 }
 
 /// Initialize telemetry synchronously (for simple use cases without OTLP).
@@ -244,22 +276,14 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
 ///
 /// Returns an error if initialization fails.
 pub fn init_telemetry_sync(config: TelemetryConfig) -> Result<(), TelemetryError> {
-    if TELEMETRY.get().is_some() {
-        return Ok(());
-    }
-
-    // Initialize logging
-    init_logging(&config)?;
-
-    // Initialize metrics if Prometheus enabled
-    if config.prometheus_enabled {
-        init_prometheus_exporter(config.prometheus_port)?;
-    }
-
-    // Store config
-    let _ = TELEMETRY.set(TelemetryState { config });
-
-    Ok(())
+    init_telemetry_with(
+        &TELEMETRY,
+        config,
+        false,
+        init_logging,
+        init_prometheus_exporter,
+        init_otlp_tracer,
+    )
 }
 
 /// Telemetry error type.
@@ -295,6 +319,7 @@ pub fn shutdown_telemetry() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     #[allow(clippy::float_cmp)] // exact float comparison is safe for sample rate
@@ -617,6 +642,125 @@ mod tests {
     fn test_shutdown_telemetry_no_panic() {
         // Shutdown should never panic even without init
         shutdown_telemetry();
+    }
+
+    #[test]
+    fn test_init_telemetry_with_is_idempotent() {
+        let state = OnceLock::new();
+        let logging_calls = AtomicUsize::new(0);
+        let prometheus_calls = AtomicUsize::new(0);
+        let otlp_calls = AtomicUsize::new(0);
+
+        let config = TelemetryConfig::new("test-service")
+            .with_prometheus(9091)
+            .with_otlp("http://collector:4317");
+
+        init_telemetry_with(
+            &state,
+            config.clone(),
+            true,
+            |_| {
+                logging_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {
+                prometheus_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _| {
+                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        init_telemetry_with(
+            &state,
+            config,
+            true,
+            |_| {
+                logging_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {
+                prometheus_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _| {
+                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(logging_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(prometheus_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(otlp_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.get().unwrap().config.service_name,
+            "test-service".to_string()
+        );
+    }
+
+    #[test]
+    fn test_init_telemetry_with_failed_attempt_can_retry() {
+        let state = OnceLock::new();
+        let logging_calls = AtomicUsize::new(0);
+
+        let first = init_telemetry_with(
+            &state,
+            TelemetryConfig::new("first-attempt"),
+            true,
+            |_| {
+                logging_calls.fetch_add(1, Ordering::SeqCst);
+                Err(TelemetryError::LoggingInit("boom".to_string()))
+            },
+            |_| Ok(()),
+            |_, _| Ok(()),
+        );
+
+        assert!(matches!(first, Err(TelemetryError::LoggingInit(_))));
+        assert!(state.get().is_none());
+
+        init_telemetry_with(
+            &state,
+            TelemetryConfig::new("second-attempt"),
+            true,
+            |_| {
+                logging_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(logging_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            state.get().unwrap().config.service_name,
+            "second-attempt".to_string()
+        );
+    }
+
+    #[test]
+    fn test_init_telemetry_sync_skips_otlp_side_effects() {
+        let state = OnceLock::new();
+        let otlp_calls = AtomicUsize::new(0);
+
+        init_telemetry_with(
+            &state,
+            TelemetryConfig::new("sync").with_otlp("http://collector:4317"),
+            false,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_, _| {
+                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(otlp_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

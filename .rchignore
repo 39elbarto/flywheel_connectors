@@ -6,6 +6,9 @@
 **/.beads/
 **/.br_recovery/
 **/.br_history/
+.beads/.codex_recovery_*/
+.beads/.codex_snapshot_*/
 .beads/recovery_*/
 .beads/recovery_manual_*/
+.beads/recovery-promotions/
 .beads/beads.db.rebuild*

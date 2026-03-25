@@ -824,12 +824,17 @@ max_response_bytes = 1048576
 when_to_use = "TODO: Describe when an AI agent should use this operation"
 common_mistakes = ["TODO: List common mistakes"]
 
+[timeouts]
+request_timeout_ms = 30000
+connect_timeout_ms = 5000
+wall_clock_timeout_ms = 60000
+
 [sandbox]
 # Strict sandbox profile (FCP2 requirement)
 profile = "strict"
 memory_mb = 64
 cpu_percent = 25
-wall_clock_timeout_ms = 30000
+wall_clock_timeout_ms = 60000
 fs_readonly_paths = ["/usr", "/lib"]
 fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
@@ -1099,8 +1104,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct {struct_name}Config {{
-    /// Default request timeout for invoke paths.
-    pub request_timeout_ms: u64,
+    /// Optional override for the manifest/default request timeout.
+    pub request_timeout_ms: Option<u64>,
     /// Shared retry policy for outbound request helpers.
     pub retry: HttpRetryConfig,
 }}
@@ -1108,7 +1113,7 @@ pub struct {struct_name}Config {{
 impl Default for {struct_name}Config {{
     fn default() -> Self {{
         Self {{
-            request_timeout_ms: 30_000,
+            request_timeout_ms: None,
             retry: HttpRetryConfig::default(),
         }}
     }}
@@ -1127,11 +1132,13 @@ impl {struct_name}Config {{
 
     /// Validate configuration invariants.
     pub fn validate(&self) -> FcpResult<()> {{
-        if self.request_timeout_ms == 0 {{
-            return Err(FcpError::InvalidRequest {{
-                code: 1003,
-                message: "request_timeout_ms must be greater than zero".into(),
-            }});
+        if let Some(request_timeout_ms) = self.request_timeout_ms {{
+            if request_timeout_ms == 0 {{
+                return Err(FcpError::InvalidRequest {{
+                    code: 1003,
+                    message: "request_timeout_ms must be greater than zero".into(),
+                }});
+            }}
         }}
         Ok(())
     }}
@@ -1969,10 +1976,15 @@ impl FcpConnector for {struct_name}Connector {{
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {{
         let config = {struct_name}Config::from_value(config)?;
         self.retry_config = config.retry.clone();
-        self.runtime = Some(ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_millis(config.request_timeout_ms)),
-        ));
+        let mut runtime_config = ConnectorRuntimeConfig::from_manifest_str(MANIFEST_TOML)
+            .map_err(|error| FcpError::Internal {{
+                message: format!("Embedded manifest timeout defaults are invalid: {{error}}"),
+            }})?;
+        if let Some(request_timeout_ms) = config.request_timeout_ms {{
+            runtime_config =
+                runtime_config.with_request_timeout(Duration::from_millis(request_timeout_ms));
+        }}
+        self.runtime = Some(ConnectorRuntime::new(runtime_config));
         self.config = Some(config);
         self.configured = true;
         self.base.set_configured(true);
@@ -4036,6 +4048,7 @@ members = [
         assert!(output.contains("pub struct MyServiceConfig"));
         assert!(output.contains("Never store secrets"));
         assert!(output.contains("request_timeout_ms"));
+        assert!(output.contains("Option<u64>"));
         assert!(output.contains("HttpRetryConfig"));
     }
 
@@ -4228,6 +4241,10 @@ members = [
         let content = result.unwrap();
         assert!(content.contains("fcp.test"));
         assert!(content.contains("z:project:test"));
+        assert!(content.contains("[timeouts]"));
+        assert!(content.contains("request_timeout_ms = 30000"));
+        assert!(content.contains("connect_timeout_ms = 5000"));
+        assert!(content.contains("wall_clock_timeout_ms = 60000"));
         assert!(!content.contains(INTERFACE_HASH_PLACEHOLDER));
     }
 
@@ -4331,6 +4348,7 @@ members = [
         assert!(output.contains("runtime: Option<ConnectorRuntime>"));
         assert!(output.contains("RetryLoop::execute"));
         assert!(output.contains("runtime.request_context()"));
+        assert!(output.contains("ConnectorRuntimeConfig::from_manifest_str(MANIFEST_TOML)"));
     }
 
     #[test]

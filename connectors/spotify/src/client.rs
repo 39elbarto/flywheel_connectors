@@ -1,6 +1,6 @@
 //! `Spotify` API client.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::time::Duration;
 
 use fcp_core::CredentialId;
@@ -10,6 +10,7 @@ use tracing::{debug, instrument};
 
 use crate::{
     error::{SpotifyError, SpotifyResult},
+    history::HistoryQuery,
     types::ApiErrorResponse,
 };
 
@@ -381,9 +382,24 @@ impl SpotifyClient {
     // -- Player --
 
     /// Get the current user's recently played tracks.
-    pub async fn get_recently_played(&self, limit: u32) -> SpotifyResult<serde_json::Value> {
-        self.get(&format!("/me/player/recently-played?limit={limit}"))
-            .await
+    pub async fn get_recently_played(
+        &self,
+        query: &HistoryQuery,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut path = format!("/me/player/recently-played?limit={}", query.limit);
+        if let Some(after) = query.after {
+            write!(&mut path, "&after={after}").map_err(|error| SpotifyError::Api {
+                status_code: 500,
+                message: format!("failed to build recently played query: {error}"),
+            })?;
+        }
+        if let Some(before) = query.before {
+            write!(&mut path, "&before={before}").map_err(|error| SpotifyError::Api {
+                status_code: 500,
+                message: format!("failed to build recently played query: {error}"),
+            })?;
+        }
+        self.get(&path).await
     }
 
     // -- Top Items --

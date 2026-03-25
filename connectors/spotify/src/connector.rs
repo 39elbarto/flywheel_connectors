@@ -17,6 +17,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_BASE_URL, SpotifyAuth, SpotifyClient},
     error::SpotifyError,
+    history::{HistoryCursors, HistoryQuery, PlayHistory, PlayHistoryItem},
 };
 
 /// Parsed and validated `Spotify` connector configuration.
@@ -603,14 +604,10 @@ impl SpotifyConnector {
         client: &SpotifyClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SpotifyError> {
-        let limit = input
-            .get("limit")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(20);
-        let resp = client.get_recently_played(limit).await?;
-        let items = resp.get("items").cloned().unwrap_or_else(|| json!([]));
-        Ok(json!({ "items": items }))
+        let query = history_query_from_input(input)?;
+        let resp = client.get_recently_played(&query).await?;
+        let history = normalize_recently_played_response(&resp, query.limit)?;
+        serde_json::to_value(history).map_err(Into::into)
     }
 
     async fn invoke_top_items(
@@ -1258,6 +1255,195 @@ fn extract_string_array(
         })
 }
 
+fn optional_u32(input: &serde_json::Value, field: &str) -> Result<Option<u32>, SpotifyError> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| SpotifyError::Api {
+                status_code: 400,
+                message: format!("{field} must be an integer"),
+            })?;
+            let parsed = u32::try_from(raw).map_err(|_| SpotifyError::Api {
+                status_code: 400,
+                message: format!("{field} is too large"),
+            })?;
+            Ok(Some(parsed))
+        }
+    }
+}
+
+fn optional_u64(input: &serde_json::Value, field: &str) -> Result<Option<u64>, SpotifyError> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| SpotifyError::Api {
+            status_code: 400,
+            message: format!("{field} must be an integer"),
+        }),
+    }
+}
+
+fn history_query_from_input(input: &serde_json::Value) -> Result<HistoryQuery, SpotifyError> {
+    let query = HistoryQuery {
+        limit: optional_u32(input, "limit")?.unwrap_or(20),
+        after: optional_u64(input, "after")?,
+        before: optional_u64(input, "before")?,
+    };
+    query.validate().map_err(|error| SpotifyError::Api {
+        status_code: 400,
+        message: error.to_string(),
+    })?;
+    Ok(query)
+}
+
+fn normalize_recently_played_response(
+    response: &serde_json::Value,
+    requested_limit: u32,
+) -> Result<PlayHistory, SpotifyError> {
+    let items = response
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_spotify_response("recently played response missing items array"))?
+        .iter()
+        .enumerate()
+        .map(|(index, item)| normalize_play_history_item(item, index))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let cursors = match response.get("cursors") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let after = response_optional_string(value, "after", "cursors")?;
+            let before = response_optional_string(value, "before", "cursors")?;
+            if after.is_none() && before.is_none() {
+                None
+            } else {
+                Some(HistoryCursors { after, before })
+            }
+        }
+    };
+
+    Ok(PlayHistory {
+        items,
+        cursors,
+        total: response_optional_u32(response, "total", "response")?,
+        limit: response_optional_u32(response, "limit", "response")?.unwrap_or(requested_limit),
+    })
+}
+
+fn normalize_play_history_item(
+    item: &serde_json::Value,
+    index: usize,
+) -> Result<PlayHistoryItem, SpotifyError> {
+    let item_path = format!("items[{index}]");
+    let track_path = format!("{item_path}.track");
+    let track = item.get("track").ok_or_else(|| {
+        invalid_spotify_response(format!(
+            "{track_path} missing from recently played response"
+        ))
+    })?;
+
+    let artists = track
+        .get("artists")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            invalid_spotify_response(format!("{track_path}.artists missing or not an array"))
+        })?
+        .iter()
+        .enumerate()
+        .map(|(artist_index, artist)| {
+            response_required_string(
+                artist,
+                "name",
+                &format!("{track_path}.artists[{artist_index}]"),
+            )
+            .map(str::to_string)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let context = item.get("context");
+    let context_type = match context {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => response_optional_string(value, "type", &format!("{item_path}.context"))?,
+    };
+    let context_uri = match context {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => response_optional_string(value, "uri", &format!("{item_path}.context"))?,
+    };
+
+    Ok(PlayHistoryItem {
+        track_id: response_required_string(track, "id", &track_path)?.to_string(),
+        track_name: response_required_string(track, "name", &track_path)?.to_string(),
+        artists,
+        played_at: response_required_string(item, "played_at", &item_path)?.to_string(),
+        context_type,
+        context_uri,
+        duration_ms: response_required_u64(track, "duration_ms", &track_path)?,
+    })
+}
+
+fn response_required_string<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+    path: &str,
+) -> Result<&'a str, SpotifyError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_spotify_response(format!("{path}.{field} missing or not a string")))
+}
+
+fn response_optional_string(
+    value: &serde_json::Value,
+    field: &str,
+    path: &str,
+) -> Result<Option<String>, SpotifyError> {
+    match value.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(raw) => raw
+            .as_str()
+            .map(|text| Some(text.to_string()))
+            .ok_or_else(|| invalid_spotify_response(format!("{path}.{field} must be a string"))),
+    }
+}
+
+fn response_required_u64(
+    value: &serde_json::Value,
+    field: &str,
+    path: &str,
+) -> Result<u64, SpotifyError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            invalid_spotify_response(format!("{path}.{field} missing or not an integer"))
+        })
+}
+
+fn response_optional_u32(
+    value: &serde_json::Value,
+    field: &str,
+    path: &str,
+) -> Result<Option<u32>, SpotifyError> {
+    match value.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(raw) => {
+            let integer = raw.as_u64().ok_or_else(|| {
+                invalid_spotify_response(format!("{path}.{field} must be an integer"))
+            })?;
+            let parsed = u32::try_from(integer).map_err(|_| {
+                invalid_spotify_response(format!("{path}.{field} exceeds u32 range"))
+            })?;
+            Ok(Some(parsed))
+        }
+    }
+}
+
+fn invalid_spotify_response(message: impl Into<String>) -> SpotifyError {
+    SpotifyError::Api {
+        status_code: 502,
+        message: message.into(),
+    }
+}
+
 /// Build a single `OperationInfo` entry.
 #[allow(clippy::too_many_arguments)]
 fn op_info(
@@ -1523,14 +1709,25 @@ fn operations_info() -> Vec<OperationInfo> {
             json!({
                 "type": "object",
                 "properties": {
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "after": { "type": "integer", "minimum": 0 },
+                    "before": { "type": "integer", "minimum": 0 }
                 }
             }),
             json!({
                 "type": "object",
-                "required": ["items"],
+                "required": ["items", "limit"],
                 "properties": {
-                    "items": { "type": "array" }
+                    "items": { "type": "array" },
+                    "cursors": {
+                        "type": "object",
+                        "properties": {
+                            "after": { "type": "string" },
+                            "before": { "type": "string" }
+                        }
+                    },
+                    "total": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
                 }
             }),
             "spotify.read",
@@ -1539,8 +1736,13 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Read recently played tracks for the current user.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"limit": 10}"#.into()],
+                common_mistakes: vec![
+                    "Supplying both after and before; only one cursor direction is valid per request.".into(),
+                ],
+                examples: vec![
+                    r#"{"limit": 10}"#.into(),
+                    r#"{"after": 1740782400000}"#.into(),
+                ],
                 related: vec![
                     CapabilityId::from_static("spotify.top_items"),
                 ],

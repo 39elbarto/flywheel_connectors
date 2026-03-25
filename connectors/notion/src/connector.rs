@@ -13,7 +13,9 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_API_URL, NotionAuth, NotionClient},
+    client::{
+        DEFAULT_API_URL, DEFAULT_NOTION_VERSION, NotionAuth, NotionClient, normalize_notion_version,
+    },
     error::NotionError,
     limits,
 };
@@ -22,6 +24,7 @@ use crate::{
 struct NotionConfig {
     auth: NotionAuth,
     api_url: String,
+    notion_version: Option<String>,
 }
 
 impl NotionConfig {
@@ -72,7 +75,27 @@ impl NotionConfig {
             .unwrap_or(DEFAULT_API_URL)
             .to_string();
 
-        Ok(Self { auth, api_url })
+        let notion_version = match params.get("notion_version") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "notion_version must be a string".into(),
+                })?;
+                Some(
+                    normalize_notion_version(raw).ok_or(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "notion_version must look like YYYY-MM-DD".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            auth,
+            api_url,
+            notion_version,
+        })
     }
 }
 
@@ -128,11 +151,12 @@ impl NotionConnector {
     ) -> FcpResult<serde_json::Value> {
         let config = NotionConfig::from_params(&params)?;
 
-        let client = NotionClient::new_with_auth(config.auth.clone())
-            .map_err(|e| FcpError::Internal {
-                message: format!("Failed to create HTTP client: {e}"),
-            })?
-            .with_api_url(&config.api_url);
+        let client =
+            NotionClient::new_with_version(config.auth.clone(), config.notion_version.as_deref())
+                .map_err(|e| FcpError::Internal {
+                    message: format!("Failed to create HTTP client: {e}"),
+                })?
+                .with_api_url(&config.api_url);
 
         info!(auth = %config.auth.redacted_label(), "Notion connector configured");
 
@@ -208,6 +232,15 @@ impl NotionConnector {
         if let Some(config) = &self.config {
             health["auth_mode"] = json!(config.auth.redacted_label());
             health["api_url"] = json!(config.api_url);
+            health["notion_version"] = json!(
+                self.client.as_ref().map_or(
+                    config
+                        .notion_version
+                        .as_deref()
+                        .unwrap_or(DEFAULT_NOTION_VERSION),
+                    NotionClient::notion_version,
+                )
+            );
         }
         Ok(health)
     }
@@ -276,7 +309,23 @@ impl NotionConnector {
             });
         }
 
-        // 5. Network constraints
+        // 5. Effective Notion API version
+        let notion_version = self.client.as_ref().map_or_else(
+            || {
+                self.config
+                    .as_ref()
+                    .and_then(|config| config.notion_version.clone())
+                    .unwrap_or_else(|| DEFAULT_NOTION_VERSION.to_string())
+            },
+            |client| client.notion_version().to_string(),
+        );
+        checks.push(DoctorCheck {
+            name: "notion_version".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("Notion-Version header: {notion_version}"),
+        });
+
+        // 6. Network constraints
         let egress_target = self.config.as_ref().map_or("api.notion.com", |c| {
             c.api_url
                 .strip_prefix("https://")
@@ -290,7 +339,7 @@ impl NotionConnector {
             message: format!("Egress target: {egress_target}"),
         });
 
-        // 6. Credential injection
+        // 7. Credential injection
         if let Some(config) = &self.config {
             if config.auth.is_secretless() {
                 checks.push(DoctorCheck {
@@ -1857,6 +1906,43 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_with_custom_notion_version() {
+        let mut connector = NotionConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "notion_version": "2025-09-03"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.notion_version.as_deref(), Some("2025-09-03"));
+        assert_eq!(
+            connector.client.as_ref().unwrap().notion_version(),
+            "2025-09-03"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_invalid_notion_version() {
+        let mut connector = NotionConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "notion_version": "2026/03/11"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("notion_version must look like"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_health_includes_auth_info() {
         let mut connector = NotionConnector::new();
         connector
@@ -1867,6 +1953,7 @@ mod tests {
         assert_eq!(health["status"], "healthy");
         assert!(health["auth_mode"].as_str().unwrap().contains("token"));
         assert!(health["api_url"].as_str().is_some());
+        assert_eq!(health["notion_version"], DEFAULT_NOTION_VERSION);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1875,7 +1962,7 @@ mod tests {
         let result = connector.handle_doctor().await.unwrap();
         assert_eq!(result["status"], "unhealthy");
         let checks = result["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 6);
+        assert_eq!(checks.len(), 7);
         assert_eq!(checks[0]["name"], "configuration");
         assert_eq!(checks[0]["status"], "unhealthy");
     }
@@ -1890,7 +1977,16 @@ mod tests {
         let result = connector.handle_doctor().await.unwrap();
         assert_eq!(result["status"], "healthy");
         let checks = result["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 6);
+        assert_eq!(checks.len(), 7);
+        let version_check = checks
+            .iter()
+            .find(|check| check["name"] == "notion_version")
+            .unwrap();
+        assert_eq!(version_check["status"], "healthy");
+        assert_eq!(
+            version_check["message"],
+            format!("Notion-Version header: {DEFAULT_NOTION_VERSION}")
+        );
         for check in checks {
             assert_eq!(check["status"], "healthy");
         }

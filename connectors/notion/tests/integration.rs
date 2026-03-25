@@ -20,7 +20,11 @@ use wiremock::{
     matchers::{header, method, path},
 };
 
-use fcp_notion::{client::NotionClient, connector::NotionConnector, error::NotionError};
+use fcp_notion::{
+    client::{DEFAULT_NOTION_VERSION, NotionClient},
+    connector::NotionConnector,
+    error::NotionError,
+};
 
 // ============================================================================
 // Helpers
@@ -291,6 +295,7 @@ async fn token_sent_as_bearer_auth() {
     Mock::given(method("POST"))
         .and(path("/v1/search"))
         .and(header("authorization", "Bearer ntn_test_auth"))
+        .and(header("notion-version", DEFAULT_NOTION_VERSION))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "object": "list",
             "results": [],

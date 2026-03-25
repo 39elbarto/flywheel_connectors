@@ -62,9 +62,12 @@ pub struct StreamHealthConfig {
 impl Default for StreamHealthConfig {
     fn default() -> Self {
         Self {
-            heartbeat_timeout: Duration::from_secs(30),
-            zombie_timeout: Duration::from_secs(120),
-            max_reconnect_attempts: 10,
+            heartbeat_timeout: Duration::from_secs(env_or(
+                "FCP_STREAMING_HEARTBEAT_TIMEOUT_SECS",
+                30,
+            )),
+            zombie_timeout: Duration::from_secs(env_or("FCP_STREAMING_ZOMBIE_TIMEOUT_SECS", 120)),
+            max_reconnect_attempts: env_or("FCP_STREAMING_MAX_RECONNECT_ATTEMPTS", 10),
         }
     }
 }
@@ -235,6 +238,14 @@ impl StreamHealthTracker {
             },
         }
     }
+}
+
+/// Parse an environment variable, falling back to a default if unset or unparseable.
+fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Convert a duration between two instants to milliseconds, saturating at `u64::MAX`.

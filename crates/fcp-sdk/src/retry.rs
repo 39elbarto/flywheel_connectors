@@ -214,14 +214,31 @@ impl RetryPolicy {
     }
 }
 
+/// Parse an environment variable, falling back to a default if unset or unparseable.
+fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Default retry-after for rate limiting when no hint is provided (30s).
 pub const DEFAULT_RATE_LIMIT_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Compute the rate-limit retry-after duration, allowing override via
+/// `FCP_SDK_RATE_LIMIT_RETRY_AFTER_SECS`.
+///
+/// Falls back to [`DEFAULT_RATE_LIMIT_RETRY_AFTER`] (30 s) when the variable is unset.
+#[must_use]
+pub fn default_rate_limit_retry_after() -> Duration {
+    Duration::from_secs(env_or("FCP_SDK_RATE_LIMIT_RETRY_AFTER_SECS", 30))
+}
 
 /// Classify an HTTP status code into a retry decision.
 #[must_use]
 pub fn decision_from_http_status(status: u16, retry_after: Option<Duration>) -> RetryDecision {
     match status {
-        429 => RetryDecision::After(retry_after.unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER)),
+        429 => RetryDecision::After(retry_after.unwrap_or_else(default_rate_limit_retry_after)),
         408 | 425 | 500..=599 => RetryDecision::Backoff,
         _ => RetryDecision::Terminal,
     }
@@ -253,7 +270,9 @@ pub fn map_external_error(
 
     let fcp_error = match status_code {
         Some(429) => FcpError::RateLimited {
-            retry_after_ms: duration_to_ms(retry_after.unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER)),
+            retry_after_ms: duration_to_ms(
+                retry_after.unwrap_or_else(default_rate_limit_retry_after),
+            ),
             violation: None,
         },
         _ => FcpError::External {

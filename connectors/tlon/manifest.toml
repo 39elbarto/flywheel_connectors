@@ -11,6 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:tlon-first-slice"
 id = "fcp.tlon"
 name = "Tlon"
 version = "0.1.0"
+status = "stub"
 description = "Tlon / Urbit connector for authenticated DM and channel send flows"
 archetypes = ["bidirectional"]
 format = "native"

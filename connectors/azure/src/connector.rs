@@ -91,6 +91,9 @@ impl AzureConfig {
     fn validate(&self) -> Result<(), String> {
         validate_management_url(&self.management_url)?;
         self.api_versions.validate()?;
+        if self.request_timeout_ms == 0 {
+            return Err("request_timeout_ms must be > 0".into());
+        }
 
         if matches!(
             &self.auth,
@@ -108,8 +111,8 @@ impl AzureConfig {
     }
 
     fn from_value(value: serde_json::Value) -> FcpResult<Self> {
-        let raw: Self = serde_json::from_value(value)
-            .map_err(|error| FcpError::InvalidRequest {
+        let raw: Self =
+            serde_json::from_value(value).map_err(|error| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid configuration: {error}"),
             })?;
@@ -1536,6 +1539,29 @@ mod tests {
                 FcpError::InvalidRequest { code, message } => {
                     assert_eq!(code, 1001);
                     assert!(message.contains("api_versions.keyvault"));
+                }
+                other => panic!("expected invalid request, got {other:?}"),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_rejects_zero_request_timeout() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = AzureConnector::new();
+            let err = connector
+                .configure(json!({
+                    "mode": "bearer_token",
+                    "bearer_token": "tok",
+                    "request_timeout_ms": 0
+                }))
+                .await
+                .unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, message } => {
+                    assert_eq!(code, 1001);
+                    assert!(message.contains("request_timeout_ms"));
                 }
                 other => panic!("expected invalid request, got {other:?}"),
             }

@@ -37,8 +37,32 @@ pub use signature::*;
 
 use std::time::Duration;
 
+/// Parse an environment variable, falling back to a default if unset or unparseable.
+fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Default timestamp tolerance for replay protection.
 pub const DEFAULT_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Default maximum payload size.
 pub const DEFAULT_MAX_PAYLOAD_SIZE: usize = 5 * 1024 * 1024; // 5MB
+
+/// Compute the timestamp tolerance, allowing override via `FCP_WEBHOOK_TIMESTAMP_TOLERANCE_SECS`.
+///
+/// Falls back to [`DEFAULT_TIMESTAMP_TOLERANCE`] (300 s) when the variable is unset.
+#[must_use]
+pub fn default_timestamp_tolerance() -> Duration {
+    Duration::from_secs(env_or("FCP_WEBHOOK_TIMESTAMP_TOLERANCE_SECS", 300))
+}
+
+/// Compute the maximum payload size, allowing override via `FCP_WEBHOOK_MAX_PAYLOAD_BYTES`.
+///
+/// Falls back to [`DEFAULT_MAX_PAYLOAD_SIZE`] (5 MiB) when the variable is unset.
+#[must_use]
+pub fn default_max_payload_size() -> usize {
+    env_or("FCP_WEBHOOK_MAX_PAYLOAD_BYTES", 5 * 1024 * 1024)
+}

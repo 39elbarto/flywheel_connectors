@@ -4019,7 +4019,7 @@ impl HostAdminStateStore {
         ) {
             (None, _, _) => rejection_reasons.push("Token is missing a COSE key ID (kid)".into()),
             (Some(key_id), None, _) => {
-                rejection_reasons.push(format!("No verifying key found for token key ID {key_id}"))
+                rejection_reasons.push(format!("No verifying key found for token key ID {key_id}"));
             }
             (Some(_), Some(_), false) => {
                 rejection_reasons.push("Token signature verification failed".into());

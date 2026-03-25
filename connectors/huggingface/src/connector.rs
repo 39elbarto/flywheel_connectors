@@ -1,20 +1,64 @@
+//! Hugging Face connector implementation.
+
 use std::sync::Arc;
+use std::time::Duration;
 
 use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::{Value, json};
+use tracing::info;
+
+use crate::client::HuggingfaceClient;
+use crate::types::{
+    SummarizationParameters, SummarizationRequest, TextGenerationParameters, TextGenerationRequest,
+};
 
 const CONNECTOR_ID: &str = "fcp.huggingface";
-const CONNECTOR_VERSION: &str = "0.1.0";
-const BOUNDARY: &str = "This first slice is request-response only and focuses on OpenAI-compatible chat completions plus /models discovery.";
-const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
-const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
-const UNIMPLEMENTED_REASON_CODE: &str = "invoke_surface_unimplemented";
-const UNIMPLEMENTED_MESSAGE: &str = "This connector scaffold only declares planned operations. Live invoke support is not implemented yet.";
+const CONNECTOR_VERSION: &str = "0.2.0";
+
+const OP_TEXT_GENERATION: &str = "huggingface.inference.text_generation";
+const OP_SUMMARIZATION: &str = "huggingface.inference.summarization";
+const OP_MODEL_INFO: &str = "huggingface.models.info";
+
+const DEFAULT_TEXT_GEN_MODEL: &str = "gpt2";
+const DEFAULT_SUMMARIZATION_MODEL: &str = "facebook/bart-large-cnn";
 
 pub struct HuggingfaceConnector {
     base: Arc<BaseConnector>,
     configured: bool,
     handshaken: bool,
+    client: Option<HuggingfaceClient>,
+    runtime: Option<ConnectorRuntime>,
+    config: Option<HuggingfaceConfig>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct HuggingfaceConfig {
+    #[serde(default)]
+    pub api_token: String,
+    #[serde(default = "default_inference_url")]
+    pub inference_url: String,
+    #[serde(default = "default_hub_url")]
+    pub hub_url: String,
+    #[serde(default)]
+    pub retry: HttpRetryConfig,
+    #[serde(default = "default_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+fn default_inference_url() -> String {
+    "https://api-inference.huggingface.co".into()
+}
+fn default_hub_url() -> String {
+    "https://huggingface.co/api".into()
+}
+const fn default_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Safe conversion from u64 JSON number to u32, returning None on overflow.
+fn safe_u32(v: u64) -> Option<u32> {
+    u32::try_from(v).ok()
 }
 
 #[allow(clippy::missing_errors_doc, clippy::unused_async)]
@@ -25,12 +69,46 @@ impl HuggingfaceConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static(CONNECTOR_ID))),
             configured: false,
             handshaken: false,
+            client: None,
+            runtime: None,
+            config: None,
         }
     }
 
-    pub async fn handle_configure(&mut self, _params: Value) -> FcpResult<Value> {
+    pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
+        let config: HuggingfaceConfig =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+
+        let timeout = Duration::from_millis(config.request_timeout_ms);
+        self.runtime = Some(ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_request_timeout(timeout),
+        ));
+
+        let client = HuggingfaceClient::new(
+            Some(&config.inference_url),
+            Some(&config.hub_url),
+            &config.api_token,
+            config.retry.clone(),
+            timeout,
+        )
+        .map_err(|e| FcpError::Internal {
+            message: format!("Client init: {e}"),
+        })?;
+
+        self.client = Some(client);
+        self.config = Some(config);
         self.configured = true;
         self.base.set_configured(true);
+
+        info!(
+            event = "huggingface.configure",
+            connector_id = CONNECTOR_ID,
+            "Configured Hugging Face connector"
+        );
+
         Ok(json!({"connector_id": CONNECTOR_ID, "configured": true}))
     }
 
@@ -44,53 +122,104 @@ impl HuggingfaceConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": [],
-            "planned_capabilities": ["huggingface.chat", "huggingface.models"],
-            "surface_status": "planned_only"
+            "capabilities": ["huggingface.inference", "huggingface.models"],
+            "surface_status": "live"
         }))
     }
 
     pub async fn handle_health(&self) -> FcpResult<Value> {
+        let has_token = self.client.as_ref().is_some_and(|c| !c.is_secretless());
+        let status = if self.configured && has_token {
+            "ready"
+        } else if self.configured {
+            "degraded"
+        } else {
+            "unconfigured"
+        };
         Ok(json!({
-            "status": if self.configured { "degraded" } else { "unconfigured" },
+            "status": status,
             "configured": self.configured,
             "handshaken": self.handshaken,
-            "live_requests_supported": false,
+            "live_requests_supported": self.configured,
         }))
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<Value> {
+        let mut checks = vec![
+            json!({ "name": "configuration", "passed": self.configured, "critical": true }),
+            json!({ "name": "handshake", "passed": self.handshaken, "critical": false }),
+            json!({ "name": "client_initialized", "passed": self.client.is_some(), "critical": true }),
+            json!({ "name": "runtime_initialized", "passed": self.runtime.is_some(), "critical": true }),
+        ];
+        if let Some(client) = &self.client {
+            checks.push(json!({
+                "name": "auth_token",
+                "passed": !client.is_secretless(),
+                "critical": false,
+                "message": if client.is_secretless() {
+                    "No API token configured; requests to gated models will fail"
+                } else {
+                    "API token configured"
+                }
+            }));
+        }
+        let all_critical_pass = checks.iter().all(|c| {
+            !c["critical"].as_bool().unwrap_or(false) || c["passed"].as_bool().unwrap_or(false)
+        });
+        let status = if all_critical_pass && self.configured {
+            "healthy"
+        } else if self.configured {
+            "degraded"
+        } else {
+            "unhealthy"
+        };
         Ok(json!({
-            "status": if self.configured { "degraded" } else { "unhealthy" },
-            "checks": [
-                { "name": "configuration", "passed": self.configured, "critical": true },
-                { "name": "handshake", "passed": self.handshaken, "critical": false },
-                { "name": "invoke_surface", "passed": false, "critical": false, "message": UNIMPLEMENTED_MESSAGE },
-                { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
-            ]
+            "status": status,
+            "checks": checks
         }))
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<Value> {
-        let (status, reason_code, message) = if !self.configured {
-            ("degraded", json!("not_configured"), json!(BOUNDARY))
-        } else if !self.handshaken {
-            (
-                "degraded",
-                json!(NOT_HANDSHAKEN_REASON_CODE),
-                json!(NOT_HANDSHAKEN_MESSAGE),
-            )
-        } else {
-            (
-                "unsupported",
-                json!(UNIMPLEMENTED_REASON_CODE),
-                json!(UNIMPLEMENTED_MESSAGE),
-            )
-        };
+        if !self.configured {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "not_configured",
+                "message": "Connector not configured"
+            }));
+        }
+        if !self.handshaken {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "not_handshaken",
+                "message": "Connector configured but handshake not completed"
+            }));
+        }
+
+        // Live self-check: try whoami to validate the token
+        if let (Some(client), Some(runtime)) = (&self.client, &self.runtime) {
+            match client.whoami(runtime).await {
+                Ok(user_info) => {
+                    return Ok(json!({
+                        "status": "ready",
+                        "reason_code": "ok",
+                        "message": "Token validated",
+                        "user": user_info.get("name").cloned().unwrap_or(Value::Null)
+                    }));
+                }
+                Err(e) => {
+                    return Ok(json!({
+                        "status": "degraded",
+                        "reason_code": "token_validation_failed",
+                        "message": format!("Token check failed: {e}")
+                    }));
+                }
+            }
+        }
+
         Ok(json!({
-            "status": status,
-            "reason_code": reason_code,
-            "message": message
+            "status": "degraded",
+            "reason_code": "missing_client",
+            "message": "Client or runtime not initialized"
         }))
     }
 
@@ -99,10 +228,35 @@ impl HuggingfaceConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
-                { "id": "huggingface.chat.completions", "summary": "Create a Hugging Face router chat completion", "capability": "huggingface.chat", "risk_level": "medium", "safety_tier": "safe", "idempotency": "none", "implemented": false },
-                { "id": "huggingface.models.list", "summary": "List Hugging Face router models", "capability": "huggingface.models", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false }
+                {
+                    "id": OP_TEXT_GENERATION,
+                    "summary": "Run text generation inference via Hugging Face Inference API",
+                    "capability": "huggingface.inference",
+                    "risk_level": "medium",
+                    "safety_tier": "safe",
+                    "idempotency": "none",
+                    "implemented": true
+                },
+                {
+                    "id": OP_SUMMARIZATION,
+                    "summary": "Run text summarization via Hugging Face Inference API",
+                    "capability": "huggingface.inference",
+                    "risk_level": "medium",
+                    "safety_tier": "safe",
+                    "idempotency": "none",
+                    "implemented": true
+                },
+                {
+                    "id": OP_MODEL_INFO,
+                    "summary": "Get model metadata from Hugging Face Hub",
+                    "capability": "huggingface.models",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "strict",
+                    "implemented": true
+                }
             ],
-            "surface_status": "planned_only",
+            "surface_status": "live",
             "events": [],
             "resource_types": []
         }))
@@ -119,18 +273,163 @@ impl HuggingfaceConnector {
                 message: "Missing operation_id".into(),
             })?;
 
-        Err(FcpError::InvalidRequest {
-            code: 1002,
-            message: if matches!(
-                operation,
-                "huggingface.chat.completions" | "huggingface.models.list"
-            ) {
-                format!(
-                    "Operation {operation} is planned but not implemented in this connector slice"
-                )
-            } else {
-                format!("Unknown operation: {operation}")
-            },
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "runtime not initialized".into(),
+        })?;
+        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "client not initialized".into(),
+        })?;
+
+        let output = match operation {
+            OP_TEXT_GENERATION => self.invoke_text_generation(client, runtime, &input).await?,
+            OP_SUMMARIZATION => self.invoke_summarization(client, runtime, &input).await?,
+            OP_MODEL_INFO => self.invoke_model_info(client, runtime, &input).await?,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+
+        Ok(json!({
+            "operation": operation,
+            "output": output
+        }))
+    }
+
+    async fn invoke_text_generation(
+        &self,
+        client: &HuggingfaceClient,
+        runtime: &ConnectorRuntime,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let model_id = input
+            .get("model_id")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_TEXT_GEN_MODEL);
+        let prompt = input
+            .get("prompt")
+            .or_else(|| input.get("inputs"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "Missing 'prompt' field".into(),
+            })?;
+
+        let mut gen_params = TextGenerationParameters::default();
+        if let Some(v) = input.get("max_new_tokens").and_then(Value::as_u64) {
+            gen_params.max_new_tokens = safe_u32(v);
+        }
+        if let Some(v) = input.get("temperature").and_then(Value::as_f64) {
+            gen_params.temperature = Some(v);
+        }
+        if let Some(v) = input.get("top_p").and_then(Value::as_f64) {
+            gen_params.top_p = Some(v);
+        }
+        if let Some(v) = input.get("top_k").and_then(Value::as_u64) {
+            gen_params.top_k = safe_u32(v);
+        }
+        if let Some(v) = input.get("repetition_penalty").and_then(Value::as_f64) {
+            gen_params.repetition_penalty = Some(v);
+        }
+        if let Some(v) = input.get("do_sample").and_then(Value::as_bool) {
+            gen_params.do_sample = Some(v);
+        }
+        if let Some(v) = input.get("return_full_text").and_then(Value::as_bool) {
+            gen_params.return_full_text = Some(v);
+        }
+
+        let has_params = gen_params.max_new_tokens.is_some()
+            || gen_params.temperature.is_some()
+            || gen_params.top_p.is_some()
+            || gen_params.top_k.is_some()
+            || gen_params.repetition_penalty.is_some()
+            || gen_params.do_sample.is_some()
+            || gen_params.return_full_text.is_some();
+
+        let request = TextGenerationRequest {
+            inputs: prompt.to_string(),
+            parameters: if has_params { Some(gen_params) } else { None },
+        };
+
+        let results = client
+            .text_generation(runtime, model_id, &request)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        serde_json::to_value(&results).map_err(|e| FcpError::Internal {
+            message: e.to_string(),
+        })
+    }
+
+    async fn invoke_summarization(
+        &self,
+        client: &HuggingfaceClient,
+        runtime: &ConnectorRuntime,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let model_id = input
+            .get("model_id")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_SUMMARIZATION_MODEL);
+        let text = input
+            .get("text")
+            .or_else(|| input.get("inputs"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "Missing 'text' field".into(),
+            })?;
+
+        let mut sum_params = SummarizationParameters::default();
+        if let Some(v) = input.get("max_length").and_then(Value::as_u64) {
+            sum_params.max_length = safe_u32(v);
+        }
+        if let Some(v) = input.get("min_length").and_then(Value::as_u64) {
+            sum_params.min_length = safe_u32(v);
+        }
+
+        let has_params = sum_params.max_length.is_some() || sum_params.min_length.is_some();
+
+        let request = SummarizationRequest {
+            inputs: text.to_string(),
+            parameters: if has_params { Some(sum_params) } else { None },
+        };
+
+        let results = client
+            .summarization(runtime, model_id, &request)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        serde_json::to_value(&results).map_err(|e| FcpError::Internal {
+            message: e.to_string(),
+        })
+    }
+
+    async fn invoke_model_info(
+        &self,
+        client: &HuggingfaceClient,
+        runtime: &ConnectorRuntime,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let model_id = input
+            .get("model_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "Missing 'model_id' field".into(),
+            })?;
+
+        let model_info = client
+            .model_info(runtime, model_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        serde_json::to_value(&model_info).map_err(|e| FcpError::Internal {
+            message: e.to_string(),
         })
     }
 
@@ -141,13 +440,20 @@ impl HuggingfaceConnector {
             .and_then(Value::as_str)
             .unwrap_or("");
 
+        let known = matches!(
+            operation,
+            OP_TEXT_GENERATION | OP_SUMMARIZATION | OP_MODEL_INFO
+        );
+
         Ok(json!({
-            "allowed": false,
-            "simulate_capability": "unsupported",
-            "reason": if matches!(operation, "huggingface.chat.completions" | "huggingface.models.list") {
-                UNIMPLEMENTED_MESSAGE
-            } else {
+            "allowed": known && self.configured,
+            "simulate_capability": if known { "supported" } else { "unknown_operation" },
+            "reason": if !known {
                 "Unknown operation."
+            } else if !self.configured {
+                "Connector not configured."
+            } else {
+                "Operation is available for invocation."
             }
         }))
     }
@@ -155,6 +461,9 @@ impl HuggingfaceConnector {
     pub async fn handle_shutdown(&mut self, _params: Value) -> FcpResult<Value> {
         self.configured = false;
         self.handshaken = false;
+        self.client = None;
+        self.runtime = None;
+        self.config = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -172,78 +481,273 @@ mod tests {
     use super::*;
 
     #[fcp_async_core::runtime::test]
-    async fn planned_only_connector_reports_degraded_readiness() {
+    async fn configure_and_handshake() {
         let mut connector = HuggingfaceConnector::new();
-        connector
-            .handle_configure(json!({}))
+        let result = connector
+            .handle_configure(json!({
+                "api_token": "hf_test_token",
+                "inference_url": "http://localhost:9999",
+                "hub_url": "http://localhost:9998"
+            }))
             .await
             .expect("configure should succeed");
+        assert_eq!(result["configured"], true);
+        assert!(connector.client.is_some());
+        assert!(connector.runtime.is_some());
 
-        let pre_handshake = connector
-            .handle_self_check()
-            .await
-            .expect("self_check before handshake should succeed");
-        assert_eq!(pre_handshake["status"], "degraded");
-        assert_eq!(pre_handshake["reason_code"], NOT_HANDSHAKEN_REASON_CODE);
-
-        connector
+        let hs = connector
             .handle_handshake(json!({}))
             .await
             .expect("handshake should succeed");
-
-        let health = connector
-            .handle_health()
-            .await
-            .expect("health should succeed");
-        assert_eq!(health["status"], "degraded");
-        assert_eq!(health["live_requests_supported"], false);
-
-        let introspect = connector
-            .handle_introspect()
-            .await
-            .expect("introspect should succeed");
-        assert_eq!(introspect["surface_status"], "planned_only");
-        assert!(
-            introspect["operations"]
-                .as_array()
-                .expect("operations should be an array")
-                .iter()
-                .all(|operation| {
-                    operation.get("implemented").and_then(Value::as_bool) == Some(false)
-                })
-        );
-
-        let self_check = connector
-            .handle_self_check()
-            .await
-            .expect("self_check should succeed");
-        assert_eq!(self_check["status"], "unsupported");
-        assert_eq!(self_check["reason_code"], UNIMPLEMENTED_REASON_CODE);
+        assert_eq!(hs["surface_status"], "live");
+        assert_eq!(hs["connector_version"], CONNECTOR_VERSION);
     }
 
     #[fcp_async_core::runtime::test]
-    async fn planned_operation_invoke_and_simulate_refuse_execution() {
+    async fn configure_with_defaults() {
         let mut connector = HuggingfaceConnector::new();
         connector
             .handle_configure(json!({}))
             .await
-            .expect("configure should succeed");
-        connector
+            .expect("configure with defaults should succeed");
+        assert!(connector.configured);
+        assert!(connector.client.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_requires_configure() {
+        let mut connector = HuggingfaceConnector::new();
+        let err = connector
             .handle_handshake(json!({}))
             .await
-            .expect("handshake should succeed");
+            .expect_err("handshake before configure should fail");
+        assert!(matches!(err, FcpError::NotConfigured));
+    }
 
-        let error = connector
-            .handle_invoke(json!({"operation_id": "huggingface.models.list"}))
-            .await
-            .expect_err("invoke should refuse planned operation");
-        assert!(error.to_string().contains("not implemented"));
+    #[fcp_async_core::runtime::test]
+    async fn health_reflects_configuration_state() {
+        let mut connector = HuggingfaceConnector::new();
+        let h = connector.handle_health().await.unwrap();
+        assert_eq!(h["status"], "unconfigured");
+        assert_eq!(h["live_requests_supported"], false);
 
-        let simulate = connector
-            .handle_simulate(json!({"operation_id": "huggingface.models.list"}))
+        connector
+            .handle_configure(json!({"api_token": "hf_test"}))
             .await
-            .expect("simulate should succeed");
-        assert_eq!(simulate["allowed"], false);
-        assert_eq!(simulate["simulate_capability"], "unsupported");
+            .unwrap();
+        let h = connector.handle_health().await.unwrap();
+        assert_eq!(h["status"], "ready");
+        assert_eq!(h["live_requests_supported"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_degraded_without_token() {
+        let mut connector = HuggingfaceConnector::new();
+        connector.handle_configure(json!({})).await.unwrap();
+        let h = connector.handle_health().await.unwrap();
+        assert_eq!(h["status"], "degraded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_checks() {
+        let mut connector = HuggingfaceConnector::new();
+        let d = connector.handle_doctor().await.unwrap();
+        assert_eq!(d["status"], "unhealthy");
+
+        connector
+            .handle_configure(json!({"api_token": "hf_test"}))
+            .await
+            .unwrap();
+        let d = connector.handle_doctor().await.unwrap();
+        assert_eq!(d["status"], "healthy");
+        let checks = d["checks"].as_array().unwrap();
+        assert!(checks.len() >= 4);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_lists_operations() {
+        let connector = HuggingfaceConnector::new();
+        let intro = connector.handle_introspect().await.unwrap();
+        assert_eq!(intro["surface_status"], "live");
+        let ops = intro["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 3);
+        assert!(ops.iter().all(|o| o["implemented"] == true));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_requires_ready_state() {
+        let connector = HuggingfaceConnector::new();
+        let err = connector
+            .handle_invoke(json!({
+                "operation_id": OP_MODEL_INFO,
+                "input": {"model_id": "gpt2"}
+            }))
+            .await
+            .expect_err("invoke before configure should fail");
+        assert!(
+            err.to_string().contains("not configured")
+                || err.to_string().contains("Not configured")
+                || matches!(err, FcpError::NotConfigured)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_rejects_unknown_operation() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({"api_token": "hf_test"}))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let err = connector
+            .handle_invoke(json!({"operation_id": "huggingface.nonexistent"}))
+            .await
+            .expect_err("unknown operation should fail");
+        assert!(err.to_string().contains("Unknown operation"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_text_generation_requires_prompt() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_token": "hf_test",
+                "inference_url": "http://localhost:1"
+            }))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation_id": OP_TEXT_GENERATION,
+                "input": {"model_id": "gpt2"}
+            }))
+            .await
+            .expect_err("missing prompt should fail");
+        assert!(err.to_string().contains("prompt"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_summarization_requires_text() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_token": "hf_test",
+                "inference_url": "http://localhost:1"
+            }))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation_id": OP_SUMMARIZATION,
+                "input": {"model_id": "facebook/bart-large-cnn"}
+            }))
+            .await
+            .expect_err("missing text should fail");
+        assert!(err.to_string().contains("text"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_model_info_requires_model_id() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_token": "hf_test",
+                "hub_url": "http://localhost:1"
+            }))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation_id": OP_MODEL_INFO,
+                "input": {}
+            }))
+            .await
+            .expect_err("missing model_id should fail");
+        assert!(err.to_string().contains("model_id"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_known_operations() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({"api_token": "hf_test"}))
+            .await
+            .unwrap();
+
+        let sim = connector
+            .handle_simulate(json!({"operation_id": OP_TEXT_GENERATION}))
+            .await
+            .unwrap();
+        assert_eq!(sim["allowed"], true);
+        assert_eq!(sim["simulate_capability"], "supported");
+
+        let sim = connector
+            .handle_simulate(json!({"operation_id": OP_SUMMARIZATION}))
+            .await
+            .unwrap();
+        assert_eq!(sim["allowed"], true);
+
+        let sim = connector
+            .handle_simulate(json!({"operation_id": OP_MODEL_INFO}))
+            .await
+            .unwrap();
+        assert_eq!(sim["allowed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation() {
+        let connector = HuggingfaceConnector::new();
+        let sim = connector
+            .handle_simulate(json!({"operation_id": "huggingface.unknown"}))
+            .await
+            .unwrap();
+        assert_eq!(sim["allowed"], false);
+        assert_eq!(sim["simulate_capability"], "unknown_operation");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_state() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({"api_token": "hf_test"}))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+        assert!(connector.configured);
+        assert!(connector.handshaken);
+        assert!(connector.client.is_some());
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+        assert!(!connector.configured);
+        assert!(!connector.handshaken);
+        assert!(connector.client.is_none());
+        assert!(connector.runtime.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_unconfigured() {
+        let connector = HuggingfaceConnector::new();
+        let sc = connector.handle_self_check().await.unwrap();
+        assert_eq!(sc["status"], "degraded");
+        assert_eq!(sc["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_not_handshaken() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({"api_token": "hf_test"}))
+            .await
+            .unwrap();
+        let sc = connector.handle_self_check().await.unwrap();
+        assert_eq!(sc["status"], "degraded");
+        assert_eq!(sc["reason_code"], "not_handshaken");
     }
 }

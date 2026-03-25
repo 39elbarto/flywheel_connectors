@@ -1302,9 +1302,29 @@ impl fmt::Display for ToolCallError {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl ToolDescriptor {
+    #[must_use]
+    const fn mcp_read_only_hint(&self) -> bool {
+        matches!(
+            (self.safety_tier, self.idempotency),
+            (
+                fcp_core::SafetyTier::Safe,
+                fcp_core::IdempotencyClass::Strict
+            )
+        )
+    }
+
+    #[must_use]
+    const fn mcp_destructive_hint(&self) -> bool {
+        matches!(
+            self.safety_tier,
+            fcp_core::SafetyTier::Dangerous | fcp_core::SafetyTier::Critical
+        )
+    }
+
     /// Convert to an MCP tools/list entry.
     ///
-    /// This produces the format expected by MCP 2025 tools/list responses.
+    /// This keeps MCP hints aligned with the canonical `OperationInfo` export
+    /// semantics used elsewhere in the workspace.
     #[must_use]
     pub fn to_mcp_tool_list_entry(&self) -> McpToolListEntry {
         let annotations = McpToolAnnotations {
@@ -1312,11 +1332,8 @@ impl ToolDescriptor {
             safety_tier: Some(format!("{:?}", self.safety_tier).to_lowercase()),
             idempotency: Some(format!("{:?}", self.idempotency).to_lowercase()),
             capability: Some(self.capability.as_str().to_owned()),
-            read_only: Some(matches!(self.risk_level, fcp_core::RiskLevel::Low)),
-            destructive: Some(matches!(
-                self.safety_tier,
-                fcp_core::SafetyTier::Dangerous | fcp_core::SafetyTier::Critical
-            )),
+            read_only: Some(self.mcp_read_only_hint()),
+            destructive: Some(self.mcp_destructive_hint()),
         };
 
         McpToolListEntry {
@@ -2767,7 +2784,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_descriptor_to_mcp_entry_read_only_low_risk() {
+    fn tool_descriptor_to_mcp_entry_read_only_safe_and_strict() {
         let desc = ToolDescriptor {
             name: "list_items".to_owned(),
             description: "List items".to_owned(),
@@ -2793,19 +2810,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_descriptor_to_mcp_entry_low_risk_is_read_only() {
+    fn tool_descriptor_to_mcp_entry_low_risk_write_is_not_read_only() {
         let desc = ToolDescriptor {
-            name: "get_status".to_owned(),
-            description: "Get status".to_owned(),
+            name: "send_message".to_owned(),
+            description: "Send a message".to_owned(),
             input_schema: serde_json::json!({}),
             output_schema: serde_json::json!({}),
-            capability: fcp_core::CapabilityId::from_static("status.get"),
+            capability: fcp_core::CapabilityId::from_static("messaging.send"),
             risk_level: fcp_core::RiskLevel::Low,
             safety_tier: fcp_core::SafetyTier::Safe,
-            idempotency: fcp_core::IdempotencyClass::Strict,
+            idempotency: fcp_core::IdempotencyClass::None,
             approval_mode: None,
             requires_confirmation: false,
-            idempotent: true,
+            idempotent: false,
             supports_simulate: Some(false),
             latency_hint: None,
             rate_limits: vec![],
@@ -2814,7 +2831,7 @@ mod tests {
         };
         let entry = desc.to_mcp_tool_list_entry();
         let ann = entry.annotations.unwrap();
-        assert_eq!(ann.read_only, Some(true));
+        assert_eq!(ann.read_only, Some(false));
     }
 
     #[test]

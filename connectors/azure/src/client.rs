@@ -891,7 +891,7 @@ where
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .map(|seconds| seconds * 1_000);
+        .map(|seconds| seconds.saturating_mul(1_000));
     let body = response.text().await.map_err(AzureError::Http)?;
 
     if status.is_success() {
@@ -915,7 +915,7 @@ where
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .map(|seconds| seconds * 1_000);
+        .map(|seconds| seconds.saturating_mul(1_000));
     let body = response.text().await.map_err(AzureError::Http)?;
 
     if status.is_success() {
@@ -1259,6 +1259,45 @@ mod tests {
             match err {
                 AzureError::RateLimited { retry_after_ms } => {
                     assert_eq!(retry_after_ms, 5_000);
+                }
+                other => panic!("expected rate limited, got {other:?}"),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn rate_limited_huge_retry_after_saturates() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/subscriptions"))
+                .respond_with(
+                    ResponseTemplate::new(429)
+                        .insert_header("retry-after", u64::MAX.to_string())
+                        .set_body_json(serde_json::json!({ "message": "throttled" })),
+                )
+                .mount(&server)
+                .await;
+
+            let no_retry = HttpRetryConfig {
+                max_retries: 0,
+                ..HttpRetryConfig::default()
+            };
+            let client = AzureClient::new(
+                AzureAuth::BearerToken {
+                    bearer_token: "test-token".into(),
+                },
+                no_retry,
+                AzureApiVersions::compiled_defaults(),
+                Duration::from_secs(5),
+            )
+            .unwrap()
+            .with_management_url(&server.uri());
+            let err = client.list_subscriptions().await.unwrap_err();
+            match err {
+                AzureError::RateLimited { retry_after_ms } => {
+                    assert_eq!(retry_after_ms, u64::MAX);
                 }
                 other => panic!("expected rate limited, got {other:?}"),
             }

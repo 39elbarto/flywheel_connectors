@@ -11,6 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:huggingface-first-slice"
 id = "fcp.huggingface"
 name = "Hugging Face"
 version = "0.1.0"
+status = "stub"
 description = "Hugging Face inference router connector for OpenAI-compatible chat completions and model discovery"
 archetypes = ["request-response"]
 format = "native"

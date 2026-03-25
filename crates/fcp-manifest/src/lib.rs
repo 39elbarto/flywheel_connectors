@@ -92,6 +92,8 @@ pub struct ConnectorManifest {
     pub provides: ProvidesSection,
     #[serde(default)]
     pub event_caps: Option<EventCapsSection>,
+    #[serde(default)]
+    pub timeouts: Option<ManifestTimeouts>,
     pub sandbox: SandboxSection,
     #[serde(default)]
     pub rate_limits: Option<RateLimitsSection>,
@@ -136,6 +138,9 @@ impl ConnectorManifest {
         self.provides.validate()?;
         if let Some(ref caps) = self.event_caps {
             caps.validate()?;
+        }
+        if let Some(ref timeouts) = self.timeouts {
+            timeouts.validate()?;
         }
         self.sandbox.validate()?;
         if let Some(ref rate_limits) = self.rate_limits {
@@ -739,9 +744,37 @@ pub struct ConnectorSection {
     pub archetypes: Vec<ConnectorArchetype>,
     pub format: ConnectorRuntimeFormat,
     #[serde(default)]
+    pub status: ConnectorStatus,
+    #[serde(default)]
     pub singleton_writer: Option<bool>,
     #[serde(default)]
     pub state: Option<ConnectorStateSection>,
+}
+
+/// Readiness status of a connector.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorStatus {
+    /// Fully functional — all declared operations work.
+    #[default]
+    Ready,
+    /// Operations are declared but return "not implemented" errors.
+    Stub,
+    /// Connector is experimental/in development.
+    Experimental,
+    /// Connector is deprecated — prefer the listed alternative.
+    Deprecated,
+}
+
+impl std::fmt::Display for ConnectorStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => write!(f, "ready"),
+            Self::Stub => write!(f, "stub"),
+            Self::Experimental => write!(f, "experimental"),
+            Self::Deprecated => write!(f, "deprecated"),
+        }
+    }
 }
 
 impl ConnectorSection {
@@ -880,6 +913,26 @@ impl ConnectorStateSection {
                 field: "connector.state.state_schema_version",
                 message: "must not be empty".into(),
             });
+        }
+        if self.model != StateModelKind::Crdt {
+            if self.crdt_type.is_some() {
+                return Err(ManifestError::Invalid {
+                    field: "connector.state.crdt_type",
+                    message: "only allowed when model = \"crdt\"".into(),
+                });
+            }
+            if self.snapshot_every_updates.is_some() {
+                return Err(ManifestError::Invalid {
+                    field: "connector.state.snapshot_every_updates",
+                    message: "only allowed when model = \"crdt\"".into(),
+                });
+            }
+            if self.snapshot_every_bytes.is_some() {
+                return Err(ManifestError::Invalid {
+                    field: "connector.state.snapshot_every_bytes",
+                    message: "only allowed when model = \"crdt\"".into(),
+                });
+            }
         }
         Ok(())
     }
@@ -1527,6 +1580,68 @@ pub struct RateLimitPoolSection {
     /// Scope: "instance" (default), "credential", "global".
     #[serde(default)]
     pub scope: Option<String>,
+}
+
+/// Connector-level default time budgets.
+///
+/// These defaults are separate from per-operation network constraints and the
+/// sandbox hard cap. Connectors may use this section to derive runtime request,
+/// connect, and wall-clock budgets without hard-coding them in Rust sources.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestTimeouts {
+    #[serde(default = "default_manifest_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_manifest_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_manifest_wall_clock_timeout_ms")]
+    pub wall_clock_timeout_ms: u64,
+}
+
+impl Default for ManifestTimeouts {
+    fn default() -> Self {
+        Self {
+            request_timeout_ms: default_manifest_request_timeout_ms(),
+            connect_timeout_ms: default_manifest_connect_timeout_ms(),
+            wall_clock_timeout_ms: default_manifest_wall_clock_timeout_ms(),
+        }
+    }
+}
+
+impl ManifestTimeouts {
+    fn validate(&self) -> Result<(), ManifestError> {
+        if self.request_timeout_ms == 0 {
+            return Err(ManifestError::Invalid {
+                field: "timeouts.request_timeout_ms",
+                message: "must be > 0".into(),
+            });
+        }
+        if self.connect_timeout_ms == 0 {
+            return Err(ManifestError::Invalid {
+                field: "timeouts.connect_timeout_ms",
+                message: "must be > 0".into(),
+            });
+        }
+        if self.wall_clock_timeout_ms == 0 {
+            return Err(ManifestError::Invalid {
+                field: "timeouts.wall_clock_timeout_ms",
+                message: "must be > 0".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+const fn default_manifest_request_timeout_ms() -> u64 {
+    30_000
+}
+
+const fn default_manifest_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+const fn default_manifest_wall_clock_timeout_ms() -> u64 {
+    60_000
 }
 
 /// `[sandbox]` section (NORMATIVE).
@@ -4076,6 +4191,41 @@ deny_ptrace = true
     }
 
     #[test]
+    fn manifest_without_timeouts_section_uses_none() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let with_hash = with_computed_hash(&test_manifest_toml(&placeholder));
+        let parsed = ConnectorManifest::parse_str(&with_hash).unwrap();
+        assert!(parsed.timeouts.is_none());
+    }
+
+    #[test]
+    fn manifest_with_timeouts_section_parses() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let raw = test_manifest_toml(&placeholder).replace(
+            "\n[sandbox]\n",
+            "\n[timeouts]\nrequest_timeout_ms = 45000\nconnect_timeout_ms = 7000\nwall_clock_timeout_ms = 90000\n\n[sandbox]\n",
+        );
+        let with_hash = with_computed_hash(&raw);
+        let parsed = ConnectorManifest::parse_str(&with_hash).unwrap();
+        let timeouts = parsed.timeouts.unwrap();
+        assert_eq!(timeouts.request_timeout_ms, 45_000);
+        assert_eq!(timeouts.connect_timeout_ms, 7_000);
+        assert_eq!(timeouts.wall_clock_timeout_ms, 90_000);
+    }
+
+    #[test]
+    fn manifest_timeouts_zero_request_timeout_rejected() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let raw = test_manifest_toml(&placeholder).replace(
+            "\n[sandbox]\n",
+            "\n[timeouts]\nrequest_timeout_ms = 0\nconnect_timeout_ms = 5000\nwall_clock_timeout_ms = 60000\n\n[sandbox]\n",
+        );
+        let with_hash = with_computed_hash(&raw);
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(err.to_string().contains("timeouts.request_timeout_ms"));
+    }
+
+    #[test]
     fn sandbox_section_rejects_relative_readonly_path() {
         let section = SandboxSection {
             profile: SandboxProfile::Strict,
@@ -6446,6 +6596,35 @@ deny_ptrace = true
         .unwrap();
         assert_eq!(section.snapshot_every_updates, Some(1000));
         assert_eq!(section.snapshot_every_bytes, Some(65536));
+    }
+
+    #[test]
+    fn state_section_singleton_writer_rejects_crdt_only_fields() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "singleton_writer",
+            "state_schema_version": "1.0",
+            "crdt_type": "lww_map",
+            "snapshot_every_updates": 1000,
+            "snapshot_every_bytes": 65536
+        }))
+        .unwrap();
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("connector.state.crdt_type"));
+    }
+
+    #[test]
+    fn state_section_stateless_rejects_snapshot_settings() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "stateless",
+            "state_schema_version": "1.0",
+            "snapshot_every_updates": 1000
+        }))
+        .unwrap();
+        let err = section.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("connector.state.snapshot_every_updates")
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════

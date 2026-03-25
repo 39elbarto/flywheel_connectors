@@ -1,19 +1,130 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::{Value, json};
+use tracing::info;
+
+use crate::client::FirecrawlClient;
+use crate::types::{CrawlRequest, ScrapeRequest};
 
 const CONNECTOR_ID: &str = "fcp.firecrawl";
 const CONNECTOR_VERSION: &str = "0.1.0";
-const BOUNDARY: &str =
-    "This first slice starts with search, scrape, extract, crawl.start, and crawl.status.";
-const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
-const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
-const UNIMPLEMENTED_REASON_CODE: &str = "invoke_surface_unimplemented";
-const UNIMPLEMENTED_MESSAGE: &str = "This connector scaffold only declares planned operations. Live invoke support is not implemented yet.";
+
+const OP_SCRAPE: &str = "firecrawl.scrape";
+const OP_CRAWL_START: &str = "firecrawl.crawl.start";
+const OP_CRAWL_STATUS: &str = "firecrawl.crawl.status";
+
+const FIRECRAWL_ALLOWED_HOSTS: &[&str] = &["api.firecrawl.dev"];
+
+#[derive(Clone, serde::Deserialize)]
+pub struct FirecrawlConfig {
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+    pub api_key: String,
+    #[serde(default)]
+    pub retry: HttpRetryConfig,
+    #[serde(default = "default_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+fn default_base_url() -> String {
+    "https://api.firecrawl.dev/v1".into()
+}
+
+const fn default_timeout_ms() -> u64 {
+    30_000
+}
+
+impl std::fmt::Debug for FirecrawlConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FirecrawlConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("retry", &self.retry)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
+}
+
+impl FirecrawlConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.api_key.trim().is_empty() {
+            return Err("api_key is required".into());
+        }
+        if self.base_url.is_empty() {
+            return Err("base_url cannot be empty".into());
+        }
+        if self.request_timeout_ms == 0 {
+            return Err("request_timeout_ms must be greater than zero".into());
+        }
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+        if !network_ok {
+            return Err(network_message);
+        }
+        Ok(())
+    }
+
+    fn from_value(val: Value) -> FcpResult<Self> {
+        let mut config: Self =
+            serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+        config.base_url = config.base_url.trim().to_string();
+        config.api_key = config.api_key.trim().to_string();
+        config.validate().map_err(|e| FcpError::InvalidRequest {
+            code: 1001,
+            message: e,
+        })?;
+        Ok(config)
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match url::Url::parse(base_url) {
+        Ok(url) => url,
+        Err(error) => return (false, format!("base_url must be an absolute URL: {error}")),
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    if is_local_test_host(host) {
+        return (
+            true,
+            format!("localhost test endpoint accepted for verification: {base_url}"),
+        );
+    }
+
+    let mut problems = Vec::new();
+    if parsed.scheme() != "https" {
+        problems.push(format!("scheme must be https, got {}", parsed.scheme()));
+    }
+    if !FIRECRAWL_ALLOWED_HOSTS.contains(&host) {
+        problems.push(format!(
+            "host must be one of {FIRECRAWL_ALLOWED_HOSTS:?}, got {host}"
+        ));
+    }
+
+    if problems.is_empty() {
+        (true, "Firecrawl production API endpoint accepted".into())
+    } else {
+        (false, problems.join("; "))
+    }
+}
 
 pub struct FirecrawlConnector {
     base: Arc<BaseConnector>,
+    config: Option<FirecrawlConfig>,
+    client: Option<FirecrawlClient>,
+    runtime: Option<ConnectorRuntime>,
     configured: bool,
     handshaken: bool,
 }
@@ -24,14 +135,37 @@ impl FirecrawlConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static(CONNECTOR_ID))),
+            config: None,
+            client: None,
+            runtime: None,
             configured: false,
             handshaken: false,
         }
     }
 
-    pub async fn handle_configure(&mut self, _params: Value) -> FcpResult<Value> {
+    pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
+        let cfg = FirecrawlConfig::from_value(params)?;
+        let timeout = Duration::from_millis(cfg.request_timeout_ms);
+
+        self.runtime = Some(ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_request_timeout(timeout),
+        ));
+
+        let client = FirecrawlClient::new(&cfg.base_url, &cfg.api_key, cfg.retry.clone(), timeout)
+            .await
+            .map_err(|e| FcpError::Internal {
+                message: format!("Client init: {e}"),
+            })?;
+
+        self.client = Some(client);
+        self.config = Some(cfg);
         self.configured = true;
         self.base.set_configured(true);
+
+        info!(
+            event = "firecrawl.configure",
+            "Configured Firecrawl connector"
+        );
         Ok(json!({"connector_id": CONNECTOR_ID, "configured": true}))
     }
 
@@ -45,73 +179,81 @@ impl FirecrawlConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": [],
-            "planned_capabilities": ["firecrawl.search", "firecrawl.scrape", "firecrawl.extract", "firecrawl.crawl"],
-            "surface_status": "planned_only"
+            "capabilities": ["firecrawl.scrape", "firecrawl.crawl"],
+            "surface_status": "live"
         }))
     }
 
     pub async fn handle_health(&self) -> FcpResult<Value> {
+        let has_client = self.client.is_some();
         Ok(json!({
-            "status": if self.configured { "degraded" } else { "unconfigured" },
+            "status": if has_client && self.configured { "ready" } else if self.configured { "degraded" } else { "unconfigured" },
             "configured": self.configured,
             "handshaken": self.handshaken,
-            "live_requests_supported": false,
+            "live_requests_supported": has_client,
         }))
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<Value> {
+        let has_client = self.client.is_some();
+        let has_runtime = self.runtime.is_some();
         Ok(json!({
-            "status": if self.configured { "degraded" } else { "unhealthy" },
+            "status": if self.configured && has_client && has_runtime { "healthy" } else if self.configured { "degraded" } else { "unhealthy" },
             "checks": [
                 { "name": "configuration", "passed": self.configured, "critical": true },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
-                { "name": "invoke_surface", "passed": false, "critical": false, "message": UNIMPLEMENTED_MESSAGE },
-                { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
+                { "name": "client_initialized", "passed": has_client, "critical": true },
+                { "name": "runtime_initialized", "passed": has_runtime, "critical": true },
             ]
         }))
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<Value> {
-        let (status, reason_code, message) = if !self.configured {
-            ("degraded", json!("not_configured"), json!(BOUNDARY))
-        } else if !self.handshaken {
-            (
-                "degraded",
-                json!(NOT_HANDSHAKEN_REASON_CODE),
-                json!(NOT_HANDSHAKEN_MESSAGE),
-            )
-        } else {
-            (
-                "unsupported",
-                json!(UNIMPLEMENTED_REASON_CODE),
-                json!(UNIMPLEMENTED_MESSAGE),
-            )
-        };
+        if !self.configured {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "not_configured",
+                "message": "Connector is not configured"
+            }));
+        }
+        if !self.handshaken {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "not_handshaken",
+                "message": "Connector configured, but handshake has not completed yet."
+            }));
+        }
+        if self.client.is_none() {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "no_client",
+                "message": "HTTP client not initialized"
+            }));
+        }
         Ok(json!({
-            "status": status,
-            "reason_code": reason_code,
-            "message": message
+            "status": "ready",
+            "reason_code": "operational",
+            "message": "Firecrawl connector is ready for requests"
         }))
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<Value> {
+        let live = self.client.is_some() && self.configured;
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
-                { "id": "firecrawl.search", "summary": "Execute a Firecrawl search", "capability": "firecrawl.search", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
-                { "id": "firecrawl.scrape", "summary": "Scrape one URL with Firecrawl", "capability": "firecrawl.scrape", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
-                { "id": "firecrawl.extract", "summary": "Extract structured data with Firecrawl", "capability": "firecrawl.extract", "risk_level": "medium", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
-                { "id": "firecrawl.crawl.start", "summary": "Start a Firecrawl crawl", "capability": "firecrawl.crawl", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
-                { "id": "firecrawl.crawl.status", "summary": "Get Firecrawl crawl status", "capability": "firecrawl.crawl", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false }
+                { "id": OP_SCRAPE, "summary": "Scrape a single URL with Firecrawl", "capability": "firecrawl.scrape", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live },
+                { "id": OP_CRAWL_START, "summary": "Start a Firecrawl crawl job", "capability": "firecrawl.crawl", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": live },
+                { "id": OP_CRAWL_STATUS, "summary": "Check Firecrawl crawl status", "capability": "firecrawl.crawl", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live }
             ],
-            "surface_status": "planned_only",
+            "surface_status": if live { "live" } else { "planned_only" },
             "events": [],
             "resource_types": []
         }))
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_invoke(&self, params: Value) -> FcpResult<Value> {
         self.base.check_ready()?;
         let operation = params
@@ -123,23 +265,140 @@ impl FirecrawlConnector {
                 message: "Missing operation_id".into(),
             })?;
 
-        Err(FcpError::InvalidRequest {
-            code: 1002,
-            message: if matches!(
-                operation,
-                "firecrawl.search"
-                    | "firecrawl.scrape"
-                    | "firecrawl.extract"
-                    | "firecrawl.crawl.start"
-                    | "firecrawl.crawl.status"
-            ) {
-                format!(
-                    "Operation {operation} is planned but not implemented in this connector slice"
-                )
-            } else {
-                format!("Unknown operation: {operation}")
-            },
-        })
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing runtime".into(),
+        })?;
+        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "connector ready state missing Firecrawl client".into(),
+        })?;
+
+        let output = match operation {
+            OP_SCRAPE => {
+                let url = require_str(&input, "url")?;
+                let mut req = ScrapeRequest::new(url);
+                if let Some(formats) = input.get("formats").and_then(Value::as_array) {
+                    req.formats = formats
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect();
+                }
+                if let Some(v) = input.get("only_main_content").and_then(Value::as_bool) {
+                    req.only_main_content = Some(v);
+                }
+                if let Some(tags) = input.get("include_tags").and_then(Value::as_array) {
+                    req.include_tags = Some(
+                        tags.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect(),
+                    );
+                }
+                if let Some(tags) = input.get("exclude_tags").and_then(Value::as_array) {
+                    req.exclude_tags = Some(
+                        tags.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect(),
+                    );
+                }
+                if let Some(v) = input.get("wait_for").and_then(Value::as_u64) {
+                    req.wait_for = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                }
+                if let Some(v) = input.get("timeout").and_then(Value::as_u64) {
+                    req.timeout = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                }
+
+                let resp = client
+                    .scrape(runtime, &req)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+
+                if !resp.success {
+                    return Err(FcpError::External {
+                        service: "firecrawl".into(),
+                        message: resp.error.unwrap_or_else(|| "scrape failed".into()),
+                        status_code: None,
+                        retryable: false,
+                        retry_after: None,
+                    });
+                }
+
+                serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
+            }
+            OP_CRAWL_START => {
+                let url = require_str(&input, "url")?;
+                let mut req = CrawlRequest::new(url);
+                if let Some(v) = input.get("limit").and_then(Value::as_u64) {
+                    req.limit = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                }
+                if let Some(v) = input.get("max_depth").and_then(Value::as_u64) {
+                    req.max_depth = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                }
+                if let Some(paths) = input.get("exclude_paths").and_then(Value::as_array) {
+                    req.exclude_paths = paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect();
+                }
+                if let Some(paths) = input.get("include_paths").and_then(Value::as_array) {
+                    req.include_paths = paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect();
+                }
+                if let Some(v) = input.get("allow_external_links").and_then(Value::as_bool) {
+                    req.allow_external_links = Some(v);
+                }
+
+                let resp = client
+                    .start_crawl(runtime, &req)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+
+                if !resp.success {
+                    return Err(FcpError::External {
+                        service: "firecrawl".into(),
+                        message: resp.error.unwrap_or_else(|| "crawl start failed".into()),
+                        status_code: None,
+                        retryable: false,
+                        retry_after: None,
+                    });
+                }
+
+                serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
+            }
+            OP_CRAWL_STATUS => {
+                let crawl_id = require_str(&input, "crawl_id")?;
+                let resp = client
+                    .get_crawl_status(runtime, crawl_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+
+                serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
+            }
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+
+        Ok(json!({
+            "operation": operation,
+            "output": output
+        }))
     }
 
     pub async fn handle_simulate(&self, params: Value) -> FcpResult<Value> {
@@ -149,18 +408,12 @@ impl FirecrawlConnector {
             .and_then(Value::as_str)
             .unwrap_or("");
 
+        let known = matches!(operation, OP_SCRAPE | OP_CRAWL_START | OP_CRAWL_STATUS);
         Ok(json!({
             "allowed": false,
-            "simulate_capability": "unsupported",
-            "reason": if matches!(
-                operation,
-                "firecrawl.search"
-                    | "firecrawl.scrape"
-                    | "firecrawl.extract"
-                    | "firecrawl.crawl.start"
-                    | "firecrawl.crawl.status"
-            ) {
-                UNIMPLEMENTED_MESSAGE
+            "simulate_capability": if known { "dry_run_not_supported" } else { "unknown_operation" },
+            "reason": if known {
+                "Firecrawl API does not support dry-run mode."
             } else {
                 "Unknown operation."
             }
@@ -170,6 +423,9 @@ impl FirecrawlConnector {
     pub async fn handle_shutdown(&mut self, _params: Value) -> FcpResult<Value> {
         self.configured = false;
         self.handshaken = false;
+        self.config = None;
+        self.client = None;
+        self.runtime = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -182,83 +438,358 @@ impl Default for FirecrawlConnector {
     }
 }
 
+fn require_str<'a>(input: &'a Value, key: &str) -> FcpResult<&'a str> {
+    let value = input
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Missing required field: {key}"),
+        })?;
+    if value.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Field '{key}' must not be empty"),
+        });
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[fcp_async_core::runtime::test]
-    async fn planned_only_connector_reports_degraded_readiness() {
-        let mut connector = FirecrawlConnector::new();
-        connector
-            .handle_configure(json!({}))
-            .await
-            .expect("configure should succeed");
-
-        let pre_handshake = connector
-            .handle_self_check()
-            .await
-            .expect("self_check before handshake should succeed");
-        assert_eq!(pre_handshake["status"], "degraded");
-        assert_eq!(pre_handshake["reason_code"], NOT_HANDSHAKEN_REASON_CODE);
-
-        connector
-            .handle_handshake(json!({}))
-            .await
-            .expect("handshake should succeed");
-
-        let health = connector
-            .handle_health()
-            .await
-            .expect("health should succeed");
-        assert_eq!(health["status"], "degraded");
-        assert_eq!(health["live_requests_supported"], false);
-
-        let introspect = connector
-            .handle_introspect()
-            .await
-            .expect("introspect should succeed");
-        assert_eq!(introspect["surface_status"], "planned_only");
-        assert!(
-            introspect["operations"]
-                .as_array()
-                .expect("operations should be an array")
-                .iter()
-                .all(|operation| {
-                    operation.get("implemented").and_then(Value::as_bool) == Some(false)
-                })
-        );
-
-        let self_check = connector
-            .handle_self_check()
-            .await
-            .expect("self_check should succeed");
-        assert_eq!(self_check["status"], "unsupported");
-        assert_eq!(self_check["reason_code"], UNIMPLEMENTED_REASON_CODE);
+    fn test_config() -> Value {
+        json!({
+            "api_key": "fc-test-key-123",
+            "base_url": "http://localhost:9999/v1"
+        })
     }
 
     #[fcp_async_core::runtime::test]
-    async fn planned_operation_invoke_and_simulate_refuse_execution() {
+    async fn configure_and_handshake_succeed() {
         let mut connector = FirecrawlConnector::new();
-        connector
-            .handle_configure(json!({}))
-            .await
-            .expect("configure should succeed");
-        connector
+        let result = connector.handle_configure(test_config()).await;
+        assert!(result.is_ok());
+        let cfg_resp = result.unwrap();
+        assert_eq!(cfg_resp["configured"], true);
+
+        let hs = connector
             .handle_handshake(json!({}))
             .await
             .expect("handshake should succeed");
+        assert_eq!(hs["surface_status"], "live");
+        assert_eq!(hs["connector_version"], CONNECTOR_VERSION);
+    }
 
-        let error = connector
-            .handle_invoke(json!({"operation_id": "firecrawl.search"}))
-            .await
-            .expect_err("invoke should refuse planned operation");
-        assert!(error.to_string().contains("not implemented"));
+    #[fcp_async_core::runtime::test]
+    async fn handshake_before_configure_fails() {
+        let mut connector = FirecrawlConnector::new();
+        let result = connector.handle_handshake(json!({})).await;
+        assert!(result.is_err());
+    }
 
-        let simulate = connector
-            .handle_simulate(json!({"operation_id": "firecrawl.search"}))
+    #[fcp_async_core::runtime::test]
+    async fn health_reports_ready_when_configured() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "ready");
+        assert_eq!(health["live_requests_supported"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_reports_unconfigured() {
+        let connector = FirecrawlConnector::new();
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "unconfigured");
+        assert_eq!(health["live_requests_supported"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_ready_after_configure_and_handshake() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let check = connector.handle_self_check().await.unwrap();
+        assert_eq!(check["status"], "ready");
+        assert_eq!(check["reason_code"], "operational");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_degraded_before_handshake() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+
+        let check = connector.handle_self_check().await.unwrap();
+        assert_eq!(check["status"], "degraded");
+        assert_eq!(check["reason_code"], "not_handshaken");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_shows_live_operations_when_configured() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+
+        let intro = connector.handle_introspect().await.unwrap();
+        assert_eq!(intro["surface_status"], "live");
+        let ops = intro["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 3);
+        assert!(ops.iter().all(|op| op["implemented"] == true));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_shows_planned_when_unconfigured() {
+        let connector = FirecrawlConnector::new();
+        let intro = connector.handle_introspect().await.unwrap();
+        assert_eq!(intro["surface_status"], "planned_only");
+        let ops = intro["operations"].as_array().unwrap();
+        assert!(ops.iter().all(|op| op["implemented"] == false));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_unknown_operation_returns_error() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let result = connector
+            .handle_invoke(json!({"operation_id": "firecrawl.nope"}))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Unknown operation"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_scrape_missing_url_returns_error() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation_id": "firecrawl.scrape",
+                "input": {}
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("url"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_crawl_start_missing_url_returns_error() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation_id": "firecrawl.crawl.start",
+                "input": {}
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_crawl_status_missing_crawl_id_returns_error() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation_id": "firecrawl.crawl.status",
+                "input": {}
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_known_operation_refuses() {
+        let connector = FirecrawlConnector::new();
+        let sim = connector
+            .handle_simulate(json!({"operation_id": "firecrawl.scrape"}))
             .await
-            .expect("simulate should succeed");
-        assert_eq!(simulate["allowed"], false);
-        assert_eq!(simulate["simulate_capability"], "unsupported");
+            .unwrap();
+        assert_eq!(sim["allowed"], false);
+        assert_eq!(sim["simulate_capability"], "dry_run_not_supported");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation() {
+        let connector = FirecrawlConnector::new();
+        let sim = connector
+            .handle_simulate(json!({"operation_id": "firecrawl.nope"}))
+            .await
+            .unwrap();
+        assert_eq!(sim["allowed"], false);
+        assert_eq!(sim["simulate_capability"], "unknown_operation");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_state() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+
+        assert!(!connector.configured);
+        assert!(!connector.handshaken);
+        assert!(connector.client.is_none());
+        assert!(connector.runtime.is_none());
+        assert!(connector.config.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_healthy_when_fully_configured() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+
+        let doc = connector.handle_doctor().await.unwrap();
+        assert_eq!(doc["status"], "healthy");
+        let checks = doc["checks"].as_array().unwrap();
+        assert!(
+            checks
+                .iter()
+                .all(|c| c["passed"] == true || !c["critical"].as_bool().unwrap_or(false))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_unhealthy_when_unconfigured() {
+        let connector = FirecrawlConnector::new();
+        let doc = connector.handle_doctor().await.unwrap();
+        assert_eq!(doc["status"], "unhealthy");
+    }
+
+    #[test]
+    fn configure_rejects_empty_api_key() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = FirecrawlConnector::new();
+            connector
+                .handle_configure(json!({
+                    "api_key": "",
+                    "base_url": "https://api.firecrawl.dev/v1"
+                }))
+                .await
+        })
+        .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn configure_rejects_invalid_base_url() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = FirecrawlConnector::new();
+            connector
+                .handle_configure(json!({
+                    "api_key": "fc-key",
+                    "base_url": "http://evil.example.com/v1"
+                }))
+                .await
+        })
+        .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn configure_accepts_localhost() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = FirecrawlConnector::new();
+            connector
+                .handle_configure(json!({
+                    "api_key": "fc-key",
+                    "base_url": "http://localhost:8080/v1"
+                }))
+                .await
+        })
+        .unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn configure_accepts_production_url() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = FirecrawlConnector::new();
+            connector
+                .handle_configure(json!({
+                    "api_key": "fc-key",
+                    "base_url": "https://api.firecrawl.dev/v1"
+                }))
+                .await
+        })
+        .unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn require_str_rejects_empty() {
+        let input = json!({"url": ""});
+        assert!(require_str(&input, "url").is_err());
+    }
+
+    #[test]
+    fn require_str_rejects_missing() {
+        let input = json!({});
+        assert!(require_str(&input, "url").is_err());
+    }
+
+    #[test]
+    fn require_str_accepts_valid() {
+        let input = json!({"url": "https://example.com"});
+        assert_eq!(require_str(&input, "url").unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_production() {
+        let (ok, _) = base_url_policy("http://api.firecrawl.dev/v1");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, _) = base_url_policy("https://not-firecrawl.example.com/v1");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_production() {
+        let (ok, _) = base_url_policy("https://api.firecrawl.dev/v1");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9999/v1");
+        assert!(ok);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_without_configure_fails() {
+        let connector = FirecrawlConnector::new();
+        let result = connector
+            .handle_invoke(json!({"operation_id": "firecrawl.scrape", "input": {"url": "https://example.com"}}))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_zero_timeout_rejected() {
+        let mut connector = FirecrawlConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "fc-key",
+                "base_url": "http://localhost:8080/v1",
+                "request_timeout_ms": 0
+            }))
+            .await;
+        assert!(result.is_err());
     }
 }

@@ -201,6 +201,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_async_core::{AsyncError, ExecutionContext};
+use fcp_manifest::{ConnectorManifest, ManifestTimeouts};
 use tracing::{debug, warn};
 
 use crate::FcpError;
@@ -236,11 +237,34 @@ pub struct ConnectorRuntime {
     background_ctx: ExecutionContext,
 }
 
+const MANIFEST_REQUEST_TIMEOUT_ENV_VAR: &str = "FCP_REQUEST_TIMEOUT_MS";
+
+/// Errors produced while loading runtime settings from an embedded manifest.
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectorRuntimeConfigError {
+    /// The connector manifest could not be parsed or validated.
+    #[error(transparent)]
+    Manifest(#[from] fcp_manifest::ManifestError),
+
+    /// The request-timeout override env var was present but unusable.
+    #[error("{env_var} must be a positive integer number of milliseconds, got `{value}`")]
+    InvalidRequestTimeoutEnvVar {
+        /// The env var name.
+        env_var: &'static str,
+        /// The invalid value observed at load time.
+        value: String,
+    },
+}
+
 /// Configuration for [`ConnectorRuntime`].
 #[derive(Debug, Clone)]
 pub struct ConnectorRuntimeConfig {
     /// Default timeout for request-scoped operations.
     pub request_timeout: Duration,
+    /// Default timeout for establishing outbound connections.
+    pub connect_timeout: Duration,
+    /// Default wall-clock budget for a single operation.
+    pub wall_clock_timeout: Duration,
     /// Timeout for graceful shutdown.
     pub shutdown_timeout: Duration,
 }
@@ -249,16 +273,80 @@ impl Default for ConnectorRuntimeConfig {
     fn default() -> Self {
         Self {
             request_timeout: Duration::from_secs(120),
+            connect_timeout: Duration::from_secs(10),
+            wall_clock_timeout: Duration::from_secs(120),
             shutdown_timeout: Duration::from_secs(30),
         }
     }
 }
 
 impl ConnectorRuntimeConfig {
+    /// Manifest-aligned defaults used by newly scaffolded connectors.
+    #[must_use]
+    pub const fn manifest_defaults() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(5),
+            wall_clock_timeout: Duration::from_secs(60),
+            shutdown_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Build runtime settings from a manifest `[timeouts]` section.
+    #[must_use]
+    pub const fn from_manifest_timeouts(timeouts: &ManifestTimeouts) -> Self {
+        Self::manifest_defaults()
+            .with_request_timeout(Duration::from_millis(timeouts.request_timeout_ms))
+            .with_connect_timeout(Duration::from_millis(timeouts.connect_timeout_ms))
+            .with_wall_clock_timeout(Duration::from_millis(timeouts.wall_clock_timeout_ms))
+    }
+
+    /// Build runtime settings from a parsed connector manifest.
+    ///
+    /// If the manifest omits `[timeouts]`, scaffold defaults are used. An
+    /// optional `FCP_REQUEST_TIMEOUT_MS` env var overrides the request timeout.
+    ///
+    /// # Errors
+    /// Returns an error when `FCP_REQUEST_TIMEOUT_MS` is present but invalid.
+    pub fn from_manifest(
+        manifest: &ConnectorManifest,
+    ) -> Result<Self, ConnectorRuntimeConfigError> {
+        let request_timeout_override = std::env::var_os(MANIFEST_REQUEST_TIMEOUT_ENV_VAR)
+            .map(|value| value.to_string_lossy().into_owned());
+        Self::from_manifest_with_request_timeout_override(
+            manifest,
+            request_timeout_override.as_deref(),
+        )
+    }
+
+    /// Build runtime settings from embedded manifest TOML.
+    ///
+    /// # Errors
+    /// Returns an error when the manifest is invalid or the request-timeout
+    /// env override cannot be parsed.
+    pub fn from_manifest_str(manifest_toml: &str) -> Result<Self, ConnectorRuntimeConfigError> {
+        let manifest = ConnectorManifest::parse_str(manifest_toml)?;
+        Self::from_manifest(&manifest)
+    }
+
     /// Builder: set request timeout.
     #[must_use]
     pub const fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    /// Builder: set connect timeout.
+    #[must_use]
+    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Builder: set wall-clock timeout.
+    #[must_use]
+    pub const fn with_wall_clock_timeout(mut self, timeout: Duration) -> Self {
+        self.wall_clock_timeout = timeout;
         self
     }
 
@@ -268,6 +356,46 @@ impl ConnectorRuntimeConfig {
         self.shutdown_timeout = timeout;
         self
     }
+
+    fn from_manifest_with_request_timeout_override(
+        manifest: &ConnectorManifest,
+        request_timeout_override: Option<&str>,
+    ) -> Result<Self, ConnectorRuntimeConfigError> {
+        let mut config = manifest
+            .timeouts
+            .as_ref()
+            .map_or_else(Self::manifest_defaults, Self::from_manifest_timeouts);
+
+        if let Some(timeout) = parse_request_timeout_override(request_timeout_override)? {
+            config = config.with_request_timeout(timeout);
+        }
+
+        Ok(config)
+    }
+}
+
+fn parse_request_timeout_override(
+    request_timeout_override: Option<&str>,
+) -> Result<Option<Duration>, ConnectorRuntimeConfigError> {
+    let Some(raw) = request_timeout_override else {
+        return Ok(None);
+    };
+
+    let timeout_ms: u64 =
+        raw.parse().map_err(
+            |_| ConnectorRuntimeConfigError::InvalidRequestTimeoutEnvVar {
+                env_var: MANIFEST_REQUEST_TIMEOUT_ENV_VAR,
+                value: raw.to_string(),
+            },
+        )?;
+    if timeout_ms == 0 {
+        return Err(ConnectorRuntimeConfigError::InvalidRequestTimeoutEnvVar {
+            env_var: MANIFEST_REQUEST_TIMEOUT_ENV_VAR,
+            value: raw.to_string(),
+        });
+    }
+
+    Ok(Some(Duration::from_millis(timeout_ms)))
 }
 
 impl ConnectorRuntime {
@@ -313,6 +441,18 @@ impl ConnectorRuntime {
     #[must_use]
     pub const fn request_timeout(&self) -> Duration {
         self.config.request_timeout
+    }
+
+    /// The configured connect timeout.
+    #[must_use]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.config.connect_timeout
+    }
+
+    /// The configured wall-clock timeout.
+    #[must_use]
+    pub const fn wall_clock_timeout(&self) -> Duration {
+        self.config.wall_clock_timeout
     }
 
     /// The configured shutdown timeout.
@@ -606,12 +746,82 @@ pub fn map_async_to_fcp_error(error: &AsyncError) -> FcpError {
 mod tests {
     use super::*;
 
+    fn manifest_toml_with_optional_timeouts(timeouts: Option<&str>) -> String {
+        let placeholder = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+        let timeouts_block = timeouts.unwrap_or_default();
+        let raw = format!(
+            r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 1200
+interface_hash = "{placeholder}"
+
+[connector]
+id = "fcp.test"
+name = "Test Connector"
+version = "0.1.0"
+description = "runtime config test manifest"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+
+[zones]
+home = "z:project:test"
+allowed_sources = ["z:project:test"]
+allowed_targets = ["z:project:test"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.outbound"]
+optional = []
+forbidden = ["system.exec"]
+
+[provides.operations.placeholder_operation]
+description = "Placeholder operation"
+capability = "test.placeholder"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = {{ type = "object", properties = {{ }} }}
+output_schema = {{ type = "object", properties = {{ }} }}
+
+[provides.operations.placeholder_operation.network_constraints]
+host_allow = ["example.invalid"]
+port_allow = [443]
+require_sni = true
+
+{timeouts_block}
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#
+        );
+        let unchecked = ConnectorManifest::parse_str_unchecked(&raw).unwrap();
+        let interface_hash = unchecked.compute_interface_hash().unwrap();
+        raw.replace(placeholder, &interface_hash.to_string())
+    }
+
     // -- ConnectorRuntime tests ------------------------------------------------
 
     #[test]
     fn runtime_default_config() {
         let config = ConnectorRuntimeConfig::default();
         assert_eq!(config.request_timeout, Duration::from_secs(120));
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(120));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
     }
 
@@ -650,6 +860,17 @@ mod tests {
             ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(60)),
         );
         assert_eq!(runtime.request_timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn runtime_connect_and_wall_clock_accessors() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default()
+                .with_connect_timeout(Duration::from_secs(7))
+                .with_wall_clock_timeout(Duration::from_secs(75)),
+        );
+        assert_eq!(runtime.connect_timeout(), Duration::from_secs(7));
+        assert_eq!(runtime.wall_clock_timeout(), Duration::from_secs(75));
     }
 
     // -- HttpRetryConfig tests ------------------------------------------------
@@ -865,6 +1086,104 @@ mod tests {
             .with_shutdown_timeout(Duration::from_secs(5));
         assert_eq!(config.request_timeout, Duration::from_secs(60));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn config_manifest_defaults_match_scaffold_expectations() {
+        let config = ConnectorRuntimeConfig::manifest_defaults();
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(60));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn config_from_manifest_timeouts_uses_manifest_values() {
+        let config = ConnectorRuntimeConfig::from_manifest_timeouts(&ManifestTimeouts {
+            request_timeout_ms: 45_000,
+            connect_timeout_ms: 7_000,
+            wall_clock_timeout_ms: 90_000,
+        });
+        assert_eq!(config.request_timeout, Duration::from_secs(45));
+        assert_eq!(config.connect_timeout, Duration::from_secs(7));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(90));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn config_from_manifest_without_timeouts_uses_manifest_defaults() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
+            .expect("manifest should parse");
+        let config =
+            ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(&manifest, None)
+                .expect("manifest defaults should load");
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn config_from_manifest_with_timeouts_uses_manifest_section() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config =
+            ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(&manifest, None)
+                .expect("manifest timeouts should load");
+        assert_eq!(config.request_timeout, Duration::from_secs(48));
+        assert_eq!(config.connect_timeout, Duration::from_secs(8));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
+    }
+
+    #[test]
+    fn config_from_manifest_override_uses_request_timeout_env_value() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config = ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(
+            &manifest,
+            Some("61000"),
+        )
+        .expect("override should parse");
+        assert_eq!(config.request_timeout, Duration::from_secs(61));
+        assert_eq!(config.connect_timeout, Duration::from_secs(8));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
+    }
+
+    #[test]
+    fn config_from_manifest_override_rejects_invalid_env_value() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
+            .expect("manifest should parse");
+        let err = ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(
+            &manifest,
+            Some("invalid"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("FCP_REQUEST_TIMEOUT_MS must be a positive integer")
+        );
+    }
+
+    #[test]
+    fn config_from_manifest_str_parses_embedded_manifest() {
+        let request_timeout_override = std::env::var_os(MANIFEST_REQUEST_TIMEOUT_ENV_VAR)
+            .map(|value| value.to_string_lossy().into_owned());
+        let expected_request_timeout =
+            parse_request_timeout_override(request_timeout_override.as_deref())
+                .expect("ambient override should be valid if present")
+                .unwrap_or(Duration::from_secs(52));
+        let config = ConnectorRuntimeConfig::from_manifest_str(
+            &manifest_toml_with_optional_timeouts(Some(
+                "[timeouts]\nrequest_timeout_ms = 52000\nconnect_timeout_ms = 6000\nwall_clock_timeout_ms = 88000\n\n",
+            )),
+        )
+        .expect("embedded manifest should parse");
+        assert_eq!(config.request_timeout, expected_request_timeout);
+        assert_eq!(config.connect_timeout, Duration::from_secs(6));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(88));
     }
 
     #[test]

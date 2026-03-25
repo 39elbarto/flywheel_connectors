@@ -800,11 +800,11 @@ impl ResourceUsage {
         }
 
         if let Some(limit) = limits.cpu_seconds {
-            let cpu_seconds = self.cpu_millis / 1000;
-            if cpu_seconds > limit {
+            let cpu_limit_millis = limit.saturating_mul(1000);
+            if self.cpu_millis > cpu_limit_millis {
                 violations.push(ResourceViolation {
                     resource: ResourceKind::CpuTime,
-                    current: cpu_seconds,
+                    current: self.cpu_millis.div_ceil(1000),
                     limit,
                 });
             }
@@ -3079,6 +3079,37 @@ mod tests {
         };
         assert!(usage.within_limits(&limits));
         assert!(usage.violations(&limits).is_empty());
+    }
+
+    #[test]
+    fn resource_usage_cpu_not_violated_at_threshold() {
+        let usage = ResourceUsage {
+            cpu_millis: 60_000,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            cpu_seconds: Some(60),
+            ..ResourceLimits::unlimited()
+        };
+        assert!(usage.within_limits(&limits));
+        assert!(usage.violations(&limits).is_empty());
+    }
+
+    #[test]
+    fn resource_usage_cpu_violation_subsecond_overflow() {
+        let usage = ResourceUsage {
+            cpu_millis: 1_500,
+            ..Default::default()
+        };
+        let limits = ResourceLimits {
+            cpu_seconds: Some(1),
+            ..ResourceLimits::unlimited()
+        };
+        let violations = usage.violations(&limits);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].resource, ResourceKind::CpuTime);
+        assert_eq!(violations[0].current, 2);
+        assert_eq!(violations[0].limit, 1);
     }
 
     #[test]

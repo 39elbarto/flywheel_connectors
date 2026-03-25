@@ -1,11 +1,15 @@
+//! FCP Perplexity Search Connector - main entrypoint.
+
 #![forbid(unsafe_code)]
 
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
+use fcp_core::{FcpError, FcpResult, SimulateRequest};
+use fcp_sdk::prelude::*;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use fcp_perplexity_search::PerplexitySearchConnector;
+use fcp_perplexity_search::connector::PerplexitySearchConnector;
 
 fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -13,7 +17,9 @@ fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    run_fcp_loop()
+    tracing::info!("FCP Perplexity Search Connector starting");
+    run_fcp_loop()?;
+    Ok(())
 }
 
 fn run_fcp_loop() -> Result<()> {
@@ -23,7 +29,7 @@ fn run_fcp_loop() -> Result<()> {
 
     for line in stdin.lock().lines() {
         let line = line?;
-        if line.trim().is_empty() {
+        if line.is_empty() {
             continue;
         }
 
@@ -39,13 +45,21 @@ fn run_fcp_loop() -> Result<()> {
                     })
                 });
 
-        writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+        let response_json = serde_json::to_string(&response)?;
+        writeln!(stdout, "{response_json}")?;
         stdout.flush()?;
     }
 
     Ok(())
 }
 
+fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|error| FcpError::Internal {
+        message: format!("Failed to serialize response: {error}"),
+    })
+}
+
+#[allow(clippy::too_many_lines)]
 async fn handle_message(
     connector: &mut PerplexitySearchConnector,
     message: &str,
@@ -55,7 +69,6 @@ async fn handle_message(
         Err(error) => {
             return serde_json::json!({
                 "jsonrpc": "2.0",
-                "id": null,
                 "error": {
                     "code": "FCP-1001",
                     "message": format!("Invalid JSON: {error}")
@@ -74,32 +87,85 @@ async fn handle_message(
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let result = match method {
-        "configure" => connector.handle_configure(params).await,
-        "handshake" => connector.handle_handshake(params).await,
-        "health" => connector.handle_health().await,
-        "doctor" => connector.handle_doctor().await,
-        "self_check" => connector.handle_self_check().await,
-        "introspect" => connector.handle_introspect().await,
-        "invoke" => connector.handle_invoke(params).await,
-        "simulate" => connector.handle_simulate(params).await,
-        "shutdown" => connector.handle_shutdown(params).await,
-        _ => Err(fcp_core::FcpError::InvalidRequest {
-            code: 1002,
-            message: format!("Unknown method: {method}"),
-        }),
-    };
+    let result: FcpResult<serde_json::Value> = async {
+        match method {
+            "configure" => {
+                connector.configure(params).await?;
+                Ok(serde_json::json!({ "status": "configured" }))
+            }
+            "handshake" => {
+                let request: fcp_core::HandshakeRequest =
+                    serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid handshake: {error}"),
+                    })?;
+                encode(&connector.handshake(request).await?)
+            }
+            "health" => encode(&connector.health().await),
+            "doctor" => encode(&connector.doctor()),
+            "self_check" => encode(&connector.self_check().await?),
+            "introspect" => encode(&connector.introspect()),
+            "invoke" => {
+                let request: fcp_core::InvokeRequest =
+                    serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid invoke: {error}"),
+                    })?;
+                encode(&connector.invoke(request).await?)
+            }
+            "simulate" => {
+                let request: SimulateRequest =
+                    serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid simulate: {error}"),
+                    })?;
+                encode(&connector.simulate(request).await?)
+            }
+            "subscribe" => {
+                let request: SubscribeRequest =
+                    serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid subscribe: {error}"),
+                    })?;
+                encode(&connector.subscribe(request).await?)
+            }
+            "unsubscribe" => {
+                let request: UnsubscribeRequest =
+                    serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid unsubscribe: {error}"),
+                    })?;
+                connector.unsubscribe(request).await?;
+                Ok(serde_json::json!({ "status": "unsubscribed" }))
+            }
+            "shutdown" => {
+                let request: fcp_core::ShutdownRequest =
+                    serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid shutdown: {error}"),
+                    })?;
+                connector.shutdown(request).await?;
+                Ok(serde_json::json!({ "status": "shutdown_accepted" }))
+            }
+            _ => Err(FcpError::InvalidRequest {
+                code: 1002,
+                message: format!("Unknown method: {method}"),
+            }),
+        }
+    }
+    .await;
 
     match result {
         Ok(value) => {
-            let mut response = serde_json::json!({"jsonrpc": "2.0", "result": value});
+            let mut response = serde_json::json!({ "jsonrpc": "2.0", "result": value });
             if let Some(id) = id {
                 response["id"] = id;
             }
             response
         }
         Err(error) => {
-            let mut response = serde_json::json!({"jsonrpc": "2.0", "error": error.to_response()});
+            let error_response = error.to_response();
+            let mut response = serde_json::json!({ "jsonrpc": "2.0", "error": error_response });
             if let Some(id) = id {
                 response["id"] = id;
             }

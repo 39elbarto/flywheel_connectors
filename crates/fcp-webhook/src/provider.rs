@@ -10,8 +10,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DEFAULT_TIMESTAMP_TOLERANCE, HmacSha256Verifier, SignatureVerifier, WebhookError, WebhookEvent,
-    WebhookResult,
+    HmacSha256Verifier, SignatureVerifier, WebhookError, WebhookEvent, WebhookResult,
+    default_timestamp_tolerance,
 };
 
 fn header_value_case_insensitive<'a>(
@@ -144,7 +144,7 @@ impl StripeWebhook {
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
         Self {
             verifier: HmacSha256Verifier::new(secret),
-            timestamp_tolerance: DEFAULT_TIMESTAMP_TOLERANCE,
+            timestamp_tolerance: default_timestamp_tolerance(),
         }
     }
 
@@ -278,7 +278,7 @@ impl SlackWebhook {
     pub fn new(signing_secret: impl AsRef<[u8]>) -> Self {
         Self {
             verifier: HmacSha256Verifier::new(signing_secret),
-            timestamp_tolerance: DEFAULT_TIMESTAMP_TOLERANCE,
+            timestamp_tolerance: default_timestamp_tolerance(),
         }
     }
 

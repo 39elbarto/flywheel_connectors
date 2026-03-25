@@ -2573,7 +2573,7 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
     let mut tools = Vec::new();
     for connector in &connectors {
         let introspection = client.introspect(connector.summary.id.as_str())?;
-        tools.extend(host_mcp_tool_definitions(connector, &introspection));
+        tools.extend(try_host_mcp_tool_definitions(connector, &introspection)?);
     }
 
     let zone = args.zone.clone();
@@ -4658,15 +4658,19 @@ fn host_tool_agent_hints(tool: &HostToolDescriptor) -> AgentHint {
     hints
 }
 
-fn host_tool_operation_info(tool: &HostToolDescriptor) -> OperationInfo {
+fn try_host_tool_operation_info(tool: &HostToolDescriptor) -> Result<OperationInfo> {
     let summary = if tool.description.trim().is_empty() {
         tool.name.clone()
     } else {
         tool.description.clone()
     };
-    OperationInfo {
-        id: OperationId::new(tool.name.clone())
-            .expect("host introspection should only surface canonical operation ids"),
+    Ok(OperationInfo {
+        id: OperationId::new(tool.name.clone()).with_context(|| {
+            format!(
+                "host introspection returned invalid canonical operation id `{}`",
+                tool.name
+            )
+        })?,
         summary: summary.clone(),
         description: Some(tool.description.clone())
             .filter(|description| !description.trim().is_empty() && description != &summary),
@@ -4679,7 +4683,12 @@ fn host_tool_operation_info(tool: &HostToolDescriptor) -> OperationInfo {
         ai_hints: host_tool_agent_hints(tool),
         rate_limit: None,
         requires_approval: tool.approval_mode,
-    }
+    })
+}
+
+fn host_tool_operation_info(tool: &HostToolDescriptor) -> OperationInfo {
+    try_host_tool_operation_info(tool)
+        .expect("host introspection should only surface canonical operation ids")
 }
 
 fn host_tool_passes_risk_filter(tool: &HostToolDescriptor, risk_max: Option<&str>) -> bool {
@@ -4696,18 +4705,25 @@ fn host_tool_passes_capability_filter(tool: &HostToolDescriptor, capability: Opt
     tool.capability.as_str().starts_with(filter)
 }
 
-fn host_mcp_tool_definitions(
+fn try_host_mcp_tool_definitions(
     connector: &HostConnectorRecord,
     introspection: &HostIntrospectionResponse,
-) -> Vec<serve_mcp::McpToolDefinition> {
+) -> Result<Vec<serve_mcp::McpToolDefinition>> {
     let options = export_tools::ExportOptions::default();
     introspection
         .tools
         .iter()
         .map(|tool| {
-            let exported =
-                export_tools::to_mcp_tool_info(&host_tool_operation_info(tool), &options);
-            serve_mcp::McpToolDefinition::new(
+            let exported = export_tools::to_mcp_tool_info(
+                &try_host_tool_operation_info(tool).with_context(|| {
+                    format!(
+                        "connector `{}` returned malformed live tool metadata for `{}`",
+                        connector.summary.id, tool.name
+                    )
+                })?,
+                &options,
+            );
+            Ok(serve_mcp::McpToolDefinition::new(
                 exported.name.clone(),
                 exported.description,
                 exported.input_schema,
@@ -4720,9 +4736,17 @@ fn host_mcp_tool_definitions(
                 &connector.slug,
                 catalog::ToolInventorySource::LiveHostInventory,
                 catalog::ToolAvailability::Live,
-            ))
+            )))
         })
         .collect()
+}
+
+fn host_mcp_tool_definitions(
+    connector: &HostConnectorRecord,
+    introspection: &HostIntrospectionResponse,
+) -> Vec<serve_mcp::McpToolDefinition> {
+    try_host_mcp_tool_definitions(connector, introspection)
+        .expect("host introspection should only surface canonical operation ids")
 }
 
 fn host_discovered_operation(
@@ -13200,16 +13224,21 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
                 "gap": gap,
             })
         }));
-        operations.extend(
-            introspection
-                .tools
-                .iter()
-                .filter(|tool| host_tool_passes_risk_filter(tool, options.risk_max.as_deref()))
-                .filter(|tool| {
-                    host_tool_passes_capability_filter(tool, options.capability_filter.as_deref())
-                })
-                .map(host_tool_operation_info),
-        );
+        for tool in introspection
+            .tools
+            .iter()
+            .filter(|tool| host_tool_passes_risk_filter(tool, options.risk_max.as_deref()))
+            .filter(|tool| {
+                host_tool_passes_capability_filter(tool, options.capability_filter.as_deref())
+            })
+        {
+            operations.push(try_host_tool_operation_info(tool).with_context(|| {
+                format!(
+                    "connector `{}` returned malformed live tool metadata for `{}`",
+                    connector.summary.id, tool.name
+                )
+            })?);
+        }
     }
 
     let tools_json = export_tools::export_operation_infos(&operations, args.tool_format, &options);
@@ -30328,6 +30357,42 @@ depends_on = ["missing"]
                 .as_ref()
                 .map(|provenance| provenance.availability.tag()),
             Some("live")
+        );
+    }
+
+    #[test]
+    fn try_host_tool_operation_info_rejects_invalid_live_tool_name() {
+        let mut introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        introspection.tools[0].name = "GitHub Create Issue".to_owned();
+
+        let err = try_host_tool_operation_info(&introspection.tools[0]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("host introspection returned invalid canonical operation id")
+        );
+    }
+
+    #[test]
+    fn try_host_mcp_tool_definitions_reject_invalid_live_tool_name() {
+        let response: HostDiscoveryResponse =
+            serde_json::from_value(mock_discovery_response_json())
+                .expect("mock discovery response should deserialize");
+        let catalog = HostConnectorCatalog::from_response(&response);
+        let connector = catalog
+            .connectors
+            .first()
+            .expect("mock catalog should contain a connector");
+        let mut introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        introspection.tools[0].name = "GitHub Create Issue".to_owned();
+
+        let err = try_host_mcp_tool_definitions(connector, &introspection).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("returned malformed live tool metadata")
         );
     }
 

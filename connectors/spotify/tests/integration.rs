@@ -826,8 +826,28 @@ async fn recently_played() {
         .and(path("/me/player/recently-played"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [
-                {"track": {"id": "t1", "name": "Song 1"}, "played_at": "2026-03-01T12:00:00Z"},
-                {"track": {"id": "t2", "name": "Song 2"}, "played_at": "2026-03-01T11:00:00Z"},
+                {
+                    "track": {
+                        "id": "t1",
+                        "name": "Song 1",
+                        "artists": [{"name": "Artist 1"}],
+                        "duration_ms": 210000
+                    },
+                    "played_at": "2026-03-01T12:00:00Z",
+                    "context": {
+                        "type": "playlist",
+                        "uri": "spotify:playlist:pl1"
+                    }
+                },
+                {
+                    "track": {
+                        "id": "t2",
+                        "name": "Song 2",
+                        "artists": [{"name": "Artist 2"}],
+                        "duration_ms": 180000
+                    },
+                    "played_at": "2026-03-01T11:00:00Z"
+                },
             ]
         })))
         .mount(&server)
@@ -842,6 +862,10 @@ async fn recently_played() {
         .await
         .unwrap();
     assert_eq!(result["items"].as_array().unwrap().len(), 2);
+    assert_eq!(result["limit"], 10);
+    assert_eq!(result["items"][0]["track_id"], "t1");
+    assert_eq!(result["items"][0]["artists"][0], "Artist 1");
+    assert_eq!(result["items"][0]["context_type"], "playlist");
 }
 
 #[fcp_async_core::runtime::test]
@@ -1565,13 +1589,23 @@ async fn playlists_list_unwraps_items() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn recently_played_unwraps_items() {
+async fn recently_played_normalizes_history_and_preserves_cursors() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/me/player/recently-played"))
+        .and(query_param("after", "1740782400000"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [{"track": {"id": "t1"}}],
+            "items": [{
+                "track": {
+                    "id": "t1",
+                    "name": "Song 1",
+                    "artists": [{"name": "Artist 1"}],
+                    "duration_ms": 215000
+                },
+                "played_at": "2026-03-01T12:00:00Z"
+            }],
             "cursors": {"after": "cursor123"},
+            "limit": 5,
         })))
         .mount(&server)
         .await;
@@ -1580,11 +1614,15 @@ async fn recently_played_unwraps_items() {
     let result = c
         .handle_invoke(json!({
             "operation_id": "spotify.player.recently_played",
-            "input": {"limit": 5}
+            "input": {"limit": 5, "after": 1740782400000u64}
         }))
         .await
         .unwrap();
     assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["track_id"], "t1");
+    assert_eq!(result["items"][0]["duration_ms"], 215000);
+    assert_eq!(result["cursors"]["after"], "cursor123");
+    assert_eq!(result["limit"], 5);
 }
 
 #[fcp_async_core::runtime::test]

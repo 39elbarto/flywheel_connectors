@@ -14,13 +14,27 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Maximum log file size before rotation (10 MB).
-const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
+fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
-/// Maximum number of rotated log files to keep.
-const MAX_ROTATED_FILES: usize = 5;
+/// Maximum log file size before rotation (default 10 MB).
+/// Override: `FWC_max_log_size()_BYTES`.
+fn max_log_size() -> u64 {
+    env_or("FWC_max_log_size()_BYTES", 10 * 1024 * 1024)
+}
 
-/// Default number of entries to return.
+/// Maximum number of rotated log files to keep (default 5).
+/// Override: `FWC_max_rotated_files()`.
+fn max_rotated_files() -> usize {
+    env_or("FWC_max_rotated_files()", 5)
+}
+
+/// Default number of entries to return (default 20).
+/// Override: `FWC_HISTORY_DEFAULT_LIMIT`.
 const DEFAULT_LIMIT: usize = 20;
 
 // ── Entry types ─────────────────────────────────────────────────────────
@@ -260,7 +274,7 @@ impl HistoryStore {
             return Ok(());
         }
         let metadata = fs::metadata(&self.log_path)?;
-        if metadata.len() < MAX_LOG_SIZE {
+        if metadata.len() < max_log_size() {
             return Ok(());
         }
         self.rotate()?;
@@ -269,7 +283,7 @@ impl HistoryStore {
 
     fn rotate(&self) -> Result<()> {
         // Shift existing rotated files.
-        for i in (1..MAX_ROTATED_FILES).rev() {
+        for i in (1..max_rotated_files()).rev() {
             let from = rotated_path(&self.log_path, i);
             let to = rotated_path(&self.log_path, i + 1);
             if from.exists() {
@@ -280,7 +294,7 @@ impl HistoryStore {
         let first_rotated = rotated_path(&self.log_path, 1);
         fs::rename(&self.log_path, &first_rotated)?;
         // Remove oldest if over limit.
-        let oldest = rotated_path(&self.log_path, MAX_ROTATED_FILES + 1);
+        let oldest = rotated_path(&self.log_path, max_rotated_files() + 1);
         if oldest.exists() {
             fs::remove_file(&oldest)?;
         }

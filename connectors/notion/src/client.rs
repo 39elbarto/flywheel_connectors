@@ -21,18 +21,45 @@ pub const DEFAULT_API_URL: &str = "https://api.notion.com/v1";
 /// Default Notion API version. Notion uses a date-based version header.
 /// This can be overridden via the `config_override` parameter or
 /// the `FCP_NOTION_API_VERSION` environment variable.
-pub const DEFAULT_NOTION_VERSION: &str = "2022-06-28";
+///
+/// Verified against Notion's changes-by-version reference (latest version
+/// `2026-03-11` as of March 25, 2026).
+pub const DEFAULT_NOTION_VERSION: &str = "2026-03-11";
+
+fn is_valid_notion_version(version: &str) -> bool {
+    if version.len() != 10 {
+        return false;
+    }
+
+    let bytes = version.as_bytes();
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+
+    let year = version[0..4].parse::<u16>().ok();
+    let month = version[5..7].parse::<u8>().ok();
+    let day = version[8..10].parse::<u8>().ok();
+
+    matches!((year, month, day), (Some(_), Some(1..=12), Some(1..=31)))
+}
+
+pub(crate) fn normalize_notion_version(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !is_valid_notion_version(trimmed) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
 
 /// Resolve the Notion API version to use: config override > env var > compiled default.
 fn resolve_notion_version(config_override: Option<&str>) -> String {
-    if let Some(v) = config_override.map(str::trim).filter(|s| !s.is_empty()) {
-        return v.to_string();
+    if let Some(version) = config_override.and_then(normalize_notion_version) {
+        return version;
     }
-    if let Ok(v) = std::env::var("FCP_NOTION_API_VERSION") {
-        let v = v.trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
+    if let Ok(version) = std::env::var("FCP_NOTION_API_VERSION")
+        && let Some(version) = normalize_notion_version(&version)
+    {
+        return version;
     }
     DEFAULT_NOTION_VERSION.to_string()
 }
@@ -128,7 +155,10 @@ impl NotionClient {
     }
 
     /// Create a new Notion client with specified auth and optional API version override.
-    pub fn new_with_version(auth: NotionAuth, version_override: Option<&str>) -> NotionResult<Self> {
+    pub fn new_with_version(
+        auth: NotionAuth,
+        version_override: Option<&str>,
+    ) -> NotionResult<Self> {
         Self::build(auth, version_override)
     }
 
@@ -553,6 +583,28 @@ mod tests {
         let page = client.get_page("page-1").await.unwrap();
         assert_eq!(page.id, "page-1");
         assert!(!page.archived);
+    }
+
+    #[test]
+    fn test_default_notion_version_value() {
+        assert_eq!(DEFAULT_NOTION_VERSION, "2026-03-11");
+    }
+
+    #[test]
+    fn test_normalize_notion_version_rejects_malformed_values() {
+        assert_eq!(normalize_notion_version("2026-3-11"), None);
+        assert_eq!(normalize_notion_version("2026/03/11"), None);
+        assert_eq!(normalize_notion_version("2026-13-11"), None);
+    }
+
+    #[test]
+    fn test_new_with_version_override() {
+        let client = NotionClient::new_with_version(
+            NotionAuth::Token("test-token".into()),
+            Some("2025-09-03"),
+        )
+        .unwrap();
+        assert_eq!(client.notion_version(), "2025-09-03");
     }
 
     #[fcp_async_core::runtime::test]

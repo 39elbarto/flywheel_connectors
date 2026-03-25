@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use crate::{
-    DEFAULT_MAX_PAYLOAD_SIZE, DeliveryStatus, EventSubscription, SignatureVerifier, WebhookError,
-    WebhookEvent, WebhookResult,
+    DeliveryStatus, EventSubscription, SignatureVerifier, WebhookError, WebhookEvent,
+    WebhookResult, default_max_payload_size,
 };
 
 /// Webhook handler configuration.
@@ -39,7 +39,7 @@ pub struct WebhookConfig {
 impl Default for WebhookConfig {
     fn default() -> Self {
         Self {
-            max_payload_size: DEFAULT_MAX_PAYLOAD_SIZE,
+            max_payload_size: default_max_payload_size(),
             idempotency_enabled: true,
             idempotency_ttl: Duration::from_secs(86400), // 24 hours
             ip_allowlist: Vec::new(),
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn test_webhook_config_default() {
         let config = WebhookConfig::default();
-        assert_eq!(config.max_payload_size, DEFAULT_MAX_PAYLOAD_SIZE);
+        assert_eq!(config.max_payload_size, default_max_payload_size());
         assert!(config.idempotency_enabled);
         assert_eq!(config.idempotency_ttl, Duration::from_secs(86400));
         assert!(config.ip_allowlist.is_empty());
@@ -551,7 +551,10 @@ mod tests {
         let handler = WebhookHandler::new(verifier, "github");
 
         assert_eq!(handler.provider(), "github");
-        assert_eq!(handler.config().max_payload_size, DEFAULT_MAX_PAYLOAD_SIZE);
+        assert_eq!(
+            handler.config().max_payload_size,
+            default_max_payload_size()
+        );
     }
 
     #[test]

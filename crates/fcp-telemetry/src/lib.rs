@@ -57,7 +57,45 @@ struct TelemetryState {
     config: TelemetryConfig,
 }
 
+/// Compiled-in fallback for the Prometheus metrics endpoint port.
+pub const DEFAULT_PROMETHEUS_PORT: u16 = 9090;
+
+/// Environment variables checked for the Prometheus metrics endpoint port, in precedence order.
+pub const PROMETHEUS_PORT_ENV_VARS: [&str; 4] = [
+    "FCP_TELEMETRY_PROMETHEUS_PORT",
+    "FCP_TELEMETRY_PORT",
+    "FCP_PROMETHEUS_PORT",
+    "PROMETHEUS_PORT",
+];
+
+fn resolve_prometheus_port() -> u16 {
+    resolve_prometheus_port_with(|key| std::env::var(key).ok())
+}
+
+fn resolve_prometheus_port_with<F>(mut get_env: F) -> u16
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    for key in PROMETHEUS_PORT_ENV_VARS {
+        let Some(value) = get_env(key) else {
+            continue;
+        };
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(port) = trimmed.parse::<u16>() {
+            return port;
+        }
+    }
+    DEFAULT_PROMETHEUS_PORT
+}
+
 /// Configuration for telemetry initialization.
+///
+/// The Prometheus metrics port can be overridden at startup via, in precedence order:
+/// `FCP_TELEMETRY_PROMETHEUS_PORT`, `FCP_TELEMETRY_PORT`, `FCP_PROMETHEUS_PORT`,
+/// or `PROMETHEUS_PORT`.
 #[derive(Debug, Clone)]
 pub struct TelemetryConfig {
     /// Service/connector name for identifying logs and metrics.
@@ -95,7 +133,7 @@ impl Default for TelemetryConfig {
             log_level: "info".to_string(),
             json_logs: true,
             prometheus_enabled: false,
-            prometheus_port: 9090,
+            prometheus_port: resolve_prometheus_port(),
             otlp_enabled: false,
             otlp_endpoint: None,
             trace_sample_rate: 1.0,
@@ -108,6 +146,12 @@ impl Default for TelemetryConfig {
             ],
         }
     }
+}
+
+/// Return the currently initialized telemetry configuration, if telemetry has already started.
+#[must_use]
+pub fn current_telemetry_config() -> Option<&'static TelemetryConfig> {
+    TELEMETRY.get().map(|state| &state.config)
 }
 
 impl TelemetryConfig {
@@ -261,11 +305,45 @@ mod tests {
         assert_eq!(config.log_level, "info");
         assert!(config.json_logs);
         assert!(!config.prometheus_enabled);
-        assert_eq!(config.prometheus_port, 9090);
+        assert_eq!(config.prometheus_port, DEFAULT_PROMETHEUS_PORT);
         assert!(!config.otlp_enabled);
         assert!(config.otlp_endpoint.is_none());
         assert_eq!(config.trace_sample_rate, 1.0);
         assert!(!config.redact_fields.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_prometheus_port_uses_first_valid_env_var() {
+        let resolved = resolve_prometheus_port_with(|key| match key {
+            "FCP_TELEMETRY_PROMETHEUS_PORT" => Some("9200".to_string()),
+            "FCP_TELEMETRY_PORT" => Some("9300".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(resolved, 9200);
+    }
+
+    #[test]
+    fn test_resolve_prometheus_port_falls_back_to_lower_priority_env_var() {
+        let resolved = resolve_prometheus_port_with(|key| match key {
+            "FCP_TELEMETRY_PROMETHEUS_PORT" => Some("not-a-port".to_string()),
+            "FCP_TELEMETRY_PORT" => Some("   ".to_string()),
+            "FCP_PROMETHEUS_PORT" => Some("9400".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(resolved, 9400);
+    }
+
+    #[test]
+    fn test_resolve_prometheus_port_uses_compiled_default_when_no_env_is_valid() {
+        let resolved = resolve_prometheus_port_with(|key| match key {
+            "FCP_TELEMETRY_PROMETHEUS_PORT" => Some("70000".to_string()),
+            "PROMETHEUS_PORT" => Some("invalid".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(resolved, DEFAULT_PROMETHEUS_PORT);
     }
 
     #[test]
@@ -607,13 +685,13 @@ mod tests {
     fn test_telemetry_config_debug_contains_all_fields() {
         let config = TelemetryConfig::new("svc")
             .with_log_level("debug")
-            .with_prometheus(9090)
+            .with_prometheus(DEFAULT_PROMETHEUS_PORT)
             .with_otlp("http://otel:4317")
             .with_sample_rate(0.5);
         let debug = format!("{config:?}");
         assert!(debug.contains("svc"));
         assert!(debug.contains("debug"));
-        assert!(debug.contains("9090"));
+        assert!(debug.contains(&DEFAULT_PROMETHEUS_PORT.to_string()));
         assert!(debug.contains("otel"));
     }
 }

@@ -168,8 +168,9 @@ impl CoverageEvaluation {
             return 0;
         }
 
-        // target_symbols = source_symbols * target_bps / 10000
-        let target_symbols = u64::from(self.source_symbols) * u64::from(target_bps) / 10000;
+        // target_symbols = source_symbols * target_bps / 10000 (ceiling division to avoid underestimate)
+        let target_symbols =
+            (u64::from(self.source_symbols) * u64::from(target_bps)).div_ceil(10000);
 
         let needed = target_symbols.saturating_sub(u64::from(self.total_symbols));
         u32::try_from(needed).unwrap_or(u32::MAX)

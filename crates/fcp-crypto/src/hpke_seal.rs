@@ -134,9 +134,12 @@ impl Fcp2Aad {
     /// Encode AAD to canonical CBOR bytes.
     ///
     /// This ensures a unique, non-malleable representation for the encryption context.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        crate::canonicalize::to_deterministic_cbor(self).unwrap_or_default()
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if CBOR serialization fails.
+    pub fn encode(&self) -> CryptoResult<Vec<u8>> {
+        crate::canonicalize::to_deterministic_cbor(self)
     }
 }
 
@@ -183,7 +186,7 @@ pub fn hpke_seal_with_rng<R: rand::CryptoRng + rand::RngCore>(
     >(&OpModeS::Base, &pk, b"FCP2-HPKE", rng)
     .map_err(|e| CryptoError::HpkeFailed(format!("setup_sender failed: {e}")))?;
 
-    let aad_bytes = aad.encode();
+    let aad_bytes = aad.encode()?;
     let ciphertext = sender_ctx
         .seal(plaintext, &aad_bytes)
         .map_err(|e| CryptoError::HpkeFailed(format!("seal failed: {e}")))?;
@@ -225,7 +228,7 @@ pub fn hpke_open(
         )
         .map_err(|e| CryptoError::HpkeFailed(format!("setup_receiver failed: {e}")))?;
 
-    let aad_bytes = aad.encode();
+    let aad_bytes = aad.encode()?;
     receiver_ctx
         .open(&sealed_box.ciphertext, &aad_bytes)
         .map_err(|e| CryptoError::HpkeFailed(format!("open failed: {e}")))
@@ -389,9 +392,9 @@ mod tests {
         let aad2 = Fcp2Aad::for_objectid_key(b"z:work", b"node", 1_234_567_890);
         let aad3 = Fcp2Aad::for_secret_share(b"z:work", b"node", 1_234_567_890);
 
-        assert_ne!(aad1.encode(), aad2.encode());
-        assert_ne!(aad1.encode(), aad3.encode());
-        assert_ne!(aad2.encode(), aad3.encode());
+        assert_ne!(aad1.encode().unwrap(), aad2.encode().unwrap());
+        assert_ne!(aad1.encode().unwrap(), aad3.encode().unwrap());
+        assert_ne!(aad2.encode().unwrap(), aad3.encode().unwrap());
     }
 
     #[test]
@@ -486,7 +489,7 @@ mod tests {
         let issued_at: u64 = 1_234_567_890;
 
         let aad = Fcp2Aad::for_zone_key(zone_id, node_id, issued_at);
-        let encoded = aad.encode();
+        let encoded = aad.encode().unwrap();
 
         // Should be a CBOR map with 4 elements
         // 0xA4 = map(4)
@@ -595,7 +598,7 @@ mod tests {
     fn fcp2_aad_clone() {
         let aad = Fcp2Aad::for_zone_key(b"z:test", b"node-x", 999);
         let cloned = aad.clone();
-        assert_eq!(aad.encode(), cloned.encode());
+        assert_eq!(aad.encode().unwrap(), cloned.encode().unwrap());
     }
 
     // ---- AAD debug ----
@@ -695,7 +698,7 @@ mod tests {
     fn fcp2_aad_encode_deterministic() {
         let aad1 = Fcp2Aad::for_zone_key(b"z:det", b"node-det", 12345);
         let aad2 = Fcp2Aad::for_zone_key(b"z:det", b"node-det", 12345);
-        assert_eq!(aad1.encode(), aad2.encode());
+        assert_eq!(aad1.encode().unwrap(), aad2.encode().unwrap());
     }
 
     // ---- Sealed box from_bytes empty ----

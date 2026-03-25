@@ -181,7 +181,9 @@ impl HpkeSealedBoxGoldenVector {
         };
 
         // 5. Verify AAD encoding (if expected is non-empty)
-        let aad_encoded = aad.encode();
+        let aad_encoded = aad
+            .encode()
+            .map_err(|e| format!("AAD encode failed: {e}"))?;
         if !self.expected_aad_cbor.is_empty() {
             let computed_aad = hex::encode(&aad_encoded);
             if computed_aad != self.expected_aad_cbor {
@@ -321,9 +323,9 @@ mod tests {
         let oid_aad = Fcp2Aad::for_objectid_key(b"z:work", b"node:a", 1_700_000_000);
         let share_aad = Fcp2Aad::for_secret_share(b"z:work", b"node:a", 1_700_000_000);
 
-        let zone_bytes = zone_aad.encode();
-        let oid_bytes = oid_aad.encode();
-        let share_bytes = share_aad.encode();
+        let zone_bytes = zone_aad.encode().unwrap();
+        let oid_bytes = oid_aad.encode().unwrap();
+        let share_bytes = share_aad.encode().unwrap();
 
         assert_ne!(
             zone_bytes, oid_bytes,

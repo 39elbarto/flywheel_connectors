@@ -382,7 +382,7 @@ fn test_hpke_aad_encoding_determinism() {
             issued_at: v.issued_at,
         };
 
-        let encoded = aad.encode();
+        let encoded = aad.encode().unwrap();
         let encoded_hex = hex::encode(&encoded);
 
         if v.expected_aad_hex == "__GENERATE__" {
@@ -399,7 +399,7 @@ fn test_hpke_aad_encoding_determinism() {
         assert_eq!(encoded[0], 0xA4, "AAD must be CBOR map(4) for '{}'", v.name);
 
         // Determinism: encode twice → same bytes
-        let encoded2 = aad.encode();
+        let encoded2 = aad.encode().unwrap();
         assert_eq!(
             encoded, encoded2,
             "AAD encoding not deterministic for '{}'",
@@ -414,9 +414,15 @@ fn test_hpke_different_purposes_different_aad() {
     let node_id = b"node-123";
     let ts: u64 = 1_700_000_000;
 
-    let aad_zone = Fcp2Aad::for_zone_key(zone_id, node_id, ts).encode();
-    let aad_obj = Fcp2Aad::for_objectid_key(zone_id, node_id, ts).encode();
-    let aad_share = Fcp2Aad::for_secret_share(zone_id, node_id, ts).encode();
+    let aad_zone = Fcp2Aad::for_zone_key(zone_id, node_id, ts)
+        .encode()
+        .unwrap();
+    let aad_obj = Fcp2Aad::for_objectid_key(zone_id, node_id, ts)
+        .encode()
+        .unwrap();
+    let aad_share = Fcp2Aad::for_secret_share(zone_id, node_id, ts)
+        .encode()
+        .unwrap();
 
     assert_ne!(
         aad_zone, aad_obj,
@@ -813,15 +819,21 @@ fn generate_all_golden_vector_hex_values() {
     // AAD encodings
     eprintln!("\n--- AAD Encodings ---");
     let aad_zone = Fcp2Aad::for_zone_key(b"z:work", b"node-123", 1_700_000_000);
-    eprintln!("  zone_key_aad: \"{}\"", hex::encode(aad_zone.encode()));
+    eprintln!(
+        "  zone_key_aad: \"{}\"",
+        hex::encode(aad_zone.encode().unwrap())
+    );
 
     let aad_obj = Fcp2Aad::for_objectid_key(b"z:work", b"node-123", 1_700_000_000);
-    eprintln!("  objectid_key_aad: \"{}\"", hex::encode(aad_obj.encode()));
+    eprintln!(
+        "  objectid_key_aad: \"{}\"",
+        hex::encode(aad_obj.encode().unwrap())
+    );
 
     let aad_share = Fcp2Aad::for_secret_share(b"z:work", b"node-123", 1_700_000_000);
     eprintln!(
         "  secret_share_aad: \"{}\"",
-        hex::encode(aad_share.encode())
+        hex::encode(aad_share.encode().unwrap())
     );
 
     let aad_owner = Fcp2Aad {
@@ -830,7 +842,10 @@ fn generate_all_golden_vector_hex_values() {
         purpose: b"FCP2-OWNER-SHARE".to_vec(),
         issued_at: 1_700_000_000,
     };
-    eprintln!("  owner_share_aad: \"{}\"", hex::encode(aad_owner.encode()));
+    eprintln!(
+        "  owner_share_aad: \"{}\"",
+        hex::encode(aad_owner.encode().unwrap())
+    );
 
     // COSE tokens
     eprintln!("\n--- COSE Tokens ---");

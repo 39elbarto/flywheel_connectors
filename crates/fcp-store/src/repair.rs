@@ -233,7 +233,7 @@ fn percentile_bps(sorted_samples: &[u32], percentile: usize) -> u32 {
         .saturating_mul(percentile)
         .div_ceil(100)
         .saturating_sub(1)
-        .min(sorted_samples.len() - 1);
+        .min(sorted_samples.len().saturating_sub(1));
     sorted_samples[rank]
 }
 

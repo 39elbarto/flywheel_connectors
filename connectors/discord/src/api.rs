@@ -44,6 +44,16 @@ pub struct DiscordApiClient {
     retry_config: HttpRetryConfig,
 }
 
+impl std::fmt::Debug for DiscordApiClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordApiClient")
+            .field("base_url", &self.base_url)
+            .field("bot_credential", &"[REDACTED]")
+            .field("retry_config", &self.retry_config)
+            .finish()
+    }
+}
+
 impl DiscordApiClient {
     /// Create a new API client from configuration.
     pub fn new(config: &DiscordConfig) -> DiscordResult<Self> {

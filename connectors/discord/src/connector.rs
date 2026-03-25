@@ -1027,13 +1027,13 @@ impl DiscordConnector {
                 }
 
                 if let Some(content) = content
-                    && content.len() > MESSAGE_CONTENT_MAX_CHARS
+                    && content.chars().count() > MESSAGE_CONTENT_MAX_CHARS
                 {
                     return Err(FcpError::InvalidRequest {
                         code: 1004,
                         message: format!(
                             "Content exceeds {MESSAGE_CONTENT_MAX_CHARS} character limit (got {} characters)",
-                            content.len()
+                            content.chars().count()
                         ),
                     });
                 }

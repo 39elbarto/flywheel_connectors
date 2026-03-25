@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the Discord connector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DiscordConfig {
     /// Bot credential from Discord Developer Portal
     pub bot_credential: String,
@@ -37,6 +37,21 @@ pub struct DiscordConfig {
     /// Shard configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shard: Option<ShardConfig>,
+}
+
+impl std::fmt::Debug for DiscordConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordConfig")
+            .field("bot_credential", &"[REDACTED]")
+            .field("application_id", &self.application_id)
+            .field("api_url", &self.api_url)
+            .field("gateway_url", &self.gateway_url)
+            .field("timeout", &self.timeout)
+            .field("retry", &self.retry)
+            .field("intents", &self.intents)
+            .field("shard", &self.shard)
+            .finish()
+    }
 }
 
 fn default_api_url() -> String {

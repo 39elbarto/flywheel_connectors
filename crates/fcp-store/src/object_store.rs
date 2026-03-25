@@ -154,7 +154,11 @@ impl ObjectStore for MemoryObjectStore {
         let obj = objects.remove(id).ok_or(ObjectStoreError::NotFound(*id))?;
 
         let size = Self::object_size(&obj);
-        self.used_bytes.fetch_sub(size, Ordering::SeqCst);
+        self.used_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_sub(size))
+            })
+            .ok();
 
         Ok(())
     }

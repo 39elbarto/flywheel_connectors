@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 // ── Auth ──
 
+pub(crate) const SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE: &str = "GCP service_account mode requires JWT signing, which is not implemented yet. \
+     Use access_token mode with a real OAuth token, or leave access_token empty \
+     and rely on egress proxy injection.";
+
 /// GCP authentication mode.
 #[derive(Clone, Deserialize)]
 #[serde(tag = "mode")]
@@ -49,14 +53,22 @@ impl GcpAuth {
     }
 
     /// Returns the bearer token for API requests.
-    /// For access_token mode, returns the token directly.
-    /// For service_account mode, returns the private_key as a placeholder
-    /// (real JWT signing would be added later).
-    #[must_use]
-    pub fn bearer_token(&self) -> &str {
+    ///
+    /// For `access_token` mode, returns the token directly.
+    /// For `service_account` mode, returns an error because JWT signing
+    /// is not yet implemented — sending a raw private key as a Bearer
+    /// token would be both functionally broken (Google rejects it) and
+    /// a security risk (key leakage in transit).
+    ///
+    /// # Errors
+    ///
+    /// Returns `GcpError::Config` if called in service_account mode.
+    pub fn bearer_token(&self) -> Result<&str, crate::error::GcpError> {
         match self {
-            Self::AccessToken { access_token } => access_token,
-            Self::ServiceAccount { private_key, .. } => private_key,
+            Self::AccessToken { access_token } => Ok(access_token),
+            Self::ServiceAccount { .. } => Err(crate::error::GcpError::Config(
+                SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE.into(),
+            )),
         }
     }
 }
@@ -338,11 +350,28 @@ mod tests {
     }
 
     #[test]
-    fn auth_bearer_token() {
+    fn auth_bearer_token_access_token_mode() {
         let token_auth = GcpAuth::AccessToken {
             access_token: "ya29.token123".into(),
         };
-        assert_eq!(token_auth.bearer_token(), "ya29.token123");
+        assert_eq!(token_auth.bearer_token().unwrap(), "ya29.token123");
+    }
+
+    #[test]
+    fn auth_bearer_token_service_account_returns_error() {
+        let sa_auth = GcpAuth::ServiceAccount {
+            client_email: "test@project.iam.gserviceaccount.com".into(),
+            private_key: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
+        };
+        let result = sa_auth.bearer_token();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::GcpError::Config(message) => {
+                assert!(message.contains("JWT signing"));
+                assert!(!message.contains("credential_id"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     #[test]

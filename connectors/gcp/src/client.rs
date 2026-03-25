@@ -85,6 +85,10 @@ impl GcpClient {
         run_base: Option<&str>,
         crm_base: Option<&str>,
     ) -> GcpResult<Self> {
+        if auth.is_service_account() {
+            return Err(GcpError::Config(SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE.into()));
+        }
+
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -143,7 +147,10 @@ impl GcpClient {
             let auth = self.auth.clone();
             async move {
                 debug!(attempt, "Listing compute instances");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = match authenticate_request(client.get(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                };
                 handle_list_response::<InstanceList, Instance>(req, attempt, |list| {
                     list.items.unwrap_or_default()
                 })
@@ -231,7 +238,10 @@ impl GcpClient {
             let auth = self.auth.clone();
             async move {
                 debug!(attempt, "Listing storage objects");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = match authenticate_request(client.get(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                };
                 handle_list_response::<ObjectList, StorageObject>(req, attempt, |list| {
                     list.items.unwrap_or_default()
                 })
@@ -288,9 +298,12 @@ impl GcpClient {
             let ct = ct.clone();
             async move {
                 debug!(attempt, "Uploading storage object");
-                let req = authenticate_request(client.post(&url), &auth)
-                    .header("Content-Type", ct)
-                    .body(body);
+                let req = match authenticate_request(client.post(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                }
+                .header("Content-Type", ct)
+                .body(body);
                 handle_response::<StorageObject>(req, attempt).await
             }
         })
@@ -333,7 +346,10 @@ impl GcpClient {
             let auth = self.auth.clone();
             async move {
                 debug!(attempt, "Listing Cloud Run services");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = match authenticate_request(client.get(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                };
                 handle_list_response::<CloudRunServiceList, CloudRunService>(req, attempt, |list| {
                     list.services.unwrap_or_default()
                 })
@@ -408,7 +424,10 @@ impl GcpClient {
             let auth = self.auth.clone();
             async move {
                 debug!(attempt, url = %url, "GET single");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = match authenticate_request(client.get(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                };
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -433,7 +452,11 @@ impl GcpClient {
             let body = body.clone();
             async move {
                 debug!(attempt, url = %url, "POST json");
-                let req = authenticate_request(client.post(&url), &auth).json(&body);
+                let req = match authenticate_request(client.post(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                }
+                .json(&body);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -455,8 +478,11 @@ impl GcpClient {
             let auth = self.auth.clone();
             async move {
                 debug!(attempt, url = %url, "POST empty");
-                let req =
-                    authenticate_request(client.post(&url), &auth).header("Content-Length", "0");
+                let req = match authenticate_request(client.post(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                }
+                .header("Content-Length", "0");
                 handle_response::<serde_json::Value>(req, attempt).await
             }
         })
@@ -474,7 +500,10 @@ impl GcpClient {
             let auth = self.auth.clone();
             async move {
                 debug!(attempt, url = %url, "DELETE");
-                let req = authenticate_request(client.delete(&url), &auth);
+                let req = match authenticate_request(client.delete(&url), &auth) {
+                    Ok(req) => req,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                };
                 handle_response::<serde_json::Value>(req, attempt).await
             }
         })
@@ -484,12 +513,11 @@ impl GcpClient {
 
 // ── Free functions for request handling ──
 
-fn authenticate_request(req: RequestBuilder, auth: &GcpAuth) -> RequestBuilder {
-    let token = auth.bearer_token();
-    if token.is_empty() {
-        req
-    } else {
-        req.bearer_auth(token)
+fn authenticate_request(req: RequestBuilder, auth: &GcpAuth) -> GcpResult<RequestBuilder> {
+    match auth.bearer_token() {
+        Ok(token) if !token.is_empty() => Ok(req.bearer_auth(token)),
+        Ok(_) => Ok(req),
+        Err(error) => Err(error),
     }
 }
 
@@ -792,5 +820,74 @@ mod tests {
         .unwrap();
         // Trailing slashes should be trimmed
         assert!(!format!("{rt:?}").is_empty());
+    }
+
+    #[test]
+    fn authenticate_request_adds_bearer_header_for_access_token() {
+        let request = authenticate_request(
+            Client::new().get("https://example.com"),
+            &GcpAuth::AccessToken {
+                access_token: "ya29.token".into(),
+            },
+        )
+        .expect("access_token auth should succeed")
+        .build()
+        .expect("request should build");
+
+        assert_eq!(
+            request.headers().get(reqwest::header::AUTHORIZATION),
+            Some(&reqwest::header::HeaderValue::from_static(
+                "Bearer ya29.token"
+            ))
+        );
+    }
+
+    #[test]
+    fn authenticate_request_allows_secretless_access_token_mode() {
+        let request = authenticate_request(
+            Client::new().get("https://example.com"),
+            &GcpAuth::AccessToken {
+                access_token: String::new(),
+            },
+        )
+        .expect("empty access_token should defer to egress proxy injection")
+        .build()
+        .expect("request should build");
+
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn client_new_rejects_service_account_auth() {
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            GcpClient::new(
+                "proj",
+                GcpAuth::ServiceAccount {
+                    client_email: "svc@proj.iam.gserviceaccount.com".into(),
+                    private_key: "private-key".into(),
+                },
+                HttpRetryConfig::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        })
+        .unwrap()
+        .expect_err("service_account auth must be rejected before request execution");
+
+        match err {
+            GcpError::Config(message) => {
+                assert!(message.contains("JWT signing"));
+                assert!(!message.contains("credential_id"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 }

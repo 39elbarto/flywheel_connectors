@@ -26,8 +26,24 @@ use crate::{
 /// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
-/// Current API version.
-const API_VERSION: &str = "2023-06-01";
+/// Default API version. Anthropic uses a date-based version header.
+/// This can be overridden via the `api_version` config field or
+/// the `FCP_ANTHROPIC_API_VERSION` environment variable.
+pub(crate) const DEFAULT_API_VERSION: &str = "2023-06-01";
+
+/// Resolve the API version to use: config override > env var > compiled default.
+fn resolve_api_version(config_override: Option<&str>) -> String {
+    if let Some(v) = config_override.map(str::trim).filter(|s| !s.is_empty()) {
+        return v.to_string();
+    }
+    if let Ok(v) = std::env::var("FCP_ANTHROPIC_API_VERSION") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    DEFAULT_API_VERSION.to_string()
+}
 
 /// Authentication mode for the Anthropic API.
 #[derive(Clone)]
@@ -69,6 +85,7 @@ pub struct AnthropicClient {
     client: Client,
     auth: AnthropicAuth,
     base_url: String,
+    api_version: String,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
     // Cost tracking
@@ -102,6 +119,14 @@ impl AnthropicClient {
     ///
     /// Returns an error if the HTTP client cannot be constructed.
     pub fn new_with_auth(auth: AnthropicAuth) -> AnthropicResult<Self> {
+        Self::new_with_auth_and_version(auth, None)
+    }
+
+    /// # Errors                                               
+    pub fn new_with_auth_and_version(
+        auth: AnthropicAuth,
+        api_version: Option<&str>,
+    ) -> AnthropicResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -111,6 +136,7 @@ impl AnthropicClient {
             client,
             auth,
             base_url: DEFAULT_BASE_URL.into(),
+            api_version: resolve_api_version(api_version),
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
@@ -155,6 +181,12 @@ impl AnthropicClient {
         &self.auth
     }
 
+    /// Get the Anthropic API version header used for requests.
+    #[must_use]
+    pub fn api_version(&self) -> &str {
+        &self.api_version
+    }
+
     /// Get total input tokens used.
     #[must_use]
     pub fn total_input_tokens(&self) -> u64 {
@@ -197,7 +229,7 @@ impl AnthropicClient {
         let request = self
             .client
             .post(&url)
-            .header("anthropic-version", API_VERSION)
+            .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json");
         let request = self.apply_auth(request);
         let request = request.json(&serde_json::json!({
@@ -346,7 +378,7 @@ impl AnthropicClient {
                 let request = self
                     .client
                     .post(url.as_str())
-                    .header("anthropic-version", API_VERSION)
+                    .header("anthropic-version", &self.api_version)
                     .header("content-type", "application/json");
                 let request = self.apply_auth(request);
 
@@ -380,7 +412,7 @@ impl AnthropicClient {
         let request = self
             .client
             .post(&url)
-            .header("anthropic-version", API_VERSION)
+            .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json");
         let request = self.apply_auth(request);
         let response = request.json(body).send().await?;
@@ -618,7 +650,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .and(header("x-api-key", "test_key"))
-            .and(header("anthropic-version", API_VERSION))
+            .and(header("anthropic-version", DEFAULT_API_VERSION))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "msg_123",
                 "type": "message",
@@ -772,7 +804,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .and(header("x-api-key", "test_key"))
-            .and(header("anthropic-version", API_VERSION))
+            .and(header("anthropic-version", DEFAULT_API_VERSION))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "msg_123",
                 "type": "message",
@@ -1028,8 +1060,19 @@ mod tests {
     #[test]
     fn client_new_default_base_url() {
         let client = AnthropicClient::new("test-key").unwrap();
+        assert_eq!(client.api_version(), DEFAULT_API_VERSION);
         assert_eq!(client.total_input_tokens(), 0);
         assert_eq!(client.total_output_tokens(), 0);
+    }
+
+    #[test]
+    fn client_api_version_override_is_trimmed() {
+        let client = AnthropicClient::new_with_auth_and_version(
+            AnthropicAuth::ApiKey("test-key".into()),
+            Some(" 2024-10-22 "),
+        )
+        .unwrap();
+        assert_eq!(client.api_version(), "2024-10-22");
     }
 
     #[test]

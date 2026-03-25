@@ -14,7 +14,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{AnthropicAuth, AnthropicClient, DEFAULT_BASE_URL},
+    client::{AnthropicAuth, AnthropicClient, DEFAULT_API_VERSION, DEFAULT_BASE_URL},
     error::AnthropicError,
     types::{Message, Model, Role, Tool, ToolChoice, Usage},
 };
@@ -24,6 +24,7 @@ use crate::{
 struct AnthropicConfig {
     auth: AnthropicAuth,
     base_url: String,
+    api_version: Option<String>,
 }
 
 impl AnthropicConfig {
@@ -74,7 +75,23 @@ impl AnthropicConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
-        Ok(Self { auth, base_url })
+        let api_version = match params.get("api_version") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "api_version must be a string".into(),
+                })?;
+                let trimmed = raw.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            auth,
+            base_url,
+            api_version,
+        })
     }
 }
 
@@ -191,10 +208,12 @@ impl AnthropicConnector {
     ) -> FcpResult<serde_json::Value> {
         let config = AnthropicConfig::from_params(&params)?;
 
-        let client = AnthropicClient::new_with_auth(config.auth.clone()).map_err(|e| {
-            FcpError::Internal {
-                message: format!("Failed to create HTTP client: {e}"),
-            }
+        let client = AnthropicClient::new_with_auth_and_version(
+            config.auth.clone(),
+            config.api_version.as_deref(),
+        )
+        .map_err(|e| FcpError::Internal {
+            message: format!("Failed to create HTTP client: {e}"),
         })?;
         let client = client.with_base_url(&config.base_url);
 
@@ -279,10 +298,15 @@ impl AnthropicConnector {
             .config
             .as_ref()
             .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.base_url.clone());
+        let api_version = self.client.as_ref().map_or_else(
+            || DEFAULT_API_VERSION.to_string(),
+            |client| client.api_version().to_string(),
+        );
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "auth": auth,
             "base_url": base_url,
+            "api_version": api_version,
             "metrics": {
                 "requests_total": self.total_requests(),
                 "requests_error": self.total_errors(),
@@ -358,6 +382,18 @@ impl AnthropicConnector {
             name: "auth_mode".into(),
             passed: true,
             message: Some(format!("Auth: {}", config.auth.redacted_label())),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "api_version".into(),
+            passed: true,
+            message: Some(format!(
+                "Anthropic API version: {}",
+                self.client
+                    .as_ref()
+                    .map_or(DEFAULT_API_VERSION, AnthropicClient::api_version)
+            )),
             critical: false,
         });
 
@@ -1457,6 +1493,7 @@ mod tests {
         assert_eq!(result["status"], "healthy");
         assert_eq!(result["auth"], "api_key:redacted");
         assert_eq!(result["base_url"], DEFAULT_BASE_URL);
+        assert_eq!(result["api_version"], DEFAULT_API_VERSION);
     }
 
     // --- Configure tests ---
@@ -1536,6 +1573,27 @@ mod tests {
         assert_eq!(
             connector.config.as_ref().unwrap().base_url,
             "https://custom.api.example.com"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_custom_api_version() {
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "api_version": " 2024-10-22 "
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            connector.config.as_ref().unwrap().api_version.as_deref(),
+            Some("2024-10-22")
+        );
+        assert_eq!(
+            connector.client.as_ref().unwrap().api_version(),
+            "2024-10-22"
         );
     }
 
@@ -1813,6 +1871,7 @@ mod tests {
         connector.config = Some(AnthropicConfig {
             auth: AnthropicAuth::ApiKey("fake_key".into()),
             base_url: "http://localhost:9999".into(),
+            api_version: None,
         });
 
         let signing_key = Ed25519SigningKey::generate();
@@ -2079,6 +2138,20 @@ mod tests {
         let params = json!({ "api_key": "sk-test" });
         let config = AnthropicConfig::from_params(&params).unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert!(config.api_version.is_none());
+    }
+
+    #[test]
+    fn config_rejects_non_string_api_version() {
+        let params = json!({ "api_key": "sk-test", "api_version": 20241022 });
+        let result = AnthropicConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api_version must be a string"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
     }
 
     // --- DoctorResult all healthy ---

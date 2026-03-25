@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::GcpClient;
-use crate::types::GcpAuth;
+use crate::types::{GcpAuth, SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/gcp_connector_verification.sh";
@@ -97,6 +97,9 @@ impl GcpConfig {
     fn validate(&self) -> Result<(), String> {
         if self.project_id.is_empty() {
             return Err("project_id is required".into());
+        }
+        if self.auth.is_service_account() {
+            return Err(SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE.into());
         }
         Ok(())
     }
@@ -1497,21 +1500,25 @@ mod tests {
     }
 
     #[test]
-    fn service_account_auth() {
-        assert!(
-            fcp_async_core::runtime::block_on_sync(async {
-                let mut c = GcpConnector::new();
-                c.configure(json!({
-                    "mode": "service_account",
-                    "client_email": "svc@proj.iam.gserviceaccount.com",
-                    "private_key": "key-data",
-                    "project_id": "proj"
-                }))
-                .await
-            })
-            .unwrap()
-            .is_ok()
-        );
+    fn service_account_auth_rejected_until_jwt_implemented() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = GcpConnector::new();
+            c.configure(json!({
+                "mode": "service_account",
+                "client_email": "svc@proj.iam.gserviceaccount.com",
+                "private_key": "key-data",
+                "project_id": "proj"
+            }))
+            .await
+        })
+        .unwrap();
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("JWT signing"));
+                assert!(!message.contains("credential_id"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]

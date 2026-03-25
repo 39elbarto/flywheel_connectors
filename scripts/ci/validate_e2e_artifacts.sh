@@ -129,13 +129,15 @@ validate_jsonl_file() {
         return
     fi
 
+    local validated=0
     while IFS= read -r line; do
         line_num=$((line_num + 1))
         [[ -z "$line" ]] && continue
         validate_jsonl_entry "$line" "$line_num" "$file"
+        validated=$((validated + 1))
     done < "$file"
 
-    pass "$file: $line_num entries validated"
+    pass "$file: $validated entries validated ($line_num lines)"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -149,11 +151,11 @@ REDACTION_PATTERNS=(
     'Bearer [a-zA-Z0-9._-]{20,}'       # Bearer tokens
     'token=[a-zA-Z0-9._-]{20,}'        # URL token params
     'api[_-]?key=[a-zA-Z0-9._-]{15,}'  # API key values
-    'password=[^\s&]{5,}'              # Password values
-    'secret=[^\s&]{10,}'               # Secret values
-    'client_secret=[^\s&]{10,}'        # OAuth client secrets
-    'refresh_token=[^\s&]{10,}'        # Refresh tokens
-    'access_token=[^\s&]{10,}'         # Access tokens
+    'password=[^[:space:]&]{5,}'       # Password values
+    'secret=[^[:space:]&]{10,}'        # Secret values
+    'client_secret=[^[:space:]&]{10,}' # OAuth client secrets
+    'refresh_token=[^[:space:]&]{10,}' # Refresh tokens
+    'access_token=[^[:space:]&]{10,}'  # Access tokens
     'AKIA[A-Z0-9]{16}'                 # AWS access key IDs
     'ghp_[a-zA-Z0-9]{36}'             # GitHub PATs
     'gho_[a-zA-Z0-9]{36}'             # GitHub OAuth tokens
@@ -170,15 +172,19 @@ validate_redaction_file() {
         return
     fi
 
+    local found_leak=false
     for pattern in "${REDACTION_PATTERNS[@]}"; do
         local matches
         matches=$(grep -cE "$pattern" "$file" 2>/dev/null || true)
         if [[ "$matches" -gt 0 ]]; then
             error "$file: found $matches matches for redaction pattern '$pattern'"
+            found_leak=true
         fi
     done
 
-    pass "$file: no sensitive patterns detected"
+    if [[ "$found_leak" == "false" ]]; then
+        pass "$file: no sensitive patterns detected"
+    fi
 }
 
 validate_redaction_dir() {
@@ -190,9 +196,9 @@ validate_redaction_dir() {
         return
     fi
 
-    find "$dir" -type f \( -name "*.json" -o -name "*.jsonl" -o -name "*.txt" -o -name "*.log" \) | while read -r file; do
+    while read -r file; do
         validate_redaction_file "$file"
-    done
+    done < <(find "$dir" -type f \( -name "*.json" -o -name "*.jsonl" -o -name "*.txt" -o -name "*.log" \) 2>/dev/null)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -277,9 +283,9 @@ validate_retention() {
     fi
 
     # Check for oversized artifacts (> 10MB suggests a logging runaway)
-    find "$dir" -type f -size +10M 2>/dev/null | while read -r large_file; do
+    while read -r large_file; do
         warn "Oversized artifact (>10MB): $large_file"
-    done
+    done < <(find "$dir" -type f -size +10M 2>/dev/null)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,9 +308,9 @@ case "$CHECK_MODE" in
         fi
         if [[ -n "$ARTIFACT_DIR" ]]; then
             # Scan for JSONL files
-            find "$ARTIFACT_DIR" -name "*.jsonl" -type f 2>/dev/null | while read -r f; do
+            while read -r f; do
                 validate_jsonl_file "$f"
-            done
+            done < <(find "$ARTIFACT_DIR" -name "*.jsonl" -type f 2>/dev/null)
             validate_redaction_dir "$ARTIFACT_DIR"
             validate_retention "$ARTIFACT_DIR"
         fi

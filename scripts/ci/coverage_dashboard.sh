@@ -64,7 +64,7 @@ python3 - "$SCAN_JSON" "$BASELINE" "$MARKDOWN_OUT" "$DIFF_OUT" "$JSON_OUT" <<'PY
 import json
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 scan_path = sys.argv[1]
 baseline_path = sys.argv[2] if sys.argv[2] else None
@@ -94,7 +94,7 @@ FAMILY_MAP = {
     "ai_llm": ["anthropic", "openai", "google-ai", "mistral", "openrouter",
                "llm-router", "huggingface", "whisper", "deepgram", "elevenlabs"],
     "devtools": ["github", "gitlab", "bitbucket", "linear", "jira", "clickup",
-                 "todoist", "trello", "asana", "circleci", "dockerhub", "sentry",
+                 "trello", "asana", "circleci", "dockerhub", "sentry",
                  "package-registry"],
     "databases": ["postgresql", "mysql", "mongodb", "redis", "elasticsearch",
                   "duckdb", "snowflake", "qdrant", "pinecone", "vectordb", "sqlite"],
@@ -150,7 +150,7 @@ failing = by_status.get("fail", 0)
 lines = []
 lines.append("# Coverage Dashboard")
 lines.append("")
-lines.append(f"> Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+lines.append(f"> Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 lines.append(f"> Source: `test_coverage_scan.sh`")
 lines.append("")
 
@@ -279,7 +279,7 @@ if baseline_path and diff_out:
 
 if json_out:
     dashboard = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
         "total_connectors": total,
         "passing": passing,
         "failing": failing,

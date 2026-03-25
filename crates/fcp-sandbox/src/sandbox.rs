@@ -173,12 +173,10 @@ impl CompiledPolicy {
             ));
         }
         if section.cpu_percent > 100 {
-            return Err(SandboxError::InvalidConfig(
-                format!(
-                    "cpu_percent must be <= 100, got {}: invalid percentage",
-                    section.cpu_percent
-                ),
-            ));
+            return Err(SandboxError::InvalidConfig(format!(
+                "cpu_percent must be <= 100, got {}: invalid percentage",
+                section.cpu_percent
+            )));
         }
 
         // Expand special paths

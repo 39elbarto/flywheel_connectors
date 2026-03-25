@@ -185,7 +185,9 @@ impl FcpsGoldenVector {
 
         // Build and verify complete frame
         let frame = FcpsFrame { header, symbols };
-        let encoded_frame = frame.encode();
+        let encoded_frame = frame
+            .encode()
+            .map_err(|e| format!("frame encode failed: {e}"))?;
         let expected_frame_bytes = hex::decode(&self.expected_frame)
             .map_err(|e| format!("invalid expected_frame hex: {e}"))?;
         if encoded_frame != expected_frame_bytes {
@@ -458,7 +460,7 @@ mod tests {
             let frame_bytes = hex::decode(&v.expected_frame).expect("valid hex");
             let decoded = FcpsFrame::decode(&frame_bytes, frame_bytes.len() + 1)
                 .expect("decode should succeed");
-            let re_encoded = decoded.encode();
+            let re_encoded = decoded.encode().expect("encode");
             assert_eq!(
                 frame_bytes, re_encoded,
                 "round-trip failed for: {}",

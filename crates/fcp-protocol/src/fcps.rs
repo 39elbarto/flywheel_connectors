@@ -1204,8 +1204,7 @@ mod tests {
         let source_id = TailscaleNodeId::new("node-test");
         let timestamp = 1_704_067_200;
 
-        let signed =
-            SignedFcpsFrame::new(frame, source_id, timestamp, &signing_key).expect("sign");
+        let signed = SignedFcpsFrame::new(frame, source_id, timestamp, &signing_key).expect("sign");
 
         // Verify should succeed with correct key
         signed
@@ -2039,8 +2038,7 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-tamper");
-        let mut signed =
-            SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
+        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
         // Tamper with a symbol
         signed.frame.symbols[0].data[0] ^= 0xFF;
         assert!(signed.verify(&signing_key.verifying_key()).is_err());
@@ -2054,8 +2052,7 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-ts");
-        let mut signed =
-            SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
+        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
         signed.timestamp += 1;
         assert!(signed.verify(&signing_key.verifying_key()).is_err());
     }
@@ -2068,8 +2065,7 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-original");
-        let mut signed =
-            SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
+        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
         signed.source_id = TailscaleNodeId::new("node-spoofed");
         assert!(signed.verify(&signing_key.verifying_key()).is_err());
     }
@@ -3053,9 +3049,8 @@ mod tests {
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed =
-            SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key)
-                .expect("sign");
+        let signed = SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key)
+            .expect("sign");
         signed
             .verify(&signing_key.verifying_key())
             .expect("verify zero ts");

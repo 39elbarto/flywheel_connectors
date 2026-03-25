@@ -2147,21 +2147,43 @@ impl DiscoveredOperation {
             .any(|candidate| candidate.starts_with(selector))
     }
 
-    #[must_use]
-    pub fn operation_info(&self) -> OperationInfo {
-        OperationInfo {
-            id: OperationId::new(self.actual_id.clone())
-                .expect("discovery catalog should only surface canonical operation ids"),
+    pub fn try_operation_info(&self) -> Result<OperationInfo> {
+        Ok(OperationInfo {
+            id: OperationId::new(self.actual_id.clone()).with_context(|| {
+                format!(
+                    "operation `{}` has invalid canonical operation id in discovery metadata",
+                    self.actual_id
+                )
+            })?,
             summary: self.summary.summary.clone(),
             description: Some(self.description.clone())
                 .filter(|description| !description.is_empty()),
             input_schema: self.input_schema.clone(),
             output_schema: self.output_schema.clone(),
-            capability: CapabilityId::new(self.summary.capability.clone())
-                .expect("discovery catalog should only surface canonical capability ids"),
-            risk_level: parse_risk_level(&self.summary.risk_level),
-            safety_tier: parse_safety_tier(&self.summary.safety_tier),
-            idempotency: parse_idempotency(&self.summary.idempotency),
+            capability: CapabilityId::new(self.summary.capability.clone()).with_context(|| {
+                format!(
+                    "operation `{}` has invalid capability id `{}` in discovery metadata",
+                    self.actual_id, self.summary.capability
+                )
+            })?,
+            risk_level: parse_risk_level(&self.summary.risk_level).with_context(|| {
+                format!(
+                    "operation `{}` has invalid risk level in discovery metadata",
+                    self.actual_id
+                )
+            })?,
+            safety_tier: parse_safety_tier(&self.summary.safety_tier).with_context(|| {
+                format!(
+                    "operation `{}` has invalid safety tier in discovery metadata",
+                    self.actual_id
+                )
+            })?,
+            idempotency: parse_idempotency(&self.summary.idempotency).with_context(|| {
+                format!(
+                    "operation `{}` has invalid idempotency in discovery metadata",
+                    self.actual_id
+                )
+            })?,
             ai_hints: AgentHint {
                 when_to_use: self.when_to_use.clone(),
                 common_mistakes: self.common_mistakes.clone(),
@@ -2169,15 +2191,33 @@ impl DiscoveredOperation {
                 related: self
                     .related
                     .iter()
-                    .filter_map(|related| CapabilityId::new(related.clone()).ok())
-                    .collect(),
+                    .map(|related| {
+                        CapabilityId::new(related.clone()).with_context(|| {
+                            format!(
+                                "operation `{}` has invalid related capability `{related}` in discovery metadata",
+                                self.actual_id
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
             },
             // Discovery intentionally stores human-facing rate-limit summaries
             // rather than the raw declaration, so the canonical `OperationInfo`
             // path leaves this unset until host-backed introspection lands.
             rate_limit: None,
-            requires_approval: parse_approval_mode(&self.approval_mode),
-        }
+            requires_approval: parse_approval_mode(&self.approval_mode).with_context(|| {
+                format!(
+                    "operation `{}` has invalid approval mode in discovery metadata",
+                    self.actual_id
+                )
+            })?,
+        })
+    }
+
+    #[must_use]
+    pub fn operation_info(&self) -> OperationInfo {
+        self.try_operation_info()
+            .expect("discovery catalog should only surface valid metadata labels")
     }
 
     fn selector_keys(&self) -> Vec<String> {
@@ -2639,43 +2679,51 @@ const fn runtime_format_label(format: ConnectorRuntimeFormat) -> &'static str {
     }
 }
 
-fn parse_risk_level(label: &str) -> RiskLevel {
+fn parse_risk_level(label: &str) -> Result<RiskLevel> {
     match label {
-        "low" => RiskLevel::Low,
-        "medium" => RiskLevel::Medium,
-        "high" => RiskLevel::High,
-        "critical" => RiskLevel::Critical,
-        other => panic!("unexpected risk level label from discovery catalog: {other}"),
+        "low" => Ok(RiskLevel::Low),
+        "medium" => Ok(RiskLevel::Medium),
+        "high" => Ok(RiskLevel::High),
+        "critical" => Ok(RiskLevel::Critical),
+        other => Err(anyhow::anyhow!(
+            "invalid discovery risk level label `{other}`"
+        )),
     }
 }
 
-fn parse_safety_tier(label: &str) -> SafetyTier {
+fn parse_safety_tier(label: &str) -> Result<SafetyTier> {
     match label {
-        "safe" => SafetyTier::Safe,
-        "risky" => SafetyTier::Risky,
-        "dangerous" => SafetyTier::Dangerous,
-        "critical" => SafetyTier::Critical,
-        "forbidden" => SafetyTier::Forbidden,
-        other => panic!("unexpected safety tier label from discovery catalog: {other}"),
+        "safe" => Ok(SafetyTier::Safe),
+        "risky" => Ok(SafetyTier::Risky),
+        "dangerous" => Ok(SafetyTier::Dangerous),
+        "critical" => Ok(SafetyTier::Critical),
+        "forbidden" => Ok(SafetyTier::Forbidden),
+        other => Err(anyhow::anyhow!(
+            "invalid discovery safety tier label `{other}`"
+        )),
     }
 }
 
-fn parse_idempotency(label: &str) -> IdempotencyClass {
+fn parse_idempotency(label: &str) -> Result<IdempotencyClass> {
     match label {
-        "none" => IdempotencyClass::None,
-        "best-effort" | "best_effort" => IdempotencyClass::BestEffort,
-        "strict" => IdempotencyClass::Strict,
-        other => panic!("unexpected idempotency label from discovery catalog: {other}"),
+        "none" => Ok(IdempotencyClass::None),
+        "best-effort" | "best_effort" => Ok(IdempotencyClass::BestEffort),
+        "strict" => Ok(IdempotencyClass::Strict),
+        other => Err(anyhow::anyhow!(
+            "invalid discovery idempotency label `{other}`"
+        )),
     }
 }
 
-fn parse_approval_mode(label: &str) -> Option<ApprovalMode> {
+fn parse_approval_mode(label: &str) -> Result<Option<ApprovalMode>> {
     match label {
-        "none" => None,
-        "policy" => Some(ApprovalMode::Policy),
-        "interactive" => Some(ApprovalMode::Interactive),
-        "elevation-token" | "elevation_token" => Some(ApprovalMode::ElevationToken),
-        other => panic!("unexpected approval mode label from discovery catalog: {other}"),
+        "" | "none" => Ok(None),
+        "policy" => Ok(Some(ApprovalMode::Policy)),
+        "interactive" => Ok(Some(ApprovalMode::Interactive)),
+        "elevation-token" | "elevation_token" => Ok(Some(ApprovalMode::ElevationToken)),
+        other => Err(anyhow::anyhow!(
+            "invalid discovery approval mode label `{other}`"
+        )),
     }
 }
 
@@ -7683,6 +7731,87 @@ output_schema = { type = "object" }
         assert_eq!(discovered.approval_mode, "");
         assert!(!discovered.summary.requires_approval);
         assert!(discovered.operation_info().requires_approval.is_none());
+    }
+
+    #[test]
+    fn try_operation_info_rejects_invalid_discovery_labels() {
+        let mut discovered = valid_discovered_operation();
+        discovered.summary.risk_level = "catastrophic".to_owned();
+
+        let error = discovered
+            .try_operation_info()
+            .expect_err("invalid discovery labels should return an error");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("fcp.github.list_issues"));
+        assert!(rendered.contains("invalid discovery risk level label `catastrophic`"));
+    }
+
+    fn valid_discovered_operation() -> DiscoveredOperation {
+        DiscoveredOperation {
+            actual_id: "fcp.github.list_issues".to_owned(),
+            local_id: "list_issues".to_owned(),
+            preferred_selector: "issues.list".to_owned(),
+            aliases: vec!["list_issues".to_owned()],
+            description: "List issues".to_owned(),
+            summary: OperationSummary {
+                id: "fcp.github.list_issues".to_owned(),
+                summary: "List issues".to_owned(),
+                capability: "fcp.github.issue.read".to_owned(),
+                risk_level: "low".to_owned(),
+                safety_tier: "safe".to_owned(),
+                idempotency: "strict".to_owned(),
+                requires_approval: false,
+                supports_simulate: MetadataField::Unknown,
+            },
+            input_schema: serde_json::json!({ "type": "object" }),
+            output_schema: serde_json::json!({ "type": "object" }),
+            approval_mode: "none".to_owned(),
+            when_to_use: String::new(),
+            common_mistakes: Vec::new(),
+            examples: Vec::new(),
+            related: Vec::new(),
+            network_constraints: None,
+            rate_limits: None,
+        }
+    }
+
+    #[test]
+    fn try_operation_info_rejects_invalid_operation_id() {
+        let mut discovered = valid_discovered_operation();
+        discovered.actual_id = "Fcp.github.list_issues".to_owned();
+
+        let error = discovered
+            .try_operation_info()
+            .expect_err("invalid operation ids should return an error");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("Fcp.github.list_issues"));
+        assert!(rendered.contains("invalid canonical operation id"));
+    }
+
+    #[test]
+    fn try_operation_info_rejects_invalid_capability_id() {
+        let mut discovered = valid_discovered_operation();
+        discovered.summary.capability = "fcp.github.issue.read!".to_owned();
+
+        let error = discovered
+            .try_operation_info()
+            .expect_err("invalid capability ids should return an error");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("fcp.github.list_issues"));
+        assert!(rendered.contains("invalid capability id `fcp.github.issue.read!`"));
+    }
+
+    #[test]
+    fn try_operation_info_rejects_invalid_related_capability_id() {
+        let mut discovered = valid_discovered_operation();
+        discovered.related = vec!["fcp.github.issue read".to_owned()];
+
+        let error = discovered
+            .try_operation_info()
+            .expect_err("invalid related capability ids should return an error");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("fcp.github.list_issues"));
+        assert!(rendered.contains("invalid related capability `fcp.github.issue read`"));
     }
 
     #[test]

@@ -2402,6 +2402,8 @@ pub struct HostAdminStateSnapshot {
     issued_tokens: Vec<IssuedTokenRecord>,
     #[serde(default)]
     next_token_sequence: u64,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    issuer_verifying_keys: HashMap<String, fcp_crypto::ed25519::Ed25519VerifyingKey>,
     #[serde(default)]
     receipts: Vec<ReceiptSummary>,
     #[serde(default)]
@@ -2422,6 +2424,7 @@ impl Default for HostAdminStateSnapshot {
             next_log_sequence: 1,
             issued_tokens: Vec::new(),
             next_token_sequence: 1,
+            issuer_verifying_keys: HashMap::new(),
             receipts: Vec::new(),
             simulate_receipts: Vec::new(),
         }
@@ -3720,7 +3723,9 @@ impl HostAdminStateStore {
         let token_id_hex = hex::encode(token_id_bytes);
 
         // Build CWT claims.
-        let issuer_id = format!("host:{}", signing_key.key_id());
+        let issuer_verifying_key = signing_key.verifying_key();
+        let issuer_key_id = issuer_verifying_key.key_id().to_hex();
+        let issuer_id = format!("host:{issuer_key_id}");
         let mut claims = fcp_crypto::cose::CwtClaims::new()
             .issuer(&issuer_id)
             .subject(&request.principal_id)
@@ -3824,6 +3829,9 @@ impl HostAdminStateStore {
                         revoked_at: None,
                     });
                     snapshot.next_token_sequence = snapshot.next_token_sequence.saturating_add(1);
+                    snapshot
+                        .issuer_verifying_keys
+                        .insert(issuer_key_id.clone(), issuer_verifying_key.clone());
                 }
 
                 Ok(seq)
@@ -3958,10 +3966,8 @@ impl HostAdminStateStore {
     /// Verify a capability token against the host's state.
     ///
     /// Performs three independent checks:
-    /// 1. **Signature**: Attempts to parse the `COSE_Sign1` structure (full
-    ///    cryptographic verification requires the issuer's public key, which
-    ///    this method does not currently resolve — `signature_valid` reflects
-    ///    structural validity only).
+    /// 1. **Signature**: Verifies the `COSE_Sign1` signature against the host's
+    ///    persisted issuer key ring using the token's COSE `kid`.
     /// 2. **Temporal**: Is the token currently within its not-before/expiration window?
     /// 3. **Scope**: If an `operation_id` or `connector_id` is provided, does the
     ///    token's grant cover them?
@@ -3979,12 +3985,47 @@ impl HostAdminStateStore {
         let inspection = Self::inspect_capability_token(&request.token_cbor_b64)?;
         let mut rejection_reasons = Vec::new();
 
-        // 1. Structural validity (parsing succeeded = structurally valid)
-        // FIXME: cryptographic verification requires the issuer's public key, which
-        // this method does not currently resolve — `signature_valid` reflects
-        // structural validity only. A future version should verify the token signature
-        // against the host keyring.
-        let signature_valid = false;
+        // 1. Cryptographic signature validity against the host issuer key ring.
+        let token_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &request.token_cbor_b64,
+        )
+        .map_err(|e| LifecycleError::Persistence {
+            reason: format!("invalid base64 in capability token: {e}"),
+        })?;
+        let token = fcp_crypto::cose::CoseToken::from_cbor(&token_bytes).map_err(|e| {
+            LifecycleError::Persistence {
+                reason: format!("invalid COSE token: {e}"),
+            }
+        })?;
+        let token_key_id = token
+            .get_key_id()
+            .ok()
+            .and_then(|raw| fcp_crypto::kid::KeyId::try_from_slice(&raw).ok())
+            .map(|kid| kid.to_hex());
+        let verifying_key = if let Some(ref key_id) = token_key_id {
+            let state = self.state.read().await;
+            state.issuer_verifying_keys.get(key_id).cloned()
+        } else {
+            None
+        };
+        let signature_valid = verifying_key
+            .as_ref()
+            .is_some_and(|key| token.verify(key).is_ok());
+        match (
+            token_key_id.as_deref(),
+            verifying_key.as_ref(),
+            signature_valid,
+        ) {
+            (None, _, _) => rejection_reasons.push("Token is missing a COSE key ID (kid)".into()),
+            (Some(key_id), None, _) => {
+                rejection_reasons.push(format!("No verifying key found for token key ID {key_id}"))
+            }
+            (Some(_), Some(_), false) => {
+                rejection_reasons.push("Token signature verification failed".into());
+            }
+            _ => {}
+        }
 
         // 2. Temporal validity
         let temporally_valid = inspection.currently_valid;
@@ -7964,6 +8005,62 @@ mod tests {
         assert!(result.valid);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn verify_tampered_token_fails_signature() {
+        let store = HostAdminStateStore::new();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+
+        let request = CapabilityIssuanceRequest {
+            connector_id: "test:saas:1.0.0".to_owned(),
+            zone_id: "zone-test".to_owned(),
+            principal_id: "agent-1".to_owned(),
+            operations: vec!["read".to_owned()],
+            ttl_secs: 3600,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+            dry_run: false,
+        };
+
+        let issued = store
+            .issue_capability_token(&request, &signing_key)
+            .await
+            .expect("issue token");
+        let mut token_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            issued.token_cbor_b64.expect("non-dry-run token"),
+        )
+        .expect("decode token");
+        *token_bytes.last_mut().expect("signature byte") ^= 0x01;
+        let tampered_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, token_bytes);
+
+        let verify_request = CapabilityTokenVerifyRequest {
+            token_cbor_b64: tampered_b64,
+            operation_id: Some("read".to_owned()),
+            connector_id: None,
+        };
+
+        let result = store
+            .verify_capability_token(&verify_request)
+            .await
+            .expect("verify tampered token");
+
+        assert!(!result.signature_valid);
+        assert!(!result.valid);
+        assert!(
+            result
+                .rejection_reasons
+                .iter()
+                .any(|reason| reason.contains("signature verification failed"))
+        );
+    }
+
     #[test]
     fn scope_check_wildcard_operation_passes() {
         let inspection = CapabilityTokenInspection {
@@ -9920,6 +10017,7 @@ mod tests {
         assert_eq!(snapshot.next_event_sequence, 1);
         assert_eq!(snapshot.next_log_sequence, 1);
         assert_eq!(snapshot.next_token_sequence, 1);
+        assert!(snapshot.issuer_verifying_keys.is_empty());
     }
 
     // ── HostAdminStateStore::new default ────────────────────────────────

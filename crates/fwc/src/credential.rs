@@ -1076,7 +1076,9 @@ mod tests {
     #[test]
     fn file_backend_temp_path_is_unique() {
         let backend = FileBackend::new(PathBuf::from("/tmp/fwc-credentials"));
-        let path = backend.credential_path("github");
+        let path = backend
+            .credential_path("github")
+            .expect("credential path should resolve");
         let first = FileBackend::temp_path_for(&path);
         let second = FileBackend::temp_path_for(&path);
 

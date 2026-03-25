@@ -308,6 +308,14 @@ where
         policy
             .validate()
             .map_err(|error| HostError::Internal(format!("invalid rollout policy: {error}")))?;
+        if previous_version
+            .as_ref()
+            .is_some_and(|previous| previous == &version)
+        {
+            return Err(HostError::InvalidFilter(format!(
+                "rollout previous_version `{version}` must differ from target version `{version}`"
+            )));
+        }
 
         let _summary = self
             .registry
@@ -4132,6 +4140,35 @@ mod tests {
             .unwrap();
         // Same version -> previous_version should not be set (version == recorded)
         assert!(o.record.previous_version.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn ctrl_schedule_rejects_matching_previous_version() {
+        let reg = Arc::new(TestRegistry {
+            summary: connector_summary(ConnectorHealth::healthy()),
+            self_check: SelfCheckReport::ok(),
+        });
+        let lm = Arc::new(InMemoryLifecycleManager::new());
+        let ctrl = RolloutController::new(reg, lm);
+        let version = semver::Version::new(1, 0, 0);
+
+        let err = ctrl
+            .schedule_canary(
+                &connector_id(),
+                version.clone(),
+                Some(version.clone()),
+                &rollout_policy(),
+                Utc::now(),
+            )
+            .await
+            .expect_err("matching previous_version should be rejected");
+
+        assert!(matches!(
+            err,
+            HostError::InvalidFilter(message)
+                if message.contains("must differ from target version")
+                    && message.contains(&version.to_string())
+        ));
     }
 
     #[fcp_async_core::runtime::test]

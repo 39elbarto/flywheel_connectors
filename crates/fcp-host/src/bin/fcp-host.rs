@@ -583,7 +583,8 @@ impl ConnectorProcessRunner {
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         for (key, value) in env {
             cmd.env(key, value);
@@ -652,14 +653,6 @@ impl ConnectorProcessRunner {
         self.read_json().await
     }
 }
-
-impl Drop for ConnectorProcessRunner {
-    fn drop(&mut self) {
-        // Prevent zombie process leaks by terminating the child on drop.
-        let _ = self._child.start_kill();
-    }
-}
-
 async fn handle_accept_error(err: std::io::Error) {
     if matches!(
         err.kind(),
@@ -4310,7 +4303,18 @@ async fn rollout_evaluate_handler(
     let connector_id = parse_connector_id(&connector_id)?;
     let observed_at = observed_at.unwrap_or_else(Utc::now);
     let started_at = Instant::now();
-    let effective_pinned = pinned;
+    let pinned_version = state.lifecycle.pinned_version(&connector_id).await;
+    let effective_pinned = pinned_version.is_some();
+    if pinned != effective_pinned {
+        tracing::warn!(
+            event = "rollout_evaluate_pinned_override",
+            connector_id = %connector_id,
+            requested_pinned = pinned,
+            effective_pinned,
+            pinned_version = ?pinned_version,
+            "ignoring client-supplied pinned flag in favor of lifecycle state"
+        );
+    }
     tracing::debug!(
         event = "rollout_evaluate_request",
         connector_id = %connector_id,
@@ -4759,6 +4763,15 @@ mod tests {
         }
     }
 
+    fn rollout_handler_test_policy() -> RolloutPolicy {
+        RolloutPolicy::builder()
+            .canary_percent(5)
+            .min_canary_duration_secs(0)
+            .success_thresholds(fcp_core::SuccessThresholds::new(0, 10_000, 1, 300))
+            .rollback_rules(fcp_core::RollbackRules::new(10_000, 3, 1, 300, true))
+            .build()
+    }
+
     fn invoke_response_with_metrics(metrics: Vec<UsageMetric>) -> InvokeResponse {
         InvokeResponse::ok(RequestId::random(), json!({"ok": true})).with_usage_metrics(metrics)
     }
@@ -4899,6 +4912,36 @@ mod tests {
                 .expect("health should succeed");
         assert_eq!(health_response["result"]["status"]["state"], "ready");
         assert!(health_response["result"]["status"]["error"].is_null());
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    async fn connector_process_runner_drop_reaps_long_running_process() {
+        let pid = {
+            let args = vec!["-c".to_string(), "while :; do sleep 1; done".to_string()];
+            let runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
+                .await
+                .expect("spawn long-running process");
+            runner._child.id().expect("child pid should be available")
+        };
+
+        let mut reaped = false;
+        for _ in 0..80 {
+            let status = std::process::Command::new("sh")
+                .args(["-c", &format!("kill -0 {pid} >/dev/null 2>&1")])
+                .status()
+                .expect("kill -0 should run");
+            if !status.success() {
+                reaped = true;
+                break;
+            }
+            fcp_async_core::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            reaped,
+            "child pid {pid} should be gone after drop-triggered cleanup"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -5503,6 +5546,89 @@ mod tests {
         let cloned = state.clone();
         // started_at should be equal (same instant)
         assert_eq!(state.started_at, cloned.started_at);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn rollout_evaluate_handler_uses_lifecycle_pin_state_over_request_flag() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping rollout pin-state test");
+            return;
+        }
+
+        let connector_id = ConnectorId::from_static("fcp.test.rollout-pinned:utility:1.0.0");
+        let registry = Arc::new(
+            SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
+                connector_id.as_str(),
+            )])
+            .await
+            .expect("registry should load"),
+        );
+        let doctor = DoctorService::new(Arc::clone(&registry));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let discovery = Arc::new(DiscoveryEndpoint::new(
+            Arc::clone(&registry),
+            Arc::clone(&budget),
+        ));
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let rollout = Arc::new(RolloutController::new(
+            Arc::clone(&registry),
+            Arc::clone(&lifecycle),
+        ));
+        let state = Arc::new(AppState {
+            registry,
+            doctor,
+            budget,
+            discovery,
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::clone(&rollout),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            connectors_file: None,
+            started_at: Instant::now(),
+        });
+        let version = semver::Version::new(1, 2, 0);
+        let previous_version = semver::Version::new(1, 1, 0);
+        let scheduled_at = Utc
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("valid schedule timestamp");
+        let policy = rollout_handler_test_policy();
+        rollout
+            .schedule_canary(
+                &connector_id,
+                version.clone(),
+                Some(previous_version),
+                &policy,
+                scheduled_at,
+            )
+            .await
+            .expect("canary should schedule");
+        lifecycle
+            .pin(&connector_id, version)
+            .await
+            .expect("pin should persist");
+
+        let Json(outcome) = rollout_evaluate_handler(
+            State(state),
+            Json(RolloutEvaluateRequest {
+                connector_id: connector_id.to_string(),
+                invocation_succeeded: true,
+                latency_ms: Some(15),
+                uptime_secs: 900,
+                pinned: false,
+                crashed: false,
+                policy,
+                observed_at: Some(scheduled_at + chrono::Duration::seconds(180)),
+            }),
+        )
+        .await
+        .expect("handler should succeed");
+
+        assert_eq!(outcome.decision, RolloutDecision::Hold);
+        assert_eq!(outcome.audit_event.reason_code, "pinned");
+        assert!(outcome.evidence.pinned);
     }
 
     // ── ConnectorSummary defaults in SubprocessConnector ──

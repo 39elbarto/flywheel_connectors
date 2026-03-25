@@ -13081,13 +13081,13 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
         })
         .collect();
 
-    let tools_json = export_tools::export_tools(&operations, args.tool_format, &options);
+    let tools_json = export_tools::try_export_tools(&operations, args.tool_format, &options)?;
     let tool_count = operations.len();
     let connector_count = connectors.len();
     let operation_infos = operations
         .iter()
-        .map(|operation| operation.operation_info())
-        .collect::<Vec<_>>();
+        .map(|operation| operation.try_operation_info())
+        .collect::<Result<Vec<_>>>()?;
     let tool_provenance = tool_inventory_provenance(
         &operation_infos,
         args.tool_format,
@@ -17540,7 +17540,7 @@ fn capabilities_dispatch(
         .iter()
         .map(|entry| entry.connector_id.clone())
         .collect::<BTreeSet<_>>();
-    let mut operation_metadata = local_capability_metadata_map(&manifest_catalog);
+    let mut operation_metadata = local_capability_metadata_map(&manifest_catalog)?;
     if let Some(client) = host_client.as_ref() {
         operation_metadata.extend(host_capability_metadata_map(
             client,
@@ -17627,11 +17627,11 @@ fn resolve_capability_connector_filter(
 
 fn local_capability_metadata_map(
     manifest_catalog: &DiscoveryCatalog,
-) -> HashMap<(String, String), CapabilityOperationMetadata> {
+) -> Result<HashMap<(String, String), CapabilityOperationMetadata>> {
     let mut metadata = HashMap::new();
     for connector in manifest_catalog.connectors() {
         for operation in &connector.operations {
-            let info = operation.operation_info();
+            let info = operation.try_operation_info()?;
             let entry = CapabilityOperationMetadata {
                 connector_slug: connector.slug.clone(),
                 capability_id: info.capability,
@@ -17651,7 +17651,7 @@ fn local_capability_metadata_map(
             }
         }
     }
-    metadata
+    Ok(metadata)
 }
 
 fn host_capability_metadata_map(

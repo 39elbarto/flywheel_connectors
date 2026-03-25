@@ -42,7 +42,8 @@ impl ConnectorProcessRunner {
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         for (key, value) in env {
             cmd.env(key, value);
@@ -262,13 +263,6 @@ impl ConnectorProcessRunner {
     pub async fn stderr_lines(&self) -> Vec<String> {
         let lines = self.stderr_lines.lock().await;
         lines.clone()
-    }
-}
-
-impl Drop for ConnectorProcessRunner {
-    fn drop(&mut self) {
-        // Prevent zombie processes from accumulating during test runs
-        let _ = self.child.start_kill();
     }
 }
 
@@ -554,6 +548,36 @@ mod tests {
         assert!(script.contains("# export FCP_MODE=<value>"));
         assert!(!script.contains("secret"));
         runner.terminate().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    async fn drop_reaps_long_running_process() {
+        let pid = {
+            let runner =
+                ConnectorProcessRunner::spawn("sh", &["-c", "while :; do sleep 1; done"], &[])
+                    .await
+                    .unwrap();
+            runner.child.id().expect("child pid should be available")
+        };
+
+        let mut reaped = false;
+        for _ in 0..80 {
+            let status = std::process::Command::new("sh")
+                .args(["-c", &format!("kill -0 {pid} >/dev/null 2>&1")])
+                .status()
+                .expect("kill -0 should run");
+            if !status.success() {
+                reaped = true;
+                break;
+            }
+            fcp_async_core::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            reaped,
+            "child pid {pid} should be gone after drop-triggered cleanup"
+        );
     }
 
     #[test]

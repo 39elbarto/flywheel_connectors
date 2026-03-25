@@ -3,6 +3,7 @@
 //! Converts [`DiscoveredOperation`] data from the discovery catalog into
 //! tool schemas consumable by external AI agent runtimes.
 
+use anyhow::Result;
 use fcp_core::{OperationInfo, tool_schema::ExportOptions as SharedExportOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -216,8 +217,13 @@ pub fn to_mcp_tool_info(op: &OperationInfo, opts: &ExportOptions) -> McpTool {
 }
 
 /// Convert a discovered operation to an MCP tool.
+pub fn try_to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> Result<McpTool> {
+    Ok(to_mcp_tool_info(&op.try_operation_info()?, opts))
+}
+
+/// Convert a discovered operation to an MCP tool.
 pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
-    to_mcp_tool_info(&op.operation_info(), opts)
+    try_to_mcp_tool(op, opts).expect("discovered operations should have valid tool metadata")
 }
 
 /// Convert canonical `OperationInfo` metadata to a Claude tool.
@@ -231,8 +237,13 @@ pub fn to_claude_tool_info(op: &OperationInfo, opts: &ExportOptions) -> ClaudeTo
 }
 
 /// Convert a discovered operation to a Claude tool.
+pub fn try_to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> Result<ClaudeTool> {
+    Ok(to_claude_tool_info(&op.try_operation_info()?, opts))
+}
+
+/// Convert a discovered operation to a Claude tool.
 pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeTool {
-    to_claude_tool_info(&op.operation_info(), opts)
+    try_to_claude_tool(op, opts).expect("discovered operations should have valid tool metadata")
 }
 
 /// Convert canonical `OperationInfo` metadata to an `OpenAI` tool.
@@ -250,8 +261,13 @@ pub fn to_openai_tool_info(op: &OperationInfo, opts: &ExportOptions) -> OpenAiTo
 }
 
 /// Convert a discovered operation to an `OpenAI` tool.
+pub fn try_to_openai_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> Result<OpenAiTool> {
+    Ok(to_openai_tool_info(&op.try_operation_info()?, opts))
+}
+
+/// Convert a discovered operation to an `OpenAI` tool.
 pub fn to_openai_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> OpenAiTool {
-    to_openai_tool_info(&op.operation_info(), opts)
+    try_to_openai_tool(op, opts).expect("discovered operations should have valid tool metadata")
 }
 
 /// Export canonical `OperationInfo` values as tool schemas in the specified format.
@@ -311,16 +327,26 @@ pub fn passes_capability_filter(op: &DiscoveredOperation, capability: Option<&st
 }
 
 /// Export all matching operations as tool schemas in the specified format.
+pub fn try_export_tools(
+    operations: &[&DiscoveredOperation],
+    format: ToolSchemaFormat,
+    options: &ExportOptions,
+) -> Result<Value> {
+    let operation_infos = operations
+        .iter()
+        .map(|op| op.try_operation_info())
+        .collect::<Result<Vec<_>>>()?;
+    Ok(export_operation_infos(&operation_infos, format, options))
+}
+
+/// Export all matching operations as tool schemas in the specified format.
 pub fn export_tools(
     operations: &[&DiscoveredOperation],
     format: ToolSchemaFormat,
     options: &ExportOptions,
 ) -> Value {
-    let operation_infos = operations
-        .iter()
-        .map(|op| op.operation_info())
-        .collect::<Vec<_>>();
-    export_operation_infos(&operation_infos, format, options)
+    try_export_tools(operations, format, options)
+        .expect("discovered operations should have valid tool metadata")
 }
 
 #[cfg(test)]
@@ -1518,6 +1544,30 @@ mod tests {
             &ExportOptions::default(),
         );
         assert_eq!(result.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn try_export_tools_rejects_invalid_discovery_labels() {
+        let mut op = sample_op();
+        op.summary.risk_level = "catastrophic".to_string();
+
+        let error = try_export_tools(&[&op], ToolSchemaFormat::Mcp, &ExportOptions::default())
+            .expect_err("invalid discovery labels should fail export");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("github.list_issues"));
+        assert!(rendered.contains("invalid discovery risk level label `catastrophic`"));
+    }
+
+    #[test]
+    fn try_export_tools_rejects_invalid_discovery_capability_ids() {
+        let mut op = sample_op();
+        op.summary.capability = "github.issue.read!".to_string();
+
+        let error = try_export_tools(&[&op], ToolSchemaFormat::Mcp, &ExportOptions::default())
+            .expect_err("invalid discovery capability ids should fail export");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("github.list_issues"));
+        assert!(rendered.contains("invalid capability id `github.issue.read!`"));
     }
 
     // ── Cross-format consistency ─────────────────────────────────────

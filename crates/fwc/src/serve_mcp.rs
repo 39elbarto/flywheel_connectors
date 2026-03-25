@@ -664,33 +664,35 @@ pub fn from_operations(ops: &[DiscoveredOperationEntry]) -> McpServerState {
 }
 
 /// Build an MCP server state from discovered connectors.
-#[must_use]
 pub fn state_from_connectors(
     connectors: &[&DiscoveredConnector],
     config: McpServerConfig,
-) -> McpServerState {
+) -> Result<McpServerState> {
     let options = export_tools::ExportOptions::default();
-    let tools = connectors.iter().flat_map(|connector| {
-        connector.operations.iter().map(|operation| {
-            let tool = export_tools::to_mcp_tool(operation, &options);
-            McpToolDefinition::new(
-                tool.name.clone(),
-                tool.description,
-                tool.input_schema,
-                connector.slug.clone(),
-                operation.preferred_selector.clone(),
-            )
-            .with_annotations(tool.annotations)
-            .with_provenance(catalog::tool_provenance(
-                &tool.name,
-                &connector.slug,
-                catalog::ToolInventorySource::WorkspaceManifest,
-                catalog::ToolAvailability::Unknown,
-            ))
-            .with_supported_zones(connector.supported_zones.clone())
+    let tools = connectors
+        .iter()
+        .flat_map(|connector| {
+            connector.operations.iter().map(|operation| {
+                let tool = export_tools::try_to_mcp_tool(operation, &options)?;
+                Ok(McpToolDefinition::new(
+                    tool.name.clone(),
+                    tool.description,
+                    tool.input_schema,
+                    connector.slug.clone(),
+                    operation.preferred_selector.clone(),
+                )
+                .with_annotations(tool.annotations)
+                .with_provenance(catalog::tool_provenance(
+                    &tool.name,
+                    &connector.slug,
+                    catalog::ToolInventorySource::WorkspaceManifest,
+                    catalog::ToolAvailability::Unknown,
+                ))
+                .with_supported_zones(connector.supported_zones.clone()))
+            })
         })
-    });
-    state_from_tools(tools, config)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(state_from_tools(tools, config))
 }
 
 /// Build an MCP server state from already-prepared tool definitions.
@@ -2127,7 +2129,7 @@ mod tests {
         });
 
         client_input.write_all(input.as_bytes()).await.unwrap();
-        client_input.shutdown().await.unwrap();
+        client_input.shutdown(std::net::Shutdown::Write).unwrap();
         task.await.unwrap();
 
         let mut output = String::new();

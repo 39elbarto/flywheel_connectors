@@ -125,16 +125,16 @@ impl TelegramClient {
 
                             // If no header, parse the JSON body for
                             // parameters.retry_after (Telegram's native format)
-                            let retry_after_secs = if let Some(s) = header_val {
-                                s
-                            } else {
-                                let body_val = response
-                                    .json::<serde_json::Value>()
-                                    .await
-                                    .ok()
-                                    .and_then(|v| v.get("parameters")?.get("retry_after")?.as_u64());
-                                body_val.unwrap_or(5)
-                            };
+                            let retry_after_secs =
+                                if let Some(s) = header_val {
+                                    s
+                                } else {
+                                    let body_val =
+                                        response.json::<serde_json::Value>().await.ok().and_then(
+                                            |v| v.get("parameters")?.get("retry_after")?.as_u64(),
+                                        );
+                                    body_val.unwrap_or(5)
+                                };
 
                             return AttemptOutcome::Retryable {
                                 error: TelegramError::Api {
@@ -688,7 +688,8 @@ mod tests {
             .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
                 "ok": false,
                 "error_code": 429,
-                "description": "Too Many Requests: retry after 30"
+                "description": "Too Many Requests: retry after 1",
+                "parameters": {"retry_after": 1}
             })))
             .mount(&mock_server)
             .await;

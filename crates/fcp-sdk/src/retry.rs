@@ -1133,8 +1133,8 @@ mod tests {
             .with_base_backoff_ms(0)
             .with_jitter_enabled(false);
         // 0 is promoted to 1 to prevent busy-wait loops
-        assert_eq!(p.compute_backoff_ms(0), 1);     // 1 * 2^0
-        assert_eq!(p.compute_backoff_ms(10), 1024);  // 1 * 2^10
+        assert_eq!(p.compute_backoff_ms(0), 1); // 1 * 2^0
+        assert_eq!(p.compute_backoff_ms(10), 1024); // 1 * 2^10
     }
 
     #[test]

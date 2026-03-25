@@ -137,7 +137,7 @@ fn bench_frame_encode(c: &mut Criterion) {
             BenchmarkId::new("symbols_x_size", format!("{symbol_count}x{symbol_size}")),
             &(symbol_count, symbol_size),
             |b, _| {
-                b.iter(|| black_box(frame.encode()));
+                b.iter(|| black_box(frame.encode().expect("encode")));
             },
         );
     }
@@ -150,7 +150,7 @@ fn bench_frame_decode(c: &mut Criterion) {
 
     for (symbol_count, symbol_size) in [(1, 1024), (10, 1024), (64, 256)] {
         let frame = test_frame(symbol_count, symbol_size);
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         let frame_size = encoded.len();
         group.throughput(Throughput::Bytes(frame_size as u64));
         group.bench_with_input(

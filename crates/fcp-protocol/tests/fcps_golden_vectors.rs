@@ -414,7 +414,7 @@ fn golden_full_frame_roundtrip() {
     ];
 
     let frame = FcpsFrame { header, symbols };
-    let encoded = frame.encode();
+    let encoded = frame.encode().expect("encode");
 
     // 114 (header) + 54*2 (symbols) = 222 bytes
     assert_eq!(encoded.len(), 114 + 108);
@@ -759,7 +759,7 @@ fn reject_frame_exceeding_mtu() {
     ];
 
     let frame = FcpsFrame { header, symbols };
-    let frame_bytes = frame.encode();
+    let frame_bytes = frame.encode().expect("encode");
 
     // Frame is 114 (header) + 2 * (22 + 1024) = 114 + 2092 = 2206 bytes
     // Use a small MTU that's less than the frame size

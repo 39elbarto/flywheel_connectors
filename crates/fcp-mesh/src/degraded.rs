@@ -265,10 +265,11 @@ impl DegradedModeEncoder {
     ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
         let frames = self.encode(envelope, epoch_id)?;
 
-        Ok(frames
+        let signed: Result<Vec<_>, _> = frames
             .into_iter()
             .map(|frame| SignedFcpsFrame::new(frame, source_id.clone(), timestamp, signing_key))
-            .collect())
+            .collect();
+        Ok(signed?)
     }
 }
 

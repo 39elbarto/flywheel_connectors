@@ -882,7 +882,7 @@ impl GossipConfig {
     /// baseline/upgradeable state.
     #[must_use]
     pub const fn max_iblt_bytes(&self) -> usize {
-        /// 16 MB hard cap to prevent saturating_mul from returning usize::MAX.
+        // 16 MB hard cap to prevent saturating_mul from returning usize::MAX.
         const MAX_IBLT_BYTES_CAP: usize = 16 * 1024 * 1024;
 
         let derived = self.reconciliation_batch_size.saturating_mul(48);

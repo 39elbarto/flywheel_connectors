@@ -204,7 +204,7 @@ fn fcps_frame_encode_decode_roundtrip() {
         symbols,
     };
 
-    let encoded = frame.encode();
+    let encoded = frame.encode().expect("encode");
     let decoded = FcpsFrame::decode(&encoded, 65535).expect("decode");
     assert_eq!(decoded.symbols.len(), 2);
     assert_eq!(decoded.symbols[0].esi, 0);
@@ -241,7 +241,7 @@ fn signed_frame_sign_and_verify() {
     };
 
     let source_id = test_node_id("node-1");
-    let signed = SignedFcpsFrame::new(frame, source_id, 12345, &signing_key);
+    let signed = SignedFcpsFrame::new(frame, source_id, 12345, &signing_key).expect("sign");
 
     signed
         .verify(&signing_key.verifying_key())
@@ -269,7 +269,7 @@ fn signed_frame_wrong_key_fails() {
         symbols: vec![],
     };
 
-    let signed = SignedFcpsFrame::new(frame, test_node_id("n1"), 100, &signing_key);
+    let signed = SignedFcpsFrame::new(frame, test_node_id("n1"), 100, &signing_key).expect("sign");
     let result = signed.verify(&wrong_key.verifying_key());
     assert!(result.is_err());
 }

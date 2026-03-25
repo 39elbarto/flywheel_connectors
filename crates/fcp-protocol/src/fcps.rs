@@ -1109,7 +1109,7 @@ mod tests {
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
 
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         let expected_len = FCPS_HEADER_LEN + 2 * (SYMBOL_RECORD_OVERHEAD + 64);
         assert_eq!(encoded.len(), expected_len);
 
@@ -1122,7 +1122,7 @@ mod tests {
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
 
         let err = FcpsFrame::decode(&encoded, 100).expect_err("should fail");
         assert!(matches!(err, FrameError::ExceedsMtu { .. }));
@@ -1204,7 +1204,8 @@ mod tests {
         let source_id = TailscaleNodeId::new("node-test");
         let timestamp = 1_704_067_200;
 
-        let signed = SignedFcpsFrame::new(frame, source_id, timestamp, &signing_key);
+        let signed =
+            SignedFcpsFrame::new(frame, source_id, timestamp, &signing_key).expect("sign");
 
         // Verify should succeed with correct key
         signed
@@ -1223,7 +1224,7 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-wrong-key");
-        let signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key);
+        let signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
 
         // Verify should fail with wrong key
         assert!(signed.verify(&wrong_key.verifying_key()).is_err());
@@ -1242,7 +1243,8 @@ mod tests {
         let source_id = TailscaleNodeId::new("node-roundtrip");
         let timestamp = 1_704_067_200;
 
-        let signed = SignedFcpsFrame::new(frame, source_id.clone(), timestamp, &signing_key);
+        let signed =
+            SignedFcpsFrame::new(frame, source_id.clone(), timestamp, &signing_key).expect("sign");
         let encoded = signed.encode();
 
         let decoded = SignedFcpsFrame::decode(&encoded, 2000).expect("decode ok");
@@ -1750,7 +1752,7 @@ mod tests {
             header,
             symbols: vec![],
         };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         assert_eq!(encoded.len(), FCPS_HEADER_LEN);
         let decoded = FcpsFrame::decode(&encoded, 2000).expect("decode");
         assert_eq!(decoded.symbols.len(), 0);
@@ -1775,7 +1777,7 @@ mod tests {
             header,
             symbols: vec![test_symbol(0, 64)],
         };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         let decoded = FcpsFrame::decode(&encoded, 2000).expect("decode");
         assert_eq!(decoded.symbols.len(), 1);
         assert_eq!(decoded.symbols[0].esi, 0);
@@ -1830,7 +1832,7 @@ mod tests {
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         validate_frame_lengths(&encoded, &frame.header).expect("valid");
     }
 
@@ -1843,7 +1845,7 @@ mod tests {
             header: test_header(),
             symbols,
         };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         let err = validate_frame_lengths(&encoded, &header).expect_err("mismatch");
         assert!(matches!(err, FrameError::LengthMismatch { .. }));
     }
@@ -2037,7 +2039,8 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-tamper");
-        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key);
+        let mut signed =
+            SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
         // Tamper with a symbol
         signed.frame.symbols[0].data[0] ^= 0xFF;
         assert!(signed.verify(&signing_key.verifying_key()).is_err());
@@ -2051,7 +2054,8 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-ts");
-        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key);
+        let mut signed =
+            SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
         signed.timestamp += 1;
         assert!(signed.verify(&signing_key.verifying_key()).is_err());
     }
@@ -2064,7 +2068,8 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-original");
-        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key);
+        let mut signed =
+            SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
         signed.source_id = TailscaleNodeId::new("node-spoofed");
         assert!(signed.verify(&signing_key.verifying_key()).is_err());
     }
@@ -2400,7 +2405,7 @@ mod tests {
         };
         let symbols: Vec<_> = (0..symbol_count).map(|i| test_symbol(i, 64)).collect();
         let frame = FcpsFrame { header, symbols };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         let decoded = FcpsFrame::decode(&encoded, 10000).expect("decode");
         assert_eq!(decoded.symbols.len(), 10);
         for (i, sym) in decoded.symbols.iter().enumerate() {
@@ -2625,7 +2630,7 @@ mod tests {
             };
             let symbols = vec![test_symbol(0, sym_size)];
             let frame = FcpsFrame { header, symbols };
-            let encoded = frame.encode();
+            let encoded = frame.encode().expect("encode");
             let decoded = FcpsFrame::decode(&encoded, 100_000).expect("decode");
             assert_eq!(decoded.symbols.len(), 1);
             assert_eq!(decoded.symbols[0].data.len(), sym_size as usize);
@@ -2691,7 +2696,8 @@ mod tests {
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
         let signed =
-            SignedFcpsFrame::new(frame, TailscaleNodeId::new("dbg-node"), 1000, &signing_key);
+            SignedFcpsFrame::new(frame, TailscaleNodeId::new("dbg-node"), 1000, &signing_key)
+                .expect("sign");
         let dbg = format!("{signed:?}");
         assert!(dbg.contains("SignedFcpsFrame"));
     }
@@ -2889,7 +2895,8 @@ mod tests {
             TailscaleNodeId::new("clone-test"),
             1000,
             &signing_key,
-        );
+        )
+        .expect("sign");
         let cloned = signed.clone();
         assert_eq!(cloned.timestamp, signed.timestamp);
         assert_eq!(cloned.source_id.as_str(), signed.source_id.as_str());
@@ -2911,7 +2918,7 @@ mod tests {
             auth_tag: [0xBB; 16],
         }];
         let frame = FcpsFrame { header, symbols };
-        let encoded = frame.encode();
+        let encoded = frame.encode().expect("encode");
         let decoded = FcpsFrame::decode(&encoded, 10000).expect("decode");
         assert_eq!(decoded.symbols.len(), 1);
         assert_eq!(decoded.symbols[0].data.len(), 1);
@@ -3046,7 +3053,9 @@ mod tests {
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed = SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key);
+        let signed =
+            SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key)
+                .expect("sign");
         signed
             .verify(&signing_key.verifying_key())
             .expect("verify zero ts");
@@ -3064,7 +3073,8 @@ mod tests {
             TailscaleNodeId::new("max-ts"),
             u64::MAX,
             &signing_key,
-        );
+        )
+        .expect("sign");
         signed
             .verify(&signing_key.verifying_key())
             .expect("verify max ts");

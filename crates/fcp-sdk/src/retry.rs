@@ -115,9 +115,11 @@ impl RetryPolicy {
     }
 
     /// Builder: set base backoff delay.
+    ///
+    /// A value of 0 is silently promoted to 1 to prevent tight busy-wait loops.
     #[must_use]
     pub const fn with_base_backoff_ms(mut self, ms: u64) -> Self {
-        self.base_backoff_ms = ms;
+        self.base_backoff_ms = if ms == 0 { 1 } else { ms };
         self
     }
 
@@ -147,11 +149,19 @@ impl RetryPolicy {
     }
 
     /// Compute backoff delay for a given attempt number (0-indexed).
+    ///
+    /// Always returns at least 1ms when `base_backoff_ms` is non-zero
+    /// to prevent tight busy-wait loops.
     #[must_use]
     pub fn compute_backoff_ms(&self, attempt: u32) -> u64 {
         let exp = attempt.min(30);
         let delay = self.base_backoff_ms.saturating_mul(1u64 << exp);
-        delay.min(self.max_backoff_ms)
+        let capped = delay.min(self.max_backoff_ms);
+        if self.base_backoff_ms > 0 && capped == 0 {
+            1
+        } else {
+            capped
+        }
     }
 
     /// Compute backoff delay with deterministic jitter.
@@ -430,7 +440,8 @@ mod tests {
         let p = RetryPolicy::new()
             .with_base_backoff_ms(0)
             .with_jitter_enabled(false);
-        assert_eq!(p.compute_backoff_ms(5), 0);
+        // 0 is promoted to 1 to prevent busy-wait loops
+        assert_eq!(p.compute_backoff_ms(5), 32); // 1 * 2^5
     }
 
     // ── compute_backoff_with_jitter_ms ───────────────────────────────────
@@ -1121,8 +1132,9 @@ mod tests {
         let p = RetryPolicy::new()
             .with_base_backoff_ms(0)
             .with_jitter_enabled(false);
-        assert_eq!(p.compute_backoff_ms(0), 0);
-        assert_eq!(p.compute_backoff_ms(10), 0);
+        // 0 is promoted to 1 to prevent busy-wait loops
+        assert_eq!(p.compute_backoff_ms(0), 1);     // 1 * 2^0
+        assert_eq!(p.compute_backoff_ms(10), 1024);  // 1 * 2^10
     }
 
     #[test]
@@ -1131,7 +1143,8 @@ mod tests {
             .with_base_backoff_ms(1000)
             .with_max_backoff_ms(0)
             .with_jitter_enabled(false);
-        assert_eq!(p.compute_backoff_ms(0), 0); // min(1000, 0) = 0
+        // min(1000, 0) = 0 but base > 0, so clamped to 1 to prevent busy-wait
+        assert_eq!(p.compute_backoff_ms(0), 1);
     }
 
     #[test]

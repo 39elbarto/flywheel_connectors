@@ -147,13 +147,23 @@ pub struct ListWebhooksResponse {
 }
 
 /// Response for creating a webhook.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CreateWebhookResponse {
     pub id: String,
     #[serde(rename = "macSecretBase64")]
     pub mac_secret_base64: String,
     #[serde(default, rename = "expirationTime")]
     pub expiration_time: Option<String>,
+}
+
+impl std::fmt::Debug for CreateWebhookResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateWebhookResponse")
+            .field("id", &self.id)
+            .field("mac_secret_base64", &"[REDACTED]")
+            .field("expiration_time", &self.expiration_time)
+            .finish()
+    }
 }
 
 /// Response for refreshing a webhook.

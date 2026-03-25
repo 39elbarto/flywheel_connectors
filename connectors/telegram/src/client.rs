@@ -116,12 +116,25 @@ impl TelegramClient {
                         let status = response.status();
 
                         if status == StatusCode::TOO_MANY_REQUESTS {
-                            let retry_after_secs = response
+                            // Try HTTP header first
+                            let header_val = response
                                 .headers()
                                 .get("retry-after")
                                 .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.parse::<u64>().ok())
-                                .unwrap_or(5);
+                                .and_then(|v| v.parse::<u64>().ok());
+
+                            // If no header, parse the JSON body for
+                            // parameters.retry_after (Telegram's native format)
+                            let retry_after_secs = if let Some(s) = header_val {
+                                s
+                            } else {
+                                let body_val = response
+                                    .json::<serde_json::Value>()
+                                    .await
+                                    .ok()
+                                    .and_then(|v| v.get("parameters")?.get("retry_after")?.as_u64());
+                                body_val.unwrap_or(5)
+                            };
 
                             return AttemptOutcome::Retryable {
                                 error: TelegramError::Api {

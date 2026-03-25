@@ -3538,7 +3538,7 @@ impl HostAdminStateStore {
                     .as_ref()
                     .is_none_or(|filter_id| e.connector_id.as_str() == filter_id.as_str())
             })
-            .take(request.limit)
+            .take(request.limit.min(10_000))
             .cloned()
             .collect();
 
@@ -3559,7 +3559,7 @@ impl HostAdminStateStore {
     ) {
         self.apply_mutation(|snapshot| {
             let seq = snapshot.next_log_sequence;
-            snapshot.next_log_sequence += 1;
+            snapshot.next_log_sequence = snapshot.next_log_sequence.saturating_add(1);
             snapshot.logs.push(HostLogEntry {
                 sequence: seq,
                 connector_id: connector_id.map(String::from),

@@ -13,7 +13,10 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, SalesforceAuth, SalesforceClient},
+    client::{
+        DEFAULT_API_PATH, DEFAULT_API_VERSION, DEFAULT_BASE_URL, SalesforceAuth, SalesforceClient,
+        normalize_api_version,
+    },
     error::SalesforceError,
 };
 
@@ -22,6 +25,7 @@ use crate::{
 struct SalesforceConfig {
     auth: SalesforceAuth,
     base_url: String,
+    api_version: Option<String>,
 }
 
 impl SalesforceConfig {
@@ -72,7 +76,25 @@ impl SalesforceConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
-        Ok(Self { auth, base_url })
+        let api_version = match params.get("api_version") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "api_version must be a string".into(),
+                })?;
+                Some(normalize_api_version(raw).ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "api_version must look like 66.0 or v66.0".into(),
+                })?)
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            auth,
+            base_url,
+            api_version,
+        })
     }
 }
 
@@ -149,9 +171,19 @@ impl SalesforceConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = SalesforceConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Salesforce connector");
-        let client = SalesforceClient::new(config.auth.clone(), Some(&config.base_url))
-            .map_err(|e| e.to_fcp_error())?;
+        let client = SalesforceClient::new_with_api_version(
+            config.auth.clone(),
+            Some(&config.base_url),
+            config.api_version.as_deref(),
+        )
+        .map_err(|e| e.to_fcp_error())?;
+        info!(
+            auth = %config.auth.redacted_label(),
+            base_url = %config.base_url,
+            api_version = client.api_version(),
+            api_path = client.api_path(),
+            "Configuring Salesforce connector"
+        );
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
@@ -207,6 +239,9 @@ impl SalesforceConnector {
             "status": status,
             "configured": configured,
             "handshaken": handshaken,
+            "base_url": self.config.as_ref().map_or(DEFAULT_BASE_URL, |cfg| cfg.base_url.as_str()),
+            "api_version": self.client.as_ref().map_or(DEFAULT_API_VERSION, |client| client.api_version()),
+            "api_path": self.client.as_ref().map_or(DEFAULT_API_PATH, |client| client.api_path()),
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed)
         }))
@@ -245,21 +280,45 @@ impl SalesforceConnector {
             },
             critical: false,
         });
+        checks.push(DoctorCheck {
+            name: "api_version".into(),
+            passed: true,
+            message: Some(format!(
+                "Salesforce REST API version: {}",
+                self.client
+                    .as_ref()
+                    .map_or(DEFAULT_API_VERSION, |client| client.api_version())
+            )),
+            critical: false,
+        });
         let result = DoctorResult::from_checks(checks);
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     pub fn provisioning_readiness(&self) -> serde_json::Value {
-        let (auth_mode, token_configured, credential_id_configured, base_url) = match &self.config {
-            Some(cfg) => {
-                let (am, tc, cc) = match &cfg.auth {
-                    SalesforceAuth::AccessToken(_) => ("access_token", true, false),
-                    SalesforceAuth::CredentialId(_) => ("credential_id", false, true),
-                };
-                (am, tc, cc, cfg.base_url.as_str())
-            }
-            None => ("unconfigured", false, false, DEFAULT_BASE_URL),
-        };
+        let (auth_mode, token_configured, credential_id_configured, base_url, api_version) =
+            match &self.config {
+                Some(cfg) => {
+                    let (am, tc, cc) = match &cfg.auth {
+                        SalesforceAuth::AccessToken(_) => ("access_token", true, false),
+                        SalesforceAuth::CredentialId(_) => ("credential_id", false, true),
+                    };
+                    let api_version = self
+                        .client
+                        .as_ref()
+                        .map(|client| client.api_version().to_string())
+                        .or_else(|| cfg.api_version.clone())
+                        .unwrap_or_else(|| DEFAULT_API_VERSION.to_string());
+                    (am, tc, cc, cfg.base_url.as_str(), api_version)
+                }
+                None => (
+                    "unconfigured",
+                    false,
+                    false,
+                    DEFAULT_BASE_URL,
+                    DEFAULT_API_VERSION.to_string(),
+                ),
+            };
 
         let network_ok = is_salesforce_domain(base_url);
 
@@ -269,6 +328,7 @@ impl SalesforceConnector {
             "credential_id_configured": credential_id_configured,
             "network_ok": network_ok,
             "base_url": base_url,
+            "api_version": api_version,
         })
     }
 
@@ -1154,6 +1214,7 @@ mod tests {
             SalesforceConfig::from_params(&json!({ "access_token": "00Dxx-test-token" })).unwrap();
         assert!(matches!(config.auth, SalesforceAuth::AccessToken(_)));
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(config.api_version, None);
     }
 
     #[test]
@@ -1225,6 +1286,81 @@ mod tests {
     fn config_default_base_url() {
         let config = SalesforceConfig::from_params(&json!({ "access_token": "tok" })).unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_accepts_custom_api_version() {
+        let config = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "api_version": "65.0"
+        }))
+        .unwrap();
+        assert_eq!(config.api_version.as_deref(), Some("65.0"));
+    }
+
+    #[test]
+    fn config_normalizes_prefixed_api_version() {
+        let config = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "api_version": " v64.0 "
+        }))
+        .unwrap();
+        assert_eq!(config.api_version.as_deref(), Some("64.0"));
+    }
+
+    #[test]
+    fn config_accepts_uppercase_prefixed_api_version() {
+        let config = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "api_version": "V63.0"
+        }))
+        .unwrap();
+        assert_eq!(config.api_version.as_deref(), Some("63.0"));
+    }
+
+    #[test]
+    fn config_rejects_non_string_api_version() {
+        let result = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "api_version": 66.0
+        }));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api_version must be a string"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_invalid_api_version() {
+        let result = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "api_version": "/services/data/v66.0"
+        }));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api_version must look like"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_malformed_api_version() {
+        let result = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "api_version": "66"
+        }));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api_version must look like"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
     }
 
     #[test]
@@ -1959,12 +2095,14 @@ mod tests {
         c.config = Some(SalesforceConfig {
             auth: SalesforceAuth::AccessToken("test-token".into()),
             base_url: "https://myorg.my.salesforce.com".into(),
+            api_version: Some("65.0".into()),
         });
         let r = c.provisioning_readiness();
         assert_eq!(r["auth_mode"], "access_token");
         assert_eq!(r["token_configured"], true);
         assert_eq!(r["credential_id_configured"], false);
         assert_eq!(r["network_ok"], true);
+        assert_eq!(r["api_version"], "65.0");
     }
 
     #[test]
@@ -1975,12 +2113,14 @@ mod tests {
                 CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
             ),
             base_url: "https://myorg.my.salesforce.com".into(),
+            api_version: None,
         });
         let r = c.provisioning_readiness();
         assert_eq!(r["auth_mode"], "credential_id");
         assert_eq!(r["token_configured"], false);
         assert_eq!(r["credential_id_configured"], true);
         assert_eq!(r["network_ok"], true);
+        assert_eq!(r["api_version"], DEFAULT_API_VERSION);
     }
 
     #[test]
@@ -1996,6 +2136,7 @@ mod tests {
         c.config = Some(SalesforceConfig {
             auth: SalesforceAuth::AccessToken("tok".into()),
             base_url: "https://evil.example.com".into(),
+            api_version: None,
         });
         let r = c.provisioning_readiness();
         assert_eq!(r["network_ok"], false);

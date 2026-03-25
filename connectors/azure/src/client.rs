@@ -8,7 +8,7 @@ use fcp_sdk::migration::{
 };
 use quick_xml::de::from_str as from_xml_str;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracing::debug;
 
 use crate::{
@@ -81,9 +81,136 @@ fn validate_hostname_component<'a>(value: &'a str, field: &str) -> AzureResult<&
 }
 
 pub const DEFAULT_MANAGEMENT_URL: &str = "https://management.azure.com";
-const ARM_API_VERSION: &str = "2022-12-01";
-const KEYVAULT_API_VERSION: &str = "7.4";
-const BLOB_API_VERSION: &str = "2023-11-03";
+
+/// Default Azure Subscriptions API version.
+/// Can be overridden via the `FCP_AZURE_SUBSCRIPTIONS_API_VERSION` environment variable.
+pub const DEFAULT_SUBSCRIPTIONS_API_VERSION: &str = "2022-12-01";
+
+/// Default Azure Resource Groups API version.
+/// Can be overridden via the `FCP_AZURE_RESOURCE_GROUPS_API_VERSION` environment variable.
+pub const DEFAULT_RESOURCE_GROUPS_API_VERSION: &str = "2021-04-01";
+
+/// Default Azure Resources API version.
+/// Can be overridden via the `FCP_AZURE_RESOURCES_API_VERSION` environment variable.
+pub const DEFAULT_RESOURCES_API_VERSION: &str = "2021-04-01";
+
+/// Default Azure Key Vault API version.
+/// Can be overridden via the `FCP_AZURE_KEYVAULT_API_VERSION` environment variable.
+pub const DEFAULT_KEYVAULT_API_VERSION: &str = "2025-07-01";
+
+/// Default Azure Blob Storage API version.
+/// Can be overridden via the `FCP_AZURE_BLOB_API_VERSION` environment variable.
+pub const DEFAULT_BLOB_API_VERSION: &str = "2026-02-06";
+
+/// Resolve an Azure API version: env var `FCP_AZURE_{env_suffix}_API_VERSION` > compiled default.
+fn resolve_azure_api_version(env_suffix: &str, default: &str) -> String {
+    let env_key = format!("FCP_AZURE_{env_suffix}_API_VERSION");
+    if let Ok(v) = std::env::var(&env_key) {
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    default.to_string()
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct AzureApiVersions {
+    #[serde(default = "default_subscriptions_api_version")]
+    pub subscriptions: String,
+    #[serde(default = "default_resource_groups_api_version")]
+    pub resource_groups: String,
+    #[serde(default = "default_resources_api_version")]
+    pub resources: String,
+    #[serde(default = "default_keyvault_api_version")]
+    pub keyvault: String,
+    #[serde(default = "default_blob_api_version")]
+    pub blob: String,
+}
+
+impl AzureApiVersions {
+    #[must_use]
+    pub fn compiled_defaults() -> Self {
+        Self {
+            subscriptions: DEFAULT_SUBSCRIPTIONS_API_VERSION.into(),
+            resource_groups: DEFAULT_RESOURCE_GROUPS_API_VERSION.into(),
+            resources: DEFAULT_RESOURCES_API_VERSION.into(),
+            keyvault: DEFAULT_KEYVAULT_API_VERSION.into(),
+            blob: DEFAULT_BLOB_API_VERSION.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        self.subscriptions = self.subscriptions.trim().to_string();
+        self.resource_groups = self.resource_groups.trim().to_string();
+        self.resources = self.resources.trim().to_string();
+        self.keyvault = self.keyvault.trim().to_string();
+        self.blob = self.blob.trim().to_string();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        for (label, value) in [
+            ("api_versions.subscriptions", &self.subscriptions),
+            ("api_versions.resource_groups", &self.resource_groups),
+            ("api_versions.resources", &self.resources),
+            ("api_versions.keyvault", &self.keyvault),
+            ("api_versions.blob", &self.blob),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("{label} cannot be empty"));
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "subscriptions={}, resource_groups={}, resources={}, keyvault={}, blob={}",
+            self.subscriptions, self.resource_groups, self.resources, self.keyvault, self.blob
+        )
+    }
+}
+
+impl Default for AzureApiVersions {
+    fn default() -> Self {
+        Self {
+            subscriptions: resolve_azure_api_version(
+                "SUBSCRIPTIONS",
+                DEFAULT_SUBSCRIPTIONS_API_VERSION,
+            ),
+            resource_groups: resolve_azure_api_version(
+                "RESOURCE_GROUPS",
+                DEFAULT_RESOURCE_GROUPS_API_VERSION,
+            ),
+            resources: resolve_azure_api_version("RESOURCES", DEFAULT_RESOURCES_API_VERSION),
+            keyvault: resolve_azure_api_version("KEYVAULT", DEFAULT_KEYVAULT_API_VERSION),
+            blob: resolve_azure_api_version("BLOB", DEFAULT_BLOB_API_VERSION),
+        }
+    }
+}
+
+fn default_subscriptions_api_version() -> String {
+    AzureApiVersions::default().subscriptions
+}
+
+fn default_resource_groups_api_version() -> String {
+    AzureApiVersions::default().resource_groups
+}
+
+fn default_resources_api_version() -> String {
+    AzureApiVersions::default().resources
+}
+
+fn default_keyvault_api_version() -> String {
+    AzureApiVersions::default().keyvault
+}
+
+fn default_blob_api_version() -> String {
+    AzureApiVersions::default().blob
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct BlobContainerEnumerationResultsXml {
@@ -208,6 +335,7 @@ pub struct AzureClient {
     http: Client,
     auth: AzureAuth,
     management_url: String,
+    api_versions: AzureApiVersions,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
 }
@@ -217,6 +345,7 @@ impl std::fmt::Debug for AzureClient {
         f.debug_struct("AzureClient")
             .field("auth", &self.auth)
             .field("management_url", &self.management_url)
+            .field("api_versions", &self.api_versions)
             .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
@@ -226,8 +355,11 @@ impl AzureClient {
     pub fn new(
         auth: AzureAuth,
         retry_config: HttpRetryConfig,
+        api_versions: AzureApiVersions,
         request_timeout: Duration,
     ) -> AzureResult<Self> {
+        let api_versions = api_versions.normalized();
+        api_versions.validate().map_err(AzureError::Validation)?;
         let http = Client::builder()
             .timeout(request_timeout)
             .user_agent("fcp-azure/0.1.0")
@@ -238,6 +370,7 @@ impl AzureClient {
             http,
             auth,
             management_url: DEFAULT_MANAGEMENT_URL.into(),
+            api_versions,
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
             ),
@@ -265,13 +398,49 @@ impl AzureClient {
         self.auth.is_secretless()
     }
 
+    /// Get the Subscriptions API version used for requests.
+    #[must_use]
+    pub fn subscriptions_api_version(&self) -> &str {
+        &self.api_versions.subscriptions
+    }
+
+    /// Get the Resource Groups API version used for requests.
+    #[must_use]
+    pub fn resource_groups_api_version(&self) -> &str {
+        &self.api_versions.resource_groups
+    }
+
+    /// Get the Resources API version used for requests.
+    #[must_use]
+    pub fn resources_api_version(&self) -> &str {
+        &self.api_versions.resources
+    }
+
+    /// Get the Key Vault API version used for requests.
+    #[must_use]
+    pub fn keyvault_api_version(&self) -> &str {
+        &self.api_versions.keyvault
+    }
+
+    /// Get the Blob Storage API version used for requests.
+    #[must_use]
+    pub fn blob_api_version(&self) -> &str {
+        &self.api_versions.blob
+    }
+
+    /// Get the effective API versions for every Azure surface this connector uses.
+    #[must_use]
+    pub const fn api_versions(&self) -> &AzureApiVersions {
+        &self.api_versions
+    }
+
     // -----------------------------------------------------------------------
     // Azure Resource Manager endpoints
     // -----------------------------------------------------------------------
 
     pub async fn list_subscriptions(&self) -> AzureResult<SubscriptionListResponse> {
-        self.arm_get("/subscriptions", &[("api-version", ARM_API_VERSION)])
-            .await
+        let query = [("api-version", self.subscriptions_api_version())];
+        self.arm_get("/subscriptions", &query).await
     }
 
     pub async fn list_resource_groups(
@@ -280,8 +449,8 @@ impl AzureClient {
     ) -> AzureResult<ResourceGroupListResponse> {
         let subscription_id = sanitize_path_segment(subscription_id, "subscription_id")?;
         let endpoint = format!("/subscriptions/{subscription_id}/resourcegroups");
-        self.arm_get(&endpoint, &[("api-version", ARM_API_VERSION)])
-            .await
+        let query = [("api-version", self.resource_groups_api_version())];
+        self.arm_get(&endpoint, &query).await
     }
 
     pub async fn list_resources(
@@ -293,8 +462,8 @@ impl AzureClient {
         let resource_group = sanitize_path_segment(resource_group, "resource_group")?;
         let endpoint =
             format!("/subscriptions/{subscription_id}/resourceGroups/{resource_group}/resources");
-        self.arm_get(&endpoint, &[("api-version", ARM_API_VERSION)])
-            .await
+        let query = [("api-version", self.resources_api_version())];
+        self.arm_get(&endpoint, &query).await
     }
 
     pub async fn health_check(&self) -> AzureResult<()> {
@@ -366,7 +535,7 @@ impl AzureClient {
                 debug!(attempt, %url, "Azure Blob GET");
                 let builder = self
                     .apply_auth(self.http.get(&url))
-                    .header("x-ms-version", BLOB_API_VERSION);
+                    .header("x-ms-version", self.blob_api_version());
 
                 match builder.send().await {
                     Ok(response) => {
@@ -454,7 +623,7 @@ impl AzureClient {
                 debug!(attempt, %url, "Azure Blob PUT");
                 let builder = self
                     .apply_auth(self.http.put(&url))
-                    .header("x-ms-version", BLOB_API_VERSION)
+                    .header("x-ms-version", self.blob_api_version())
                     .header("x-ms-blob-type", "BlockBlob")
                     .header("Content-Type", &ct)
                     .body(body_bytes);
@@ -505,7 +674,7 @@ impl AzureClient {
             .unwrap_or("https://{vault}.vault.azure.net")
             .replace("{vault}", vault_name);
         let url = format!("{base}/secrets");
-        let query = [("api-version", KEYVAULT_API_VERSION)];
+        let query = [("api-version", self.keyvault_api_version())];
         self.kv_get_json(&url, &query).await
     }
 
@@ -522,7 +691,7 @@ impl AzureClient {
         let safe_name =
             percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/secrets/{safe_name}");
-        let query = [("api-version", KEYVAULT_API_VERSION)];
+        let query = [("api-version", self.keyvault_api_version())];
         self.kv_get_json(&url, &query).await
     }
 
@@ -540,7 +709,7 @@ impl AzureClient {
         let safe_name =
             percent_encoding::utf8_percent_encode(secret_name, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/secrets/{safe_name}");
-        let query = [("api-version", KEYVAULT_API_VERSION)];
+        let query = [("api-version", self.keyvault_api_version())];
 
         let body = serde_json::to_value(request).map_err(AzureError::Json)?;
 
@@ -641,7 +810,7 @@ impl AzureClient {
                     .apply_auth(self.http.get(&url))
                     .query(query)
                     .header("Accept", "application/xml")
-                    .header("x-ms-version", BLOB_API_VERSION);
+                    .header("x-ms-version", self.blob_api_version());
 
                 match builder.send().await {
                     Ok(response) => match handle_xml_response(response).await {
@@ -808,6 +977,7 @@ mod tests {
                 bearer_token: "test-token".into(),
             },
             HttpRetryConfig::default(),
+            AzureApiVersions::compiled_defaults(),
             Duration::from_secs(5),
         )
         .unwrap()
@@ -820,7 +990,10 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/subscriptions"))
-                .and(query_param("api-version", ARM_API_VERSION))
+                .and(query_param(
+                    "api-version",
+                    DEFAULT_SUBSCRIPTIONS_API_VERSION,
+                ))
                 .and(header("authorization", "Bearer test-token"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "value": [
@@ -848,7 +1021,10 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/subscriptions/sub-1/resourcegroups"))
-                .and(query_param("api-version", ARM_API_VERSION))
+                .and(query_param(
+                    "api-version",
+                    DEFAULT_RESOURCE_GROUPS_API_VERSION,
+                ))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "value": [
                         { "name": "rg-1", "location": "eastus" }
@@ -873,6 +1049,7 @@ mod tests {
                 .and(path(
                     "/subscriptions/sub-1/resourceGroups/rg-1/resources",
                 ))
+                .and(query_param("api-version", DEFAULT_RESOURCES_API_VERSION))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "value": [
                         { "name": "vm-1", "type": "Microsoft.Compute/virtualMachines", "location": "westus2" }
@@ -895,6 +1072,10 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/subscriptions"))
+                .and(query_param(
+                    "api-version",
+                    DEFAULT_SUBSCRIPTIONS_API_VERSION,
+                ))
                 .respond_with(
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
                 )
@@ -914,7 +1095,7 @@ mod tests {
             Mock::given(method("GET"))
                 .and(path("/"))
                 .and(query_param("comp", "list"))
-                .and(header("x-ms-version", BLOB_API_VERSION))
+                .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
                 .respond_with(ResponseTemplate::new(200).set_body_string(
                     r#"<?xml version="1.0" encoding="utf-8"?>
 <EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/">
@@ -961,7 +1142,7 @@ mod tests {
                 .and(path("/docs"))
                 .and(query_param("restype", "container"))
                 .and(query_param("comp", "list"))
-                .and(header("x-ms-version", BLOB_API_VERSION))
+                .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
                 .respond_with(ResponseTemplate::new(200).set_body_string(
                     r#"<?xml version="1.0" encoding="utf-8"?>
 <EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/" ContainerName="docs">
@@ -1069,6 +1250,7 @@ mod tests {
                     bearer_token: "test-token".into(),
                 },
                 no_retry,
+                AzureApiVersions::compiled_defaults(),
                 Duration::from_secs(5),
             )
             .unwrap()
@@ -1091,6 +1273,7 @@ mod tests {
                 bearer_token: "super-secret".into(),
             },
             HttpRetryConfig::default(),
+            AzureApiVersions::compiled_defaults(),
             Duration::from_secs(5),
         )
         .unwrap();

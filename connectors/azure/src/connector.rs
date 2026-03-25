@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    client::AzureClient,
+    client::{AzureApiVersions, AzureClient},
     types::{AzureAuth, SetSecretAttributes, SetSecretRequest},
 };
 
@@ -64,6 +64,8 @@ pub struct AzureConfig {
     pub retry: HttpRetryConfig,
     #[serde(default = "default_timeout_ms")]
     pub request_timeout_ms: u64,
+    #[serde(default)]
+    pub api_versions: AzureApiVersions,
 }
 
 fn default_management_url() -> String {
@@ -80,6 +82,7 @@ impl std::fmt::Debug for AzureConfig {
             .field("management_url", &self.management_url)
             .field("auth", &self.auth)
             .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("api_versions", &self.api_versions)
             .finish()
     }
 }
@@ -87,6 +90,7 @@ impl std::fmt::Debug for AzureConfig {
 impl AzureConfig {
     fn validate(&self) -> Result<(), String> {
         validate_management_url(&self.management_url)?;
+        self.api_versions.validate()?;
 
         if matches!(
             &self.auth,
@@ -98,12 +102,18 @@ impl AzureConfig {
         Ok(())
     }
 
+    fn normalized(mut self) -> Self {
+        self.api_versions = self.api_versions.normalized();
+        self
+    }
+
     fn from_value(value: serde_json::Value) -> FcpResult<Self> {
-        let config: Self =
-            serde_json::from_value(value).map_err(|error| FcpError::InvalidRequest {
+        let raw: Self = serde_json::from_value(value)
+            .map_err(|error| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid configuration: {error}"),
             })?;
+        let config = raw.normalized();
 
         config
             .validate()
@@ -120,6 +130,7 @@ impl AzureConfig {
             auth_mode: self.auth.redacted_label(),
             management_url: self.management_url.clone(),
             request_timeout_ms: self.request_timeout_ms,
+            api_versions: self.api_versions.clone(),
             credential_injection_required: self.auth.is_secretless(),
             supported_overrides: SupportedOverrides {
                 blob_base_url: "https://<account>.blob.core.windows.net",
@@ -229,6 +240,7 @@ struct ProvisioningReadiness {
     auth_mode: &'static str,
     management_url: String,
     request_timeout_ms: u64,
+    api_versions: AzureApiVersions,
     credential_injection_required: bool,
     supported_overrides: SupportedOverrides,
 }
@@ -432,6 +444,15 @@ impl AzureConnector {
                 message: Some(format!(
                     "HTTP timeout configured to {}ms",
                     readiness.request_timeout_ms
+                )),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "api_versions".into(),
+                passed: true,
+                message: Some(format!(
+                    "Effective Azure API versions: {}",
+                    readiness.api_versions.summary()
                 )),
                 critical: false,
             });
@@ -1227,6 +1248,7 @@ impl FcpConnector for AzureConnector {
         let client = AzureClient::new(
             azure.auth.clone(),
             azure.retry.clone(),
+            azure.api_versions.clone(),
             Duration::from_millis(azure.request_timeout_ms),
         )
         .map_err(|error| FcpError::Internal {
@@ -1308,6 +1330,10 @@ impl FcpConnector for AzureConnector {
                 .config
                 .as_ref()
                 .map(|config| config.management_url.clone()),
+            "api_versions": self
+                .config
+                .as_ref()
+                .map(|config| config.api_versions.clone()),
             "credential_injection_required": credential_injection_required,
             "supported_overrides": {
                 "blob_base_url": "https://<account>.blob.core.windows.net",
@@ -1417,7 +1443,8 @@ mod tests {
     fn valid_config() -> serde_json::Value {
         json!({
             "mode": "bearer_token",
-            "bearer_token": "test-token"
+            "bearer_token": "test-token",
+            "api_versions": AzureApiVersions::compiled_defaults()
         })
     }
 
@@ -1492,6 +1519,31 @@ mod tests {
     }
 
     #[test]
+    fn configure_rejects_empty_api_version() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = AzureConnector::new();
+            let err = connector
+                .configure(json!({
+                    "mode": "bearer_token",
+                    "bearer_token": "tok",
+                    "api_versions": {
+                        "keyvault": "   "
+                    }
+                }))
+                .await
+                .unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, message } => {
+                    assert_eq!(code, 1001);
+                    assert!(message.contains("api_versions.keyvault"));
+                }
+                other => panic!("expected invalid request, got {other:?}"),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn management_url_requires_https_and_azure_host() {
         assert!(validate_management_url("https://management.azure.com").is_ok());
         assert!(validate_management_url("http://management.azure.com").is_err());
@@ -1530,6 +1582,42 @@ mod tests {
             connector.configure(valid_config()).await.unwrap();
             let doctor = connector.doctor();
             assert!(doctor.passed);
+            let doctor_json = serde_json::to_value(&doctor).unwrap();
+            assert_eq!(
+                doctor_json["provisioning"]["api_versions"]["subscriptions"],
+                AzureApiVersions::compiled_defaults().subscriptions
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_accepts_custom_api_versions() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = AzureConnector::new();
+            connector
+                .configure(json!({
+                    "mode": "bearer_token",
+                    "bearer_token": "test-token",
+                    "api_versions": {
+                        "subscriptions": "2022-12-01",
+                        "resource_groups": "2021-04-01",
+                        "resources": "2021-04-01",
+                        "keyvault": "2025-07-01",
+                        "blob": "2026-02-06"
+                    }
+                }))
+                .await
+                .unwrap();
+
+            let client = connector.client.as_ref().expect("client");
+            assert_eq!(client.keyvault_api_version(), "2025-07-01");
+            assert_eq!(client.blob_api_version(), "2026-02-06");
+
+            let health = connector.health().await;
+            let details = health.details.expect("health details");
+            assert_eq!(details["api_versions"]["keyvault"], "2025-07-01");
+            assert_eq!(details["api_versions"]["blob"], "2026-02-06");
         })
         .unwrap();
     }

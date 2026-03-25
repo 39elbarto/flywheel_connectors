@@ -94,7 +94,7 @@ mod tests {
             "totalSize": 500,
             "done": false,
             "records": [],
-            "nextRecordsUrl": "/services/data/v59.0/query/01g..."
+            "nextRecordsUrl": "/services/data/v66.0/query/01g..."
         }))
         .unwrap();
         assert!(!s.done.unwrap());

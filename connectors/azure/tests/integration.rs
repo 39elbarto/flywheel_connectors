@@ -11,7 +11,13 @@
 )]
 
 use chrono::{Duration, Utc};
-use fcp_azure::connector::AzureConnector;
+use fcp_azure::{
+    client::{
+        AzureApiVersions, DEFAULT_BLOB_API_VERSION, DEFAULT_KEYVAULT_API_VERSION,
+        DEFAULT_SUBSCRIPTIONS_API_VERSION,
+    },
+    connector::AzureConnector,
+};
 use fcp_core::{
     ApprovalMode, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HandshakeRequest,
     IdempotencyClass, InvokeRequest, OperationId, RequestId, SafetyTier, ZoneId,
@@ -98,7 +104,8 @@ async fn setup_connector(management_url: &str) -> (AzureConnector, Ed25519Signin
             "mode": "bearer_token",
             "bearer_token": "test-token",
             "management_url": management_url,
-            "retry": { "max_retries": 0 }
+            "retry": { "max_retries": 0 },
+            "api_versions": AzureApiVersions::compiled_defaults()
         }))
         .await
         .unwrap();
@@ -158,7 +165,10 @@ async fn self_check_ready_with_local_management_override_and_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/subscriptions"))
-        .and(query_param("api-version", "2022-12-01"))
+        .and(query_param(
+            "api-version",
+            DEFAULT_SUBSCRIPTIONS_API_VERSION,
+        ))
         .and(header("authorization", "Bearer test-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": [
@@ -178,6 +188,10 @@ async fn self_check_ready_with_local_management_override_and_evidence() {
     let doctor = serde_json::to_value(connector.doctor()).unwrap();
     assert_doctor_response_valid(&doctor);
     assert_eq!(doctor["ready"], true);
+    assert_eq!(
+        doctor["provisioning"]["api_versions"]["subscriptions"],
+        DEFAULT_SUBSCRIPTIONS_API_VERSION
+    );
     println!(
         "azure_doctor_evidence={}",
         serde_json::to_string_pretty(&doctor).unwrap()
@@ -194,6 +208,10 @@ async fn self_check_ready_with_local_management_override_and_evidence() {
         value["details"]["provisioning"]["management_url"],
         server.uri()
     );
+    assert_eq!(
+        value["details"]["provisioning"]["api_versions"]["subscriptions"],
+        DEFAULT_SUBSCRIPTIONS_API_VERSION
+    );
     println!(
         "azure_self_check_evidence={}",
         serde_json::to_string_pretty(&value).unwrap()
@@ -205,7 +223,10 @@ async fn self_check_retryable_management_failure_reports_degraded() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/subscriptions"))
-        .and(query_param("api-version", "2022-12-01"))
+        .and(query_param(
+            "api-version",
+            DEFAULT_SUBSCRIPTIONS_API_VERSION,
+        ))
         .respond_with(ResponseTemplate::new(503).set_body_json(json!({
             "error": {
                 "code": "ServiceUnavailable",
@@ -229,7 +250,7 @@ async fn invoke_blob_put_preserves_artifact_evidence() {
     Mock::given(method("PUT"))
         .and(path("/fixtures/hello.txt"))
         .and(header("authorization", "Bearer test-token"))
-        .and(header("x-ms-version", "2023-11-03"))
+        .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
         .and(header("x-ms-blob-type", "BlockBlob"))
         .respond_with(ResponseTemplate::new(201))
         .mount(&server)
@@ -265,7 +286,7 @@ async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
         .and(path("/secrets/api-key"))
-        .and(query_param("api-version", "7.4"))
+        .and(query_param("api-version", DEFAULT_KEYVAULT_API_VERSION))
         .and(header("authorization", "Bearer test-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "value": "fixture-secret",

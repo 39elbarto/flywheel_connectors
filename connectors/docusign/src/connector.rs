@@ -659,14 +659,14 @@ impl DocuSignConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, DocuSignError> {
         let _account_id = require_str(input, "account_id")?;
-        let since_ts = input.get("since_ts").and_then(serde_json::Value::as_str);
-        // Streaming is a placeholder — real implementation would poll Connect logs
-        // or use a webhook receiver. For now, return an empty events array.
-        Ok(json!({
-            "events": [],
-            "since_ts": since_ts,
-            "streaming": true,
-        }))
+        // DocuSign Connect event streaming requires either a webhook receiver
+        // or polling the Connect Logs API, neither of which is implemented yet.
+        Err(DocuSignError::InvalidInput(
+            "stream_connect_events is not yet implemented. DocuSign event streaming \
+             requires a Connect webhook receiver or Connect Logs API polling. \
+             Use list_envelopes with status filters as an alternative."
+                .into(),
+        ))
     }
 }
 

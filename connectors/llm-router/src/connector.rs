@@ -854,8 +854,9 @@ impl LlmRouterConnector {
             "Routing decision made"
         );
 
-        // In a real implementation, this would call the provider's API.
-        // For now, we return a structured response indicating the routing decision.
+        // The router returns a routing decision, not an LLM inference result.
+        // The caller must separately invoke the chosen provider's connector
+        // (FCP security invariant #3: no cross-connector calling).
         let cost = selected.estimated_cost;
         self.track_cost(cost);
 
@@ -877,7 +878,11 @@ impl LlmRouterConnector {
         };
 
         Ok(json!({
-            "response": format!("[routed to {provider_name}/{model_id}]"),
+            "dispatch_required": true,
+            "dispatch_instruction": format!(
+                "Invoke {provider_name}.chat_completion with model={model_id} to get the actual LLM response. \
+                 This routing decision does not contain inference output."
+            ),
             "provider": provider_name,
             "model": model_id,
             "usage": {

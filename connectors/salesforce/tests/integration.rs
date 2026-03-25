@@ -15,10 +15,13 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use fcp_salesforce::connector::SalesforceConnector;
+use fcp_salesforce::{
+    client::{DEFAULT_API_PATH, DEFAULT_API_VERSION},
+    connector::SalesforceConnector,
+};
 
 /// API path prefix used by the `Salesforce` REST API.
-const API: &str = "/services/data/v59.0";
+const API: &str = DEFAULT_API_PATH;
 
 async fn setup_connector(mock_url: &str) -> SalesforceConnector {
     let mut c = SalesforceConnector::new();
@@ -49,6 +52,7 @@ async fn lifecycle_full() {
     let c = setup_connector(&server.uri()).await;
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "healthy");
+    assert_eq!(h["api_version"], DEFAULT_API_VERSION);
 }
 
 #[fcp_async_core::runtime::test]
@@ -77,7 +81,15 @@ async fn lifecycle_self_check() {
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
+    let doctor = c.handle_doctor().await.unwrap();
+    assert_eq!(doctor["status"], "healthy");
+    assert!(doctor["checks"].as_array().unwrap().iter().any(|check| {
+        check["name"] == "api_version"
+            && check["message"].as_str()
+                == Some(&format!(
+                    "Salesforce REST API version: {DEFAULT_API_VERSION}"
+                ))
+    }));
 }
 
 #[fcp_async_core::runtime::test]

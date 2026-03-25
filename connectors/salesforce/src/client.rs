@@ -17,8 +17,80 @@ use crate::{
 /// Default `Salesforce` instance URL.
 pub const DEFAULT_BASE_URL: &str = "https://login.salesforce.com";
 
-/// API version path prefix for the `Salesforce` REST API.
-pub const API_PATH: &str = "/services/data/v59.0";
+/// Default `Salesforce` REST API version.
+///
+/// Verified against Salesforce's Spring '26 REST API docs (API version 66.0).
+pub const DEFAULT_API_VERSION: &str = "66.0";
+
+/// Default API version path prefix for the `Salesforce` REST API.
+pub const DEFAULT_API_PATH: &str = "/services/data/v66.0";
+
+fn is_valid_api_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(major), Some(minor), None) => {
+            !major.is_empty()
+                && !minor.is_empty()
+                && major.chars().all(|ch| ch.is_ascii_digit())
+                && minor.chars().all(|ch| ch.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn normalize_api_version(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let trimmed = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    if !is_valid_api_version(trimmed) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn api_path_from_version(version: &str) -> String {
+    format!("/services/data/v{version}")
+}
+
+fn api_version_from_path(path: &str) -> Option<&str> {
+    let version = path.strip_prefix("/services/data/v")?.trim();
+    if !is_valid_api_version(version) {
+        return None;
+    }
+    Some(version)
+}
+
+/// Resolve the Salesforce API path to use.
+///
+/// Precedence: explicit `api_path` override > explicit `api_version` override >
+/// `FCP_SALESFORCE_API_PATH` > `FCP_SALESFORCE_API_VERSION` > compiled default.
+fn resolve_salesforce_api_path(
+    api_path_override: Option<&str>,
+    api_version_override: Option<&str>,
+) -> String {
+    if let Some(path) = api_path_override.map(str::trim).filter(|s| !s.is_empty())
+        && api_version_from_path(path).is_some()
+    {
+        return path.to_string();
+    }
+    if let Some(version) = api_version_override.and_then(normalize_api_version) {
+        return api_path_from_version(&version);
+    }
+    if let Ok(path) = std::env::var("FCP_SALESFORCE_API_PATH") {
+        let path = path.trim();
+        if !path.is_empty() && api_version_from_path(path).is_some() {
+            return path.to_string();
+        }
+    }
+    if let Ok(version) = std::env::var("FCP_SALESFORCE_API_VERSION")
+        && let Some(version) = normalize_api_version(&version)
+    {
+        return api_path_from_version(&version);
+    }
+    DEFAULT_API_PATH.to_string()
+}
 
 /// Authentication mode for the `Salesforce` API.
 #[derive(Clone)]
@@ -81,6 +153,7 @@ pub struct SalesforceClient {
     client: Client,
     auth: SalesforceAuth,
     base_url: String,
+    api_path: String,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
 }
@@ -90,6 +163,7 @@ impl fmt::Debug for SalesforceClient {
         f.debug_struct("SalesforceClient")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
+            .field("api_path", &self.api_path)
             .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
@@ -98,6 +172,33 @@ impl fmt::Debug for SalesforceClient {
 impl SalesforceClient {
     /// Create a new `Salesforce` client.
     pub fn new(auth: SalesforceAuth, base_url: Option<&str>) -> SalesforceResult<Self> {
+        Self::new_with_overrides(auth, base_url, None, None)
+    }
+
+    /// Create a new `Salesforce` client with an optional API path override.
+    pub fn new_with_api_path(
+        auth: SalesforceAuth,
+        base_url: Option<&str>,
+        api_path_override: Option<&str>,
+    ) -> SalesforceResult<Self> {
+        Self::new_with_overrides(auth, base_url, api_path_override, None)
+    }
+
+    /// Create a new `Salesforce` client with an optional API version override.
+    pub fn new_with_api_version(
+        auth: SalesforceAuth,
+        base_url: Option<&str>,
+        api_version_override: Option<&str>,
+    ) -> SalesforceResult<Self> {
+        Self::new_with_overrides(auth, base_url, None, api_version_override)
+    }
+
+    fn new_with_overrides(
+        auth: SalesforceAuth,
+        base_url: Option<&str>,
+        api_path_override: Option<&str>,
+        api_version_override: Option<&str>,
+    ) -> SalesforceResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-salesforce/0.1.0")
@@ -110,6 +211,7 @@ impl SalesforceClient {
                 .unwrap_or(DEFAULT_BASE_URL)
                 .trim_end_matches('/')
                 .to_string(),
+            api_path: resolve_salesforce_api_path(api_path_override, api_version_override),
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
@@ -126,6 +228,7 @@ impl SalesforceClient {
             client,
             auth,
             base_url: base_url.trim_end_matches('/').to_string(),
+            api_path: resolve_salesforce_api_path(None, None),
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
@@ -139,6 +242,18 @@ impl SalesforceClient {
     /// Trigger graceful shutdown.
     pub fn shutdown(&self) {
         self.runtime.shutdown();
+    }
+
+    /// Get the API path prefix used for requests.
+    #[must_use]
+    pub fn api_path(&self) -> &str {
+        &self.api_path
+    }
+
+    /// Get the resolved REST API version used for requests.
+    #[must_use]
+    pub fn api_version(&self) -> &str {
+        api_version_from_path(&self.api_path).unwrap_or(DEFAULT_API_VERSION)
     }
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -205,7 +320,7 @@ impl SalesforceClient {
     /// GET request to the `Salesforce` API.
     #[instrument(skip(self), fields(url))]
     pub async fn get(&self, path: &str) -> SalesforceResult<serde_json::Value> {
-        let url = format!("{}{API_PATH}{path}", self.base_url);
+        let url = format!("{}{}{path}", self.base_url, self.api_path);
         debug!(url = %url, "GET request");
         let req = self.add_auth(self.client.get(&url));
         let resp = req.send().await?;
@@ -219,7 +334,7 @@ impl SalesforceClient {
         path: &str,
         body: &serde_json::Value,
     ) -> SalesforceResult<serde_json::Value> {
-        let url = format!("{}{API_PATH}{path}", self.base_url);
+        let url = format!("{}{}{path}", self.base_url, self.api_path);
         debug!(url = %url, "POST request");
         let req = self.add_auth(self.client.post(&url).json(body));
         let resp = req.send().await?;
@@ -229,7 +344,7 @@ impl SalesforceClient {
     /// DELETE request to the `Salesforce` API.
     #[instrument(skip(self), fields(url))]
     pub async fn delete(&self, path: &str) -> SalesforceResult<serde_json::Value> {
-        let url = format!("{}{API_PATH}{path}", self.base_url);
+        let url = format!("{}{}{path}", self.base_url, self.api_path);
         debug!(url = %url, "DELETE request");
         let req = self.add_auth(self.client.delete(&url));
         let resp = req.send().await?;
@@ -492,6 +607,7 @@ mod tests {
         let client =
             SalesforceClient::new(SalesforceAuth::AccessToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
+        assert_eq!(client.api_version(), DEFAULT_API_VERSION);
     }
 
     #[test]
@@ -523,6 +639,7 @@ mod tests {
             "https://x.com/",
         );
         assert_eq!(client.base_url, "https://x.com");
+        assert_eq!(client.api_version(), DEFAULT_API_VERSION);
     }
 
     #[test]
@@ -596,8 +713,52 @@ mod tests {
     }
 
     #[test]
-    fn api_path_value() {
-        assert_eq!(API_PATH, "/services/data/v59.0");
+    fn default_api_path_value() {
+        assert_eq!(DEFAULT_API_PATH, "/services/data/v66.0");
+        assert_eq!(DEFAULT_API_VERSION, "66.0");
+    }
+
+    #[test]
+    fn client_new_with_api_version_override() {
+        let client = SalesforceClient::new_with_api_version(
+            SalesforceAuth::AccessToken("tok".into()),
+            None,
+            Some("65.0"),
+        )
+        .unwrap();
+        assert_eq!(client.api_path(), "/services/data/v65.0");
+        assert_eq!(client.api_version(), "65.0");
+    }
+
+    #[test]
+    fn client_new_with_api_version_normalizes_prefix() {
+        let client = SalesforceClient::new_with_api_version(
+            SalesforceAuth::AccessToken("tok".into()),
+            None,
+            Some("v64.0"),
+        )
+        .unwrap();
+        assert_eq!(client.api_path(), "/services/data/v64.0");
+        assert_eq!(client.api_version(), "64.0");
+    }
+
+    #[test]
+    fn client_new_with_api_version_accepts_uppercase_prefix() {
+        let client = SalesforceClient::new_with_api_version(
+            SalesforceAuth::AccessToken("tok".into()),
+            None,
+            Some("V63.0"),
+        )
+        .unwrap();
+        assert_eq!(client.api_path(), "/services/data/v63.0");
+        assert_eq!(client.api_version(), "63.0");
+    }
+
+    #[test]
+    fn normalize_api_version_rejects_malformed_values() {
+        assert_eq!(normalize_api_version("66"), None);
+        assert_eq!(normalize_api_version("66..0"), None);
+        assert_eq!(normalize_api_version("vv66.0"), None);
     }
 
     // -- sanitize_path_segment tests --

@@ -17,7 +17,25 @@ use crate::{
 
 /// Default Notion API base URL.
 pub const DEFAULT_API_URL: &str = "https://api.notion.com/v1";
-const NOTION_VERSION: &str = "2022-06-28";
+
+/// Default Notion API version. Notion uses a date-based version header.
+/// This can be overridden via the `config_override` parameter or
+/// the `FCP_NOTION_API_VERSION` environment variable.
+pub const DEFAULT_NOTION_VERSION: &str = "2022-06-28";
+
+/// Resolve the Notion API version to use: config override > env var > compiled default.
+fn resolve_notion_version(config_override: Option<&str>) -> String {
+    if let Some(v) = config_override.map(str::trim).filter(|s| !s.is_empty()) {
+        return v.to_string();
+    }
+    if let Ok(v) = std::env::var("FCP_NOTION_API_VERSION") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    DEFAULT_NOTION_VERSION.to_string()
+}
 
 /// Characters that are NOT percent-encoded in a path segment.
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
@@ -91,6 +109,7 @@ impl NotionAuth {
 pub struct NotionClient {
     http: Client,
     api_url: String,
+    notion_version: String,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
     auth: NotionAuth,
@@ -108,11 +127,21 @@ impl NotionClient {
         Self::new_with_auth(NotionAuth::Token(token.to_string()))
     }
 
+    /// Create a new Notion client with specified auth and optional API version override.
+    pub fn new_with_version(auth: NotionAuth, version_override: Option<&str>) -> NotionResult<Self> {
+        Self::build(auth, version_override)
+    }
+
     /// Create a new Notion client with the specified auth mode.
     pub fn new_with_auth(auth: NotionAuth) -> NotionResult<Self> {
+        Self::build(auth, None)
+    }
+
+    fn build(auth: NotionAuth, version_override: Option<&str>) -> NotionResult<Self> {
+        let notion_version = resolve_notion_version(version_override);
         let mut headers = header::HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-        headers.insert("Notion-Version", NOTION_VERSION.parse().unwrap());
+        headers.insert("Notion-Version", notion_version.parse().unwrap());
 
         match &auth {
             NotionAuth::Token(token) => {
@@ -146,6 +175,7 @@ impl NotionClient {
         Ok(Self {
             http,
             api_url: DEFAULT_API_URL.to_string(),
+            notion_version,
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
@@ -182,6 +212,12 @@ impl NotionClient {
     /// Trigger graceful shutdown of request contexts.
     pub fn shutdown(&self) {
         self.runtime.shutdown();
+    }
+
+    /// Get the Notion API version header used for requests.
+    #[must_use]
+    pub fn notion_version(&self) -> &str {
+        &self.notion_version
     }
 
     // ── Page operations ───────────────────────────────────────────

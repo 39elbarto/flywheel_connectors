@@ -1441,7 +1441,7 @@ FCP integrates with the broader Agent Flywheel ecosystem:
 In shared multi-agent sessions, offload CPU-heavy Cargo work through `rch` so local machines do not
 turn into compilation bottlenecks. `rch` fails open to local execution if the worker fleet is unavailable; in swarm-style sessions, abort that local fallback instead of letting heavy Cargo work pile onto the workstation unexpectedly.
 
-This repo also carries a project-level `.rch/config.toml` that pins the critical `.beads` transfer excludes in effective `rch` config. If `rch` prints `Remote command finished: exit=0` and only then fails during `Retrieving build artifacts...`, treat that as a tooling or worker-state problem rather than a Cargo failure; keep the retrieval stderr, then retry on a different worker or continue the investigation in `rch` itself.
+This repo carries both `.rchignore` and a project-level `.rch/config.toml` for `.beads` hygiene. In the current upstream `rch` source, retrieval-side filtering comes from `.rchignore`, while `.rch/config.toml` keeps the same excludes visible in effective config and applied on the upload side. Older installed `rch` releases can predate that retrieval-side fix, so post-success retrieval failures may still appear even when the repo configuration is correct. If `rch` prints `Remote command finished: exit=0` and only then fails during `Retrieving build artifacts...`, treat that as a tooling or worker-state problem rather than a Cargo failure; keep the retrieval stderr, then retry or continue the investigation in `rch` itself.
 
 ```bash
 # Build the default workspace members (core platform crates)

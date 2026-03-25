@@ -240,7 +240,11 @@ impl HuggingfaceClient {
     ///
     /// Returns `HuggingfaceError` on HTTP, auth, or parse failures.
     pub async fn whoami(&self, runtime: &ConnectorRuntime) -> HuggingfaceResult<serde_json::Value> {
-        let url = format!("{}/whoami-v2", self.hub_url.replace("/api", ""));
+        // Strip trailing /api or /api/ path segment to get the base HuggingFace URL
+        // (hub_url is "https://huggingface.co/api" but whoami lives at "https://huggingface.co/whoami-v2")
+        let base = self.hub_url.trim_end_matches('/');
+        let base = base.strip_suffix("/api").unwrap_or(base);
+        let url = format!("{base}/whoami-v2");
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 

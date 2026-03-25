@@ -9,6 +9,7 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -72,8 +73,10 @@ impl AnthropicConfig {
         let base_url = params
             .get("base_url")
             .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_BASE_URL)
-            .to_string();
+            .map_or_else(
+                || Ok(DEFAULT_BASE_URL.to_string()),
+                validate_anthropic_base_url,
+            )?;
 
         let api_version = match params.get("api_version") {
             Some(value) => {
@@ -93,6 +96,54 @@ impl AnthropicConfig {
             api_version,
         })
     }
+}
+
+fn validate_anthropic_base_url(base_url: &str) -> FcpResult<String> {
+    let parsed =
+        parse_anthropic_base_url(base_url).map_err(|message| FcpError::InvalidRequest {
+            code: 1003,
+            message,
+        })?;
+
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn parse_anthropic_base_url(base_url: &str) -> Result<Url, String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err("base_url must not be empty".into());
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|err| format!("Invalid base_url: {err}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "base_url must include a host".to_string())?;
+    let normalized_host = host
+        .trim()
+        .trim_end_matches('.')
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    let local = matches!(normalized_host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let allowed_host = normalized_host == "api.anthropic.com" || local;
+    let valid_scheme = if local {
+        matches!(parsed.scheme(), "http" | "https")
+    } else {
+        parsed.scheme() == "https"
+    };
+    if !allowed_host || !valid_scheme {
+        return Err(format!(
+            "base_url must use https and api.anthropic.com (localhost/127.0.0.1/::1 allowed over http/https for tests): {trimmed}"
+        ));
+    }
+
+    let root_path = matches!(parsed.path(), "" | "/");
+    if !root_path || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "base_url must be an origin without path, query, or fragment: {trimmed}"
+        ));
+    }
+
+    Ok(parsed)
 }
 
 /// Doctor check result.
@@ -362,17 +413,14 @@ impl AnthropicConnector {
         });
 
         // Check 3: Base URL scheme
-        let scheme = if config.base_url.starts_with("https://") {
-            "https"
-        } else if config.base_url.starts_with("http://") {
-            "http"
-        } else {
-            "unknown"
-        };
+        let parsed_base_url = Url::parse(&config.base_url).ok();
+        let scheme = parsed_base_url
+            .as_ref()
+            .map_or("unknown", |parsed| parsed.scheme());
 
         checks.push(DoctorCheck {
             name: "base_url".into(),
-            passed: true,
+            passed: parsed_base_url.is_some(),
             message: Some(format!("Base URL ({scheme}): {}", config.base_url)),
             critical: false,
         });
@@ -398,20 +446,13 @@ impl AnthropicConnector {
         });
 
         // Check 5: Network constraints - host must be api.anthropic.com (or test override)
-        let allowed_hosts = ["api.anthropic.com"];
-        let host_ok = config.base_url.starts_with("http://localhost")
-            || config.base_url.starts_with("http://127.0.0.1")
-            || allowed_hosts.iter().any(|h| config.base_url.contains(h));
+        let network_validation = parse_anthropic_base_url(&config.base_url);
         checks.push(DoctorCheck {
             name: "network_constraints".into(),
-            passed: host_ok,
-            message: Some(if host_ok {
-                "Base URL matches allowed host (api.anthropic.com)".into()
-            } else {
-                format!(
-                    "Base URL {} does not match allowed hosts: {:?}",
-                    config.base_url, allowed_hosts
-                )
+            passed: network_validation.is_ok(),
+            message: Some(match network_validation {
+                Ok(_) => "Base URL matches Anthropic endpoint policy".into(),
+                Err(message) => message,
             }),
             critical: true,
         });
@@ -1560,20 +1601,39 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_configure_with_custom_base_url() {
+    async fn test_configure_rejects_non_anthropic_base_url() {
         let mut connector = AnthropicConnector::new();
-        connector
+        let err = connector
             .handle_configure(json!({
                 "api_key": "sk-test",
                 "base_url": "https://custom.api.example.com"
             }))
             .await
-            .unwrap();
+            .expect_err("non-Anthropic endpoint must be rejected");
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api.anthropic.com"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
 
-        assert_eq!(
-            connector.config.as_ref().unwrap().base_url,
-            "https://custom.api.example.com"
-        );
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_base_url_with_api_path() {
+        let mut connector = AnthropicConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "base_url": "https://api.anthropic.com/v1"
+            }))
+            .await
+            .expect_err("pathful base_url must be rejected");
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("without path, query, or fragment"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1662,13 +1722,17 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_doctor_network_constraints_bad_host() {
         let mut connector = AnthropicConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "sk-test",
-                "base_url": "https://evil.example.com"
-            }))
-            .await
-            .unwrap();
+        connector.config = Some(AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: "https://evil.example.com".into(),
+            api_version: None,
+        });
+        connector.client = Some(
+            AnthropicClient::new_with_auth(AnthropicAuth::ApiKey("sk-test".into()))
+                .expect("client")
+                .with_base_url("https://evil.example.com"),
+        );
+        connector.base.set_configured(true);
 
         let result = connector.handle_doctor().await.unwrap();
         let doctor: DoctorResult = serde_json::from_value(result).unwrap();
@@ -1681,6 +1745,39 @@ mod tests {
             .unwrap();
         assert!(!net_check.passed);
         assert!(net_check.critical);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_network_constraints_rejects_pathful_base_url() {
+        let mut connector = AnthropicConnector::new();
+        connector.config = Some(AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: "https://api.anthropic.com/v1".into(),
+            api_version: None,
+        });
+        connector.client = Some(
+            AnthropicClient::new_with_auth(AnthropicAuth::ApiKey("sk-test".into()))
+                .expect("client")
+                .with_base_url("https://api.anthropic.com/v1"),
+        );
+        connector.base.set_configured(true);
+
+        let result = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(doctor.status, DoctorStatus::Unhealthy);
+        let net_check = doctor
+            .checks
+            .iter()
+            .find(|c| c.name == "network_constraints")
+            .unwrap();
+        assert!(!net_check.passed);
+        assert!(
+            net_check
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("without path, query, or fragment"))
+        );
     }
 
     // --- Self-check tests ---

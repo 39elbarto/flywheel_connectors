@@ -2127,20 +2127,32 @@ async fn config_no_auth_rejected() {
     }
 }
 
-/// Configure with custom base_url is accepted and reflected.
+/// Configure rejects base URLs outside the Anthropic endpoint policy.
 #[fcp_async_core::test]
-async fn config_custom_base_url() {
+async fn config_rejects_non_anthropic_base_url() {
     let mut connector = AnthropicConnector::new();
-    connector
+    let err = connector
         .handle_configure(json!({
             "api_key": "sk-test",
             "base_url": "https://proxy.example.com/v1"
         }))
         .await
-        .expect("custom base_url should work");
+        .expect_err("custom proxy endpoint must be rejected");
+    assert!(err.to_string().contains("api.anthropic.com"));
+}
 
-    let health = connector.handle_health().await.unwrap();
-    assert_eq!(health["base_url"], "https://proxy.example.com/v1");
+/// Configure rejects Anthropic origins with embedded API paths.
+#[fcp_async_core::test]
+async fn config_rejects_pathful_anthropic_base_url() {
+    let mut connector = AnthropicConnector::new();
+    let err = connector
+        .handle_configure(json!({
+            "api_key": "sk-test",
+            "base_url": "https://api.anthropic.com/v1"
+        }))
+        .await
+        .expect_err("pathful Anthropic base_url must be rejected");
+    assert!(err.to_string().contains("without path, query, or fragment"));
 }
 
 /// Configure with whitespace-only api_key is rejected (treated as empty).

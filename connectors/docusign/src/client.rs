@@ -107,7 +107,7 @@ impl fmt::Debug for DocuSignClient {
 impl DocuSignClient {
     /// Create a new `DocuSign` client.
     ///
-    /// `base_url` is **required** — there is no safe default because DocuSign
+    /// `base_url` is **required** — there is no safe default because `DocuSign`
     /// demo and production environments are completely separate. Callers must
     /// explicitly choose (e.g. `"https://na1.docusign.net/restapi/v2.1/accounts"`
     /// for production or `DEMO_BASE_URL` for testing).

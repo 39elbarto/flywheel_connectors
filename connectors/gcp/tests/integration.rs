@@ -158,9 +158,9 @@ async fn doctor_unconfigured_reports_remediation() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn self_check_rejects_cross_wired_storage_endpoint_override() {
+async fn configure_rejects_cross_wired_storage_endpoint_override() {
     let mut connector = GcpConnector::new();
-    connector
+    let err = connector
         .configure(json!({
             "mode": "access_token",
             "access_token": "ya29.test",
@@ -169,21 +169,29 @@ async fn self_check_rejects_cross_wired_storage_endpoint_override() {
             "retry": { "max_retries": 0 },
         }))
         .await
-        .unwrap();
+        .expect_err("cross-wired storage endpoint must be rejected");
+    let rendered = err.to_string();
+    assert!(rendered.contains("storage"), "unexpected error: {rendered}");
+}
 
-    let report = connector.self_check().await.unwrap();
-    let value = serde_json::to_value(&report).unwrap();
-    assert_self_check_not_ready(&value);
-    assert_eq!(value["reason_code"], "network_constraints_invalid");
-    assert_eq!(value["details"]["provisioning"]["network_ok"], false);
-
-    let endpoints = value["details"]["provisioning"]["service_endpoints"]
-        .as_array()
-        .expect("service endpoints");
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_pathful_compute_endpoint_override() {
+    let mut connector = GcpConnector::new();
+    let err = connector
+        .configure(json!({
+            "mode": "access_token",
+            "access_token": "ya29.test",
+            "project_id": "test-project",
+            "compute_base_url": "https://compute.googleapis.com/compute/v1",
+            "retry": { "max_retries": 0 },
+        }))
+        .await
+        .expect_err("pathful compute endpoint must be rejected");
+    let rendered = err.to_string();
+    assert!(rendered.contains("compute"), "unexpected error: {rendered}");
     assert!(
-        endpoints
-            .iter()
-            .any(|endpoint| { endpoint["service"] == "storage" && endpoint["ok"] == false })
+        rendered.contains("path must be empty"),
+        "unexpected error: {rendered}"
     );
 }
 

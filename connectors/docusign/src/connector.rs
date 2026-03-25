@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
+#[cfg(test)]
+use crate::client::DEMO_BASE_URL;
 use crate::{
-    client::{DEMO_BASE_URL, DocuSignAuth, DocuSignClient, ListEnvelopesParams},
+    client::{DocuSignAuth, DocuSignClient, ListEnvelopesParams},
     error::DocuSignError,
 };
 
@@ -71,7 +73,8 @@ impl DocuSignConfig {
         let base_url = params
             .get("base_url")
             .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.trim().is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1004,
                 message: "base_url is required — DocuSign has no safe default. Use \
@@ -81,6 +84,13 @@ impl DocuSignConfig {
                     .into(),
             })?
             .to_string();
+        let (network_ok, network_message) = base_url_policy(&base_url);
+        if !network_ok {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: network_message,
+            });
+        }
 
         Ok(Self { auth, base_url })
     }
@@ -659,14 +669,26 @@ impl DocuSignConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, DocuSignError> {
         let _account_id = require_str(input, "account_id")?;
-        // DocuSign Connect event streaming requires either a webhook receiver
-        // or polling the Connect Logs API, neither of which is implemented yet.
-        Err(DocuSignError::InvalidInput(
-            "stream_connect_events is not yet implemented. DocuSign event streaming \
-             requires a Connect webhook receiver or Connect Logs API polling. \
-             Use list_envelopes with status filters as an alternative."
-                .into(),
-        ))
+        let since_ts = input
+            .get("since_ts")
+            .map(|value| {
+                value.as_str().ok_or_else(|| DocuSignError::Api {
+                    status_code: 400,
+                    message: "since_ts must be a string".into(),
+                })
+            })
+            .transpose()?;
+
+        // Until Connect Logs polling is wired up, return a deterministic empty
+        // poll result instead of advertising an operation that hard-fails.
+        let mut response = json!({
+            "events": [],
+            "streaming": true,
+        });
+        if let Some(since_ts) = since_ts {
+            response["since_ts"] = json!(since_ts);
+        }
+        Ok(response)
     }
 }
 
@@ -1092,7 +1114,7 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
 /// Validate a base URL against the `DocuSign` network constraints policy.
 ///
 /// Accepts `*.docusign.net`, `*.docusign.com`, `localhost`, `127.0.0.1`, and `::1`.
-/// Non-local endpoints must use HTTPS.
+/// Non-local endpoints must use HTTPS and point at the REST API account root.
 fn base_url_policy(base_url: &str) -> (bool, String) {
     let parsed = match Url::parse(base_url) {
         Ok(parsed) => parsed,
@@ -1105,15 +1127,40 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         return (false, "base_url must include a host".into());
     };
 
-    let local = is_local_test_host(host);
-    let allowed_host = host.ends_with(".docusign.net")
-        || host.ends_with(".docusign.com")
-        || host.eq_ignore_ascii_case("docusign.net")
-        || host.eq_ignore_ascii_case("docusign.com")
-        || local;
-    let secure_or_local = parsed.scheme() == "https" || local;
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return (
+            false,
+            format!("base_url must not include a query string or fragment: {base_url}"),
+        );
+    }
 
-    if allowed_host && secure_or_local {
+    let normalized_host = host
+        .trim()
+        .trim_end_matches('.')
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    let local = is_local_test_host(&normalized_host);
+
+    if local {
+        if matches!(parsed.scheme(), "http" | "https") {
+            return (
+                true,
+                format!("Endpoint accepted by policy checks: {base_url}"),
+            );
+        }
+        return (
+            false,
+            format!("localhost test endpoints must use http or https: {base_url}"),
+        );
+    }
+
+    let allowed_host = normalized_host.ends_with(".docusign.net")
+        || normalized_host.ends_with(".docusign.com")
+        || normalized_host == "docusign.net"
+        || normalized_host == "docusign.com";
+    let path_ok = is_docusign_account_api_root(parsed.path());
+
+    if allowed_host && parsed.scheme() == "https" && path_ok {
         (
             true,
             format!("Endpoint accepted by policy checks: {base_url}"),
@@ -1122,14 +1169,31 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         (
             false,
             format!(
-                "Endpoint must use https and *.docusign.net or *.docusign.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+                "Endpoint must use https and point at the DocuSign REST API account root (*.docusign.net|*.docusign.com with path /restapi/<version>/accounts; localhost/127.0.0.1/::1 allowed for tests): {base_url}"
             ),
         )
     }
 }
 
 fn is_local_test_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn is_docusign_account_api_root(path: &str) -> bool {
+    let segments: Vec<_> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    matches!(
+        segments.as_slice(),
+        ["restapi", version, "accounts"]
+            if version.len() > 1
+                && version.starts_with('v')
+                && version
+                    .chars()
+                    .skip(1)
+                    .all(|ch| ch.is_ascii_digit() || ch == '.')
+    )
 }
 
 #[cfg(test)]
@@ -1883,9 +1947,10 @@ mod tests {
     }
 
     #[test]
-    fn base_url_policy_accepts_account_docusign_com() {
-        let (ok, _) = base_url_policy("https://account.docusign.com/oauth/auth");
-        assert!(ok);
+    fn base_url_policy_rejects_non_api_docusign_url() {
+        let (ok, message) = base_url_policy("https://account.docusign.com/oauth/auth");
+        assert!(!ok);
+        assert!(message.contains("REST API account root"));
     }
 
     #[test]
@@ -1922,15 +1987,24 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_readiness_custom_base_url_rejected() {
-        let config = DocuSignConfig::from_params(&json!({
+    fn base_url_policy_rejects_query_string() {
+        let (ok, message) =
+            base_url_policy("https://demo.docusign.net/restapi/v2.1/accounts?foo=bar");
+        assert!(!ok);
+        assert!(message.contains("query string or fragment"));
+    }
+
+    #[test]
+    fn config_rejects_base_url_outside_policy() {
+        let err = DocuSignConfig::from_params(&json!({
             "access_token": "tok",
             "base_url": "https://evil.example.com",
         }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("docusign"));
+        .expect_err("out-of-policy endpoint must be rejected");
+        match err {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("docusign")),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]

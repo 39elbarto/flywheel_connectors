@@ -95,20 +95,29 @@ impl std::fmt::Debug for GcpConfig {
 
 impl GcpConfig {
     fn validate(&self) -> Result<(), String> {
-        if self.project_id.is_empty() {
+        if self.project_id.trim().is_empty() {
             return Err("project_id is required".into());
+        }
+        if self.request_timeout_ms == 0 {
+            return Err("request_timeout_ms must be > 0".into());
         }
         if self.auth.is_service_account() {
             return Err(SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE.into());
+        }
+        let readiness = self.provisioning_readiness();
+        if !readiness.network_ok {
+            return Err(readiness.network_message);
         }
         Ok(())
     }
 
     fn from_value(val: serde_json::Value) -> FcpResult<Self> {
-        let config: Self = serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("Invalid configuration: {e}"),
-        })?;
+        let mut config: Self =
+            serde_json::from_value(val).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+        config.project_id = config.project_id.trim().to_string();
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
             message: e,
@@ -252,8 +261,15 @@ impl DoctorResult {
     }
 }
 
+fn normalize_policy_host(host: &str) -> String {
+    host.trim()
+        .trim_end_matches('.')
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase()
+}
+
 fn is_local_test_host(host: &str) -> bool {
-    host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".localhost")
 }
 
 fn endpoint_policy(
@@ -294,24 +310,45 @@ fn endpoint_policy(
         };
     };
 
-    if is_local_test_host(host) {
+    let normalized_host = normalize_policy_host(host);
+    let mut problems = Vec::new();
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        problems.push("query string and fragment are not allowed".to_string());
+    }
+
+    if is_local_test_host(&normalized_host) {
+        if !matches!(parsed.scheme(), "http" | "https") {
+            problems.push(format!(
+                "scheme must be http or https for local test endpoint, got {}",
+                parsed.scheme()
+            ));
+        }
         return EndpointReadiness {
             service,
             expected_host,
             override_configured: true,
-            ok: true,
-            message: format!(
-                "localhost test endpoint accepted for {service} verification: {base_url}"
-            ),
+            ok: problems.is_empty(),
+            message: if problems.is_empty() {
+                format!("localhost test endpoint accepted for {service} verification: {base_url}")
+            } else {
+                problems.join("; ")
+            },
         };
     }
 
-    let mut problems = Vec::new();
     if parsed.scheme() != "https" {
         problems.push(format!("scheme must be https, got {}", parsed.scheme()));
     }
-    if host != expected_host {
-        problems.push(format!("host must be {expected_host}, got {host}"));
+    if normalized_host != expected_host {
+        problems.push(format!(
+            "host must be {expected_host}, got {normalized_host}"
+        ));
+    }
+    if !matches!(parsed.path(), "" | "/") {
+        problems.push(format!(
+            "path must be empty for {service} base_url, got {}",
+            parsed.path()
+        ));
     }
 
     EndpointReadiness {
@@ -1308,6 +1345,37 @@ mod tests {
     }
 
     #[test]
+    fn configure_whitespace_project_is_rejected() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = GcpConnector::new();
+                c.configure(json!({"mode":"access_token","access_token":"t","project_id":"   "}))
+                    .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn configure_zero_request_timeout_is_rejected() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                let mut c = GcpConnector::new();
+                c.configure(json!({
+                    "mode":"access_token",
+                    "access_token":"t",
+                    "project_id":"test-project",
+                    "request_timeout_ms": 0
+                }))
+                .await
+            })
+            .unwrap()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn configure_bad() {
         assert!(
             fcp_async_core::runtime::block_on_sync(async {
@@ -1607,6 +1675,17 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_policy_rejects_pathful_google_api_override() {
+        let policy = endpoint_policy(
+            "compute",
+            &Some("https://compute.googleapis.com/compute/v1".into()),
+            COMPUTE_API_HOST,
+        );
+        assert!(!policy.ok);
+        assert!(policy.message.contains("path must be empty"));
+    }
+
+    #[test]
     fn endpoint_policy_wrong_service_host() {
         let policy = endpoint_policy(
             "storage",
@@ -1641,6 +1720,27 @@ mod tests {
                 .iter()
                 .any(|endpoint| endpoint.service == "storage" && !endpoint.ok)
         );
+    }
+
+    #[test]
+    fn config_validation_rejects_invalid_auxiliary_endpoint() {
+        let config = GcpConfig {
+            project_id: "test-project".into(),
+            auth: GcpAuth::AccessToken {
+                access_token: "ya29.test".into(),
+            },
+            retry: HttpRetryConfig::default(),
+            request_timeout_ms: default_timeout_ms(),
+            compute_base_url: None,
+            storage_base_url: Some("https://compute.googleapis.com".into()),
+            run_base_url: None,
+            crm_base_url: None,
+        };
+
+        let err = config
+            .validate()
+            .expect_err("cross-wired endpoint must be rejected");
+        assert!(err.contains("storage"));
     }
 
     #[test]

@@ -61,6 +61,7 @@ async fn setup_configure(connector: &mut PlaidConnector, base_url: &str) {
             "client_id": "test_client_id",
             "secret": "test_secret",
             "base_url": base_url,
+            "environment": "sandbox",
         }))
         .await
         .expect("configure");
@@ -1593,7 +1594,8 @@ async fn configure_missing_client_id() {
     let mut connector = PlaidConnector::new();
     let result = connector
         .handle_configure(json!({
-            "secret": "test_secret"
+            "secret": "test_secret",
+            "environment": "sandbox"
         }))
         .await;
     assert!(result.is_err());
@@ -1611,7 +1613,8 @@ async fn configure_missing_auth() {
     let mut connector = PlaidConnector::new();
     let result = connector
         .handle_configure(json!({
-            "client_id": "test_id"
+            "client_id": "test_id",
+            "environment": "sandbox"
         }))
         .await;
     assert!(result.is_err());
@@ -1630,7 +1633,8 @@ async fn configure_empty_client_id() {
     let result = connector
         .handle_configure(json!({
             "client_id": "  ",
-            "secret": "test_secret"
+            "secret": "test_secret",
+            "environment": "sandbox"
         }))
         .await;
     assert!(result.is_err());
@@ -1649,7 +1653,8 @@ async fn configure_empty_secret_no_credential() {
     let result = connector
         .handle_configure(json!({
             "client_id": "test_id",
-            "secret": ""
+            "secret": "",
+            "environment": "sandbox"
         }))
         .await;
     assert!(result.is_err());
@@ -1689,7 +1694,8 @@ async fn configure_both_auth_modes_rejected() {
         .handle_configure(json!({
             "client_id": "test_id",
             "secret": "test_secret",
-            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "environment": "sandbox"
         }))
         .await;
     assert!(result.is_err());
@@ -1708,7 +1714,8 @@ async fn configure_credential_id_mode() {
     let result = connector
         .handle_configure(json!({
             "client_id": "test_id",
-            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "environment": "sandbox"
         }))
         .await
         .unwrap();
@@ -1979,7 +1986,8 @@ async fn health_check_after_configure() {
         .handle_configure(json!({
             "client_id": "test_id",
             "secret": "test_secret",
-            "base_url": "http://localhost:9999"
+            "base_url": "http://localhost:9999",
+            "environment": "sandbox"
         }))
         .await
         .unwrap();
@@ -1994,7 +2002,8 @@ async fn health_check_credential_id_degraded() {
     connector
         .handle_configure(json!({
             "client_id": "test_id",
-            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "environment": "sandbox"
         }))
         .await
         .unwrap();
@@ -2035,7 +2044,8 @@ async fn doctor_secret_mode_healthy() {
         .handle_configure(json!({
             "client_id": "test_id",
             "secret": "test_secret",
-            "base_url": mock.base_url()
+            "base_url": mock.base_url(),
+            "environment": "sandbox"
         }))
         .await
         .unwrap();
@@ -2069,7 +2079,8 @@ async fn doctor_secret_mode_invalid_creds() {
         .handle_configure(json!({
             "client_id": "bad_id",
             "secret": "bad_secret",
-            "base_url": mock.base_url()
+            "base_url": mock.base_url(),
+            "environment": "sandbox"
         }))
         .await
         .unwrap();
@@ -2194,7 +2205,8 @@ async fn reconfigure_connector() {
         .handle_configure(json!({
             "client_id": "first_id",
             "secret": "first_secret",
-            "base_url": "http://localhost:9999"
+            "base_url": "http://localhost:9999",
+            "environment": "sandbox"
         }))
         .await
         .unwrap();
@@ -2207,7 +2219,8 @@ async fn reconfigure_connector() {
         .handle_configure(json!({
             "client_id": "second_id",
             "secret": "second_secret",
-            "base_url": "http://localhost:8888"
+            "base_url": "http://localhost:8888",
+            "environment": "sandbox"
         }))
         .await
         .unwrap();

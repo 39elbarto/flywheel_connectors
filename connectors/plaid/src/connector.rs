@@ -140,7 +140,12 @@ impl PlaidConfig {
             params
                 .get("environment")
                 .and_then(|v| v.as_str())
-                .unwrap_or("sandbox"),
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: "environment is required — must be one of: sandbox, development, \
+                        production. Plaid has no safe default because sandbox uses fake data."
+                        .into(),
+                })?,
         )?;
 
         let base_url = params
@@ -1309,7 +1314,8 @@ mod tests {
         let result = connector
             .handle_configure(json!({
                 "client_id": "test_client_id",
-                "credential_id": credential_id
+                "credential_id": credential_id,
+                "environment": "sandbox"
             }))
             .await
             .unwrap();

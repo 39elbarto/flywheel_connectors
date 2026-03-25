@@ -34,8 +34,12 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocuSignResult<&'a 
     Ok(value)
 }
 
-/// Default `DocuSign` API base URL (demo environment).
-pub const DEFAULT_BASE_URL: &str = "https://demo.docusign.net/restapi/v2.1/accounts";
+/// Well-known `DocuSign` demo environment URL.
+///
+/// **WARNING**: This is the demo/sandbox environment, NOT production.
+/// Production URLs vary by region (na1, na2, eu, au).
+/// Connectors must always receive an explicit `base_url` from configuration.
+pub const DEMO_BASE_URL: &str = "https://demo.docusign.net/restapi/v2.1/accounts";
 
 /// Parameters for listing envelopes.
 #[derive(Debug, Default)]
@@ -102,7 +106,17 @@ impl fmt::Debug for DocuSignClient {
 
 impl DocuSignClient {
     /// Create a new `DocuSign` client.
-    pub fn new(auth: DocuSignAuth, base_url: Option<&str>) -> DocuSignResult<Self> {
+    ///
+    /// `base_url` is **required** — there is no safe default because DocuSign
+    /// demo and production environments are completely separate. Callers must
+    /// explicitly choose (e.g. `"https://na1.docusign.net/restapi/v2.1/accounts"`
+    /// for production or `DEMO_BASE_URL` for testing).
+    pub fn new(auth: DocuSignAuth, base_url: &str) -> DocuSignResult<Self> {
+        if base_url.trim().is_empty() {
+            return Err(DocuSignError::InvalidInput(
+                "base_url is required — DocuSign has no safe default (demo vs production is a deployment choice)".into(),
+            ));
+        }
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-docusign/0.1.0 (FCP connector)")
@@ -111,10 +125,7 @@ impl DocuSignClient {
         Ok(Self {
             client,
             auth,
-            base_url: base_url
-                .unwrap_or(DEFAULT_BASE_URL)
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
@@ -528,16 +539,23 @@ mod tests {
     }
 
     #[test]
-    fn client_default_base_url() {
-        let c = DocuSignClient::new(DocuSignAuth::BearerToken("tok".into()), None).unwrap();
-        assert_eq!(c.base_url, DEFAULT_BASE_URL);
+    fn client_with_demo_base_url() {
+        let c =
+            DocuSignClient::new(DocuSignAuth::BearerToken("tok".into()), DEMO_BASE_URL).unwrap();
+        assert_eq!(c.base_url, DEMO_BASE_URL);
+    }
+
+    #[test]
+    fn client_rejects_empty_base_url() {
+        let result = DocuSignClient::new(DocuSignAuth::BearerToken("tok".into()), "");
+        assert!(result.is_err());
     }
 
     #[test]
     fn client_custom_base_url() {
         let c = DocuSignClient::new(
             DocuSignAuth::BearerToken("tok".into()),
-            Some("https://custom.docusign.net/restapi/v2.1/accounts"),
+            "https://custom.docusign.net/restapi/v2.1/accounts",
         )
         .unwrap();
         assert_eq!(
@@ -550,7 +568,7 @@ mod tests {
     fn client_trims_trailing_slash() {
         let c = DocuSignClient::new(
             DocuSignAuth::BearerToken("tok".into()),
-            Some("https://example.com/api/"),
+            "https://example.com/api/",
         )
         .unwrap();
         assert_eq!(c.base_url, "https://example.com/api");
@@ -558,7 +576,8 @@ mod tests {
 
     #[test]
     fn client_debug_format() {
-        let c = DocuSignClient::new(DocuSignAuth::BearerToken("secret".into()), None).unwrap();
+        let c =
+            DocuSignClient::new(DocuSignAuth::BearerToken("secret".into()), DEMO_BASE_URL).unwrap();
         let dbg = format!("{c:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("DocuSignClient"));
@@ -582,7 +601,8 @@ mod tests {
 
     #[test]
     fn client_debug_contains_base_url() {
-        let c = DocuSignClient::new(DocuSignAuth::BearerToken("tok".into()), None).unwrap();
+        let c =
+            DocuSignClient::new(DocuSignAuth::BearerToken("tok".into()), DEMO_BASE_URL).unwrap();
         let dbg = format!("{c:?}");
         assert!(dbg.contains("base_url"));
     }
@@ -590,23 +610,23 @@ mod tests {
     #[test]
     fn client_new_with_credential_id() {
         let cred = CredentialId::new();
-        let c = DocuSignClient::new(DocuSignAuth::CredentialId(cred), None).unwrap();
-        assert_eq!(c.base_url, DEFAULT_BASE_URL);
+        let c = DocuSignClient::new(DocuSignAuth::CredentialId(cred), DEMO_BASE_URL).unwrap();
+        assert_eq!(c.base_url, DEMO_BASE_URL);
     }
 
     #[test]
-    fn default_base_url_contains_docusign() {
-        assert!(DEFAULT_BASE_URL.contains("docusign"));
+    fn demo_base_url_contains_docusign() {
+        assert!(DEMO_BASE_URL.contains("docusign"));
     }
 
     #[test]
     fn default_base_url_is_https() {
-        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+        assert!(DEMO_BASE_URL.starts_with("https://"));
     }
 
     #[test]
     fn default_base_url_contains_restapi() {
-        assert!(DEFAULT_BASE_URL.contains("restapi"));
+        assert!(DEMO_BASE_URL.contains("restapi"));
     }
 
     #[test]
@@ -639,7 +659,7 @@ mod tests {
     fn client_strips_multiple_trailing_slashes() {
         let c = DocuSignClient::new(
             DocuSignAuth::BearerToken("k".into()),
-            Some("https://example.com/api////"),
+            "https://example.com/api////",
         )
         .unwrap();
         assert!(!c.base_url.ends_with('/'));

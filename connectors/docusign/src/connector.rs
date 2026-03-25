@@ -15,7 +15,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, DocuSignAuth, DocuSignClient, ListEnvelopesParams},
+    client::{DEMO_BASE_URL, DocuSignAuth, DocuSignClient, ListEnvelopesParams},
     error::DocuSignError,
 };
 
@@ -71,7 +71,15 @@ impl DocuSignConfig {
         let base_url = params
             .get("base_url")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or(DEFAULT_BASE_URL)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1004,
+                message: "base_url is required — DocuSign has no safe default. Use \
+                    'https://demo.docusign.net/restapi/v2.1/accounts' for testing or \
+                    'https://na1.docusign.net/restapi/v2.1/accounts' (or eu/au region) \
+                    for production."
+                    .into(),
+            })?
             .to_string();
 
         Ok(Self { auth, base_url })
@@ -186,7 +194,7 @@ impl DocuSignConnector {
         let config = DocuSignConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring DocuSign connector");
 
-        let client = DocuSignClient::new(config.auth.clone(), Some(&config.base_url))
+        let client = DocuSignClient::new(config.auth.clone(), &config.base_url)
             .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
@@ -1132,16 +1140,32 @@ mod tests {
     fn config_from_access_token() {
         let config = DocuSignConfig::from_params(&json!({
             "access_token": "test-token",
+            "base_url": DEMO_BASE_URL,
         }))
         .unwrap();
         assert!(matches!(config.auth, DocuSignAuth::BearerToken(_)));
-        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(config.base_url, DEMO_BASE_URL);
+    }
+
+    #[test]
+    fn config_rejects_missing_base_url() {
+        let result = DocuSignConfig::from_params(&json!({
+            "access_token": "test-token",
+        }));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("base_url is required"),
+            "Error should explain base_url is required, got: {msg}"
+        );
     }
 
     #[test]
     fn config_from_credential_id() {
         let config = DocuSignConfig::from_params(&json!({
             "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "base_url": DEMO_BASE_URL,
         }))
         .unwrap();
         assert!(config.auth.is_secretless());
@@ -1209,8 +1233,10 @@ mod tests {
 
     #[test]
     fn config_trims_access_token() {
-        let config =
-            DocuSignConfig::from_params(&json!({ "access_token": "  tok_test  " })).unwrap();
+        let config = DocuSignConfig::from_params(
+            &json!({ "access_token": "  tok_test  ", "base_url": DEMO_BASE_URL }),
+        )
+        .unwrap();
         match &config.auth {
             DocuSignAuth::BearerToken(t) => assert_eq!(t, "tok_test"),
             DocuSignAuth::CredentialId(_) => panic!("expected BearerToken"),
@@ -1644,12 +1670,11 @@ mod tests {
     }
 
     #[test]
-    fn config_default_base_url_when_not_specified() {
-        let config = DocuSignConfig::from_params(&json!({
+    fn config_errors_when_base_url_not_specified() {
+        let result = DocuSignConfig::from_params(&json!({
             "access_token": "tok",
-        }))
-        .unwrap();
-        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        }));
+        assert!(result.is_err(), "Should require base_url");
     }
 
     #[test]
@@ -1738,6 +1763,7 @@ mod tests {
     fn provisioning_readiness_bearer_token_mode() {
         let config = DocuSignConfig::from_params(&json!({
             "access_token": "test-token",
+            "base_url": DEMO_BASE_URL,
         }))
         .unwrap();
         let readiness = config.provisioning_readiness();
@@ -1746,13 +1772,14 @@ mod tests {
         assert!(!readiness.credential_id_configured);
         assert!(!readiness.requires_credential_injection);
         assert!(readiness.network_ok);
-        assert_eq!(readiness.base_url, DEFAULT_BASE_URL);
+        assert_eq!(readiness.base_url, DEMO_BASE_URL);
     }
 
     #[test]
     fn provisioning_readiness_credential_id_mode() {
         let config = DocuSignConfig::from_params(&json!({
             "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "base_url": DEMO_BASE_URL,
         }))
         .unwrap();
         let readiness = config.provisioning_readiness();
@@ -1767,6 +1794,7 @@ mod tests {
     fn provisioning_readiness_serializes() {
         let config = DocuSignConfig::from_params(&json!({
             "access_token": "tok",
+            "base_url": DEMO_BASE_URL,
         }))
         .unwrap();
         let readiness = config.provisioning_readiness();

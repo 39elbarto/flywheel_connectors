@@ -18,7 +18,9 @@ use crate::{
     },
 };
 
-const DEFAULT_BASE_URL: &str = "https://sandbox.plaid.com";
+/// Well-known Plaid sandbox URL. **Not a safe default** — sandbox uses fake data.
+/// Connectors must always receive an explicit environment selection from configuration.
+const SANDBOX_BASE_URL: &str = "https://sandbox.plaid.com";
 
 /// Plaid REST API client.
 pub struct PlaidClient {
@@ -41,7 +43,7 @@ impl PlaidClient {
 
         Ok(Self {
             http,
-            base_url: DEFAULT_BASE_URL.to_string(),
+            base_url: SANDBOX_BASE_URL.to_string(),
             client_id: client_id.to_string(),
             secret: secret.to_string(),
             max_retries: 2,
@@ -802,8 +804,8 @@ mod tests {
     // ── Default base URL constant ───────────────────────────────────────
 
     #[test]
-    fn default_base_url_is_sandbox() {
-        assert_eq!(DEFAULT_BASE_URL, "https://sandbox.plaid.com");
+    fn sandbox_base_url_is_correct() {
+        assert_eq!(SANDBOX_BASE_URL, "https://sandbox.plaid.com");
     }
 
     // ── Additional wiremock API edge case tests ─────────────────────────

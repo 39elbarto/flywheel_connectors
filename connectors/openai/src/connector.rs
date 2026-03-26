@@ -2328,12 +2328,12 @@ impl OpenAIConnector {
             });
         }
 
-        if text.len() > 4096 {
+        if text.chars().count() > 4096 {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: format!(
                     "Input text exceeds 4096 character limit (got {})",
-                    text.len()
+                    text.chars().count()
                 ),
             });
         }

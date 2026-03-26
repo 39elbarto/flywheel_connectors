@@ -1306,8 +1306,11 @@ mod edge_cases {
         let mut section = strict_sandbox_section();
         section.memory_mb = 0;
 
-        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
-        assert_eq!(policy.memory_limit_bytes, 0);
+        let err = CompiledPolicy::from_manifest(&section, None).unwrap_err();
+        assert!(
+            err.to_string().contains("memory_mb must be > 0"),
+            "expected zero-memory rejection, got: {err}"
+        );
     }
 
     #[test]

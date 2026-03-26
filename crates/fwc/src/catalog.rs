@@ -336,12 +336,12 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
     },
     CommandClassification {
         command: "do",
-        truth_source: CommandTruthSource::Hybrid,
+        truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::Mutating,
-        host_absent: HostAbsentBehavior::DegradedWithWarning,
+        host_absent: HostAbsentBehavior::Unaffected,
         requires_capability_token: false,
         may_need_approval: true,
-        transport_note: "Intent dispatch: invokes live host when available, plans offline otherwise",
+        transport_note: "Workflow materialization stays artifact-backed; approved primitive steps may still surface their own live host envelopes",
     },
     // ── Live-host-required commands ─────────────────────────────────────
     CommandClassification {
@@ -418,12 +418,12 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
     },
     CommandClassification {
         command: "capabilities",
-        truth_source: CommandTruthSource::LiveHost,
+        truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::ReadOnly,
-        host_absent: HostAbsentBehavior::FailFast,
+        host_absent: HostAbsentBehavior::Unaffected,
         requires_capability_token: false,
         may_need_approval: false,
-        transport_note: "POST /rpc/capabilities — live host capability report",
+        transport_note: "Capability usage is derived from local execution history and may be enriched with current host metadata when available",
     },
     CommandClassification {
         command: "lifecycle",
@@ -918,6 +918,7 @@ pub fn default_offline_source(command: &str) -> OfflineSource {
             // Refine based on specific command
             match command {
                 "guide" => OfflineSource::StaticContract,
+                "capabilities" => OfflineSource::LocalHistory,
                 "compare" => OfflineSource::LocalHistory,
                 "history" => OfflineSource::LocalHistory,
                 "pipe" => OfflineSource::LocalHistory,
@@ -6398,8 +6399,8 @@ mod tests {
         assert!(command_requires_host("doctor"));
         assert!(command_requires_host("status"));
         assert!(command_requires_host("budget"));
-        assert!(command_requires_host("capabilities"));
         assert!(command_requires_host("serve-mcp"));
+        assert!(command_requires_host("watch"));
     }
 
     #[test]
@@ -6414,17 +6415,14 @@ mod tests {
 
     #[test]
     fn command_does_not_require_host_for_offline_commands() {
+        assert!(!command_requires_host("capabilities"));
+        assert!(!command_requires_host("do"));
         assert!(!command_requires_host("guide"));
         assert!(!command_requires_host("task"));
         assert!(!command_requires_host("plan"));
         assert!(!command_requires_host("explain"));
         assert!(!command_requires_host("history"));
         assert!(!command_requires_host("pipe"));
-    }
-
-    #[test]
-    fn command_does_not_require_host_for_degraded_commands() {
-        assert!(!command_requires_host("do"));
     }
 
     #[test]
@@ -8509,20 +8507,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_hybrid_degraded_command_with_host_is_live() {
-        // do is Hybrid + DegradedWithWarning
+    fn resolve_offline_artifact_command_with_host_stays_explicit_offline() {
         let mode = resolve_runtime_mode(&ctx("do", false, true, true));
-        assert_eq!(mode, RuntimeMode::Live);
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
     }
 
     #[test]
-    fn resolve_hybrid_degraded_command_without_host_degrades() {
+    fn resolve_offline_artifact_command_without_host_stays_explicit_offline() {
         let mode = resolve_runtime_mode(&ctx("do", false, false, false));
-        assert_eq!(mode, RuntimeMode::DegradedOffline);
+        assert_eq!(mode, RuntimeMode::ExplicitOffline);
     }
 
     #[test]
-    fn resolve_hybrid_degraded_command_with_offline_flag_is_explicit_offline() {
+    fn resolve_offline_artifact_command_with_offline_flag_is_explicit_offline() {
         let mode = resolve_runtime_mode(&ctx("do", true, false, false));
         assert_eq!(mode, RuntimeMode::ExplicitOffline);
     }
@@ -8614,10 +8611,9 @@ mod tests {
     }
 
     #[test]
-    fn boundary_degraded_has_provenance_no_refusal() {
-        // "do" is Hybrid + DegradedWithWarning
+    fn boundary_offline_artifact_has_provenance_no_refusal() {
         let b = resolve_boundary(&ctx("do", false, false, false));
-        assert_eq!(b.mode, RuntimeMode::DegradedOffline);
+        assert_eq!(b.mode, RuntimeMode::ExplicitOffline);
         assert!(b.offline_provenance.is_some());
         assert!(b.refusal.is_none());
     }

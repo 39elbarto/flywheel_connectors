@@ -881,7 +881,7 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
     },
     CommandFamilyEntry {
         name: "capabilities",
-        mode: CommandTruthMode::Hybrid,
+        mode: CommandTruthMode::OfflineOnly,
     },
     // ── Offline-only commands (operate on local state, never contact host) ──
     CommandFamilyEntry {
@@ -9391,8 +9391,10 @@ output_schema = { type = "object" }
             .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
             .map(|e| e.name)
             .collect();
+        assert!(offline.contains(&"capabilities"));
         assert!(offline.contains(&"context"));
         assert!(offline.contains(&"session"));
+        assert!(offline.contains(&"do"));
         assert!(offline.contains(&"guide"));
         assert!(offline.contains(&"task"));
     }
@@ -9846,10 +9848,10 @@ output_schema = { type = "object" }
     }
 
     #[test]
-    fn classify_capabilities_is_hybrid() {
+    fn classify_capabilities_is_offline_only() {
         assert_eq!(
             classify_command("capabilities").unwrap().mode,
-            CommandTruthMode::Hybrid
+            CommandTruthMode::OfflineOnly
         );
     }
 

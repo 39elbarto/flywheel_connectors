@@ -258,8 +258,11 @@ fn test_zero_memory_limit() {
     let mut manifest = strict_manifest();
     manifest.memory_mb = 0;
 
-    let policy = CompiledPolicy::from_manifest(&manifest, None).unwrap();
-    assert_eq!(policy.memory_limit_bytes, 0);
+    let err = CompiledPolicy::from_manifest(&manifest, None).unwrap_err();
+    assert!(
+        err.to_string().contains("memory_mb must be > 0"),
+        "expected zero-memory rejection, got: {err}"
+    );
 }
 
 #[test]
@@ -267,8 +270,11 @@ fn test_zero_cpu_percent() {
     let mut manifest = strict_manifest();
     manifest.cpu_percent = 0;
 
-    let policy = CompiledPolicy::from_manifest(&manifest, None).unwrap();
-    assert_eq!(policy.cpu_percent, 0);
+    let err = CompiledPolicy::from_manifest(&manifest, None).unwrap_err();
+    assert!(
+        err.to_string().contains("cpu_percent must be > 0"),
+        "expected zero-cpu rejection, got: {err}"
+    );
 }
 
 #[test]
@@ -276,8 +282,11 @@ fn test_zero_timeout() {
     let mut manifest = strict_manifest();
     manifest.wall_clock_timeout_ms = 0;
 
-    let policy = CompiledPolicy::from_manifest(&manifest, None).unwrap();
-    assert_eq!(policy.wall_clock_timeout, Duration::ZERO);
+    let err = CompiledPolicy::from_manifest(&manifest, None).unwrap_err();
+    assert!(
+        err.to_string().contains("wall_clock_timeout_ms must be > 0"),
+        "expected zero-timeout rejection, got: {err}"
+    );
 }
 
 #[test]

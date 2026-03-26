@@ -25805,6 +25805,16 @@ deny_ptrace = true
 
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "simulated");
+        assert_eq!(payload["availability"]["availability"], "offline-artifact");
+        assert_eq!(payload["availability"]["command"], "do");
+        assert_eq!(payload["availability"]["authoritative"], false);
+        assert!(
+            payload["availability"]["next_actions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().all(
+                    |action| !action.as_str().unwrap_or_default().contains("--host")
+                ))
+        );
         assert_eq!(payload["execution_mode"]["defaulted"], true);
         assert_eq!(payload["execution"]["status"], "stopped-on-primitive-error");
         // The first inspect step fails (no live host), so execution truthfully stops
@@ -26814,6 +26824,16 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "capabilities");
         assert_eq!(payload["subcommand"], "report");
+        assert_eq!(payload["availability"]["availability"], "offline-artifact");
+        assert_eq!(payload["availability"]["command"], "capabilities");
+        assert_eq!(payload["availability"]["authoritative"], false);
+        assert!(
+            payload["availability"]["next_actions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().all(
+                    |action| !action.as_str().unwrap_or_default().contains("--host")
+                ))
+        );
         assert_eq!(payload["summary"]["aggregate_count"], 2);
         assert_eq!(payload["summary"]["skipped_simulated"], 1);
         assert_eq!(payload["zones"][0]["zone_id"], "z:work");

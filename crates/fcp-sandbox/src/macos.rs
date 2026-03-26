@@ -413,7 +413,10 @@ impl Sandbox for MacOsSandbox {
 
         if write {
             for writable in &policy.writable_paths {
-                if path.starts_with(writable) {
+                // Canonicalize policy paths too so macOS symlinks
+                // (/tmp → /private/tmp, /var → /private/var) match.
+                let writable = crate::sandbox::resolve_policy_path(writable);
+                if path.starts_with(&writable) {
                     return Ok(());
                 }
             }
@@ -431,9 +434,10 @@ impl Sandbox for MacOsSandbox {
             }
         }
 
-        // Check policy paths
+        // Check policy paths — canonicalize to handle platform symlinks.
         for readable in policy.readonly_paths.iter().chain(&policy.writable_paths) {
-            if path.starts_with(readable) {
+            let readable = crate::sandbox::resolve_policy_path(readable);
+            if path.starts_with(&readable) {
                 return Ok(());
             }
         }

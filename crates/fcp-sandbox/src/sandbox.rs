@@ -784,10 +784,15 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "fcp-sandbox-path-resolution-{}-{unique}",
-            std::process::id()
-        ));
+        // Canonicalize temp_dir to resolve macOS symlinks (/var → /private/var)
+        // so that policy path comparisons use consistent prefixes.
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!(
+                "fcp-sandbox-path-resolution-{}-{unique}",
+                std::process::id()
+            ));
         let allowed = base.join("allowed");
         let escaped = base.join("escaped");
         let link = allowed.join("link");

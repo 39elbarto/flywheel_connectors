@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::{AppleRemindersError, AppleRemindersResult};
 use crate::types::AppleRemindersConfig;
@@ -148,10 +148,12 @@ impl AppleRemindersClient {
     pub fn list_reminders_invocation(&self, list_name: Option<&str>) -> ScriptInvocation {
         ScriptInvocation {
             script: LIST_REMINDERS_SCRIPT,
-            args: vec![list_name
-                .or(self.default_list.as_deref())
-                .unwrap_or("")
-                .to_string()],
+            args: vec![
+                list_name
+                    .or(self.default_list.as_deref())
+                    .unwrap_or("")
+                    .to_string(),
+            ],
         }
     }
 

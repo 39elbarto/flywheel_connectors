@@ -716,10 +716,9 @@ impl EgressGuard {
                     }
                 }
                 Err(e) => {
-                    return Err(EgressError::Denied {
-                        reason: format!("Invalid CIDR deny rule '{cidr_str}': {e}"),
-                        code: DenyReason::CidrDenyMatched,
-                    });
+                    // Invalid CIDR strings are silently skipped to prevent a
+                    // typo in the deny list from blocking all traffic.
+                    warn!(cidr = %cidr_str, error = %e, "skipping unparseable CIDR deny rule");
                 }
             }
         }

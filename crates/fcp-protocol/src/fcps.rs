@@ -917,6 +917,10 @@ impl SignedFcpsFrame {
     ///
     /// # Errors
     /// Returns `CryptoError` if signature verification fails.
+    ///
+    /// # Panics
+    /// Panics if the internal frame cannot be re-encoded, which should
+    /// never happen for frames validated at construction.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
         // encode() validated at construction time in new(); infallible for well-formed frames
         let frame_bytes = self

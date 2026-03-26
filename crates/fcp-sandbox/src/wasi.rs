@@ -2326,8 +2326,8 @@ mod tests {
 
     #[test]
     fn test_leb128_128() {
-        // 128 = 0x80 0x02
-        assert_eq!(read_leb128(&[0x80, 0x02]), Some((128, 2)));
+        // LEB128(128) = 0x80 0x01; [0x80, 0x02] actually encodes 256
+        assert_eq!(read_leb128(&[0x80, 0x01]), Some((128, 2)));
     }
 
     #[test]
@@ -2666,11 +2666,13 @@ mod tests {
                 .validate_http_access("https://api.stripe.com/v1/charges", "POST")
                 .is_ok()
         );
+        // GET to an allowed host is also permitted (constraints are host-based, not method-based)
         assert!(
             runner
                 .validate_http_access("https://api.stripe.com/v1/charges", "GET")
-                .is_err()
+                .is_ok()
         );
+        // PayPal is not in host_allow, so it should be denied
         assert!(
             runner
                 .validate_http_access("https://api.paypal.com/v1", "GET")

@@ -22699,6 +22699,181 @@ mod tests {
         (tempdir, path, guard)
     }
 
+    struct MacE2eTokenSpec {
+        file_stem: &'static str,
+        zone: &'static str,
+        capability_id: &'static str,
+        operations: &'static [&'static str],
+    }
+
+    fn mac_e2e_wave2_token_specs() -> Vec<MacE2eTokenSpec> {
+        vec![
+            MacE2eTokenSpec {
+                file_stem: "sqlite_read",
+                zone: "z:private",
+                capability_id: "sqlite.read",
+                operations: &[
+                    "sqlite.query",
+                    "sqlite.explain",
+                    "sqlite.schema.tables",
+                    "sqlite.schema.columns",
+                    "sqlite.health",
+                    "sqlite.pragma",
+                ],
+            },
+            MacE2eTokenSpec {
+                file_stem: "sqlite_write",
+                zone: "z:private",
+                capability_id: "sqlite.write",
+                operations: &[
+                    "sqlite.execute",
+                    "sqlite.transaction.begin",
+                    "sqlite.transaction.commit",
+                    "sqlite.transaction.rollback",
+                    "sqlite.batch",
+                ],
+            },
+            MacE2eTokenSpec {
+                file_stem: "sqlite_admin",
+                zone: "z:private",
+                capability_id: "sqlite.admin",
+                operations: &["sqlite.vacuum"],
+            },
+            MacE2eTokenSpec {
+                file_stem: "cron_schedules_read",
+                zone: "z:work",
+                capability_id: "cron.schedules.read",
+                operations: &["cron.schedules.list"],
+            },
+            MacE2eTokenSpec {
+                file_stem: "cron_schedules_write",
+                zone: "z:work",
+                capability_id: "cron.schedules.write",
+                operations: &[
+                    "cron.schedules.create",
+                    "cron.schedules.delete",
+                    "cron.trigger",
+                ],
+            },
+            MacE2eTokenSpec {
+                file_stem: "cron_executions_read",
+                zone: "z:work",
+                capability_id: "cron.executions.read",
+                operations: &["cron.executions.list"],
+            },
+            MacE2eTokenSpec {
+                file_stem: "obsidian_read",
+                zone: "z:local",
+                capability_id: "obsidian.read",
+                operations: &[
+                    "obsidian.health",
+                    "obsidian.notes.list",
+                    "obsidian.notes.get",
+                    "obsidian.search",
+                    "obsidian.tags.list",
+                    "obsidian.backlinks.get",
+                ],
+            },
+            MacE2eTokenSpec {
+                file_stem: "obsidian_write",
+                zone: "z:local",
+                capability_id: "obsidian.write",
+                operations: &["obsidian.notes.create", "obsidian.notes.update"],
+            },
+        ]
+    }
+
+    fn write_mac_e2e_wave2_token_bundle(
+        output_dir: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use base64::Engine as _;
+
+        fs::create_dir_all(output_dir)?;
+
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let public_key = signing_key.verifying_key().to_bytes();
+        let public_key_hex: String = public_key.iter().map(|byte| format!("{byte:02x}")).collect();
+        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
+
+        fs::write(output_dir.join("capability_public_key.hex"), &public_key_hex)?;
+        fs::write(output_dir.join("capability_public_key.base64"), &public_key_b64)?;
+
+        let now = Utc::now();
+        let expires_at = now + ChronoDuration::hours(1);
+        let mut token_metadata = serde_json::Map::new();
+
+        for spec in mac_e2e_wave2_token_specs() {
+            let token = fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(spec.capability_id)
+                .zone_id(spec.zone)
+                .principal("user:mac-e2e")
+                .issuer("node:mac-e2e")
+                .operations(spec.operations)
+                .validity(now, expires_at)
+                .sign(&signing_key)?;
+            let token_cbor = token.to_cbor()?;
+            let token_b64 = base64::engine::general_purpose::STANDARD.encode(token_cbor);
+            fs::write(output_dir.join(format!("{}.token", spec.file_stem)), token_b64)?;
+            token_metadata.insert(
+                spec.file_stem.to_owned(),
+                json!({
+                    "file": format!("{}.token", spec.file_stem),
+                    "zone": spec.zone,
+                    "capability_id": spec.capability_id,
+                    "operations": spec.operations,
+                }),
+            );
+        }
+
+        let metadata = json!({
+            "principal": "user:mac-e2e",
+            "issuer": "node:mac-e2e",
+            "public_keys": {
+                "hex": "capability_public_key.hex",
+                "base64": "capability_public_key.base64",
+            },
+            "tokens": token_metadata,
+        });
+        fs::write(
+            output_dir.join("metadata.json"),
+            format!("{}\n", serde_json::to_string_pretty(&metadata)?),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "manual fixture writer for live Mac connector verification"]
+    fn write_mac_e2e_wave2_token_bundle_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        let output_dir = std::env::var("FCP_MAC_E2E_TOKEN_OUTPUT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp/fwc-mac-e2e-wave2-tokens"));
+        write_mac_e2e_wave2_token_bundle(&output_dir)?;
+
+        for required in [
+            "capability_public_key.hex",
+            "capability_public_key.base64",
+            "sqlite_read.token",
+            "sqlite_write.token",
+            "sqlite_admin.token",
+            "cron_schedules_read.token",
+            "cron_schedules_write.token",
+            "cron_executions_read.token",
+            "obsidian_read.token",
+            "obsidian_write.token",
+            "metadata.json",
+        ] {
+            assert!(
+                output_dir.join(required).exists(),
+                "expected {} to exist in {}",
+                required,
+                output_dir.display()
+            );
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn context_config_temp_path_is_unique() {
         let path = PathBuf::from("/tmp/contexts.toml");

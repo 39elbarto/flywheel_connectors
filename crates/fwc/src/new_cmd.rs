@@ -730,7 +730,7 @@ hex.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"
-fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-crypto = {{ path = "../../crates/fcp-crypto" }}
 wiremock.workspace = true
 "#
     )

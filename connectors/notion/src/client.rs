@@ -26,6 +26,21 @@ pub const DEFAULT_API_URL: &str = "https://api.notion.com/v1";
 /// `2026-03-11` as of March 25, 2026).
 pub const DEFAULT_NOTION_VERSION: &str = "2026-03-11";
 
+/// Truncate a response body string to `max` characters at a safe UTF-8 boundary.
+fn truncate_body(body: String, max: usize) -> String {
+    if body.len() <= max {
+        return body;
+    }
+    // Find the last char boundary at or before `max` bytes
+    let end = body
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= max)
+        .last()
+        .unwrap_or(0);
+    format!("{}...[truncated]", &body[..end])
+}
+
 fn is_valid_notion_version(version: &str) -> bool {
     if version.len() != 10 {
         return false;
@@ -477,6 +492,7 @@ impl NotionClient {
 
                         if status == StatusCode::NOT_FOUND {
                             let body = response.text().await.unwrap_or_default();
+                            let body = truncate_body(body, 500);
                             return AttemptOutcome::Terminal(NotionError::NotFound {
                                 resource: body,
                             });
@@ -501,6 +517,7 @@ impl NotionClient {
 
                         if status.is_server_error() {
                             let body = response.text().await.unwrap_or_default();
+                            let body = truncate_body(body, 500);
                             return AttemptOutcome::Retryable {
                                 error: NotionError::Api {
                                     message: format!("Server error {status}: {body}"),
@@ -512,6 +529,7 @@ impl NotionClient {
 
                         if !status.is_success() {
                             let body = response.text().await.unwrap_or_default();
+                            let body = truncate_body(body, 500);
                             let api_err: Option<ApiErrorResponse> =
                                 serde_json::from_str(&body).ok();
                             let message = api_err

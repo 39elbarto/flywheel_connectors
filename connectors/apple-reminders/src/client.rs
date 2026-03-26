@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::error::{AppleRemindersError, AppleRemindersResult};
 use crate::types::AppleRemindersConfig;
@@ -82,6 +82,43 @@ pub struct AppleRemindersClient {
     default_list: Option<String>,
 }
 
+fn normalize_script_output(raw: &str) -> String {
+    raw.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn parse_list_output(raw: &str) -> Vec<Value> {
+    let normalized = normalize_script_output(raw);
+    normalized
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            Some(json!({
+                "id": parts.next()?,
+                "name": parts.next()?,
+            }))
+        })
+        .collect()
+}
+
+fn parse_reminder_output(raw: &str) -> Vec<Value> {
+    let normalized = normalize_script_output(raw);
+    normalized
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            Some(json!({
+                "id": parts.next()?,
+                "title": parts.next()?,
+                "list": parts.next()?,
+                "completed": parts.next()? == "true",
+                "due": parts.next().unwrap_or(""),
+            }))
+        })
+        .collect()
+}
+
 impl AppleRemindersClient {
     pub fn from_config(config: &AppleRemindersConfig) -> AppleRemindersResult<Self> {
         Ok(Self {
@@ -111,12 +148,10 @@ impl AppleRemindersClient {
     pub fn list_reminders_invocation(&self, list_name: Option<&str>) -> ScriptInvocation {
         ScriptInvocation {
             script: LIST_REMINDERS_SCRIPT,
-            args: vec![
-                list_name
-                    .or(self.default_list.as_deref())
-                    .unwrap_or("")
-                    .to_string(),
-            ],
+            args: vec![list_name
+                .or(self.default_list.as_deref())
+                .unwrap_or("")
+                .to_string()],
         }
     }
 
@@ -164,41 +199,19 @@ impl AppleRemindersClient {
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(normalize_script_output(stdout.as_ref()).trim().to_string())
     }
 
     pub fn list_lists(&self) -> AppleRemindersResult<Value> {
         let raw = self.run_invocation(self.list_lists_invocation())?;
-        let lists: Vec<Value> = raw
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| {
-                let mut parts = line.split('\t');
-                Some(json!({
-                    "id": parts.next()?,
-                    "name": parts.next()?,
-                }))
-            })
-            .collect();
+        let lists = parse_list_output(&raw);
         Ok(json!({ "lists": lists }))
     }
 
     pub fn list_reminders(&self, list_name: Option<&str>) -> AppleRemindersResult<Value> {
         let raw = self.run_invocation(self.list_reminders_invocation(list_name))?;
-        let reminders: Vec<Value> = raw
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| {
-                let mut parts = line.split('\t');
-                Some(json!({
-                    "id": parts.next()?,
-                    "title": parts.next()?,
-                    "list": parts.next()?,
-                    "completed": parts.next()? == "true",
-                    "due": parts.next().unwrap_or(""),
-                }))
-            })
-            .collect();
+        let reminders = parse_reminder_output(&raw);
         Ok(json!({ "reminders": reminders }))
     }
 
@@ -316,6 +329,80 @@ mod tests {
     fn complete_rejects_empty_id() {
         let err = client_with_list().complete_reminder("  ");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn normalize_script_output_accepts_carriage_returns() {
+        assert_eq!(normalize_script_output("a\rb\r\nc\n"), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn parse_list_output_handles_carriage_return_delimited_records() {
+        let lists = parse_list_output(
+            "36B7BEE9-47C2-4B22-A513-D05ACF76D8DE\tReminders\rA1B2C3D4\tShopping\r",
+        );
+
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0]["name"], "Reminders");
+        assert_eq!(lists[1]["name"], "Shopping");
+    }
+
+    #[test]
+    fn parse_list_output_matches_live_artifact_separator_shape() {
+        let lists = parse_list_output(concat!(
+            "36B7BEE9-47C2-4B22-A513-D05ACF76D8DE\tReminders\r",
+            "6A48664C-BCEB-4368-87B6-B8AB9EF4501D\tShopping\r",
+        ));
+
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0]["id"], "36B7BEE9-47C2-4B22-A513-D05ACF76D8DE");
+        assert_eq!(lists[0]["name"], "Reminders");
+        assert_eq!(lists[1]["id"], "6A48664C-BCEB-4368-87B6-B8AB9EF4501D");
+        assert_eq!(lists[1]["name"], "Shopping");
+    }
+
+    #[test]
+    fn parse_reminder_output_handles_carriage_return_delimited_records() {
+        let reminders = parse_reminder_output(concat!(
+            "x-apple-reminder://D5C7ED01\tPay Caterine\tReminders\tfalse\tFriday, October 3, 2025 at 6:00:00 PM\r",
+            "x-apple-reminder://5C3420C7\tFCP Mac E2E Reminder Default 20260325T192752\tReminders\ttrue\t\r",
+        ));
+
+        assert_eq!(reminders.len(), 2);
+        assert_eq!(reminders[0]["due"], "Friday, October 3, 2025 at 6:00:00 PM");
+        assert_eq!(
+            reminders[1]["title"],
+            "FCP Mac E2E Reminder Default 20260325T192752"
+        );
+        assert_eq!(reminders[1]["due"], "");
+    }
+
+    #[test]
+    fn parse_reminder_output_matches_live_artifact_separator_shape() {
+        let reminders = parse_reminder_output(concat!(
+            "x-apple-reminder://D5C7ED01-AE69-4BC9-B5AA-A2FE8AC2B047\tPay Caterine\tReminders\tfalse\tFriday, October 3, 2025 at 6:00:00\u{202f}PM\r",
+            "x-apple-reminder://5C3420C7-82E6-470A-A961-2004D8724CF5\tFCP Mac E2E Reminder Default 20260325T192752\tReminders\ttrue\t\r",
+        ));
+
+        assert_eq!(reminders.len(), 2);
+        assert_eq!(
+            reminders[0]["id"],
+            "x-apple-reminder://D5C7ED01-AE69-4BC9-B5AA-A2FE8AC2B047"
+        );
+        assert_eq!(
+            reminders[0]["due"],
+            "Friday, October 3, 2025 at 6:00:00\u{202f}PM"
+        );
+        assert_eq!(
+            reminders[1]["id"],
+            "x-apple-reminder://5C3420C7-82E6-470A-A961-2004D8724CF5"
+        );
+        assert_eq!(
+            reminders[1]["title"],
+            "FCP Mac E2E Reminder Default 20260325T192752"
+        );
+        assert_eq!(reminders[1]["completed"], true);
+        assert_eq!(reminders[1]["due"], "");
     }
 
     #[test]

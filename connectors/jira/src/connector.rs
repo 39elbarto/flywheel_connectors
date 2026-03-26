@@ -1699,7 +1699,7 @@ impl JiraConnector {
             body["fields"] = json!(fields.split(',').collect::<Vec<_>>());
         }
         if let Some(max_results) = input.get("max_results").and_then(|v| v.as_u64()) {
-            body["maxResults"] = json!(max_results);
+            body["maxResults"] = json!(max_results.min(1000));
         }
         if let Some(start_at) = input.get("start_at").and_then(|v| v.as_u64()) {
             body["startAt"] = json!(start_at);
@@ -1774,7 +1774,10 @@ impl JiraConnector {
                 })?;
         let state = input.get("state").and_then(|v| v.as_str());
         let start_at = input.get("start_at").and_then(|v| v.as_u64());
-        let max_results = input.get("max_results").and_then(|v| v.as_u64());
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.min(1000));
 
         let resp = client
             .list_sprints(board_id, state, start_at, max_results)
@@ -1838,7 +1841,10 @@ impl JiraConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let issue_key = require_str(&input, "issue_key")?;
         let start_at = input.get("start_at").and_then(|v| v.as_u64());
-        let max_results = input.get("max_results").and_then(|v| v.as_u64());
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.min(1000));
         let order_by = input.get("order_by").and_then(|v| v.as_str());
 
         let resp = client
@@ -1854,7 +1860,10 @@ impl JiraConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let issue_key = require_str(&input, "issue_key")?;
         let start_at = input.get("start_at").and_then(|v| v.as_u64());
-        let max_results = input.get("max_results").and_then(|v| v.as_u64());
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.min(1000));
 
         let resp = client
             .list_worklogs(issue_key, start_at, max_results)

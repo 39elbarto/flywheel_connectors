@@ -33,6 +33,10 @@ pub enum JiraError {
     #[error("Invalid or expired Jira credentials")]
     Unauthorized,
 
+    /// Invalid input from caller (e.g. malformed issue key)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     /// Resource not found
     #[error("Resource not found: {resource}")]
     NotFound { resource: String },
@@ -46,7 +50,9 @@ impl JiraError {
             Self::Http(e) => e.is_timeout() || e.is_connect(),
             Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, Some(500..=599 | 429)),
-            Self::Json(_) | Self::Unauthorized | Self::NotFound { .. } => false,
+            Self::Json(_) | Self::Unauthorized | Self::NotFound { .. } | Self::InvalidInput(_) => {
+                false
+            }
         }
     }
 
@@ -101,6 +107,10 @@ impl JiraError {
             Self::Unauthorized => FcpError::Unauthorized {
                 code: 2001,
                 message: "Invalid or expired Jira credentials".into(),
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1003,
+                message: msg.clone(),
             },
             Self::NotFound { resource } => FcpError::ResourceNotFound {
                 resource: resource.clone(),
@@ -730,6 +740,7 @@ mod tests {
                 retry_after_ms: 100,
             }),
             Box::new(JiraError::Unauthorized),
+            Box::new(JiraError::InvalidInput("bad key".into())),
             Box::new(JiraError::NotFound {
                 resource: "r".into(),
             }),
@@ -911,6 +922,7 @@ mod tests {
             },
             JiraError::RateLimited { retry_after_ms: 1 },
             JiraError::Unauthorized,
+            JiraError::InvalidInput("bad".into()),
             JiraError::NotFound {
                 resource: "r".into(),
             },

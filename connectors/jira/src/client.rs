@@ -93,6 +93,55 @@ impl JiraAuth {
 pub const DEFAULT_AUTOMATION_BASE: &str =
     "https://{domain}.atlassian.net/rest/cb-automation/latest";
 
+/// Validate a Jira issue key (e.g. `PROJ-123`).
+///
+/// Jira issue keys follow the pattern `[A-Za-z][A-Za-z0-9_]*-[0-9]+`.
+/// This rejects empty strings, strings without a hyphen, and any character
+/// outside the `[A-Za-z0-9_-]` set to prevent path injection.
+fn validate_issue_key(key: &str) -> JiraResult<&str> {
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !key.contains('-')
+    {
+        return Err(JiraError::InvalidInput(format!(
+            "Invalid issue key: {key}"
+        )));
+    }
+    Ok(key)
+}
+
+/// Validate a Jira project key/ID (e.g. `PROJ` or numeric `10001`).
+///
+/// Allows only ASCII alphanumeric characters, hyphens, and underscores.
+fn validate_project_key(key: &str) -> JiraResult<&str> {
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(JiraError::InvalidInput(format!(
+            "Invalid project key: {key}"
+        )));
+    }
+    Ok(key)
+}
+
+/// Validate an opaque ID (worklog, rule, etc.) for safe URL interpolation.
+///
+/// Allows only ASCII alphanumeric characters, hyphens, and underscores.
+fn validate_id<'a>(id: &'a str, label: &str) -> JiraResult<&'a str> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(JiraError::InvalidInput(format!("Invalid {label}: {id}")));
+    }
+    Ok(id)
+}
+
 /// Jira REST API client with retry logic and rate limit awareness.
 pub struct JiraClient {
     client: Client,
@@ -326,6 +375,7 @@ impl JiraClient {
         fields: Option<&str>,
         expand: Option<&str>,
     ) -> JiraResult<JiraIssue> {
+        let issue_key = validate_issue_key(issue_key)?;
         let mut url = format!("{}/issue/{issue_key}", self.base_url);
         let mut sep = '?';
         if let Some(fields) = fields {
@@ -351,6 +401,7 @@ impl JiraClient {
         body: &serde_json::Value,
         notify_users: bool,
     ) -> JiraResult<()> {
+        let issue_key = validate_issue_key(issue_key)?;
         let mut url = format!("{}/issue/{issue_key}", self.base_url);
         if !notify_users {
             url.push_str("?notifyUsers=false");
@@ -362,6 +413,7 @@ impl JiraClient {
     /// Delete an issue.
     #[instrument(skip(self))]
     pub async fn delete_issue(&self, issue_key: &str, delete_subtasks: bool) -> JiraResult<()> {
+        let issue_key = validate_issue_key(issue_key)?;
         let mut url = format!("{}/issue/{issue_key}", self.base_url);
         if delete_subtasks {
             url.push_str("?deleteSubtasks=true");
@@ -383,6 +435,7 @@ impl JiraClient {
     /// List available transitions for an issue.
     #[instrument(skip(self))]
     pub async fn list_transitions(&self, issue_key: &str) -> JiraResult<TransitionsResponse> {
+        let issue_key = validate_issue_key(issue_key)?;
         self.get(&format!("{}/issue/{issue_key}/transitions", self.base_url))
             .await
     }
@@ -394,6 +447,7 @@ impl JiraClient {
         issue_key: &str,
         body: &serde_json::Value,
     ) -> JiraResult<()> {
+        let issue_key = validate_issue_key(issue_key)?;
         self.post_no_content(
             &format!("{}/issue/{issue_key}/transitions", self.base_url),
             body,
@@ -450,6 +504,7 @@ impl JiraClient {
         issue_key: &str,
         body: &serde_json::Value,
     ) -> JiraResult<JiraComment> {
+        let issue_key = validate_issue_key(issue_key)?;
         self.post(
             &format!("{}/issue/{issue_key}/comment", self.base_url),
             body,
@@ -466,6 +521,7 @@ impl JiraClient {
         max_results: Option<u64>,
         order_by: Option<&str>,
     ) -> JiraResult<CommentListResponse> {
+        let issue_key = validate_issue_key(issue_key)?;
         let mut url = format!("{}/issue/{issue_key}/comment", self.base_url);
         let mut sep = '?';
         if let Some(start_at) = start_at {
@@ -495,6 +551,7 @@ impl JiraClient {
         start_at: Option<u64>,
         max_results: Option<u64>,
     ) -> JiraResult<WorklogListResponse> {
+        let issue_key = validate_issue_key(issue_key)?;
         let mut url = format!("{}/issue/{issue_key}/worklog", self.base_url);
         let mut sep = '?';
         if let Some(start_at) = start_at {
@@ -515,6 +572,7 @@ impl JiraClient {
         issue_key: &str,
         body: &serde_json::Value,
     ) -> JiraResult<JiraWorklog> {
+        let issue_key = validate_issue_key(issue_key)?;
         self.post(
             &format!("{}/issue/{issue_key}/worklog", self.base_url),
             body,
@@ -530,6 +588,8 @@ impl JiraClient {
         worklog_id: &str,
         body: &serde_json::Value,
     ) -> JiraResult<JiraWorklog> {
+        let issue_key = validate_issue_key(issue_key)?;
+        let worklog_id = validate_id(worklog_id, "worklog_id")?;
         let url = format!("{}/issue/{issue_key}/worklog/{worklog_id}", self.base_url);
         self.put(&url, body).await
     }
@@ -537,6 +597,8 @@ impl JiraClient {
     /// Delete a worklog entry.
     #[instrument(skip(self))]
     pub async fn delete_worklog(&self, issue_key: &str, worklog_id: &str) -> JiraResult<()> {
+        let issue_key = validate_issue_key(issue_key)?;
+        let worklog_id = validate_id(worklog_id, "worklog_id")?;
         self.delete(&format!(
             "{}/issue/{issue_key}/worklog/{worklog_id}",
             self.base_url
@@ -554,6 +616,7 @@ impl JiraClient {
         filename: &str,
         data: &[u8],
     ) -> JiraResult<Vec<JiraAttachment>> {
+        let issue_key = validate_issue_key(issue_key)?;
         let url = format!("{}/issue/{issue_key}/attachments", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let ctx = self.runtime.request_context();
@@ -599,6 +662,7 @@ impl JiraClient {
                             };
                         }
 
+                        let retry_after_ms = Self::extract_retry_after_ms(&response);
                         let bytes = match response.bytes().await {
                             Ok(bytes) => bytes,
                             Err(error) => return AttemptOutcome::Terminal(JiraError::Http(error)),
@@ -611,7 +675,7 @@ impl JiraClient {
                             };
                         }
 
-                        let error = Self::parse_error(status, &bytes);
+                        let error = Self::parse_error(status, &bytes, retry_after_ms);
                         if error.is_retryable() {
                             AttemptOutcome::Retryable {
                                 retry_after: error.retry_after(),
@@ -642,6 +706,7 @@ impl JiraClient {
         &self,
         project_id: &str,
     ) -> JiraResult<AutomationRuleListResponse> {
+        let project_id = validate_project_key(project_id)?;
         let url = format!("{}/project/{project_id}/rule", self.automation_url);
         self.get(&url).await
     }
@@ -649,6 +714,7 @@ impl JiraClient {
     /// Get a single automation rule by ID.
     #[instrument(skip(self))]
     pub async fn get_automation_rule(&self, rule_id: &str) -> JiraResult<JiraAutomationRule> {
+        let rule_id = validate_id(rule_id, "rule_id")?;
         let url = format!("{}/rule/{rule_id}", self.automation_url);
         self.get(&url).await
     }
@@ -660,6 +726,7 @@ impl JiraClient {
         project_id: &str,
         body: &serde_json::Value,
     ) -> JiraResult<JiraAutomationRule> {
+        let project_id = validate_project_key(project_id)?;
         let url = format!("{}/project/{project_id}/rule", self.automation_url);
         self.post(&url, body).await
     }
@@ -671,6 +738,7 @@ impl JiraClient {
         rule_id: &str,
         body: &serde_json::Value,
     ) -> JiraResult<JiraAutomationRule> {
+        let rule_id = validate_id(rule_id, "rule_id")?;
         let url = format!("{}/rule/{rule_id}", self.automation_url);
         self.put(&url, body).await
     }
@@ -678,6 +746,7 @@ impl JiraClient {
     /// Enable an automation rule.
     #[instrument(skip(self))]
     pub async fn enable_automation_rule(&self, rule_id: &str) -> JiraResult<()> {
+        let rule_id = validate_id(rule_id, "rule_id")?;
         let url = format!("{}/rule/{rule_id}/enable", self.automation_url);
         self.put_no_content(&url, &serde_json::json!({})).await
     }
@@ -685,6 +754,7 @@ impl JiraClient {
     /// Disable an automation rule.
     #[instrument(skip(self))]
     pub async fn disable_automation_rule(&self, rule_id: &str) -> JiraResult<()> {
+        let rule_id = validate_id(rule_id, "rule_id")?;
         let url = format!("{}/rule/{rule_id}/disable", self.automation_url);
         self.put_no_content(&url, &serde_json::json!({})).await
     }
@@ -692,6 +762,7 @@ impl JiraClient {
     /// Delete an automation rule.
     #[instrument(skip(self))]
     pub async fn delete_automation_rule(&self, rule_id: &str) -> JiraResult<()> {
+        let rule_id = validate_id(rule_id, "rule_id")?;
         let url = format!("{}/rule/{rule_id}", self.automation_url);
         self.delete(&url).await
     }
@@ -781,11 +852,12 @@ impl JiraClient {
                         return AttemptOutcome::Success(());
                     }
                     let status = response.status();
+                    let retry_after_ms = Self::extract_retry_after_ms(&response);
                     let bytes = match response.bytes().await {
                         Ok(b) => b,
                         Err(e) => return AttemptOutcome::Terminal(JiraError::Http(e)),
                     };
-                    let err = Self::parse_error(status, &bytes);
+                    let err = Self::parse_error(status, &bytes, retry_after_ms);
                     if err.is_retryable() {
                         AttemptOutcome::Retryable {
                             retry_after: err.retry_after(),
@@ -858,11 +930,12 @@ impl JiraClient {
                         return AttemptOutcome::Success(());
                     }
                     let status = response.status();
+                    let retry_after_ms = Self::extract_retry_after_ms(&response);
                     let bytes = match response.bytes().await {
                         Ok(b) => b,
                         Err(e) => return AttemptOutcome::Terminal(JiraError::Http(e)),
                     };
-                    let err = Self::parse_error(status, &bytes);
+                    let err = Self::parse_error(status, &bytes, retry_after_ms);
                     if err.is_retryable() {
                         AttemptOutcome::Retryable {
                             retry_after: err.retry_after(),
@@ -905,11 +978,12 @@ impl JiraClient {
                         return AttemptOutcome::Success(());
                     }
                     let status = response.status();
+                    let retry_after_ms = Self::extract_retry_after_ms(&response);
                     let bytes = match response.bytes().await {
                         Ok(b) => b,
                         Err(e) => return AttemptOutcome::Terminal(JiraError::Http(e)),
                     };
-                    let err = Self::parse_error(status, &bytes);
+                    let err = Self::parse_error(status, &bytes, retry_after_ms);
                     if err.is_retryable() {
                         AttemptOutcome::Retryable {
                             retry_after: err.retry_after(),
@@ -942,12 +1016,14 @@ impl JiraClient {
             });
         }
 
+        // Extract Retry-After header before consuming the response body.
+        let retry_after_ms = Self::extract_retry_after_ms(&response);
         let bytes = response.bytes().await.map_err(JiraError::Http)?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(JiraError::from)
         } else {
-            Err(Self::parse_error(status, &bytes))
+            Err(Self::parse_error(status, &bytes, retry_after_ms))
         }
     }
 
@@ -966,7 +1042,19 @@ impl JiraClient {
         }
     }
 
-    fn parse_error(status: StatusCode, bytes: &[u8]) -> JiraError {
+    /// Extract the `Retry-After` header value in milliseconds from a response.
+    ///
+    /// Returns `None` if the header is missing or unparseable.
+    fn extract_retry_after_ms(response: &Response) -> Option<u64> {
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|secs| secs * 1000)
+    }
+
+    fn parse_error(status: StatusCode, bytes: &[u8], retry_after_ms: Option<u64>) -> JiraError {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return JiraError::Unauthorized;
         }
@@ -977,7 +1065,7 @@ impl JiraClient {
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
             return JiraError::RateLimited {
-                retry_after_ms: 60_000,
+                retry_after_ms: retry_after_ms.unwrap_or(60_000),
             };
         }
 

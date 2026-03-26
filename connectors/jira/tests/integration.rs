@@ -1099,7 +1099,7 @@ async fn lifecycle_handshake_grants_capabilities() {
 /// Shutdown returns clean status.
 #[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown_clean() {
-    let connector = JiraConnector::new();
+    let mut connector = JiraConnector::new();
     let result = connector
         .handle_shutdown(json!({}))
         .await

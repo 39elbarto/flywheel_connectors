@@ -868,6 +868,10 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         mode: CommandTruthMode::LiveOnly,
     },
     CommandFamilyEntry {
+        name: "lifecycle",
+        mode: CommandTruthMode::LiveOnly,
+    },
+    CommandFamilyEntry {
         name: "cancel",
         mode: CommandTruthMode::LiveOnly,
     },
@@ -970,6 +974,10 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
         mode: CommandTruthMode::Hybrid,
     },
     CommandFamilyEntry {
+        name: "mesh",
+        mode: CommandTruthMode::Hybrid,
+    },
+    CommandFamilyEntry {
         name: "preflight",
         mode: CommandTruthMode::Hybrid,
     },
@@ -1036,7 +1044,7 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
     },
     CommandFamilyEntry {
         name: "tail",
-        mode: CommandTruthMode::LiveOnly,
+        mode: CommandTruthMode::Hybrid,
     },
     CommandFamilyEntry {
         name: "watch",
@@ -9401,6 +9409,8 @@ output_schema = { type = "object" }
         assert!(hybrid.contains(&"ops"));
         assert!(hybrid.contains(&"export-tools"));
         assert!(hybrid.contains(&"config"));
+        assert!(hybrid.contains(&"mesh"));
+        assert!(hybrid.contains(&"tail"));
     }
 
     #[test]
@@ -10008,6 +10018,38 @@ output_schema = { type = "object" }
         assert_eq!(
             classify_command("pipeline").unwrap().mode,
             CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_mesh_is_hybrid() {
+        assert_eq!(
+            classify_command("mesh").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_tail_is_hybrid() {
+        assert_eq!(
+            classify_command("tail").unwrap().mode,
+            CommandTruthMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn classify_lifecycle_is_live_only() {
+        assert_eq!(
+            classify_command("lifecycle").unwrap().mode,
+            CommandTruthMode::LiveOnly
+        );
+    }
+
+    #[test]
+    fn classify_watch_is_live_only() {
+        assert_eq!(
+            classify_command("watch").unwrap().mode,
+            CommandTruthMode::LiveOnly
         );
     }
 

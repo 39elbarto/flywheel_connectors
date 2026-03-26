@@ -91,6 +91,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "Static contract documentation, fully local",
     },
     CommandClassification {
+        command: "context",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local host-context registry stored under ~/.fcp/contexts.toml",
+    },
+    CommandClassification {
         command: "task",
         truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::LocalOnly,
@@ -107,6 +116,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         requires_capability_token: false,
         may_need_approval: false,
         transport_note: "Local agent session state persisted under ~/.fwc/sessions",
+    },
+    CommandClassification {
+        command: "agent",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local agent-mail coordination surface and inbox rendering",
     },
     CommandClassification {
         command: "auth",
@@ -143,6 +161,24 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         requires_capability_token: false,
         may_need_approval: false,
         transport_note: "Local execution history file",
+    },
+    CommandClassification {
+        command: "compare",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local diff view over recorded history entries",
+    },
+    CommandClassification {
+        command: "approvals",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local approval-artifact inspection from the persisted artifact directory",
     },
     CommandClassification {
         command: "pipe",
@@ -254,6 +290,51 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "Live host tool export by default; use --offline for explicit manifest-backed export",
     },
     CommandClassification {
+        command: "mesh",
+        truth_source: CommandTruthSource::Hybrid,
+        execution_mode: CommandExecutionMode::Mutating,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Mesh status uses the live host when available; targeting and availability hints fall back to local context state",
+    },
+    CommandClassification {
+        command: "preflight",
+        truth_source: CommandTruthSource::Hybrid,
+        execution_mode: CommandExecutionMode::Simulate,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
+        requires_capability_token: true,
+        may_need_approval: true,
+        transport_note: "Live host preflight performs full policy evaluation; without a host it degrades to manifest-backed risk analysis",
+    },
+    CommandClassification {
+        command: "replay",
+        truth_source: CommandTruthSource::Hybrid,
+        execution_mode: CommandExecutionMode::Mutating,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Dry-run rebuilds from local history; live replay requires host-backed re-execution",
+    },
+    CommandClassification {
+        command: "undo",
+        truth_source: CommandTruthSource::Hybrid,
+        execution_mode: CommandExecutionMode::Mutating,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Undo guidance is local; executing a reversal requires a live host",
+    },
+    CommandClassification {
+        command: "tail",
+        truth_source: CommandTruthSource::Hybrid,
+        execution_mode: CommandExecutionMode::Interactive,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Streams live host events when connected and falls back to local persisted tail history otherwise",
+    },
+    CommandClassification {
         command: "do",
         truth_source: CommandTruthSource::Hybrid,
         execution_mode: CommandExecutionMode::Mutating,
@@ -345,6 +426,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "POST /rpc/capabilities — live host capability report",
     },
     CommandClassification {
+        command: "lifecycle",
+        truth_source: CommandTruthSource::LiveHost,
+        execution_mode: CommandExecutionMode::Mutating,
+        host_absent: HostAbsentBehavior::FailFast,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Live host lifecycle state inspection, preflight, and mutation surface",
+    },
+    CommandClassification {
         command: "install",
         truth_source: CommandTruthSource::LiveHost,
         execution_mode: CommandExecutionMode::Mutating,
@@ -391,12 +481,12 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
     },
     CommandClassification {
         command: "config",
-        truth_source: CommandTruthSource::LiveHost,
+        truth_source: CommandTruthSource::Hybrid,
         execution_mode: CommandExecutionMode::Mutating,
-        host_absent: HostAbsentBehavior::FailFast,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
         requires_capability_token: false,
         may_need_approval: false,
-        transport_note: "POST /rpc/config — live host config management",
+        transport_note: "Config schema is available from workspace discovery; host-backed subcommands manage live connector config when connected",
     },
     CommandClassification {
         command: "map",
@@ -418,21 +508,30 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
     },
     CommandClassification {
         command: "recipe",
-        truth_source: CommandTruthSource::LiveHost,
+        truth_source: CommandTruthSource::Hybrid,
         execution_mode: CommandExecutionMode::Mutating,
-        host_absent: HostAbsentBehavior::FailFast,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
         requires_capability_token: true,
         may_need_approval: true,
-        transport_note: "Multi-step recipe execution via live host",
+        transport_note: "List/show/validate/export/estimate operate locally; run and dry-run execute through the live host with auth",
     },
     CommandClassification {
         command: "pipeline",
-        truth_source: CommandTruthSource::LiveHost,
+        truth_source: CommandTruthSource::Hybrid,
         execution_mode: CommandExecutionMode::Mutating,
-        host_absent: HostAbsentBehavior::FailFast,
+        host_absent: HostAbsentBehavior::DegradedWithWarning,
         requires_capability_token: true,
         may_need_approval: true,
-        transport_note: "Multi-step pipeline execution via live host",
+        transport_note: "List/show/validate/estimate operate locally; run and dry-run execute through the live host with auth",
+    },
+    CommandClassification {
+        command: "watch",
+        truth_source: CommandTruthSource::LiveHost,
+        execution_mode: CommandExecutionMode::ReadOnly,
+        host_absent: HostAbsentBehavior::FailFast,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Polls the live host for long-running operation status",
     },
     // ── Passthrough commands ────────────────────────────────────────────
     CommandClassification {
@@ -497,6 +596,24 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         requires_capability_token: false,
         may_need_approval: false,
         transport_note: "Connector packaging subsystem",
+    },
+    CommandClassification {
+        command: "bench",
+        truth_source: CommandTruthSource::Passthrough,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::PassthroughDependent,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Benchmarking passthrough subsystem",
+    },
+    CommandClassification {
+        command: "new",
+        truth_source: CommandTruthSource::Passthrough,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::PassthroughDependent,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Connector scaffolding passthrough subsystem",
     },
 ];
 
@@ -801,12 +918,17 @@ pub fn default_offline_source(command: &str) -> OfflineSource {
             // Refine based on specific command
             match command {
                 "guide" => OfflineSource::StaticContract,
+                "compare" => OfflineSource::LocalHistory,
                 "history" => OfflineSource::LocalHistory,
                 "pipe" => OfflineSource::LocalHistory,
                 _ => OfflineSource::LocalCatalog,
             }
         }
-        Some(CommandTruthSource::Hybrid) => OfflineSource::WorkspaceManifest,
+        Some(CommandTruthSource::Hybrid) => match command {
+            "mesh" => OfflineSource::LocalCatalog,
+            "replay" | "undo" | "tail" => OfflineSource::LocalHistory,
+            _ => OfflineSource::WorkspaceManifest,
+        },
         Some(CommandTruthSource::Passthrough) => OfflineSource::Subsystem,
         _ => OfflineSource::LocalCatalog,
     }
@@ -3322,8 +3444,12 @@ pub fn evidence_bundle_metadata(
 
 pub const COMMANDS: &[&str] = &[
     "guide",
+    "context",
+    "mesh",
     "task",
     "session",
+    "agent",
+    "lifecycle",
     "auth",
     "plan",
     "explain",
@@ -3355,6 +3481,7 @@ pub const COMMANDS: &[&str] = &[
     "config",
     "invoke",
     "simulate",
+    "preflight",
     "cancel",
     "export-tools",
     "serve-mcp",
@@ -3362,11 +3489,19 @@ pub const COMMANDS: &[&str] = &[
     "template",
     "validate",
     "history",
+    "replay",
+    "compare",
+    "undo",
+    "approvals",
     "pipe",
     "pipeline",
     "recipe",
     "map",
     "batch-file",
+    "bench",
+    "new",
+    "tail",
+    "watch",
 ];
 
 #[allow(clippy::too_many_lines)]
@@ -3557,6 +3692,14 @@ fn command_contract(command: &str) -> Option<Value> {
             "next_beads": ["flywheel_connectors-1g7z0.1", "flywheel_connectors-1g7z0.2"],
             "workflow_handoff": ["Use `fwc list` to begin discovery once host-backed data is wired in."],
         })),
+        "context" => Some(workflow_contract(
+            "Manage named host contexts stored in ~/.fcp/contexts.toml.",
+            "A local context ledger over active host endpoint, default zone, node identity, and per-context mesh targeting state.",
+        )),
+        "mesh" => Some(workflow_contract(
+            "Inspect mesh availability and persist explicit node-targeting hints.",
+            "A mixed live-and-local surface that reports host-backed mesh state when available and preserves durable local targeting decisions otherwise.",
+        )),
         "task" => Some(workflow_contract(
             "Create and resume durable workflow capsules for connector jobs.",
             "A resumable capsule view over compiled intent, bindings, approvals, and execution receipts so agents can operate on a short task id instead of replaying the full workflow from scratch.",
@@ -3564,6 +3707,10 @@ fn command_contract(command: &str) -> Option<Value> {
         "session" => Some(workflow_contract(
             "Track the current agent session and persist resumable context.",
             "A local session ledger over agent identity, goal, zone binding, active locks, and operation counts so context survives agent rotations.",
+        )),
+        "agent" => Some(workflow_contract(
+            "Coordinate local multi-agent work through the fwc agent-mail hub.",
+            "An inbox/outbox and reservation surface for short coordination messages, local file claims, and collaborator discovery.",
         )),
         "auth" => Some(json!({
             "family": "auth",
@@ -3711,6 +3858,10 @@ fn command_contract(command: &str) -> Option<Value> {
             "Inspect or change connector rollout state.",
             "Managed rollout workflows with explicit status, canary, and rollback semantics.",
         )),
+        "lifecycle" => Some(lifecycle_contract(
+            "Inspect valid lifecycle actions, preflight a transition, or perform a connector lifecycle mutation.",
+            "A live host-backed lifecycle control surface over current state, valid transitions, and preflighted mutations.",
+        )),
         "config" => Some(json!({
             "family": "config",
             "summary": "Manage config schema, values, import/export, and doctor checks through one nested command family.",
@@ -3728,6 +3879,10 @@ fn command_contract(command: &str) -> Option<Value> {
         "simulate" => Some(execution_contract(
             "Preflight or dry-run a connector operation before side effects.",
             "Explain-first execution path for risky or destructive operations.",
+        )),
+        "preflight" => Some(execution_contract(
+            "Analyze risk, approval requirements, and capability scope without executing the operation.",
+            "A truthful preflight surface that uses live host policy when connected and degrades to manifest-backed risk analysis otherwise.",
         )),
         "cancel" => Some(execution_contract(
             "Cancel an in-flight connector operation.",
@@ -3757,6 +3912,22 @@ fn command_contract(command: &str) -> Option<Value> {
             "Browse the append-only operation history.",
             "Receipt- and replay-oriented view over recorded operation outcomes.",
         )),
+        "replay" => Some(execution_contract(
+            "Replay a recorded operation or dry-run the reconstructed request from history.",
+            "History-backed reconstruction with explicit override visibility before any live re-execution is attempted.",
+        )),
+        "compare" => Some(execution_contract(
+            "Diff two history entries side by side.",
+            "Field-level comparison over recorded connector, operation, zone, latency, and hash metadata.",
+        )),
+        "undo" => Some(execution_contract(
+            "Show reversal guidance or attempt an explicit undo path for a recorded operation.",
+            "Undoability analysis rooted in stored operation history and connector-specific reversal metadata.",
+        )),
+        "approvals" => Some(execution_contract(
+            "Inspect stored approval artifacts created by preflight checks.",
+            "Artifact-first approval browsing over persisted approval receipts and their allow or deny reasoning.",
+        )),
         "pipe" => Some(execution_contract(
             "Chain two operations by mapping output fields from one into the next.",
             "Two-step composition surface for cross-connector execution.",
@@ -3776,6 +3947,28 @@ fn command_contract(command: &str) -> Option<Value> {
         "batch-file" => Some(execution_contract(
             "Execute a JSONL file of heterogeneous operations with dependency ordering.",
             "File-driven multi-operation execution over real host-backed batch endpoints.",
+        )),
+        "bench" => Some(json!({
+            "family": "tooling",
+            "summary": "Run benchmark and profiling helpers for FCP primitives.",
+            "intended_shape": "Passthrough benchmarking workflows that delegate to the dedicated benchmarking subsystem.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc bench` when you need dedicated measurement rather than connector-facing runtime behavior."],
+        })),
+        "new" => Some(json!({
+            "family": "tooling",
+            "summary": "Scaffold a new FCP connector crate or validate an existing scaffold.",
+            "intended_shape": "Passthrough scaffolding workflows that delegate to the connector-generator subsystem.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc new <name>` to generate the connector skeleton before editing crate internals directly."],
+        })),
+        "tail" => Some(execution_contract(
+            "Tail connector or host events in real time, with offline fallback when only local receipts exist.",
+            "Streaming event surface that prefers the live host but can still surface persisted local event history truthfully.",
+        )),
+        "watch" => Some(execution_contract(
+            "Poll the live host for the latest state of a long-running operation.",
+            "Live operation-status watch loop over current host-backed execution state and next suggested follow-up actions.",
         )),
         _ => None,
     }
@@ -5789,6 +5982,149 @@ mod tests {
     }
 
     #[test]
+    fn selected_command_classifications_match_dispatch_contracts() {
+        let expected = [
+            (
+                "context",
+                CommandTruthSource::OfflineArtifact,
+                CommandExecutionMode::LocalOnly,
+                HostAbsentBehavior::Unaffected,
+            ),
+            (
+                "mesh",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Mutating,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "agent",
+                CommandTruthSource::OfflineArtifact,
+                CommandExecutionMode::LocalOnly,
+                HostAbsentBehavior::Unaffected,
+            ),
+            (
+                "config",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Mutating,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "lifecycle",
+                CommandTruthSource::LiveHost,
+                CommandExecutionMode::Mutating,
+                HostAbsentBehavior::FailFast,
+            ),
+            (
+                "preflight",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Simulate,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "recipe",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Mutating,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "pipeline",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Mutating,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "replay",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Mutating,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "compare",
+                CommandTruthSource::OfflineArtifact,
+                CommandExecutionMode::LocalOnly,
+                HostAbsentBehavior::Unaffected,
+            ),
+            (
+                "undo",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Mutating,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "approvals",
+                CommandTruthSource::OfflineArtifact,
+                CommandExecutionMode::LocalOnly,
+                HostAbsentBehavior::Unaffected,
+            ),
+            (
+                "bench",
+                CommandTruthSource::Passthrough,
+                CommandExecutionMode::LocalOnly,
+                HostAbsentBehavior::PassthroughDependent,
+            ),
+            (
+                "new",
+                CommandTruthSource::Passthrough,
+                CommandExecutionMode::LocalOnly,
+                HostAbsentBehavior::PassthroughDependent,
+            ),
+            (
+                "tail",
+                CommandTruthSource::Hybrid,
+                CommandExecutionMode::Interactive,
+                HostAbsentBehavior::DegradedWithWarning,
+            ),
+            (
+                "watch",
+                CommandTruthSource::LiveHost,
+                CommandExecutionMode::ReadOnly,
+                HostAbsentBehavior::FailFast,
+            ),
+        ];
+
+        for (command, truth_source, execution_mode, host_absent) in expected {
+            let cls = classify_command(command)
+                .unwrap_or_else(|| panic!("expected '{command}' to be classified"));
+            assert_eq!(cls.truth_source, truth_source, "truth_source for {command}");
+            assert_eq!(
+                cls.execution_mode, execution_mode,
+                "execution_mode for {command}"
+            );
+            assert_eq!(cls.host_absent, host_absent, "host_absent for {command}");
+        }
+    }
+
+    #[test]
+    fn selected_catalog_commands_align_with_readiness_modes() {
+        use crate::readiness::CommandTruthMode;
+
+        let expected = [
+            ("context", CommandTruthMode::OfflineOnly),
+            ("mesh", CommandTruthMode::Hybrid),
+            ("agent", CommandTruthMode::OfflineOnly),
+            ("config", CommandTruthMode::Hybrid),
+            ("lifecycle", CommandTruthMode::LiveOnly),
+            ("preflight", CommandTruthMode::Hybrid),
+            ("recipe", CommandTruthMode::Hybrid),
+            ("pipeline", CommandTruthMode::Hybrid),
+            ("replay", CommandTruthMode::Hybrid),
+            ("compare", CommandTruthMode::OfflineOnly),
+            ("undo", CommandTruthMode::Hybrid),
+            ("approvals", CommandTruthMode::OfflineOnly),
+            ("bench", CommandTruthMode::Passthrough),
+            ("new", CommandTruthMode::Passthrough),
+            ("tail", CommandTruthMode::Hybrid),
+            ("watch", CommandTruthMode::LiveOnly),
+        ];
+
+        for (command, mode) in expected {
+            let readiness = crate::readiness::classify_command(command)
+                .unwrap_or_else(|| panic!("expected readiness classification for '{command}'"));
+            assert_eq!(readiness.mode, mode, "readiness mode for {command}");
+        }
+    }
+
+    #[test]
     fn invoke_requires_live_host_and_token() {
         let cls = classify_command("invoke").unwrap();
         assert_eq!(cls.truth_source, CommandTruthSource::LiveHost);
@@ -6870,12 +7206,14 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_commands_are_read_only_or_mutating() {
+    fn hybrid_commands_use_supported_modes() {
         for cls in COMMAND_CLASSIFICATIONS {
             if cls.truth_source == CommandTruthSource::Hybrid {
                 assert!(
                     cls.execution_mode == CommandExecutionMode::ReadOnly
-                        || cls.execution_mode == CommandExecutionMode::Mutating,
+                        || cls.execution_mode == CommandExecutionMode::Mutating
+                        || cls.execution_mode == CommandExecutionMode::Simulate
+                        || cls.execution_mode == CommandExecutionMode::Interactive,
                     "Hybrid command '{}' has unexpected mode {:?}",
                     cls.command,
                     cls.execution_mode
@@ -7232,13 +7570,18 @@ mod tests {
     }
 
     #[test]
-    fn default_offline_source_hybrid_commands_are_workspace_manifest() {
+    fn default_offline_source_hybrid_commands_match_command_family() {
         for cls in COMMAND_CLASSIFICATIONS {
             if cls.truth_source == CommandTruthSource::Hybrid {
+                let expected = match cls.command {
+                    "mesh" => OfflineSource::LocalCatalog,
+                    "replay" | "undo" | "tail" => OfflineSource::LocalHistory,
+                    _ => OfflineSource::WorkspaceManifest,
+                };
                 assert_eq!(
                     default_offline_source(cls.command),
-                    OfflineSource::WorkspaceManifest,
-                    "Hybrid command '{}' default source should be WorkspaceManifest",
+                    expected,
+                    "Hybrid command '{}' default source mismatch",
                     cls.command
                 );
             }

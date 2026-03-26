@@ -1004,9 +1004,9 @@ fn known_hmac_sha1_vectors() {
 fn record_event_does_not_check_replay() {
     let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
 
-    // record_event silently records, never errors
-    handler.record_event("evt_r1");
-    handler.record_event("evt_r1"); // no error on duplicate
+    // record_event records, never errors for fresh + duplicate inserts
+    handler.record_event("evt_r1").unwrap();
+    handler.record_event("evt_r1").unwrap(); // no error on duplicate
 
     // But check_replay now detects it
     assert!(matches!(
@@ -1024,7 +1024,7 @@ fn check_replay_does_not_record() {
     assert!(handler.check_replay("evt_c1").is_ok()); // still Ok — not recorded
 
     // Only after record_event does replay fail
-    handler.record_event("evt_c1");
+    handler.record_event("evt_c1").unwrap();
     assert!(matches!(
         handler.check_replay("evt_c1"),
         Err(WebhookError::ReplayDetected { .. })
@@ -1808,7 +1808,7 @@ fn idempotency_disabled_allows_duplicates() {
 #[test]
 fn record_then_check_replay_detects() {
     let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
-    handler.record_event("evt-1");
+    handler.record_event("evt-1").unwrap();
     let err = handler.check_replay("evt-1").unwrap_err();
     assert!(matches!(err, WebhookError::ReplayDetected { .. }));
 }

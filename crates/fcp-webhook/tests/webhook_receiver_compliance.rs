@@ -92,7 +92,7 @@ fn replay_window_expires_entries_after_ttl() {
             let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_millis(1));
             let handler = WebhookHandler::with_config(verifier, "github", config);
 
-            handler.record_event("evt_ttl");
+            handler.record_event("evt_ttl").unwrap();
             assert!(matches!(
                 handler.check_replay("evt_ttl"),
                 Err(WebhookError::ReplayDetected { .. })

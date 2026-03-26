@@ -14,6 +14,10 @@ use crate::{
     WebhookResult, default_max_payload_size,
 };
 
+/// Maximum number of entries allowed in the replay event cache.
+/// When this limit is reached, new events are rejected to prevent unbounded memory growth.
+const MAX_SEEN_EVENTS: usize = 100_000;
+
 /// Webhook handler configuration.
 #[derive(Debug, Clone)]
 pub struct WebhookConfig {
@@ -201,11 +205,21 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     }
 
     /// Record an event as seen.
-    pub fn record_event(&self, event_id: &str) {
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::ReplayCacheFull`] when the cache has reached its maximum size.
+    pub fn record_event(&self, event_id: &str) -> WebhookResult<()> {
         if self.config.idempotency_enabled {
             let mut state = self.seen_events.write();
+            if state.events.len() >= MAX_SEEN_EVENTS && !state.events.contains_key(event_id) {
+                return Err(WebhookError::ReplayCacheFull {
+                    size: state.events.len(),
+                    limit: MAX_SEEN_EVENTS,
+                });
+            }
             state.events.insert(event_id.to_string(), Utc::now());
         }
+        Ok(())
     }
 
     /// Check for replay and record the event in one atomic operation.
@@ -233,6 +247,13 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
                         event_id: event_id.to_string(),
                     });
                 }
+            }
+
+            if state.events.len() >= MAX_SEEN_EVENTS && !state.events.contains_key(event_id) {
+                return Err(WebhookError::ReplayCacheFull {
+                    size: state.events.len(),
+                    limit: MAX_SEEN_EVENTS,
+                });
             }
 
             state.events.insert(event_id.to_string(), now);
@@ -424,7 +445,7 @@ mod tests {
         assert!(handler.check_replay("event_1").is_ok());
 
         // Record the event
-        handler.record_event("event_1");
+        handler.record_event("event_1").unwrap();
 
         // Second check should fail
         assert!(matches!(
@@ -585,7 +606,7 @@ mod tests {
         let config = WebhookConfig::new().with_idempotency(false);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
-        handler.record_event("evt_1");
+        handler.record_event("evt_1").unwrap();
         assert!(handler.check_replay("evt_1").is_ok());
         assert!(handler.claim_event("evt_1").is_ok());
     }
@@ -712,8 +733,8 @@ mod tests {
         let verifier = HmacSha256Verifier::new("secret");
         let handler = WebhookHandler::new(verifier, "test");
 
-        handler.record_event("evt_1");
-        handler.record_event("evt_2");
+        handler.record_event("evt_1").unwrap();
+        handler.record_event("evt_2").unwrap();
 
         assert!(matches!(
             handler.check_replay("evt_1"),
@@ -732,7 +753,7 @@ mod tests {
         let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_millis(1));
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
-        handler.record_event("evt_ttl");
+        handler.record_event("evt_ttl").unwrap();
         assert!(matches!(
             handler.check_replay("evt_ttl"),
             Err(WebhookError::ReplayDetected { .. })
@@ -751,7 +772,7 @@ mod tests {
         let config = WebhookConfig::new().with_idempotency(false);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
-        handler.record_event("evt_1");
+        handler.record_event("evt_1").unwrap();
         // Should not be recorded since idempotency is disabled
         assert!(handler.check_replay("evt_1").is_ok());
     }
@@ -1141,7 +1162,7 @@ mod tests {
     fn test_handler_record_event_then_check() {
         let verifier = HmacSha256Verifier::new("secret");
         let handler = WebhookHandler::new(verifier, "test");
-        handler.record_event("unique_id_abc");
+        handler.record_event("unique_id_abc").unwrap();
         assert!(matches!(
             handler.check_replay("unique_id_abc"),
             Err(WebhookError::ReplayDetected { .. })
@@ -1323,7 +1344,7 @@ mod tests {
             .with_idempotency(true)
             .with_idempotency_ttl(Duration::from_secs(3600));
         let handler = WebhookHandler::with_config(verifier, "test", config);
-        handler.record_event("recent_event");
+        handler.record_event("recent_event").unwrap();
         // Event was just recorded, should not be cleaned up
         assert!(matches!(
             handler.check_replay("recent_event"),
@@ -1419,7 +1440,7 @@ mod tests {
         let verifier = HmacSha256Verifier::new("secret");
         let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_secs(0));
         let handler = WebhookHandler::with_config(verifier, "test", config);
-        handler.record_event("evt_zero_ttl");
+        handler.record_event("evt_zero_ttl").unwrap();
         // With zero TTL, cleanup should remove it immediately
         // (depends on timing, but cleanup runs on check)
         // Wait a tiny moment to ensure it's past
@@ -1462,7 +1483,7 @@ mod tests {
         let verifier = HmacSha256Verifier::new("secret");
         let handler = WebhookHandler::new(verifier, "test");
         // Record an event first
-        handler.record_event("evt_rc");
+        handler.record_event("evt_rc").unwrap();
         // Claim should fail because it was already recorded
         assert!(handler.claim_event("evt_rc").is_err());
     }

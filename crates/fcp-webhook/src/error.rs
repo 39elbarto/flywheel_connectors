@@ -58,6 +58,15 @@ pub enum WebhookError {
     #[error("IP address not in allowlist: {0}")]
     IpNotAllowed(String),
 
+    /// Replay cache is full.
+    #[error("Replay cache full: {size} entries exceeds limit of {limit}")]
+    ReplayCacheFull {
+        /// Current cache size.
+        size: usize,
+        /// Maximum allowed entries.
+        limit: usize,
+    },
+
     /// Delivery failed.
     #[error("Webhook delivery failed: {0}")]
     DeliveryFailed(String),
@@ -149,6 +158,18 @@ mod tests {
     fn ip_not_allowed_display() {
         let e = WebhookError::IpNotAllowed("10.0.0.1".into());
         assert_eq!(e.to_string(), "IP address not in allowlist: 10.0.0.1");
+    }
+
+    #[test]
+    fn replay_cache_full_display() {
+        let e = WebhookError::ReplayCacheFull {
+            size: 100_000,
+            limit: 100_000,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Replay cache full: 100000 entries exceeds limit of 100000"
+        );
     }
 
     #[test]
@@ -448,6 +469,10 @@ mod tests {
             WebhookError::UnsupportedEventType("u".into()),
             WebhookError::ProviderNotConfigured("c".into()),
             WebhookError::IpNotAllowed("i".into()),
+            WebhookError::ReplayCacheFull {
+                size: 100_000,
+                limit: 100_000,
+            },
             WebhookError::DeliveryFailed("d".into()),
         ];
         for variant in variants {
@@ -557,6 +582,7 @@ mod tests {
             WebhookError::UnsupportedEventType(String::new()),
             WebhookError::ProviderNotConfigured(String::new()),
             WebhookError::IpNotAllowed(String::new()),
+            WebhookError::ReplayCacheFull { size: 0, limit: 0 },
             WebhookError::DeliveryFailed(String::new()),
         ];
         for v in variants {

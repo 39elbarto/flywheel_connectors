@@ -364,6 +364,26 @@ impl FixtureArtifactPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixtureHandshakeMode {
+    Accepted,
+    Rejected,
+    BadNonce,
+}
+
+impl FixtureHandshakeMode {
+    fn from_env() -> Self {
+        match std::env::var("FCP_TEST_CONNECTOR_HANDSHAKE_MODE")
+            .ok()
+            .as_deref()
+        {
+            Some("rejected") => Self::Rejected,
+            Some("bad_nonce") => Self::BadNonce,
+            _ => Self::Accepted,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TestConnectorProfile {
     archetype: FixtureArchetype,
@@ -372,6 +392,8 @@ struct TestConnectorProfile {
     operation_mode: FixtureOperationMode,
     simulate_mode: FixtureSimulateMode,
     artifact_policy: FixtureArtifactPolicy,
+    handshake_mode: FixtureHandshakeMode,
+    require_handshake: bool,
 }
 
 impl TestConnectorProfile {
@@ -383,6 +405,10 @@ impl TestConnectorProfile {
             operation_mode: FixtureOperationMode::from_env(),
             simulate_mode: FixtureSimulateMode::from_env(),
             artifact_policy: FixtureArtifactPolicy::from_env(),
+            handshake_mode: FixtureHandshakeMode::from_env(),
+            require_handshake: std::env::var("FCP_TEST_CONNECTOR_REQUIRE_HANDSHAKE")
+                .map(|value| value == "1")
+                .unwrap_or(false),
         }
     }
 
@@ -420,6 +446,7 @@ struct TestConnector {
     id: ConnectorId,
     start_time: Instant,
     configured: bool,
+    handshaken: bool,
     profile: TestConnectorProfile,
 }
 
@@ -429,6 +456,7 @@ impl TestConnector {
             id,
             start_time: Instant::now(),
             configured: false,
+            handshaken: false,
             profile: TestConnectorProfile::from_env(),
         }
     }
@@ -438,6 +466,7 @@ impl TestConnector {
         _params: serde_json::Value,
     ) -> Result<serde_json::Value, FcpError> {
         self.configured = true;
+        self.handshaken = false;
         Ok(json!({ "status": "ok" }))
     }
 
@@ -451,16 +480,26 @@ impl TestConnector {
                 message: format!("Invalid handshake request: {err}"),
             })?;
 
+        let (status, nonce, handshaken) = match self.profile.handshake_mode {
+            FixtureHandshakeMode::Accepted => ("accepted".to_string(), req.nonce, true),
+            FixtureHandshakeMode::Rejected => ("rejected".to_string(), req.nonce, false),
+            FixtureHandshakeMode::BadNonce => {
+                let mut nonce = req.nonce;
+                nonce[0] ^= 0xFF;
+                ("accepted".to_string(), nonce, true)
+            }
+        };
         let response = HandshakeResponse {
-            status: "accepted".to_string(),
+            status,
             capabilities_granted: Vec::new(),
             session_id: SessionId::new(),
             manifest_hash: "sha256:fcp-test-connector".to_string(),
-            nonce: req.nonce,
+            nonce,
             event_caps: self.profile.archetype.event_caps(),
             auth_caps: self.profile.auth_mode.auth_caps(),
             op_catalog_hash: None,
         };
+        self.handshaken = handshaken;
 
         serde_json::to_value(response).map_err(|err| FcpError::Internal {
             message: format!("Failed to serialize handshake response: {err}"),
@@ -506,6 +545,10 @@ impl TestConnector {
                 code: 1003,
                 message: format!("Invalid invoke request: {err}"),
             })?;
+
+        if self.profile.require_handshake && !self.handshaken {
+            return Err(FcpError::NotHandshaken);
+        }
 
         if req.connector_id != self.id {
             return Err(FcpError::InvalidRequest {
@@ -572,6 +615,32 @@ impl TestConnector {
                 code: 1003,
                 message: format!("Invalid simulate request: {err}"),
             })?;
+
+        if self.profile.require_handshake && !self.handshaken {
+            return Err(FcpError::NotHandshaken);
+        }
+
+        if req.connector_id != self.id {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!(
+                    "Connector id mismatch: expected {}, got {}",
+                    self.id.as_str(),
+                    req.connector_id.as_str()
+                ),
+            });
+        }
+
+        if req.operation.as_str() != self.profile.archetype.operation_id() {
+            return Err(FcpError::InvalidRequest {
+                code: 1006,
+                message: format!(
+                    "Operation mismatch: expected {}, got {}",
+                    self.profile.archetype.operation_id(),
+                    req.operation.as_str()
+                ),
+            });
+        }
 
         let response = match self.profile.simulate_mode {
             FixtureSimulateMode::Allowed => SimulateResponse::allowed(req.id),
@@ -691,6 +760,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    fn test_profile(require_handshake: bool) -> TestConnectorProfile {
+        TestConnectorProfile {
+            archetype: FixtureArchetype::Unknown,
+            auth_mode: FixtureAuthMode::None,
+            health_mode: FixtureHealthMode::Ready,
+            operation_mode: FixtureOperationMode::Reversible,
+            simulate_mode: FixtureSimulateMode::Allowed,
+            artifact_policy: FixtureArtifactPolicy::Echo,
+            handshake_mode: FixtureHandshakeMode::Accepted,
+            require_handshake,
+        }
+    }
+
+    fn simulate_request(connector_id: &ConnectorId, operation: &str) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest {
+            r#type: "simulate".into(),
+            id: RequestId::new("sim_fixture"),
+            connector_id: connector_id.clone(),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: CapabilityToken::test_token(),
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        })
+        .expect("simulate request should serialize")
+    }
+
     #[test]
     fn unset_archetype_env_defaults_to_unknown() {
         assert_eq!(
@@ -716,6 +815,7 @@ mod tests {
             operation_mode: FixtureOperationMode::Reversible,
             simulate_mode: FixtureSimulateMode::Allowed,
             artifact_policy: FixtureArtifactPolicy::Echo,
+            require_handshake: false,
         };
         let operation = profile
             .operation_info()
@@ -730,5 +830,39 @@ mod tests {
         assert_eq!(operation.capability.as_str(), "cap.test.echo");
         assert_eq!(operation.summary, "Exercise generic connector behavior");
         assert!(profile.archetype.event_caps().is_none());
+    }
+
+    #[test]
+    fn simulate_requires_handshake_when_profile_demands_it() {
+        let connector_id = ConnectorId::from_static("fcp.test.simulate:utility:1.0.0");
+        let connector = TestConnector {
+            id: connector_id.clone(),
+            start_time: Instant::now(),
+            configured: true,
+            handshaken: false,
+            profile: test_profile(true),
+        };
+
+        let err = connector
+            .handle_simulate(simulate_request(&connector_id, "test.echo"))
+            .expect_err("simulate should require handshake");
+        assert!(matches!(err, FcpError::NotHandshaken));
+    }
+
+    #[test]
+    fn simulate_rejects_operation_mismatch() {
+        let connector_id = ConnectorId::from_static("fcp.test.simulate:utility:1.0.0");
+        let connector = TestConnector {
+            id: connector_id.clone(),
+            start_time: Instant::now(),
+            configured: true,
+            handshaken: true,
+            profile: test_profile(false),
+        };
+
+        let err = connector
+            .handle_simulate(simulate_request(&connector_id, "test.other"))
+            .expect_err("simulate should reject mismatched operation");
+        assert!(matches!(err, FcpError::InvalidRequest { code: 1006, .. }));
     }
 }

@@ -32,12 +32,12 @@ use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
     ApprovalMode, ApprovalToken, CapabilityVerifier, ConnectorHealth, ConnectorId,
-    CostEstimateConfidence, Decision, DecisionReceiptPolicy, HealthSnapshot, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, LifecycleError, LifecycleManager, LifecycleState,
-    LifecycleStatus, ObjectHeader, PolicySimulationInput, Provenance, RequestId,
-    ResourceAvailability, RolloutPolicy, SafetyTier, SelfCheckReport, SimulateRequest,
-    SimulateResponse, SoftwareBillOfMaterials, SupplyChainAttestation, TransportMode, ZoneId,
-    ZonePolicyObject, ZoneTransportPolicy, simulate_policy_decision,
+    CostEstimateConfidence, Decision, DecisionReceiptPolicy, HandshakeRequest, HandshakeResponse,
+    HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, LifecycleError,
+    LifecycleManager, LifecycleState, LifecycleStatus, ObjectHeader, PolicySimulationInput,
+    Provenance, RequestId, ResourceAvailability, RolloutPolicy, SafetyTier, SelfCheckReport,
+    SimulateRequest, SimulateResponse, SoftwareBillOfMaterials, SupplyChainAttestation,
+    TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy, simulate_policy_decision,
 };
 use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
@@ -91,10 +91,16 @@ struct SubprocessConnector {
     summary: ConnectorSummary,
     runner: Mutex<ConnectorProcessRunner>,
     resilience: Arc<ResilienceLayer>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    handshaken_zone: Mutex<Option<ZoneId>>,
 }
 
 impl SubprocessConnector {
-    async fn spawn(config: ConnectorConfig, resilience: Arc<ResilienceLayer>) -> HostResult<Self> {
+    async fn spawn(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    ) -> HostResult<Self> {
         let connector_id: ConnectorId = config.id.parse().map_err(|err| {
             HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
         })?;
@@ -133,6 +139,8 @@ impl SubprocessConnector {
             summary,
             runner: Mutex::new(runner),
             resilience,
+            capability_verifying_key,
+            handshaken_zone: Mutex::new(None),
         };
         connector.resilience.ensure_connector(&connector.summary.id);
 
@@ -185,6 +193,49 @@ impl SubprocessConnector {
             .map_err(|err| HostError::RegistryError(format!("health parse error: {err}")))
     }
 
+    async fn ensure_handshake(&self, zone: &ZoneId) -> HostResult<()> {
+        let Some(host_public_key) = self.capability_verifying_key else {
+            return Ok(());
+        };
+
+        let mut handshaken_zone = self.handshaken_zone.lock().await;
+        if handshaken_zone.as_ref() == Some(zone) {
+            return Ok(());
+        }
+
+        let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
+        let request = HandshakeRequest {
+            protocol_version: "1.0.0".to_string(),
+            zone: zone.clone(),
+            zone_dir: None,
+            host_public_key,
+            nonce,
+            capabilities_requested: Vec::new(),
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        };
+        let params = serde_json::to_value(request)
+            .map_err(|err| HostError::RegistryError(format!("handshake encode error: {err}")))?;
+        let response: HandshakeResponse =
+            serde_json::from_value(self.rpc("handshake", params).await?)
+                .map_err(|err| HostError::RegistryError(format!("handshake parse error: {err}")))?;
+        if response.status != "accepted" {
+            return Err(HostError::RegistryError(format!(
+                "handshake rejected by connector '{}': {}",
+                self.summary.id, response.status
+            )));
+        }
+        if response.nonce != nonce {
+            return Err(HostError::RegistryError(format!(
+                "handshake nonce mismatch for connector '{}'",
+                self.summary.id
+            )));
+        }
+        *handshaken_zone = Some(zone.clone());
+        Ok(())
+    }
+
     async fn self_check(&self) -> HostResult<SelfCheckReport> {
         let result = self.rpc("self_check", json!({})).await?;
         serde_json::from_value(result)
@@ -192,6 +243,7 @@ impl SubprocessConnector {
     }
 
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        self.ensure_handshake(&request.zone_id).await?;
         let params = serde_json::to_value(request)
             .map_err(|err| HostError::RegistryError(format!("invoke encode error: {err}")))?;
         let result = self.rpc("invoke", params).await?;
@@ -200,6 +252,7 @@ impl SubprocessConnector {
     }
 
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        self.ensure_handshake(&request.zone_id).await?;
         let params = serde_json::to_value(request)
             .map_err(|err| HostError::RegistryError(format!("simulate encode error: {err}")))?;
         let result = self.rpc("simulate", params).await?;
@@ -243,6 +296,7 @@ struct SubprocessRegistry {
     state: Arc<RwLock<RegistryState>>,
     resilience: Arc<ResilienceLayer>,
     version: Arc<AtomicU64>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
 }
 
 struct RegistryEntry {
@@ -281,7 +335,10 @@ impl PreparedRegistryApply {
 }
 
 impl SubprocessRegistry {
-    async fn from_configs(configs: Vec<ConnectorConfig>) -> HostResult<Self> {
+    async fn from_configs(
+        configs: Vec<ConnectorConfig>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    ) -> HostResult<Self> {
         let resilience = Arc::new(ResilienceLayer::default());
         let mut map = HashMap::new();
         for config in configs {
@@ -294,7 +351,12 @@ impl SubprocessRegistry {
                 )));
             }
             let connector = Arc::new(
-                SubprocessConnector::spawn(config.clone(), Arc::clone(&resilience)).await?,
+                SubprocessConnector::spawn(
+                    config.clone(),
+                    Arc::clone(&resilience),
+                    capability_verifying_key,
+                )
+                .await?,
             );
             map.insert(connector_id, RegistryEntry { config, connector });
         }
@@ -302,6 +364,7 @@ impl SubprocessRegistry {
             state: Arc::new(RwLock::new(RegistryState { connectors: map })),
             resilience,
             version: Arc::new(AtomicU64::new(1)),
+            capability_verifying_key,
         })
     }
 
@@ -351,8 +414,12 @@ impl SubprocessRegistry {
                 }
                 Some(_) => {
                     let connector = Arc::new(
-                        SubprocessConnector::spawn(config.clone(), Arc::clone(&self.resilience))
-                            .await?,
+                        SubprocessConnector::spawn(
+                            config.clone(),
+                            Arc::clone(&self.resilience),
+                            self.capability_verifying_key,
+                        )
+                        .await?,
                     );
                     replacement_entries.insert(
                         connector_id.clone(),
@@ -365,8 +432,12 @@ impl SubprocessRegistry {
                 }
                 None => {
                     let connector = Arc::new(
-                        SubprocessConnector::spawn(config.clone(), Arc::clone(&self.resilience))
-                            .await?,
+                        SubprocessConnector::spawn(
+                            config.clone(),
+                            Arc::clone(&self.resilience),
+                            self.capability_verifying_key,
+                        )
+                        .await?,
                     );
                     replacement_entries.insert(
                         connector_id.clone(),
@@ -1944,7 +2015,15 @@ async fn async_main() -> HostResult<()> {
         tracing::warn!("no connectors configured; doctor self-checks will fail");
     }
 
-    let registry = Arc::new(SubprocessRegistry::from_configs(loaded_configs.configs).await?);
+    let registry = Arc::new(
+        SubprocessRegistry::from_configs(
+            loaded_configs.configs,
+            capability_verifying_key
+                .as_ref()
+                .map(Ed25519VerifyingKey::to_bytes),
+        )
+        .await?,
+    );
     let doctor = match resolve_self_check_timeout()? {
         Some(timeout) => DoctorService::with_timeout(Arc::clone(&registry), timeout),
         None => DoctorService::new(Arc::clone(&registry)),
@@ -4804,6 +4883,47 @@ mod tests {
         }
     }
 
+    fn subprocess_test_connector_config_requiring_handshake(connector_id: &str) -> ConnectorConfig {
+        let mut config = subprocess_test_connector_config(connector_id);
+        config.env.insert(
+            "FCP_TEST_CONNECTOR_REQUIRE_HANDSHAKE".to_string(),
+            "1".to_string(),
+        );
+        config
+    }
+
+    fn subprocess_test_connector_config_with_handshake_mode(
+        connector_id: &str,
+        handshake_mode: &str,
+    ) -> ConnectorConfig {
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.env.insert(
+            "FCP_TEST_CONNECTOR_HANDSHAKE_MODE".to_string(),
+            handshake_mode.to_string(),
+        );
+        config
+    }
+
+    fn test_capability_token(
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        capability_id: &str,
+        operation_id: &str,
+        zone_id: &str,
+    ) -> fcp_core::CapabilityToken {
+        let now = Utc::now();
+        fcp_core::CapabilityToken {
+            raw: fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(capability_id)
+                .zone_id(zone_id)
+                .principal("user:test")
+                .issuer("node:test")
+                .operations(&[operation_id])
+                .validity(now, now + chrono::Duration::hours(1))
+                .sign(signing_key)
+                .expect("test capability token should sign"),
+        }
+    }
+
     fn failing_admin_state_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
         let blocker = dir.path().join("admin-state-blocker");
         std::fs::write(&blocker, "block persistence here").expect("write blocker file");
@@ -4817,7 +4937,7 @@ mod tests {
     ) -> Arc<AppState> {
         write_connector_configs_file(&connectors_file, &configs).expect("write connectors file");
         let registry = Arc::new(
-            SubprocessRegistry::from_configs(configs)
+            SubprocessRegistry::from_configs(configs, None)
                 .await
                 .expect("registry should load"),
         );
@@ -5036,6 +5156,7 @@ mod tests {
             SubprocessConnector::spawn(
                 subprocess_test_connector_config(connector_id),
                 Arc::new(ResilienceLayer::default()),
+                None,
             ),
         )
         .await
@@ -5060,6 +5181,199 @@ mod tests {
         );
     }
 
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_invoke_performs_handshake_automatically() {
+        let connector_id = "fcp.test.handshake:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config_requiring_handshake(connector_id),
+                Arc::new(ResilienceLayer::default()),
+                Some(signing_key.verifying_key().to_bytes()),
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let response = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            connector.invoke(InvokeRequest {
+                r#type: "invoke".to_string(),
+                id: RequestId::random(),
+                connector_id: connector_id.parse().expect("connector id"),
+                operation: OperationId::from_static("test.echo"),
+                zone_id: ZoneId::work(),
+                input: json!({ "message": "hello from host test" }),
+                capability_token: test_capability_token(
+                    &signing_key,
+                    "cap.test.echo",
+                    "test.echo",
+                    "z:work",
+                ),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            }),
+        )
+        .await
+        .expect("invoke should not hang")
+        .expect("invoke should succeed");
+
+        assert_eq!(response.status, fcp_core::InvokeStatus::Ok);
+        assert_eq!(
+            response.result.expect("result")["echo"]["message"],
+            "hello from host test"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_simulate_performs_handshake_automatically() {
+        let connector_id = "fcp.test.simulate-handshake:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config_requiring_handshake(connector_id),
+                Arc::new(ResilienceLayer::default()),
+                Some(signing_key.verifying_key().to_bytes()),
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let response = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            connector.simulate(SimulateRequest {
+                r#type: "simulate".to_string(),
+                id: RequestId::random(),
+                connector_id: connector_id.parse().expect("connector id"),
+                operation: OperationId::from_static("test.echo"),
+                zone_id: ZoneId::work(),
+                input: json!({ "message": "hello from simulate host test" }),
+                capability_token: test_capability_token(
+                    &signing_key,
+                    "cap.test.echo",
+                    "test.echo",
+                    "z:work",
+                ),
+                estimate_cost: false,
+                check_availability: false,
+                context: None,
+                correlation_id: None,
+            }),
+        )
+        .await
+        .expect("simulate should not hang")
+        .expect("simulate should succeed");
+
+        assert!(response.would_succeed);
+        assert!(response.failure_reason.is_none());
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_invoke_fails_when_handshake_is_rejected() {
+        let connector_id = "fcp.test.handshake-rejected:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config_with_handshake_mode(connector_id, "rejected"),
+                Arc::new(ResilienceLayer::default()),
+                Some(signing_key.verifying_key().to_bytes()),
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let error = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            connector.invoke(InvokeRequest {
+                r#type: "invoke".to_string(),
+                id: RequestId::random(),
+                connector_id: connector_id.parse().expect("connector id"),
+                operation: OperationId::from_static("test.echo"),
+                zone_id: ZoneId::work(),
+                input: json!({ "message": "should fail at handshake" }),
+                capability_token: test_capability_token(
+                    &signing_key,
+                    "cap.test.echo",
+                    "test.echo",
+                    "z:work",
+                ),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            }),
+        )
+        .await
+        .expect("invoke should not hang")
+        .expect_err("invoke should fail");
+
+        assert!(error.to_string().contains("handshake rejected"));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_invoke_fails_when_handshake_nonce_mismatches() {
+        let connector_id = "fcp.test.handshake-bad-nonce:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config_with_handshake_mode(connector_id, "bad_nonce"),
+                Arc::new(ResilienceLayer::default()),
+                Some(signing_key.verifying_key().to_bytes()),
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let error = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            connector.invoke(InvokeRequest {
+                r#type: "invoke".to_string(),
+                id: RequestId::random(),
+                connector_id: connector_id.parse().expect("connector id"),
+                operation: OperationId::from_static("test.echo"),
+                zone_id: ZoneId::work(),
+                input: json!({ "message": "should fail at handshake" }),
+                capability_token: test_capability_token(
+                    &signing_key,
+                    "cap.test.echo",
+                    "test.echo",
+                    "z:work",
+                ),
+                holder_proof: None,
+                context: None,
+                idempotency_key: None,
+                lease_seq: None,
+                deadline_ms: None,
+                correlation_id: None,
+                provenance: None,
+                approval_tokens: Vec::new(),
+            }),
+        )
+        .await
+        .expect("invoke should not hang")
+        .expect_err("invoke should fail");
+
+        assert!(error.to_string().contains("handshake nonce mismatch"));
+    }
+
     #[test]
     fn subprocess_connector_supports_multiple_rpc_calls_on_block_on_sync_runtime() {
         let result = fcp_async_core::runtime::block_on_sync(async {
@@ -5069,6 +5383,7 @@ mod tests {
                 SubprocessConnector::spawn(
                     subprocess_test_connector_config(connector_id),
                     Arc::new(ResilienceLayer::default()),
+                    None,
                 ),
             )
             .await
@@ -5101,9 +5416,10 @@ mod tests {
         let connector_id = ConnectorId::from_static("fcp.test.registry:utility:1.0.0");
         let registry = fcp_async_core::time::timeout(
             Duration::from_secs(2),
-            SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
-                connector_id.as_str(),
-            )]),
+            SubprocessRegistry::from_configs(
+                vec![subprocess_test_connector_config(connector_id.as_str())],
+                None,
+            ),
         )
         .await
         .expect("registry construction should not hang")
@@ -5132,9 +5448,10 @@ mod tests {
         }
         let first_id = ConnectorId::from_static("fcp.test.registry-apply-one:utility:1.0.0");
         let second_id = ConnectorId::from_static("fcp.test.registry-apply-two:utility:1.0.0");
-        let registry = SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
-            first_id.as_str(),
-        )])
+        let registry = SubprocessRegistry::from_configs(
+            vec![subprocess_test_connector_config(first_id.as_str())],
+            None,
+        )
         .await
         .expect("registry construction should succeed");
 
@@ -5578,6 +5895,7 @@ mod tests {
             state: Arc::new(RwLock::new(RegistryState::default())),
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(version)),
+            capability_verifying_key: None,
         }
     }
 
@@ -5641,9 +5959,10 @@ mod tests {
 
         let connector_id = ConnectorId::from_static("fcp.test.rollout-pinned:utility:1.0.0");
         let registry = Arc::new(
-            SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
-                connector_id.as_str(),
-            )])
+            SubprocessRegistry::from_configs(
+                vec![subprocess_test_connector_config(connector_id.as_str())],
+                None,
+            )
             .await
             .expect("registry should load"),
         );
@@ -5759,9 +6078,10 @@ mod tests {
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn subprocess_registry_rate_limits_remain_unknown_without_declarations() {
         let connector_id = ConnectorId::from_static("fcp.test.truth.rate-limits:utility:1.0.0");
-        let registry = SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
-            connector_id.as_str(),
-        )])
+        let registry = SubprocessRegistry::from_configs(
+            vec![subprocess_test_connector_config(connector_id.as_str())],
+            None,
+        )
         .await
         .expect("registry should load");
 

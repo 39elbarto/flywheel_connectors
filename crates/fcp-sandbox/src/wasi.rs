@@ -880,10 +880,19 @@ impl WasiRuntime {
 
     fn configure_network_policy(&self, wasi_builder: &mut WasiCtxBuilder) {
         match (
-            &self.config.network_constraints,
             self.config.block_direct_network,
+            &self.config.network_constraints,
         ) {
-            (Some(constraints), _) => {
+            // Strict and moderate sandbox profiles require all outbound traffic
+            // to flow through the Network Guard. Preview2 socket hostcalls
+            // bypass that mediation, so they must stay disabled even when
+            // operation-level network constraints are present.
+            (true, _) => {
+                wasi_builder.allow_ip_name_lookup(false);
+                wasi_builder.allow_tcp(false);
+                wasi_builder.allow_udp(false);
+            }
+            (false, Some(constraints)) => {
                 let constraints = Arc::new(constraints.clone());
                 wasi_builder.allow_ip_name_lookup(true);
                 wasi_builder.allow_tcp(true);
@@ -893,12 +902,7 @@ impl WasiRuntime {
                     Box::pin(async move { socket_addr_allowed(constraints.as_ref(), addr, reason) })
                 });
             }
-            (None, true) => {
-                wasi_builder.allow_ip_name_lookup(false);
-                wasi_builder.allow_tcp(false);
-                wasi_builder.allow_udp(false);
-            }
-            (None, false) => {
+            (false, None) => {
                 wasi_builder.inherit_network();
                 wasi_builder.allow_ip_name_lookup(true);
                 wasi_builder.allow_tcp(true);

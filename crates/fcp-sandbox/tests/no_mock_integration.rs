@@ -1054,12 +1054,27 @@ async fn wasi_runtime_network_policy_controls_preview2_socket_hostcalls() {
         assert!(err.to_string().contains("resolver-failure"));
     }
 
-    let constrained_runtime =
+    let strict_runtime =
         WasiRuntime::new(WasiConfig::default().with_network_constraints(open_constraints()))
             .unwrap();
-    let mut constrained_store = constrained_runtime.create_store().unwrap();
+    let mut strict_store = strict_runtime.create_store().unwrap();
     {
-        let mut sockets = constrained_store.data_mut().sockets();
+        let mut sockets = strict_store.data_mut().sockets();
+        let network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let err =
+            ip_name_lookup::Host::resolve_addresses(&mut sockets, network, "example.com".into())
+                .unwrap_err();
+        assert!(err.to_string().contains("resolver-failure"));
+    }
+
+    let permissive_runtime = WasiRuntime::new(WasiConfig {
+        block_direct_network: false,
+        ..WasiConfig::default().with_network_constraints(open_constraints())
+    })
+    .unwrap();
+    let mut permissive_store = permissive_runtime.create_store().unwrap();
+    {
+        let mut sockets = permissive_store.data_mut().sockets();
         let lookup_network = instance_network::Host::instance_network(&mut sockets).unwrap();
         assert!(
             ip_name_lookup::Host::resolve_addresses(

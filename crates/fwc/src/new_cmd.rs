@@ -730,6 +730,7 @@ hex.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"
+fcp-crypto = { path = "../../crates/fcp-crypto" }
 wiremock.workspace = true
 "#
     )
@@ -1984,14 +1985,23 @@ impl FcpConnector for {struct_name}Connector {{
             runtime_config =
                 runtime_config.with_request_timeout(Duration::from_millis(request_timeout_ms));
         }}
+        if let Some(runtime) = self.runtime.take() {{
+            runtime.shutdown();
+        }}
         self.runtime = Some(ConnectorRuntime::new(runtime_config));
         self.config = Some(config);
+        self.verifier = None;
         self.configured = true;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(())
     }}
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {{
+        if !self.configured || self.runtime.is_none() {{
+            return Err(FcpError::NotConfigured);
+        }}
+
         self.base.set_handshaken(true);
 
         // Initialize capability verifier with host key and zone
@@ -2051,7 +2061,46 @@ impl FcpConnector for {struct_name}Connector {{
     }}
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {{
-        // Default V3 simulate: check capability token and return allowed.
+        if req.operation.as_str() != OP_PLACEHOLDER {{
+            let error = FcpError::InvalidRequest {{
+                code: 1004,
+                message: format!("Unknown operation: {{}}", req.operation.as_str()),
+            }};
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }}
+
+        if !self.configured || self.runtime.is_none() {{
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }}
+
+        let Some(verifier) = &self.verifier else {{
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        }};
+
+        let required_cap = CapabilityId::from_static(CAP_PLACEHOLDER);
+        if let Err(error) = verifier.verify(&req.capability_token, &required_cap, &req.operation, &[]) {{
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {{
+                response =
+                    response.with_missing_capabilities(vec![required_cap.as_str().to_string()]);
+            }}
+            return Ok(response);
+        }}
+
+        // Default V3 simulate: reflect lifecycle/capability gating without side effects.
         // TODO: Add cost estimation, resource availability checks, etc.
         Ok(SimulateResponse::allowed(req.id))
     }}
@@ -2061,9 +2110,14 @@ impl FcpConnector for {struct_name}Connector {{
     }}
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {{
-        if let Some(runtime) = &self.runtime {{
+        if let Some(runtime) = self.runtime.take() {{
             runtime.shutdown();
         }}
+        self.config = None;
+        self.verifier = None;
+        self.configured = false;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
         Ok(())
     }}
 
@@ -2090,16 +2144,12 @@ impl FcpConnector for {struct_name}Connector {{
             }});
         }}
 
-        // Verify capability token
-        if let Some(verifier) = &self.verifier {{
-            // TODO: Pass actual resource URIs if the operation targets specific resources
-            // TODO: Map operation to required capability dynamically
-            let required_cap = CapabilityId::from_static(CAP_PLACEHOLDER);
-            verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
-        }} else {{
-            return Err(FcpError::NotConfigured);
-        }}
-
+        self.base.check_ready()?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        // TODO: Pass actual resource URIs if the operation targets specific resources
+        // TODO: Map operation to required capability dynamically
+        let required_cap = CapabilityId::from_static(CAP_PLACEHOLDER);
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
         self.enforce_limits(&req.input)?;
         let runtime = self.runtime.as_ref().ok_or(FcpError::NotConfigured)?;
         let ctx = runtime.request_context();
@@ -2155,12 +2205,34 @@ impl Default for {struct_name}Connector {{
 mod tests {{
     use super::*;
 
-    fn base_handshake() -> HandshakeRequest {{
+    fn test_signing_key() -> fcp_crypto::ed25519::Ed25519SigningKey {{
+        fcp_crypto::ed25519::Ed25519SigningKey::generate()
+    }}
+
+    fn test_capability_token(
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        operation: &str,
+    ) -> CapabilityToken {{
+        let now = chrono::Utc::now();
+        CapabilityToken {{
+            raw: fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(CAP_PLACEHOLDER)
+                .zone_id("z:work")
+                .principal("user:test")
+                .issuer("node:test")
+                .operations(&[operation])
+                .validity(now, now + chrono::Duration::hours(1))
+                .sign(signing_key)
+                .expect("test capability token should sign"),
+        }}
+    }}
+
+    fn base_handshake(signing_key: &fcp_crypto::ed25519::Ed25519SigningKey) -> HandshakeRequest {{
         HandshakeRequest {{
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
             zone_dir: None,
-            host_public_key: [0u8; 32],
+            host_public_key: signing_key.verifying_key().to_bytes(),
             nonce: [0u8; 32],
             capabilities_requested: vec![CapabilityId::from_static(CAP_PLACEHOLDER)],
             host: None,
@@ -2169,7 +2241,11 @@ mod tests {{
         }}
     }}
 
-    fn base_invoke(connector_id: &ConnectorId, operation: &str) -> InvokeRequest {{
+    fn base_invoke(
+        connector_id: &ConnectorId,
+        operation: &str,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    ) -> InvokeRequest {{
         InvokeRequest {{
             r#type: "invoke".into(),
             id: RequestId::new("req_1"),
@@ -2177,7 +2253,7 @@ mod tests {{
             operation: OperationId::from_static(operation),
             zone_id: ZoneId::work(),
             input: serde_json::json!({{}}),
-            capability_token: CapabilityToken::test_token(),
+            capability_token: test_capability_token(signing_key, operation),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -2192,7 +2268,9 @@ mod tests {{
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {{
         let mut connector = {struct_name}Connector::new();
-        let result = connector.handshake(base_handshake()).await;
+        connector.configure(serde_json::json!({{}})).await.expect("configure");
+        let signing_key = test_signing_key();
+        let result = connector.handshake(base_handshake(&signing_key)).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.status, "accepted");
@@ -2201,14 +2279,18 @@ mod tests {{
     #[fcp_async_core::runtime::test]
     async fn test_invoke_placeholder() {{
         let mut connector = {struct_name}Connector::new();
+        let signing_key = test_signing_key();
         connector
             .configure(serde_json::json!({{}}))
             .await
             .expect("configure");
         // Must handshake first to initialize verifier
-        connector.handshake(base_handshake()).await.expect("handshake");
+        connector
+            .handshake(base_handshake(&signing_key))
+            .await
+            .expect("handshake");
 
-        let req = base_invoke(connector.id(), OP_PLACEHOLDER);
+        let req = base_invoke(connector.id(), OP_PLACEHOLDER, &signing_key);
         let response = connector.invoke(req).await.expect("invoke");
         assert_eq!(response.status, InvokeStatus::Ok);
     }}
@@ -2247,7 +2329,13 @@ mod tests {{
 
     #[fcp_async_core::runtime::test]
     async fn test_simulate_returns_allowed() {{
-        let connector = {struct_name}Connector::new();
+        let mut connector = {struct_name}Connector::new();
+        let signing_key = test_signing_key();
+        connector.configure(serde_json::json!({{}})).await.expect("configure");
+        connector
+            .handshake(base_handshake(&signing_key))
+            .await
+            .expect("handshake");
         let req = SimulateRequest {{
             r#type: "simulate".into(),
             id: RequestId::new("sim_1"),
@@ -2255,7 +2343,7 @@ mod tests {{
             operation: OperationId::from_static(OP_PLACEHOLDER),
             zone_id: ZoneId::work(),
             input: serde_json::json!({{}}),
-            capability_token: CapabilityToken::test_token(),
+            capability_token: test_capability_token(&signing_key, OP_PLACEHOLDER),
             estimate_cost: false,
             check_availability: false,
             context: None,
@@ -2266,11 +2354,33 @@ mod tests {{
     }}
 
     #[fcp_async_core::runtime::test]
+    async fn test_reconfigure_requires_new_handshake() {{
+        let mut connector = {struct_name}Connector::new();
+        let signing_key = test_signing_key();
+        connector.configure(serde_json::json!({{}})).await.expect("configure");
+        connector
+            .handshake(base_handshake(&signing_key))
+            .await
+            .expect("handshake");
+        connector.configure(serde_json::json!({{}})).await.expect("reconfigure");
+
+        let err = connector
+            .invoke(base_invoke(connector.id(), OP_PLACEHOLDER, &signing_key))
+            .await
+            .expect_err("invoke should require a fresh handshake after reconfigure");
+        assert!(matches!(err, FcpError::NotHandshaken));
+    }}
+
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_unknown_operation_rejected() {{
         let mut connector = {struct_name}Connector::new();
+        let signing_key = test_signing_key();
         connector.configure(serde_json::json!({{}})).await.expect("configure");
-        connector.handshake(base_handshake()).await.expect("handshake");
-        let req = base_invoke(connector.id(), "nonexistent.operation");
+        connector
+            .handshake(base_handshake(&signing_key))
+            .await
+            .expect("handshake");
+        let req = base_invoke(connector.id(), "nonexistent.operation", &signing_key);
         let result = connector.invoke(req).await;
         assert!(result.is_err(), "unknown operation should be rejected");
     }}
@@ -2332,22 +2442,49 @@ use fcp_sdk::prelude::*;
 use {crate_ident}::{struct_name}Connector;
 
 const OP_PLACEHOLDER: &str = "{short_name}.placeholder";
+const CAP_PLACEHOLDER: &str = "{short_name}.placeholder";
 
-fn base_handshake() -> HandshakeRequest {{
+fn test_signing_key() -> fcp_crypto::ed25519::Ed25519SigningKey {{
+    fcp_crypto::ed25519::Ed25519SigningKey::generate()
+}}
+
+fn test_capability_token(
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    operation: &str,
+) -> CapabilityToken {{
+    let now = chrono::Utc::now();
+    CapabilityToken {{
+        raw: fcp_crypto::cose::CapabilityTokenBuilder::new()
+            .capability_id(CAP_PLACEHOLDER)
+            .zone_id("z:work")
+            .principal("user:test")
+            .issuer("node:test")
+            .operations(&[operation])
+            .validity(now, now + chrono::Duration::hours(1))
+            .sign(signing_key)
+            .expect("test capability token should sign"),
+    }}
+}}
+
+fn base_handshake(signing_key: &fcp_crypto::ed25519::Ed25519SigningKey) -> HandshakeRequest {{
     HandshakeRequest {{
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
         zone_dir: None,
-        host_public_key: [0u8; 32],
+        host_public_key: signing_key.verifying_key().to_bytes(),
         nonce: [0u8; 32],
-        capabilities_requested: vec![CapabilityId::from_static(OP_PLACEHOLDER)],
+        capabilities_requested: vec![CapabilityId::from_static(CAP_PLACEHOLDER)],
         host: None,
         transport_caps: None,
         requested_instance_id: None,
     }}
 }}
 
-fn base_invoke(connector_id: &ConnectorId, operation: &str) -> InvokeRequest {{
+fn base_invoke(
+    connector_id: &ConnectorId,
+    operation: &str,
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+) -> InvokeRequest {{
     InvokeRequest {{
         r#type: "invoke".into(),
         id: RequestId::new("req_1"),
@@ -2355,7 +2492,7 @@ fn base_invoke(connector_id: &ConnectorId, operation: &str) -> InvokeRequest {{
         operation: OperationId::from_static(operation),
         zone_id: ZoneId::work(),
         input: serde_json::json!({{}}),
-        capability_token: CapabilityToken::test_token(),
+        capability_token: test_capability_token(signing_key, operation),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -2374,6 +2511,7 @@ fn base_invoke(connector_id: &ConnectorId, operation: &str) -> InvokeRequest {{
 #[fcp_async_core::runtime::test]
 async fn test_happy_path_placeholder() {{
     let mut connector = {struct_name}Connector::new();
+    let signing_key = test_signing_key();
 
     // Configure the connector
     connector
@@ -2382,13 +2520,13 @@ async fn test_happy_path_placeholder() {{
         .expect("configure");
 
     connector
-        .handshake(base_handshake())
+        .handshake(base_handshake(&signing_key))
         .await
         .expect("handshake");
 
     // Invoke placeholder operation
     let invoke_result = connector
-        .invoke(base_invoke(connector.id(), OP_PLACEHOLDER))
+        .invoke(base_invoke(connector.id(), OP_PLACEHOLDER, &signing_key))
         .await;
     assert!(invoke_result.is_ok(), "Placeholder operation should succeed");
 }}
@@ -2439,10 +2577,11 @@ async fn test_secrets_not_logged() {{
 #[fcp_async_core::runtime::test]
 async fn test_error_codes_correct() {{
     let connector = {struct_name}Connector::new();
+    let signing_key = test_signing_key();
 
     // Test unknown operation returns correct error
     let result = connector
-        .invoke(base_invoke(connector.id(), "unknown.operation"))
+        .invoke(base_invoke(connector.id(), "unknown.operation", &signing_key))
         .await;
 
     assert!(result.is_err());
@@ -2549,7 +2688,13 @@ async fn test_self_check_ok_after_configure() {{
 
 #[fcp_async_core::runtime::test]
 async fn test_simulate_allowed_by_default() {{
-    let connector = {struct_name}Connector::new();
+    let mut connector = {struct_name}Connector::new();
+    let signing_key = test_signing_key();
+    connector.configure(serde_json::json!({{}})).await.expect("configure");
+    connector
+        .handshake(base_handshake(&signing_key))
+        .await
+        .expect("handshake");
     let req = SimulateRequest {{
         r#type: "simulate".into(),
         id: RequestId::new("sim_1"),
@@ -2557,7 +2702,7 @@ async fn test_simulate_allowed_by_default() {{
         operation: OperationId::from_static(OP_PLACEHOLDER),
         zone_id: ZoneId::work(),
         input: serde_json::json!({{}}),
-        capability_token: CapabilityToken::test_token(),
+        capability_token: test_capability_token(&signing_key, OP_PLACEHOLDER),
         estimate_cost: false,
         check_availability: false,
         context: None,

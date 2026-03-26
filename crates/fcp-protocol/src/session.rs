@@ -68,6 +68,12 @@ pub enum SessionError {
     #[error("attested node id does not match handshake")]
     AttestationNodeMismatch,
 
+    #[error("session ack does not reflect the initiating hello endpoints")]
+    AckHelloMismatch,
+
+    #[error("session ack selected a suite not offered by the hello")]
+    AckSuiteNotOffered,
+
     #[error("attestation verification failed: {reason}")]
     AttestationVerifyFailed { reason: String },
 
@@ -427,6 +433,12 @@ impl MeshSessionAck {
         hello: &MeshSessionHello,
         verifying_key: &Ed25519VerifyingKey,
     ) -> Result<(), SessionError> {
+        if self.from.as_str() != hello.to.as_str() || self.to.as_str() != hello.from.as_str() {
+            return Err(SessionError::AckHelloMismatch);
+        }
+        if !hello.suites.contains(&self.suite) {
+            return Err(SessionError::AckSuiteNotOffered);
+        }
         let signature = self.signature.ok_or(SessionError::MissingSignature)?;
         let transcript = self.transcript_bytes(hello)?;
         verifying_key
@@ -2443,6 +2455,47 @@ mod tests {
         });
     }
 
+    #[test]
+    fn ack_verify_rejects_endpoint_mismatch() {
+        let context = LogContext::new("handshake", "verify").with_reason("ack_hello_mismatch");
+        run_logged_test("ack_verify_rejects_endpoint_mismatch", 1, &context, || {
+            let signing_key = Ed25519SigningKey::generate();
+            let hello = make_hello();
+            let mut ack = make_ack();
+            ack.to = TailscaleNodeId::new("node-someone-else");
+            ack.sign(&hello, &signing_key).expect("sign ack");
+
+            let err = ack
+                .verify(&hello, &signing_key.verifying_key())
+                .expect_err("ack endpoint mismatch should fail");
+            assert!(matches!(err, SessionError::AckHelloMismatch));
+        });
+    }
+
+    #[test]
+    fn ack_verify_rejects_suite_not_offered_by_hello() {
+        let context = LogContext::new("handshake", "verify").with_reason("suite_not_offered");
+        run_logged_test(
+            "ack_verify_rejects_suite_not_offered_by_hello",
+            1,
+            &context,
+            || {
+                let signing_key = Ed25519SigningKey::generate();
+                let mut hello = make_hello();
+                hello.suites = vec![SessionCryptoSuite::Suite1];
+
+                let mut ack = make_ack();
+                ack.suite = SessionCryptoSuite::Suite2;
+                ack.sign(&hello, &signing_key).expect("sign ack");
+
+                let err = ack
+                    .verify(&hello, &signing_key.verifying_key())
+                    .expect_err("suite not offered should fail");
+                assert!(matches!(err, SessionError::AckSuiteNotOffered));
+            },
+        );
+    }
+
     // ── suite id roundtrip ──────────────────────────────────────────
 
     #[test]
@@ -2571,6 +2624,16 @@ mod tests {
                 SessionError::InvalidAttestation
                     .to_string()
                     .contains("attestation")
+            );
+            assert!(
+                SessionError::AckHelloMismatch
+                    .to_string()
+                    .contains("does not reflect")
+            );
+            assert!(
+                SessionError::AckSuiteNotOffered
+                    .to_string()
+                    .contains("suite not offered")
             );
             assert!(
                 SessionError::InvalidMacKeyLength

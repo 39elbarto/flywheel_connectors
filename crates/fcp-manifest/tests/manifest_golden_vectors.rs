@@ -2233,6 +2233,7 @@ fn linear_full_manifest_parses_with_all_operations() {
         "linear.list_cycles",
         "linear.add_comment",
         "linear.list_projects",
+        "linear.plan_sync",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

@@ -1146,12 +1146,13 @@ async fn lifecycle_introspect_all_operations() {
         "github.trigger_workflow",
         "github.get_file_content",
         "github.search_code",
+        "github.process_webhook",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 12);
+    assert_eq!(ops.len(), 13);
 
     for op in ops {
         assert!(

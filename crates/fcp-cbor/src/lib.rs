@@ -152,6 +152,10 @@ pub enum SerializationError {
     #[error("cbor value conversion error: {0}")]
     CborValue(#[from] ciborium::value::Error),
 
+    /// A float value is NaN or Infinity (RFC 8949 §4.2.5).
+    #[error("non-finite float (NaN or Infinity) not allowed in canonical CBOR")]
+    NonFiniteFloat,
+
     /// A map contains duplicate keys (after canonicalization).
     #[error("duplicate map key (canonical key bytes: {key_hex})")]
     DuplicateMapKey { key_hex: String },
@@ -324,6 +328,11 @@ fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), Serial
     }
 
     match v {
+        Value::Float(f) => {
+            if f.is_nan() || f.is_infinite() {
+                return Err(SerializationError::NonFiniteFloat);
+            }
+        }
         Value::Array(items) => {
             for item in items {
                 canonicalize_value_in_place(item, depth + 1)?;
@@ -1660,6 +1669,7 @@ mod tests {
             SerializationError::PayloadTooLarge { len: 100, max: 50 },
             SerializationError::TrailingBytes,
             SerializationError::NonCanonicalEncoding,
+            SerializationError::NonFiniteFloat,
             SerializationError::DuplicateMapKey {
                 key_hex: "deadbeef".to_string(),
             },
@@ -2624,6 +2634,7 @@ mod tests {
             SerializationError::PayloadTooLarge { len: 100, max: 50 },
             SerializationError::TrailingBytes,
             SerializationError::NonCanonicalEncoding,
+            SerializationError::NonFiniteFloat,
             SerializationError::DuplicateMapKey {
                 key_hex: "deadbeef".into(),
             },
@@ -3037,30 +3048,27 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_f64_infinity() {
+    fn roundtrip_f64_infinity_rejected() {
         let schema = SchemaId::new("fcp.test", "F64Inf", Version::new(1, 0, 0));
         let val: f64 = f64::INFINITY;
-        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
-        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
-        assert!(decoded.is_infinite() && decoded.is_sign_positive());
+        let err = CanonicalSerializer::serialize(&val, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::NonFiniteFloat));
     }
 
     #[test]
-    fn roundtrip_f64_neg_infinity() {
+    fn roundtrip_f64_neg_infinity_rejected() {
         let schema = SchemaId::new("fcp.test", "F64NegInf", Version::new(1, 0, 0));
         let val: f64 = f64::NEG_INFINITY;
-        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
-        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
-        assert!(decoded.is_infinite() && decoded.is_sign_negative());
+        let err = CanonicalSerializer::serialize(&val, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::NonFiniteFloat));
     }
 
     #[test]
-    fn roundtrip_f64_nan() {
+    fn roundtrip_f64_nan_rejected() {
         let schema = SchemaId::new("fcp.test", "F64NaN", Version::new(1, 0, 0));
         let val: f64 = f64::NAN;
-        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
-        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
-        assert!(decoded.is_nan());
+        let err = CanonicalSerializer::serialize(&val, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::NonFiniteFloat));
     }
 
     #[test]
@@ -4234,36 +4242,21 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn to_canonical_cbor_f64_positive_infinity() {
-        let bytes = to_canonical_cbor(&f64::INFINITY).unwrap();
-        let val: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        if let Value::Float(f) = val {
-            assert!(f.is_infinite() && f.is_sign_positive());
-        } else {
-            panic!("expected float");
-        }
+    fn to_canonical_cbor_f64_positive_infinity_rejected() {
+        let err = to_canonical_cbor(&f64::INFINITY).unwrap_err();
+        assert!(matches!(err, SerializationError::NonFiniteFloat));
     }
 
     #[test]
-    fn to_canonical_cbor_f64_negative_infinity() {
-        let bytes = to_canonical_cbor(&f64::NEG_INFINITY).unwrap();
-        let val: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        if let Value::Float(f) = val {
-            assert!(f.is_infinite() && f.is_sign_negative());
-        } else {
-            panic!("expected float");
-        }
+    fn to_canonical_cbor_f64_negative_infinity_rejected() {
+        let err = to_canonical_cbor(&f64::NEG_INFINITY).unwrap_err();
+        assert!(matches!(err, SerializationError::NonFiniteFloat));
     }
 
     #[test]
-    fn to_canonical_cbor_f64_nan() {
-        let bytes = to_canonical_cbor(&f64::NAN).unwrap();
-        let val: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        if let Value::Float(f) = val {
-            assert!(f.is_nan());
-        } else {
-            panic!("expected float");
-        }
+    fn to_canonical_cbor_f64_nan_rejected() {
+        let err = to_canonical_cbor(&f64::NAN).unwrap_err();
+        assert!(matches!(err, SerializationError::NonFiniteFloat));
     }
 
     // ========================================================================
@@ -5253,17 +5246,21 @@ mod tests {
     #[test]
     fn roundtrip_vec_of_f64() {
         let schema = SchemaId::new("fcp.test", "F64Vec", Version::new(1, 0, 0));
-        let val = vec![1.1_f64, 2.2, -3.3, 0.0, f64::INFINITY];
+        let val = vec![1.1_f64, 2.2, -3.3, 0.0, 42.0];
         let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
         let decoded: Vec<f64> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
         assert_eq!(decoded.len(), val.len());
         for (a, b) in val.iter().zip(decoded.iter()) {
-            if a.is_infinite() {
-                assert!(b.is_infinite());
-            } else {
-                assert!((a - b).abs() < f64::EPSILON);
-            }
+            assert!((a - b).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    fn roundtrip_vec_of_f64_rejects_infinity() {
+        let schema = SchemaId::new("fcp.test", "F64VecInf", Version::new(1, 0, 0));
+        let val = vec![1.1_f64, 2.2, f64::INFINITY];
+        let err = CanonicalSerializer::serialize(&val, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::NonFiniteFloat));
     }
 
     #[test]
@@ -5610,6 +5607,7 @@ mod tests {
             SerializationError::MissingSchemaHashPrefix,
             SerializationError::TrailingBytes,
             SerializationError::NonCanonicalEncoding,
+            SerializationError::NonFiniteFloat,
         ];
         for err in &simple_errors {
             assert!(err.source().is_none(), "expected no source for {err}");

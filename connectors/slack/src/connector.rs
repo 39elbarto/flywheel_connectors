@@ -13,8 +13,8 @@ use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, ObjectId, OperationId,
-    OperationInfo, Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse,
-    ThreadInfo, TrustLevel, ZoneId,
+    OperationInfo, Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
+    SimulateResponse, ThreadInfo, TrustLevel, ZoneId,
 };
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::Deserialize;
@@ -1144,6 +1144,62 @@ impl SlackConnector {
 
         serde_json::to_value(report).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize doctor report: {e}"),
+        })
+    }
+
+    /// Handle connector self-check.
+    ///
+    /// Validates token and API reachability via auth.test.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization of the self-check report fails.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let report = match client.auth_test().await {
+            Ok((auth_info, scopes)) => {
+                let missing = SlackClient::validate_scopes(&scopes, Self::REQUIRED_SCOPES);
+                if missing.is_empty() {
+                    let mut report = SelfCheckReport::ok();
+                    report.details = Some(json!({
+                        "token_ok": true,
+                        "team": auth_info.team,
+                        "team_id": auth_info.team_id,
+                        "user": auth_info.user,
+                        "scopes_ok": true,
+                    }));
+                    report
+                } else {
+                    let mut report = SelfCheckReport::failed(
+                        "provisioning_scopes_missing",
+                        format!("Missing required scopes: {}", missing.join(", ")),
+                    );
+                    report.details = Some(json!({
+                        "token_ok": true,
+                        "team": auth_info.team,
+                        "scopes_ok": false,
+                        "missing_scopes": missing,
+                        "granted_scopes": scopes,
+                    }));
+                    report
+                }
+            }
+            Err(e) => {
+                if e.is_retryable() {
+                    SelfCheckReport::degraded("api_transient_error", e.to_string())
+                } else {
+                    SelfCheckReport::failed("provisioning_token_invalid", e.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
         })
     }
 
@@ -2499,5 +2555,48 @@ mod tests {
     #[test]
     fn test_default_creates_new_connector() {
         let _connector: SlackConnector = SlackConnector::default();
+    }
+
+    // ── Self-check tests ─────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_unconfigured() {
+        let connector = SlackConnector::new();
+        let value = connector.handle_self_check().await.unwrap();
+        assert_eq!(value["status"], "degraded");
+        assert_eq!(value["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_with_valid_token() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/auth.test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "url": "https://test.slack.com/",
+                "team": "Test Team",
+                "user": "testbot",
+                "team_id": "T123",
+                "user_id": "U123",
+                "bot_id": "B123"
+            })).insert_header("x-oauth-scopes", "chat:write,channels:read,channels:history,users:read,reactions:write,team:read"))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = SlackConnector::new();
+        connector
+            .handle_configure(json!({
+                "bot_token": "xoxb-test",
+                "api_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+
+        let value = connector.handle_self_check().await.unwrap();
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["details"]["token_ok"], true);
+        assert_eq!(value["details"]["scopes_ok"], true);
     }
 }

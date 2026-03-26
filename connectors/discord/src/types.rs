@@ -2,6 +2,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Doctor diagnostic report.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorReport {
+    pub ready: bool,
+    pub checks: Vec<DoctorCheck>,
+}
+
+/// A single doctor check result.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub passed: bool,
+    pub message: String,
+}
+
 /// Discord user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {

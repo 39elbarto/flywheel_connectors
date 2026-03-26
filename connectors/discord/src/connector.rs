@@ -39,7 +39,7 @@ use crate::{
         EMBED_DESCRIPTION_MAX_CHARS, EMBED_TITLE_MAX_CHARS, EMBED_TOTAL_MAX_CHARS,
         EMBEDS_MAX_COUNT, MESSAGE_CONTENT_MAX_CHARS, THREAD_NAME_MAX_CHARS,
     },
-    types::Embed,
+    types::{DoctorCheck, DoctorReport, Embed},
 };
 
 /// Discord FCP connector.
@@ -452,6 +452,110 @@ impl DiscordConnector {
                 "error": e.to_string()
             })),
         }
+    }
+
+    /// Handle doctor diagnostics.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // Check 1: Token configured
+        let token_present = self.api_client.is_some();
+        checks.push(DoctorCheck {
+            name: "token_present".into(),
+            passed: token_present,
+            message: if token_present {
+                "Bot token is configured".into()
+            } else {
+                "No token configured — call configure with a valid bot token".into()
+            },
+        });
+
+        if !token_present {
+            let report = DoctorReport {
+                ready: false,
+                checks,
+            };
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize doctor report: {e}"),
+            });
+        }
+
+        let api_client = self.api_client.as_ref().expect("checked above");
+
+        // Check 2: Token validity via get_current_user
+        match api_client.get_current_user().await {
+            Ok(user) => {
+                checks.push(DoctorCheck {
+                    name: "token_valid".into(),
+                    passed: true,
+                    message: format!("Token valid — user: {} ({})", user.username, user.id),
+                });
+
+                // Check 3: Bot account
+                let is_bot = user.bot;
+                checks.push(DoctorCheck {
+                    name: "bot_account".into(),
+                    passed: is_bot,
+                    message: if is_bot {
+                        "Authenticated as a bot account".into()
+                    } else {
+                        "Authenticated as a user account — bot token recommended".into()
+                    },
+                });
+            }
+            Err(e) => {
+                checks.push(DoctorCheck {
+                    name: "token_valid".into(),
+                    passed: false,
+                    message: format!("Token validation failed: {e}"),
+                });
+            }
+        }
+
+        // Check 4: Gateway intents
+        if let Some(config) = &self.config {
+            let missing = missing_required_intents(config.intents);
+            checks.push(DoctorCheck {
+                name: "gateway_intents".into(),
+                passed: missing.is_empty(),
+                message: if missing.is_empty() {
+                    "All required gateway intents are configured".into()
+                } else {
+                    format!("Missing required gateway intents: {}", missing.join(", "))
+                },
+            });
+
+            // Check 5: Network constraints
+            let network = network_readiness(config);
+            checks.push(DoctorCheck {
+                name: "network_constraints".into(),
+                passed: network.network_ok,
+                message: if network.network_ok {
+                    "Discord endpoints within network constraints".into()
+                } else {
+                    "Discord endpoints outside configured network constraints".into()
+                },
+            });
+        }
+
+        // Check 6: Gateway connection (if streaming)
+        let gateway_connected = self.gateway_task.is_some();
+        checks.push(DoctorCheck {
+            name: "gateway_connected".into(),
+            passed: gateway_connected,
+            message: if gateway_connected {
+                "Gateway WebSocket connection is active".into()
+            } else {
+                "Gateway WebSocket not connected (streaming events unavailable)".into()
+            },
+        });
+
+        let ready = checks.iter().all(|c| c.passed);
+        let report = DoctorReport { ready, checks };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor report: {e}"),
+        })
     }
 
     /// Handle connector self-check.
@@ -2336,6 +2440,75 @@ mod tests {
         );
         assert!(matches!(second, Err(FcpError::Conflict { .. })));
         first.release().unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_unconfigured() {
+        let connector = DiscordConnector::new();
+        let value = connector.handle_doctor().await.unwrap();
+        assert_eq!(value["ready"], false);
+        let checks = value["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["name"], "token_present");
+        assert_eq!(checks[0]["passed"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_and_healthy() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let api_config = base_config(mock_server.uri());
+        let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
+
+        let mut connector = DiscordConnector::new();
+        connector.api_client = Some(api_client);
+        connector.config = Some(api_config);
+
+        let value = connector.handle_doctor().await.unwrap();
+        let checks = value["checks"].as_array().unwrap();
+
+        // token_present, token_valid, bot_account, gateway_intents, network_constraints, gateway_connected
+        assert!(checks.len() >= 5);
+        assert_eq!(checks[0]["name"], "token_present");
+        assert_eq!(checks[0]["passed"], true);
+        assert_eq!(checks[1]["name"], "token_valid");
+        assert_eq!(checks[1]["passed"], true);
+        assert_eq!(checks[2]["name"], "bot_account");
+        assert_eq!(checks[2]["passed"], true);
+        assert_eq!(checks[3]["name"], "gateway_intents");
+        assert_eq!(checks[3]["passed"], true);
+        assert_eq!(checks[4]["name"], "network_constraints");
+        assert_eq!(checks[4]["passed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_reports_missing_intents() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let api_config = base_config(mock_server.uri());
+        let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
+
+        let mut connector = DiscordConnector::new();
+        connector.api_client = Some(api_client);
+        connector.config = Some(DiscordConfig {
+            intents: INTENT_GUILDS | INTENT_GUILD_MESSAGES,
+            ..api_config
+        });
+
+        let value = connector.handle_doctor().await.unwrap();
+        let checks = value["checks"].as_array().unwrap();
+        let intents_check = checks
+            .iter()
+            .find(|c| c["name"] == "gateway_intents")
+            .unwrap();
+        assert_eq!(intents_check["passed"], false);
+        assert!(
+            intents_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("Missing")
+        );
     }
 
     #[fcp_async_core::runtime::test]

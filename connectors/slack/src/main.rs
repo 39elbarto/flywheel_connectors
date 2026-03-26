@@ -114,6 +114,7 @@ async fn handle_message(connector: &mut SlackConnector, message: &str) -> serde_
         "handshake" => connector.handle_handshake(params).await,
         "health" => connector.handle_health().await,
         "doctor" => connector.handle_doctor().await,
+        "self_check" => connector.handle_self_check().await,
         "introspect" => connector.handle_introspect().await,
         "subscribe" => connector.handle_subscribe(params).await,
         "invoke" => connector.handle_invoke(params).await,

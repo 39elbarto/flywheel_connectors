@@ -5,8 +5,8 @@ use std::sync::Arc;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use serde_json::json;
@@ -15,6 +15,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_BASE_URL, DriveClient},
     error::DriveError,
+    types::{DoctorCheck, DoctorReport},
 };
 
 /// FCP Google Drive Connector.
@@ -147,6 +148,114 @@ impl DriveConnector {
                 "requests_error": metrics.requests_error,
             }
         }))
+    }
+
+    /// Handle doctor diagnostics.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // Check 1: Client configured
+        let client_present = self.client.is_some();
+        checks.push(DoctorCheck {
+            name: "client_configured".into(),
+            passed: client_present,
+            message: if client_present {
+                "Google Drive client is configured".into()
+            } else {
+                "No client configured — call configure with valid Google credentials".into()
+            },
+        });
+
+        if !client_present {
+            let report = DoctorReport {
+                ready: false,
+                checks,
+            };
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize doctor report: {e}"),
+            });
+        }
+
+        let client = self.client.as_ref().expect("checked above");
+
+        // Check 2: API reachability via about endpoint
+        match client.about().await {
+            Ok(about) => {
+                checks.push(DoctorCheck {
+                    name: "api_reachable".into(),
+                    passed: true,
+                    message: format!(
+                        "Drive API reachable — user: {}",
+                        about
+                            .user
+                            .as_ref()
+                            .and_then(|u| u.display_name.as_deref())
+                            .unwrap_or("unknown")
+                    ),
+                });
+
+                // Check 3: Storage quota
+                if let Some(quota) = &about.storage_quota {
+                    let has_limit = quota.limit.is_some();
+                    checks.push(DoctorCheck {
+                        name: "storage_quota".into(),
+                        passed: true,
+                        message: if has_limit {
+                            let usage = quota.usage.as_deref().unwrap_or("0");
+                            let limit = quota.limit.as_deref().unwrap_or("0");
+                            format!("Storage quota: {usage} / {limit} bytes")
+                        } else {
+                            "Storage quota: unlimited".into()
+                        },
+                    });
+                }
+            }
+            Err(e) => {
+                checks.push(DoctorCheck {
+                    name: "api_reachable".into(),
+                    passed: false,
+                    message: format!("Drive API unreachable: {e}"),
+                });
+            }
+        }
+
+        let ready = checks.iter().all(|c| c.passed);
+        let report = DoctorReport { ready, checks };
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor report: {e}"),
+        })
+    }
+
+    /// Handle connector self-check.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let report = match client.health_check().await {
+            Ok(()) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({
+                    "api_reachable": true,
+                    "base_url": DEFAULT_BASE_URL,
+                }));
+                report
+            }
+            Err(e) => {
+                if e.is_retryable() {
+                    SelfCheckReport::degraded("api_transient_error", e.to_string())
+                } else {
+                    SelfCheckReport::failed("api_unreachable", e.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
@@ -698,5 +807,38 @@ mod tests {
     #[test]
     fn default_impl() {
         let _connector = DriveConnector::default();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_unconfigured() {
+        let connector = DriveConnector::new();
+        let value = connector.handle_doctor().await.unwrap();
+        assert_eq!(value["ready"], false);
+        let checks = value["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["name"], "client_configured");
+        assert_eq!(checks[0]["passed"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_unconfigured() {
+        let connector = DriveConnector::new();
+        let value = connector.handle_self_check().await.unwrap();
+        assert_eq!(value["status"], "degraded");
+        assert_eq!(value["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_configured() {
+        let mut connector = DriveConnector::new();
+        connector
+            .handle_configure(json!({ "access_token": "ya29.test" }))
+            .await
+            .unwrap();
+        let value = connector.handle_doctor().await.unwrap();
+        let checks = value["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["name"], "client_configured");
+        assert_eq!(checks[0]["passed"], true);
+        // API reachability will fail without a mock server, but the check still runs
+        assert!(checks.len() >= 2);
     }
 }

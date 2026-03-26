@@ -5,19 +5,24 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use chrono::Utc;
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, ConnectorId, EventCaps, FcpError,
+    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, OperationId,
+    OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use uuid::Uuid;
 
 use crate::error::CronError;
 use crate::types::{Execution, Schedule, validate_cron_expression};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Default maximum number of executions returned.
 const DEFAULT_EXECUTION_LIMIT: u64 = 50;
@@ -218,6 +223,7 @@ pub struct CronConnector {
     base: Arc<BaseConnector>,
     configured: bool,
     session_id: Option<String>,
+    started_at: Instant,
     provisioning: ProvisioningPolicy,
     schedules: Vec<Schedule>,
     executions: Vec<Execution>,
@@ -232,6 +238,7 @@ impl CronConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("cron"))),
             configured: false,
             session_id: None,
+            started_at: Instant::now(),
             provisioning: ProvisioningPolicy::default(),
             schedules: Vec::new(),
             executions: Vec::new(),
@@ -248,6 +255,13 @@ impl Default for CronConnector {
 }
 
 impl CronConnector {
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let digest = hasher.finalize();
+        format!("sha256:{digest:x}")
+    }
+
     /// Handle the `configure` method.
     ///
     /// The cron connector requires no external credentials. Configuration
@@ -296,47 +310,81 @@ impl CronConnector {
             });
         }
 
-        let session_id = params
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+        let request: HandshakeRequest =
+            serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Invalid handshake params: {error}"),
+            })?;
 
-        self.session_id = session_id;
+        let response = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted: request
+                .capabilities_requested
+                .into_iter()
+                .map(|capability| CapabilityGrant {
+                    capability,
+                    operation: None,
+                })
+                .collect(),
+            session_id: SessionId::new(),
+            manifest_hash: Self::manifest_hash(),
+            nonce: request.nonce,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        };
+
+        self.session_id = Some(response.session_id.to_string());
         self.base.set_handshaken(true);
 
-        Ok(json!({
-            "protocol_version": "2.0",
-            "connector_id": "fcp.cron",
-            "connector_version": "0.1.0",
-            "capabilities": [
-                "cron.schedules.read",
-                "cron.schedules.write",
-                "cron.executions.read"
-            ]
-        }))
+        serde_json::to_value(response).map_err(|error| FcpError::Internal {
+            message: format!("failed to serialize handshake response: {error}"),
+        })
     }
 
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let handshaken = self.session_id.is_some();
 
-        let status = if self.configured && handshaken {
-            "healthy"
-        } else if self.configured {
-            "degraded"
+        let mut snapshot = if !self.configured {
+            HealthSnapshot::degraded("not configured")
+        } else if !handshaken {
+            HealthSnapshot::degraded("handshake not completed")
         } else {
-            "unconfigured"
+            HealthSnapshot::ready()
         };
-
-        Ok(json!({
-            "status": status,
+        snapshot.uptime_ms =
+            u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(json!({
             "configured": self.configured,
             "handshaken": handshaken,
+            "session_id": self.session_id.as_deref(),
             "schedules": self.schedules.len(),
             "executions": self.executions.len(),
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
-        }))
+            "manifest_hash": Self::manifest_hash(),
+            "state_store": {
+                "backend": self.provisioning.state_store.backend.as_str(),
+                "max_schedules": self.provisioning.state_store.max_schedules,
+                "max_executions": self.provisioning.state_store.max_executions,
+                "persist_to_disk": self.provisioning.state_store.persist_to_disk,
+            },
+            "clock": {
+                "source": self.provisioning.clock.source.as_str(),
+                "timezone": self.provisioning.clock.timezone.as_str(),
+                "max_clock_skew_seconds": self.provisioning.clock.max_clock_skew_seconds,
+            }
+        }));
+
+        serde_json::to_value(snapshot).map_err(|error| FcpError::Internal {
+            message: format!("failed to serialize health snapshot: {error}"),
+        })
     }
 
     /// Handle the `doctor` method.

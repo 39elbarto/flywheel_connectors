@@ -6673,6 +6673,14 @@ mod tests {
     }
 
     #[test]
+    fn default_offline_source_capabilities_is_local_history() {
+        assert_eq!(
+            default_offline_source("capabilities"),
+            OfflineSource::LocalHistory
+        );
+    }
+
+    #[test]
     fn default_offline_source_pipe_is_local_history() {
         assert_eq!(default_offline_source("pipe"), OfflineSource::LocalHistory);
     }

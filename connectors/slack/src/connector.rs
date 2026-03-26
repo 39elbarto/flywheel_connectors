@@ -2588,8 +2588,8 @@ mod tests {
         let mut connector = SlackConnector::new();
         connector
             .handle_configure(json!({
-                "bot_token": "xoxb-test",
-                "api_url": mock_server.uri()
+                "token": "xoxb-test",
+                "base_url": mock_server.uri()
             }))
             .await
             .unwrap();

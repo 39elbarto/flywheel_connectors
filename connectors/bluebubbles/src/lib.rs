@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod error;
+
 use fcp_imessage::BlueBubblesConnector;
 
 pub const CONNECTOR_ID: &str = "fcp.bluebubbles";

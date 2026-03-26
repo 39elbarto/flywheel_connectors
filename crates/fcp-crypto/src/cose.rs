@@ -12,7 +12,9 @@ use crate::ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use crate::error::{CryptoError, CryptoResult};
 use crate::kid::KeyId;
 use chrono::{DateTime, Utc};
-use coset::{CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder, iana};
+use coset::{
+    CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable, iana,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -528,6 +530,7 @@ impl CoseToken {
     /// Returns an error if deserialization fails.
     pub fn from_cbor(bytes: &[u8]) -> CryptoResult<Self> {
         let inner = CoseSign1::from_slice(bytes)
+            .or_else(|_| CoseSign1::from_tagged_slice(bytes))
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
         Ok(Self { inner })
     }
@@ -1016,6 +1019,23 @@ mod tests {
     fn cose_token_from_cbor_invalid() {
         let err = CoseToken::from_cbor(&[0x01, 0x02, 0x03]).unwrap_err();
         assert!(matches!(err, CryptoError::SerializationError(_)));
+    }
+
+    #[test]
+    fn cose_token_from_cbor_accepts_tagged_sign1() {
+        let sk = Ed25519SigningKey::generate();
+        let claims = CwtClaims::new()
+            .issuer("tagged-issuer")
+            .subject("tagged-subject")
+            .capability_id("cap:test");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+        let tagged = token.inner.clone().to_tagged_vec().unwrap();
+
+        let parsed = CoseToken::from_cbor(&tagged).unwrap();
+        let claims = parsed.claims_unverified().unwrap();
+        assert_eq!(claims.get_issuer(), Some("tagged-issuer"));
+        assert_eq!(claims.get_subject(), Some("tagged-subject"));
+        assert_eq!(claims.get_capability_id(), Some("cap:test"));
     }
 
     #[test]

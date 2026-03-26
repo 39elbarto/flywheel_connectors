@@ -50,7 +50,7 @@ impl std::fmt::Debug for DiscordApiClient {
             .field("base_url", &self.base_url)
             .field("bot_credential", &"[REDACTED]")
             .field("retry_config", &self.retry_config)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

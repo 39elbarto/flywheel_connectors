@@ -11,16 +11,28 @@
     clippy::unused_async
 )]
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use fcp_cron::connector::CronConnector;
+
+fn handshake_request_json() -> Value {
+    json!({
+        "protocol_version": "2.0",
+        "zone": "z:work",
+        "host_public_key": vec![7u8; 32],
+        "nonce": vec![9u8; 32],
+        "capabilities_requested": [
+            "cron.schedules.read",
+            "cron.schedules.write",
+            "cron.executions.read"
+        ]
+    })
+}
 
 async fn setup_connector() -> CronConnector {
     let mut c = CronConnector::new();
     c.handle_configure(json!({})).await.unwrap();
-    c.handle_handshake(json!({"session_id": "test-session"}))
-        .await
-        .unwrap();
+    c.handle_handshake(handshake_request_json()).await.unwrap();
     c
 }
 
@@ -32,9 +44,11 @@ async fn setup_connector() -> CronConnector {
 async fn lifecycle_health_unconfigured() {
     let c = CronConnector::new();
     let h = c.handle_health().await.unwrap();
-    assert_eq!(h["status"], "unconfigured");
-    assert_eq!(h["configured"], false);
-    assert_eq!(h["handshaken"], false);
+    assert_eq!(h["status"]["state"], "degraded");
+    assert_eq!(h["status"]["reason"], "not configured");
+    assert_eq!(h["details"]["configured"], false);
+    assert_eq!(h["details"]["handshaken"], false);
+    assert!(h["uptime_ms"].as_u64().is_some());
 }
 
 #[fcp_async_core::runtime::test]
@@ -49,8 +63,10 @@ async fn lifecycle_configure() {
     assert_eq!(configured["clock"]["source"], "system_utc");
     assert_eq!(configured["clock"]["timezone"], "UTC");
     let h = c.handle_health().await.unwrap();
-    assert_eq!(h["status"], "degraded"); // configured but not handshaken
-    assert_eq!(h["configured"], true);
+    assert_eq!(h["status"]["state"], "degraded"); // configured but not handshaken
+    assert_eq!(h["status"]["reason"], "handshake not completed");
+    assert_eq!(h["details"]["configured"], true);
+    assert_eq!(h["details"]["handshaken"], false);
 }
 
 #[fcp_async_core::runtime::test]
@@ -112,9 +128,10 @@ async fn lifecycle_configure_rejects_non_utc_timezone() {
 async fn lifecycle_full() {
     let c = setup_connector().await;
     let h = c.handle_health().await.unwrap();
-    assert_eq!(h["status"], "healthy");
-    assert_eq!(h["configured"], true);
-    assert_eq!(h["handshaken"], true);
+    assert_eq!(h["status"]["state"], "ready");
+    assert_eq!(h["details"]["configured"], true);
+    assert_eq!(h["details"]["handshaken"], true);
+    assert!(h["details"]["session_id"].as_str().is_some());
 }
 
 #[fcp_async_core::runtime::test]
@@ -124,11 +141,36 @@ async fn lifecycle_handshake_before_configure_fails() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn lifecycle_handshake_returns_canonical_response() {
+    let mut c = CronConnector::new();
+    c.handle_configure(json!({})).await.unwrap();
+
+    let request = handshake_request_json();
+    let response = c.handle_handshake(request.clone()).await.unwrap();
+
+    assert_eq!(response["status"], "accepted");
+    assert!(response["session_id"].as_str().is_some());
+    assert_eq!(response["nonce"], request["nonce"]);
+    assert_eq!(
+        response["capabilities_granted"].as_array().unwrap().len(),
+        request["capabilities_requested"].as_array().unwrap().len()
+    );
+    assert_eq!(response["event_caps"]["streaming"], false);
+    assert!(
+        response["manifest_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let mut c = setup_connector().await;
     c.handle_shutdown(json!({})).await.unwrap();
     let h = c.handle_health().await.unwrap();
-    assert_eq!(h["status"], "unconfigured");
+    assert_eq!(h["status"]["state"], "degraded");
+    assert_eq!(h["status"]["reason"], "not configured");
 }
 
 #[fcp_async_core::runtime::test]
@@ -143,7 +185,7 @@ async fn lifecycle_self_check_configured() {
 async fn lifecycle_self_check_unconfigured() {
     let c = CronConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
 }
 
 #[fcp_async_core::runtime::test]
@@ -184,10 +226,10 @@ async fn lifecycle_introspect() {
 async fn lifecycle_health_shows_counts() {
     let c = setup_connector().await;
     let h = c.handle_health().await.unwrap();
-    assert_eq!(h["schedules"], 0);
-    assert_eq!(h["executions"], 0);
-    assert_eq!(h["requests"], 0);
-    assert_eq!(h["errors"], 0);
+    assert_eq!(h["details"]["schedules"], 0);
+    assert_eq!(h["details"]["executions"], 0);
+    assert_eq!(h["details"]["requests"], 0);
+    assert_eq!(h["details"]["errors"], 0);
 }
 
 // ==========================================================================
@@ -891,9 +933,7 @@ async fn e2e_reconfigure_after_shutdown() {
 
     // Reconfigure
     c.handle_configure(json!({})).await.unwrap();
-    c.handle_handshake(json!({"session_id": "new-session"}))
-        .await
-        .unwrap();
+    c.handle_handshake(handshake_request_json()).await.unwrap();
 
     // Should work again, but schedules from before shutdown still present in memory
     let list = c
@@ -924,6 +964,6 @@ async fn health_counts_increment() {
     .unwrap();
 
     let h = c.handle_health().await.unwrap();
-    assert_eq!(h["schedules"], 1);
-    assert_eq!(h["requests"], 1);
+    assert_eq!(h["details"]["schedules"], 1);
+    assert_eq!(h["details"]["requests"], 1);
 }

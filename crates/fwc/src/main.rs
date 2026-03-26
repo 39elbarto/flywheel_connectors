@@ -22792,11 +22792,20 @@ mod tests {
 
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
         let public_key = signing_key.verifying_key().to_bytes();
-        let public_key_hex: String = public_key.iter().map(|byte| format!("{byte:02x}")).collect();
+        let public_key_hex: String = public_key
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
 
-        fs::write(output_dir.join("capability_public_key.hex"), &public_key_hex)?;
-        fs::write(output_dir.join("capability_public_key.base64"), &public_key_b64)?;
+        fs::write(
+            output_dir.join("capability_public_key.hex"),
+            &public_key_hex,
+        )?;
+        fs::write(
+            output_dir.join("capability_public_key.base64"),
+            &public_key_b64,
+        )?;
 
         let now = Utc::now();
         let expires_at = now + ChronoDuration::hours(1);
@@ -22813,7 +22822,10 @@ mod tests {
                 .sign(&signing_key)?;
             let token_cbor = token.to_cbor()?;
             let token_b64 = base64::engine::general_purpose::STANDARD.encode(token_cbor);
-            fs::write(output_dir.join(format!("{}.token", spec.file_stem)), token_b64)?;
+            fs::write(
+                output_dir.join(format!("{}.token", spec.file_stem)),
+                token_b64,
+            )?;
             token_metadata.insert(
                 spec.file_stem.to_owned(),
                 json!({
@@ -23553,6 +23565,62 @@ mod tests {
         let token = super::CapabilityToken::test_token();
         base64::engine::general_purpose::STANDARD
             .encode(token.raw.to_cbor().expect("test token should encode"))
+    }
+
+    fn test_tagged_capability_token_bytes() -> Vec<u8> {
+        let token = super::CapabilityToken::test_token();
+        let encoded = token.raw.to_cbor().expect("test token should encode");
+        let mut tagged = Vec::with_capacity(encoded.len() + 1);
+        tagged.push(0xd2);
+        tagged.extend(encoded);
+        tagged
+    }
+
+    fn test_tagged_capability_token_arg() -> String {
+        use base64::Engine as _;
+
+        base64::engine::general_purpose::STANDARD.encode(test_tagged_capability_token_bytes())
+    }
+
+    #[test]
+    fn resolve_live_auth_accepts_tagged_capability_token_arg() {
+        let auth = super::resolve_live_auth(&LiveAuthArgs {
+            capability_token: Some(test_tagged_capability_token_arg()),
+            ..LiveAuthArgs::default()
+        })
+        .expect("tagged capability token arg should parse");
+
+        let claims = auth
+            .capability_token
+            .raw
+            .claims_unverified()
+            .expect("claims should decode");
+        assert_eq!(claims.get_capability_id(), Some("cap.all"));
+        assert_eq!(claims.get_zone_id(), Some("z:work"));
+        assert_eq!(auth.principal_hint.as_deref(), Some("test-principal"));
+    }
+
+    #[test]
+    fn resolve_live_auth_accepts_tagged_capability_token_file() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let token_path = tempdir.path().join("capability.token");
+        std::fs::write(&token_path, test_tagged_capability_token_bytes())
+            .expect("tagged token should write");
+
+        let auth = super::resolve_live_auth(&LiveAuthArgs {
+            capability_token_file: Some(token_path),
+            ..LiveAuthArgs::default()
+        })
+        .expect("tagged capability token file should parse");
+
+        let claims = auth
+            .capability_token
+            .raw
+            .claims_unverified()
+            .expect("claims should decode");
+        assert_eq!(claims.get_capability_id(), Some("cap.all"));
+        assert_eq!(claims.get_zone_id(), Some("z:work"));
+        assert_eq!(auth.principal_hint.as_deref(), Some("test-principal"));
     }
 
     fn write_test_package_output(connector_id: &str, version: &str) -> (TempDir, PathBuf) {
@@ -25811,9 +25879,9 @@ deny_ptrace = true
         assert!(
             payload["availability"]["next_actions"]
                 .as_array()
-                .is_some_and(|actions| actions.iter().all(
-                    |action| !action.as_str().unwrap_or_default().contains("--host")
-                ))
+                .is_some_and(|actions| actions
+                    .iter()
+                    .all(|action| !action.as_str().unwrap_or_default().contains("--host")))
         );
         assert_eq!(payload["execution_mode"]["defaulted"], true);
         assert_eq!(payload["execution"]["status"], "stopped-on-primitive-error");
@@ -26830,9 +26898,9 @@ deny_ptrace = true
         assert!(
             payload["availability"]["next_actions"]
                 .as_array()
-                .is_some_and(|actions| actions.iter().all(
-                    |action| !action.as_str().unwrap_or_default().contains("--host")
-                ))
+                .is_some_and(|actions| actions
+                    .iter()
+                    .all(|action| !action.as_str().unwrap_or_default().contains("--host")))
         );
         assert_eq!(payload["summary"]["aggregate_count"], 2);
         assert_eq!(payload["summary"]["skipped_simulated"], 1);

@@ -15,11 +15,11 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
-    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
-    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
+    FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
+    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,
+    RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{
@@ -68,7 +68,8 @@ impl FcpConnector for CronConnectorAdapter {
         let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        self.connector
+        let response = self
+            .connector
             .lock()
             .await
             .handle_handshake(request)
@@ -77,40 +78,16 @@ impl FcpConnector for CronConnectorAdapter {
                 message: format!("failed to process handshake request: {err}"),
             })?;
 
-        Ok(HandshakeResponse {
-            status: "accepted".to_string(),
-            capabilities_granted: req
-                .capabilities_requested
-                .iter()
-                .cloned()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
-            session_id: SessionId::new(),
-            manifest_hash: "sha256:cron-e2e".to_string(),
-            nonce: req.nonce,
-            event_caps: None,
-            auth_caps: None,
-            op_catalog_hash: None,
+        serde_json::from_value(response).map_err(|err| FcpError::Internal {
+            message: format!("failed to decode cron handshake response: {err}"),
         })
     }
 
     async fn health(&self) -> HealthSnapshot {
         match self.connector.lock().await.handle_health().await {
-            Ok(payload) => {
-                let status = payload
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown");
-                match status {
-                    "healthy" => HealthSnapshot::ready(),
-                    "degraded" => HealthSnapshot::degraded("not_handshaken"),
-                    "unconfigured" => HealthSnapshot::degraded("unconfigured"),
-                    other => HealthSnapshot::degraded(format!("cron_status:{other}")),
-                }
-            }
+            Ok(payload) => serde_json::from_value(payload).unwrap_or_else(|err| {
+                HealthSnapshot::error(format!("failed to decode cron health snapshot: {err}"))
+            }),
             Err(err) => HealthSnapshot::error(err.to_string()),
         }
     }

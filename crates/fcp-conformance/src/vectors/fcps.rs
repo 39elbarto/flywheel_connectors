@@ -90,7 +90,7 @@ impl FcpsGoldenVector {
     /// Returns an error description if verification fails.
     pub fn verify(&self) -> Result<(), String> {
         use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
-        use fcp_protocol::{FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameFlags, SymbolRecord};
+        use fcp_protocol::{FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameFlags};
 
         // Parse expected values
         let object_id = ObjectId::from_bytes(
@@ -144,44 +144,8 @@ impl FcpsGoldenVector {
             ));
         }
 
-        // Build symbol records
-        let mut symbols = Vec::new();
-        for (i, sv) in self.symbols.iter().enumerate() {
-            let data =
-                hex::decode(&sv.data).map_err(|e| format!("invalid symbol[{i}] data hex: {e}"))?;
-            if data.len() != self.symbol_size as usize {
-                return Err(format!(
-                    "symbol[{i}] data length {} != symbol_size {}",
-                    data.len(),
-                    self.symbol_size
-                ));
-            }
-            let auth_tag: [u8; 16] = hex::decode(&sv.auth_tag)
-                .map_err(|e| format!("invalid symbol[{i}] auth_tag hex: {e}"))?
-                .try_into()
-                .map_err(|_| format!("symbol[{i}] auth_tag must be 16 bytes"))?;
-
-            let record = SymbolRecord {
-                esi: sv.esi,
-                k: sv.k,
-                data,
-                auth_tag,
-            };
-
-            // Verify symbol record encoding
-            let encoded_record = record.encode();
-            let expected_record_bytes = hex::decode(&sv.expected_encoded)
-                .map_err(|e| format!("invalid symbol[{i}] expected_encoded hex: {e}"))?;
-            if encoded_record != expected_record_bytes {
-                return Err(format!(
-                    "symbol[{i}] record mismatch:\n  expected: {}\n  actual:   {}",
-                    sv.expected_encoded,
-                    hex::encode(&encoded_record)
-                ));
-            }
-
-            symbols.push(record);
-        }
+        // Build and verify symbol records
+        let symbols = self.decode_and_verify_symbols()?;
 
         // Build and verify complete frame
         let frame = FcpsFrame { header, symbols };
@@ -208,6 +172,48 @@ impl FcpsGoldenVector {
         }
 
         Ok(())
+    }
+
+    fn decode_and_verify_symbols(
+        &self,
+    ) -> Result<Vec<fcp_protocol::SymbolRecord>, String> {
+        let mut symbols = Vec::new();
+        for (i, sv) in self.symbols.iter().enumerate() {
+            let data =
+                hex::decode(&sv.data).map_err(|e| format!("invalid symbol[{i}] data hex: {e}"))?;
+            if data.len() != self.symbol_size as usize {
+                return Err(format!(
+                    "symbol[{i}] data length {} != symbol_size {}",
+                    data.len(),
+                    self.symbol_size
+                ));
+            }
+            let auth_tag: [u8; 16] = hex::decode(&sv.auth_tag)
+                .map_err(|e| format!("invalid symbol[{i}] auth_tag hex: {e}"))?
+                .try_into()
+                .map_err(|_| format!("symbol[{i}] auth_tag must be 16 bytes"))?;
+
+            let record = fcp_protocol::SymbolRecord {
+                esi: sv.esi,
+                k: sv.k,
+                data,
+                auth_tag,
+            };
+
+            let encoded_record = record.encode();
+            let expected_record_bytes = hex::decode(&sv.expected_encoded)
+                .map_err(|e| format!("invalid symbol[{i}] expected_encoded hex: {e}"))?;
+            if encoded_record != expected_record_bytes {
+                return Err(format!(
+                    "symbol[{i}] record mismatch:\n  expected: {}\n  actual:   {}",
+                    sv.expected_encoded,
+                    hex::encode(&encoded_record)
+                ));
+            }
+
+            symbols.push(record);
+        }
+        Ok(symbols)
     }
 }
 

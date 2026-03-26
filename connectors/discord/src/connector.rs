@@ -455,6 +455,10 @@ impl DiscordConnector {
     }
 
     /// Handle doctor diagnostics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `api_client` is `None` after the token-present guard (unreachable).
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
         let mut checks = Vec::new();
 

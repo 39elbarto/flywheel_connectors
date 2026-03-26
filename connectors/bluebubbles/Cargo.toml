@@ -25,8 +25,10 @@ fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-imessage = { path = "../imessage" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
+reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 

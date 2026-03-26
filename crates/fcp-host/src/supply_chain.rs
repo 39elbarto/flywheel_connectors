@@ -2903,7 +2903,8 @@ mod tests {
         let p = gate.policy();
         assert_eq!(p.min_slsa_level, 3);
         assert!(p.require_attestation);
-        assert!(!p.require_sbom);
+        // default_policy() sets require_sbom to true (fail-closed default)
+        assert!(p.require_sbom);
         assert!(!p.allow_unsigned);
         assert!(p.require_digest_match);
         assert_eq!(p.trusted_builders, vec!["builder-x"]);
@@ -3329,10 +3330,13 @@ mod tests {
 
     #[test]
     fn audit_event_step_counts_for_allowed_unsigned() {
-        let gate = SupplyChainGate::new();
+        // Use a permissive policy that allows unsigned connectors
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
         let digest = valid_digest();
-        let att = valid_attestation(&digest);
-        let sbom = valid_sbom();
 
         let outcome = gate
             .verify_at(

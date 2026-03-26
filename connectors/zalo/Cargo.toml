@@ -22,11 +22,13 @@ workspace = true
 [dependencies]
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
+fcp-sdk = { path = "../../crates/fcp-sdk" }
 
 anyhow.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true

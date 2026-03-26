@@ -3,7 +3,7 @@
 // Allow truncation casts - symbol counts are bounded by protocol
 #![allow(clippy::cast_possible_truncation)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -19,8 +19,8 @@ const COOPERATIVE_YIELD_INTERVAL: usize = 32;
 
 /// `RaptorQ` decoder for reconstructing payload from symbols.
 pub struct RaptorQDecoder {
-    /// Buffered received symbols: ESI -> data.
-    received: HashMap<u32, Vec<u8>>,
+    /// Buffered received symbols kept in ascending ESI order for deterministic reconstruction.
+    received: BTreeMap<u32, Vec<u8>>,
     /// Number of source symbols (K).
     k: u32,
     /// Transfer length in bytes.
@@ -41,7 +41,7 @@ impl RaptorQDecoder {
         let k = u32::try_from(k_usize).unwrap_or(u32::MAX);
 
         Self {
-            received: HashMap::new(),
+            received: BTreeMap::new(),
             k,
             transfer_length: oti.transfer_length(),
             symbol_size: oti.symbol_size(),
@@ -59,7 +59,7 @@ impl RaptorQDecoder {
         config: &RaptorQConfig,
     ) -> Self {
         Self {
-            received: HashMap::new(),
+            received: BTreeMap::new(),
             k,
             transfer_length,
             symbol_size,
@@ -1481,6 +1481,33 @@ mod tests {
             }
         }
         panic!("Failed to decode with source symbols only");
+    }
+
+    #[test]
+    fn decoder_roundtrip_with_reverse_arrival_order_and_repairs() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 5000,
+            max_object_size: 1024 * 1024,
+            decode_timeout: Duration::from_secs(30),
+            max_chunk_threshold: 256 * 1024,
+            chunk_size: 64 * 1024,
+        };
+        let payload: Vec<u8> = (0..(50 * 64)).map(|i| (i % 251) as u8).collect();
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let mut symbols = encoder.encode_all();
+        let oti = encoder.transmission_info();
+
+        symbols.reverse();
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for (esi, data) in symbols {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(decoded, payload);
+                return;
+            }
+        }
+        panic!("Failed to decode with reverse repair-first arrival order");
     }
 
     // ── Additional decode tests (batch 2) ─────────────────────────────────

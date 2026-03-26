@@ -7359,7 +7359,7 @@ archetypes = ["messaging", "operational"]
 format = "wasi"
 
 [connector.state]
-model = "cursor"
+model = "stateless"
 state_schema_version = "1"
 migration_hint = "init"
 
@@ -7435,7 +7435,7 @@ burst = 5
                 .and_then(toml::Value::as_table)
                 .and_then(|state| state.get("model"))
                 .and_then(toml::Value::as_str),
-            Some("cursor")
+            Some("stateless")
         );
         assert!(
             normalized
@@ -7483,7 +7483,7 @@ archetypes = ["operational"]
 format = "wasi"
 
 [connector.state]
-model = "cursor"
+model = "stateless"
 state_schema_version = "1"
 migration_hint = "init"
 
@@ -9703,7 +9703,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::OfflineOnly)
             .count();
-        assert_eq!(count, 13, "Expected 13 offline-only commands, got {count}");
+        assert_eq!(count, 14, "Expected 14 offline-only commands, got {count}");
     }
 
     #[test]
@@ -9712,7 +9712,7 @@ output_schema = { type = "object" }
             .iter()
             .filter(|e| e.mode == CommandTruthMode::Hybrid)
             .count();
-        assert_eq!(count, 17, "Expected 17 hybrid commands, got {count}");
+        assert_eq!(count, 18, "Expected 18 hybrid commands, got {count}");
     }
 
     #[test]
@@ -11201,7 +11201,7 @@ output_schema = { type = "object" }
     #[test]
     fn golden_classification_count() {
         // Pinned count — if commands are added/removed, update this.
-        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 57);
+        assert_eq!(COMMAND_FAMILY_CLASSIFICATION.len(), 59);
     }
 
     #[test]

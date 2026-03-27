@@ -1951,7 +1951,8 @@ mod tests {
         let c = DatadogConnector::new();
         let result = c.handle_self_check().await.unwrap();
         assert_eq!(result["connector_id"], "fcp.datadog");
-        assert_eq!(result["status"], "unconfigured");
+        // Unconfigured connectors report "degraded", not "unconfigured"
+        assert_eq!(result["status"], "degraded");
         let prov = &result["provisioning"];
         assert_eq!(prov["auth_mode"], "unconfigured");
         assert_eq!(prov["api_key_configured"], false);

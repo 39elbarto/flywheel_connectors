@@ -1956,8 +1956,8 @@ mod tests {
         let host_check = report
             .checks
             .iter()
-            .find(|check| check.name == "network_constraints")
-            .expect("network check");
+            .find(|check| check.name == "endpoint_policy")
+            .expect("endpoint_policy check");
         assert!(host_check.passed);
     }
 

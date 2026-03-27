@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(bundle.policy_version, "2026-03-06");
         assert_eq!(
             bundle.generated_from_bead,
-            "flywheel_connectors-lszk.45.1.8.1"
+            "flywheel_connectors-lszk.45.3.7"
         );
         assert_eq!(bundle.surface.surface_id, "gmail");
         assert_eq!(

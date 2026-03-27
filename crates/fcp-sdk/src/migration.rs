@@ -2025,7 +2025,11 @@ deny_ptrace = true
         use std::sync::{Arc, Mutex};
 
         fcp_async_core::runtime::block_on_sync(async {
-            let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+            // Background context (no deadline) — this test validates that the
+            // retry loop stops at the u32::MAX attempt ceiling, not deadline
+            // enforcement. A request-scoped deadline races with tokio's 0ms
+            // sleep and causes spurious DeadlineExceeded failures.
+            let ctx = ExecutionContext::background();
             let policy = RetryPolicy::new()
                 .with_max_attempts(None)
                 .with_base_backoff_ms(0)

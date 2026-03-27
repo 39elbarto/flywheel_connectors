@@ -42,6 +42,7 @@ pub struct SchemaField {
 }
 
 /// Walk a JSON Schema and produce a flat list of annotated fields.
+#[must_use]
 pub fn walk_schema(schema: &Value, examples: &[String]) -> Vec<SchemaField> {
     let normalized = normalize_schema(schema);
     let mut fields = Vec::new();
@@ -70,6 +71,7 @@ pub fn walk_schema(schema: &Value, examples: &[String]) -> Vec<SchemaField> {
 }
 
 /// Generate a scaffold JSON template with placeholders for required fields.
+#[must_use]
 pub fn scaffold_template(schema: &Value) -> Value {
     let normalized = normalize_schema(schema);
     if normalized.get("properties").is_some() {
@@ -79,6 +81,7 @@ pub fn scaffold_template(schema: &Value) -> Value {
 }
 
 /// Filter fields to show only those matching a specific path prefix.
+#[must_use]
 pub fn filter_by_field(fields: &[SchemaField], field_name: &str) -> Vec<SchemaField> {
     fields
         .iter()
@@ -88,6 +91,7 @@ pub fn filter_by_field(fields: &[SchemaField], field_name: &str) -> Vec<SchemaFi
 }
 
 /// Filter fields to show only required fields.
+#[must_use]
 pub fn required_only_fields(fields: &[SchemaField]) -> Vec<SchemaField> {
     fields.iter().filter(|f| f.required).cloned().collect()
 }
@@ -96,6 +100,7 @@ pub fn required_only_fields(fields: &[SchemaField]) -> Vec<SchemaField> {
 ///
 /// Each field is rendered as an object with path, type, required, description,
 /// and any constraints. This is the structured backing for `fwc schema`.
+#[must_use]
 pub fn schema_summary(fields: &[SchemaField]) -> Value {
     let items: Vec<Value> = fields
         .iter()
@@ -140,6 +145,7 @@ pub fn schema_summary(fields: &[SchemaField]) -> Value {
 /// Takes a scaffold template (from `scaffold_template`) and a map of
 /// path → value bindings, and replaces placeholder values with the provided
 /// values. Paths use dot notation for nested fields.
+#[must_use]
 pub fn fill_template(template: &Value, bindings: &Map<String, Value>) -> Value {
     if let Some(bound) = root_fill_binding(bindings) {
         return bound.clone();
@@ -220,6 +226,7 @@ pub struct ValidationError {
 /// This is a structural pre-check, not a full JSON Schema validator — it catches
 /// the most common agent mistakes: missing required fields, wrong types, and
 /// enum constraint violations.
+#[must_use]
 pub fn validate_input(schema: &Value, input: &Value) -> Vec<ValidationError> {
     let normalized = normalize_schema(schema);
     let mut errors = Vec::new();

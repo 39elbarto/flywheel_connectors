@@ -70,11 +70,21 @@ impl SchemaId {
     ///
     /// Uses BLAKE3 with fixed-size output to prevent `DoS` via maliciously large schema strings.
     /// The domain separator `"FCP2-SCHEMA-V1"` ensures hash isolation from other uses.
+    ///
+    /// Feeds schema components directly into the hasher to avoid the temporary
+    /// `Vec<u8>` allocation that `as_bytes()` would incur.
     #[must_use]
     pub fn hash(&self) -> SchemaHash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(SCHEMA_HASH_DOMAIN_SEPARATOR);
-        hasher.update(&self.as_bytes());
+        // Feed canonical representation directly: "{namespace}:{name}@{version}"
+        hasher.update(self.namespace.as_bytes());
+        hasher.update(b":");
+        hasher.update(self.name.as_bytes());
+        hasher.update(b"@");
+        // Version::to_string() is unavoidable but typically short (e.g., "1.0.0")
+        let version_str = self.version.to_string();
+        hasher.update(version_str.as_bytes());
         SchemaHash(*hasher.finalize().as_bytes())
     }
 }

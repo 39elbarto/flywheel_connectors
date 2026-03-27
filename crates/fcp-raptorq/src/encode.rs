@@ -142,6 +142,32 @@ impl RaptorQEncoder {
         result
     }
 
+    /// Generate all source + repair symbols, consuming the encoder to avoid
+    /// cloning source data.
+    #[must_use]
+    pub fn into_encode_all(self) -> Vec<(u32, Vec<u8>)> {
+        let repair_count = self.config.repair_symbols(self.config.source_symbols(self.payload_len));
+        let k_prime = self.inner.params().k_prime as u32;
+
+        let mut result = Vec::with_capacity(self.source_data.len() + repair_count as usize);
+
+        // Repair symbols must be generated before consuming source_data
+        let repairs: Vec<(u32, Vec<u8>)> = (0..repair_count)
+            .map(|i| {
+                let esi = k_prime + i;
+                (esi, self.inner.repair_symbol(esi))
+            })
+            .collect();
+
+        // Source symbols (ESI 0..K): move data directly, zero clones
+        for (esi, data) in self.source_data.into_iter().enumerate() {
+            result.push((esi as u32, data));
+        }
+
+        result.extend(repairs);
+        result
+    }
+
     /// Generate source symbols only.
     #[must_use]
     pub fn encode_source(&self) -> Vec<(u32, Vec<u8>)> {
@@ -149,6 +175,16 @@ impl RaptorQEncoder {
             .iter()
             .enumerate()
             .map(|(esi, data)| (esi as u32, data.clone()))
+            .collect()
+    }
+
+    /// Generate source symbols only, consuming the encoder to avoid cloning.
+    #[must_use]
+    pub fn into_encode_source(self) -> Vec<(u32, Vec<u8>)> {
+        self.source_data
+            .into_iter()
+            .enumerate()
+            .map(|(esi, data)| (esi as u32, data))
             .collect()
     }
 

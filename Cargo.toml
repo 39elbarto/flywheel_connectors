@@ -329,3 +329,12 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Benchmark profile: inherit release settings but optimize for speed, not size.
+# `cargo bench` uses this automatically. This prevents benchmarks from measuring
+# size-optimized codegen (`opt-level = "z"`) which is 2-5x slower than speed-
+# optimized codegen for compute-heavy paths (RaptorQ, crypto, CBOR).
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1

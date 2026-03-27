@@ -147,6 +147,7 @@ pub struct FcpsFrameHeader {
 
 impl FcpsFrameHeader {
     /// Encode the header to bytes (114 bytes).
+    #[inline]
     #[must_use]
     pub fn encode(&self) -> [u8; FCPS_HEADER_LEN] {
         let mut buf = [0u8; FCPS_HEADER_LEN];
@@ -289,6 +290,7 @@ pub struct SymbolRecord {
 
 impl SymbolRecord {
     /// Wire size of this record.
+    #[inline]
     #[must_use]
     pub fn wire_size(&self) -> usize {
         SYMBOL_RECORD_OVERHEAD + self.data.len()
@@ -298,17 +300,24 @@ impl SymbolRecord {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.wire_size());
+        self.encode_to(&mut buf);
+        buf
+    }
+
+    /// Encode the record directly into an existing buffer (zero per-symbol allocation).
+    #[inline]
+    pub fn encode_to(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.esi.to_le_bytes());
         buf.extend_from_slice(&self.k.to_le_bytes());
         buf.extend_from_slice(&self.data);
         buf.extend_from_slice(&self.auth_tag);
-        buf
     }
 
     /// Decode a symbol record from bytes given the expected symbol size.
     ///
     /// # Errors
     /// Returns `FrameError::TooShort` if buffer is insufficient.
+    #[inline]
     pub fn decode(bytes: &[u8], symbol_size: u16) -> Result<Self, FrameError> {
         let expected_len = SYMBOL_RECORD_OVERHEAD + symbol_size as usize;
         if bytes.len() < expected_len {
@@ -373,7 +382,7 @@ impl FcpsFrame {
         let mut buf = Vec::with_capacity(FCPS_HEADER_LEN + payload_len);
         buf.extend_from_slice(&header_bytes);
         for symbol in &self.symbols {
-            buf.extend_from_slice(&symbol.encode());
+            symbol.encode_to(&mut buf);
         }
         Ok(buf)
     }

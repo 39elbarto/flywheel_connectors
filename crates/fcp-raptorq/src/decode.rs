@@ -234,14 +234,14 @@ impl RaptorQDecoder {
         for sym in symbols {
             if sym.is_source && (sym.esi as usize) < params.k_prime {
                 source_received[sym.esi as usize] = true;
-                rhs[params.s + params.h + sym.esi as usize] = sym.data.clone();
+                rhs[params.s + params.h + sym.esi as usize].clone_from(&sym.data);
             }
         }
 
         // For missing source positions, try to substitute a repair equation
         let mut repair_iter = symbols.iter().filter(|s| !s.is_source);
-        for i in 0..params.k_prime {
-            if source_received[i] {
+        for (i, &received) in source_received.iter().enumerate().take(params.k_prime) {
+            if received {
                 continue;
             }
             // This source position is missing — substitute a repair equation
@@ -259,11 +259,11 @@ impl RaptorQDecoder {
             for (&col, &coef) in repair.columns.iter().zip(repair.coefficients.iter()) {
                 matrix.set(row, col, coef);
             }
-            rhs[row] = repair.data.clone();
+            rhs[row].clone_from(&repair.data);
         }
 
         // Solve using the dense Gaussian elimination (same as encoder)
-        let intermediate = matrix.solve(&rhs).ok_or(DecodeError::InsufficientSymbols {
+        let intermediate = matrix.solve(&rhs).ok_or_else(|| DecodeError::InsufficientSymbols {
             received: self.received_count(),
             needed: self.needed(),
         })?;
@@ -285,9 +285,6 @@ impl RaptorQDecoder {
     ) -> DecodeError {
         use crate::codec::decoder::DecodeError as InnerError;
         match error {
-            InnerError::InsufficientSymbols { .. } | InnerError::SingularMatrix { .. } => {
-                DecodeError::InsufficientSymbols { received, needed }
-            }
             InnerError::SymbolSizeMismatch { expected, actual } => DecodeError::InvalidSymbol {
                 reason: format!(
                     "symbol size mismatch: expected {expected} bytes, got {actual} bytes"
@@ -323,7 +320,9 @@ impl RaptorQDecoder {
             // subset when source and repair symbols arrive in arbitrary order.
             // A verification mismatch here means "this optimistic attempt was
             // not sufficient yet", not that the received symbol was malformed.
-            InnerError::CorruptDecodedOutput { .. } => {
+            InnerError::InsufficientSymbols { .. }
+            | InnerError::SingularMatrix { .. }
+            | InnerError::CorruptDecodedOutput { .. } => {
                 DecodeError::InsufficientSymbols { received, needed }
             }
         }

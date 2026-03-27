@@ -109,15 +109,17 @@ fn canonicalize_map(
     use std::cmp::Ordering;
 
     let mut with_keys = Vec::with_capacity(entries.len());
+    // Reuse a single buffer for serializing map keys instead of allocating per key.
+    let mut key_buf = Vec::with_capacity(64);
     for (mut key, mut value) in std::mem::take(entries) {
         canonicalize_value_in_place(&mut key)?;
         canonicalize_value_in_place(&mut value)?;
 
-        let mut key_bytes = Vec::new();
-        ciborium::into_writer(&key, &mut key_bytes)
+        key_buf.clear();
+        ciborium::into_writer(&key, &mut key_buf)
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
 
-        with_keys.push((key_bytes, key, value));
+        with_keys.push((key_buf.clone(), key, value));
     }
 
     with_keys.sort_by(

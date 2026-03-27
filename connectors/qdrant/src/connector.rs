@@ -6,8 +6,8 @@ use chrono::Utc;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -416,6 +416,35 @@ impl QdrantConnector {
         }
 
         DoctorResult::from_checks(checks)
+    }
+
+    /// Handle self-check.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check: {e}"),
+            });
+        };
+
+        let report = match client.list_collections().await {
+            Ok(_) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({ "api_reachable": true }));
+                report
+            }
+            Err(e) => {
+                if e.is_retryable() {
+                    SelfCheckReport::degraded("api_transient_error", e.to_string())
+                } else {
+                    SelfCheckReport::failed("api_unreachable", e.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check: {e}"),
+        })
     }
 
     /// Handle introspect method.

@@ -14,8 +14,8 @@ use fcp_core::{
     ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
     Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
-    Principal, ResourceTypeInfo, RiskLevel, SafetyTier, SessionId, SubscribeRequest, ThreadInfo,
-    ThreadKind, TrustLevel, ZoneId,
+    Principal, ResourceTypeInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    SimulateRequest, SimulateResponse, SubscribeRequest, ThreadInfo, ThreadKind, TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
@@ -429,6 +429,117 @@ impl MattermostConnector {
         }));
         serde_json::to_value(snapshot).map_err(|e| FcpError::Internal {
             message: format!("failed to serialize health snapshot: {e}"),
+        })
+    }
+
+    /// Handle doctor diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FcpError` if the doctor report cannot be serialized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `client` is `None` after the configured guard (unreachable).
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks: Vec<serde_json::Value> = Vec::new();
+
+        let configured = self.client.is_some();
+        checks.push(json!({
+            "name": "client_configured",
+            "passed": configured,
+            "message": if configured { "Mattermost client is configured" } else { "Not configured — call configure with server URL and token" },
+        }));
+
+        if !configured {
+            return Ok(json!({ "ready": false, "checks": checks }));
+        }
+
+        let client = self.client.as_ref().expect("checked above");
+
+        match client.get_me().await {
+            Ok(user) => {
+                checks.push(json!({
+                    "name": "api_reachable",
+                    "passed": true,
+                    "message": format!("API reachable — user: {} ({})", user.username, user.id),
+                }));
+            }
+            Err(e) => {
+                checks.push(json!({
+                    "name": "api_reachable",
+                    "passed": false,
+                    "message": format!("API unreachable: {e}"),
+                }));
+            }
+        }
+
+        let socket_connected = *self.socket_connected.read().await;
+        checks.push(json!({
+            "name": "websocket_connected",
+            "passed": socket_connected,
+            "message": if socket_connected { "WebSocket connection is active" } else { "WebSocket not connected (streaming events unavailable)" },
+        }));
+
+        let ready = checks.iter().all(|c| c["passed"].as_bool().unwrap_or(false));
+        Ok(json!({ "ready": ready, "checks": checks }))
+    }
+
+    /// Handle self-check.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FcpError` if the self-check report cannot be serialized.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check: {e}"),
+            });
+        };
+
+        let report = match client.get_me().await {
+            Ok(user) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({
+                    "api_reachable": true,
+                    "user_id": user.id,
+                    "username": user.username,
+                }));
+                report
+            }
+            Err(e) => {
+                if e.is_retryable() {
+                    SelfCheckReport::degraded("api_transient_error", e.to_string())
+                } else {
+                    SelfCheckReport::failed("api_unreachable", e.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check: {e}"),
+        })
+    }
+
+    /// Handle simulate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FcpError` if the request is invalid or the response cannot be serialized.
+    pub async fn handle_simulate(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("invalid simulate request: {e}"),
+            })?;
+
+        let response = SimulateResponse::allowed(req.id);
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("failed to serialize simulate response: {e}"),
         })
     }
 
@@ -3357,5 +3468,32 @@ mod tests {
                 "manifest should advertise {operation}"
             );
         }
+    }
+
+    // ── Doctor / Self-check / Simulate tests ───────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_unconfigured() {
+        let connector = MattermostConnector::new();
+        let value = connector.handle_doctor().await.unwrap();
+        assert_eq!(value["ready"], false);
+        let checks = value["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["name"], "client_configured");
+        assert_eq!(checks[0]["passed"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_unconfigured() {
+        let connector = MattermostConnector::new();
+        let value = connector.handle_self_check().await.unwrap();
+        assert_eq!(value["status"], "degraded");
+        assert_eq!(value["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_invalid_input() {
+        let connector = MattermostConnector::new();
+        let result = connector.handle_simulate(json!({})).await;
+        assert!(result.is_err());
     }
 }

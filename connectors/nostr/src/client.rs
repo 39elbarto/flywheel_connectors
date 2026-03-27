@@ -542,11 +542,8 @@ impl<'a> NostrRelayClient<'a> {
 
         // Measure connection latency
         let connect_start = Instant::now();
-        let mut ws = match self.connect_once("nostr health score connect").await {
-            Ok(ws) => ws,
-            Err(_) => {
-                return RelayHealthScore::unreachable(self.relay.as_str(), last_checked);
-            }
+        let Ok(mut ws) = self.connect_once("nostr health score connect").await else {
+            return RelayHealthScore::unreachable(self.relay.as_str(), last_checked);
         };
         let latency_ms = connect_start.elapsed().as_millis();
         let latency_ms = u64::try_from(latency_ms).unwrap_or(u64::MAX);
@@ -593,9 +590,8 @@ impl<'a> NostrRelayClient<'a> {
 
         // Read frames until EOSE or NOTICE (with timeout)
         loop {
-            let message = match self.recv(ws, "nostr probe recv").await {
-                Ok(Some(msg)) => msg,
-                _ => return false,
+            let Ok(Some(message)) = self.recv(ws, "nostr probe recv").await else {
+                return false;
             };
             let Ok(frame) = parse_ws_message(&message, self.relay) else {
                 return false;

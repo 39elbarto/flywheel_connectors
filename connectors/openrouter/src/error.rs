@@ -5,7 +5,7 @@ use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
-/// OpenRouter connector errors.
+/// `OpenRouter` connector errors.
 #[derive(Error, Debug)]
 pub enum OpenRouterError {
     /// HTTP request failed

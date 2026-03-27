@@ -527,7 +527,7 @@ impl MattermostConnector {
     /// # Errors
     ///
     /// Returns `FcpError` if the request is invalid or the response cannot be serialized.
-    pub async fn handle_simulate(
+    pub fn handle_simulate(
         &self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
@@ -3493,7 +3493,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_simulate_rejects_invalid_input() {
         let connector = MattermostConnector::new();
-        let result = connector.handle_simulate(json!({})).await;
+        let result = connector.handle_simulate(json!({}));
         assert!(result.is_err());
     }
 }

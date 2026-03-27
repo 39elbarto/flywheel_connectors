@@ -5,7 +5,7 @@ use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
-/// ElevenLabs connector errors.
+/// `ElevenLabs` connector errors.
 #[derive(Error, Debug)]
 pub enum ElevenLabsError {
     /// HTTP request failed

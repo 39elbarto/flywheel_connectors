@@ -7,7 +7,7 @@ use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
-/// ZaloUser connector errors.
+/// `ZaloUser` connector errors.
 #[derive(Error, Debug)]
 pub enum ZaloUserError {
     /// HTTP request failed

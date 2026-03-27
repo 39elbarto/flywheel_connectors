@@ -178,8 +178,7 @@ impl IrcSession {
         while self.lines.len() < target_len {
             match self.read_line().await {
                 Ok(Some(_)) => {}
-                Ok(None) => break,
-                Err(FcpError::UpstreamTimeout { .. }) => break,
+                Ok(None) | Err(FcpError::UpstreamTimeout { .. }) => break,
                 Err(error) => return Err(error),
             }
         }

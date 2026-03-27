@@ -7,7 +7,7 @@ use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
-/// BlueBubbles connector errors.
+/// `BlueBubbles` connector errors.
 #[derive(Error, Debug)]
 pub enum BlueBubblesError {
     /// HTTP request failed

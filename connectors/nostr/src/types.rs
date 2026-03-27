@@ -49,7 +49,7 @@ pub struct EncryptedDmEvent {
 impl EncryptedDmEvent {
     /// Create a new NIP-04 encrypted DM event envelope.
     #[must_use]
-    pub fn new(recipient_pubkey: String, content: String) -> Self {
+    pub const fn new(recipient_pubkey: String, content: String) -> Self {
         Self {
             recipient_pubkey,
             content,

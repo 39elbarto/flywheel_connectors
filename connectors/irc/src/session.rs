@@ -31,7 +31,7 @@ pub const MAX_NICK_RETRIES: usize = 5;
 pub enum ConnectionState {
     /// TCP connected but not yet registered (no NICK/USER sent or awaiting 001).
     Connected,
-    /// Successfully registered (received RPL_WELCOME 001).
+    /// Successfully registered (received `RPL_WELCOME` 001).
     Registered,
     /// Connection has been closed or lost.
     Disconnected,
@@ -98,16 +98,12 @@ pub enum MessageTarget {
 #[must_use]
 pub fn parse_irc_message(line: &str) -> IrcMessage {
     let trimmed = line.trim_end_matches(['\r', '\n']);
-    let (prefix, remainder) = if let Some(stripped) = trimmed.strip_prefix(':') {
-        if let Some((prefix_str, rest)) = stripped.split_once(' ') {
-            (Some(prefix_str.to_string()), rest.trim_start())
-        } else {
-            // Degenerate line: just ":something" with no command
-            (Some(stripped.to_string()), "")
-        }
-    } else {
-        (None, trimmed)
-    };
+    let (prefix, remainder) = trimmed.strip_prefix(':').map_or((None, trimmed), |stripped| {
+        stripped.split_once(' ').map_or_else(
+            || (Some(stripped.to_string()), ""),
+            |(prefix_str, rest)| (Some(prefix_str.to_string()), rest.trim_start()),
+        )
+    });
 
     let (command_raw, params_section) = remainder
         .split_once(' ')
@@ -275,13 +271,13 @@ impl MessageBuffer {
 
     /// Maximum capacity of the buffer.
     #[must_use]
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         self.capacity
     }
 
     /// Total number of messages received since creation (including evicted).
     #[must_use]
-    pub fn total_received(&self) -> u64 {
+    pub const fn total_received(&self) -> u64 {
         self.total_received
     }
 
@@ -348,11 +344,11 @@ pub struct IrcPersistentSession {
     state: ConnectionState,
     /// When the session was created.
     created_at: Instant,
-    /// When registration completed (RPL_WELCOME received).
+    /// When registration completed (`RPL_WELCOME` received).
     registered_at: Option<Instant>,
     /// Number of nick-collision retries performed.
     nick_retries: usize,
-    /// Server name from the RPL_WELCOME line, if available.
+    /// Server name from the `RPL_WELCOME` line, if available.
     server_name: Option<String>,
     /// The welcome message (trailing from 001), if available.
     welcome_message: Option<String>,
@@ -398,7 +394,7 @@ impl IrcPersistentSession {
 
     /// Current connection state.
     #[must_use]
-    pub fn state(&self) -> ConnectionState {
+    pub const fn state(&self) -> ConnectionState {
         self.state
     }
 
@@ -416,7 +412,7 @@ impl IrcPersistentSession {
 
     /// The set of currently joined channels.
     #[must_use]
-    pub fn joined_channels(&self) -> &HashSet<String> {
+    pub const fn joined_channels(&self) -> &HashSet<String> {
         &self.joined_channels
     }
 
@@ -428,7 +424,7 @@ impl IrcPersistentSession {
 
     /// Access the message buffer.
     #[must_use]
-    pub fn message_buffer(&self) -> &MessageBuffer {
+    pub const fn message_buffer(&self) -> &MessageBuffer {
         &self.message_buffer
     }
 
@@ -446,17 +442,17 @@ impl IrcPersistentSession {
 
     /// Number of nick-collision retries performed so far.
     #[must_use]
-    pub fn nick_retries(&self) -> usize {
+    pub const fn nick_retries(&self) -> usize {
         self.nick_retries
     }
 
-    /// The server name extracted from RPL_WELCOME, if available.
+    /// The server name extracted from `RPL_WELCOME`, if available.
     #[must_use]
     pub fn server_name(&self) -> Option<&str> {
         self.server_name.as_deref()
     }
 
-    /// The welcome message from RPL_WELCOME, if available.
+    /// The welcome message from `RPL_WELCOME`, if available.
     #[must_use]
     pub fn welcome_message(&self) -> Option<&str> {
         self.welcome_message.as_deref()
@@ -470,7 +466,7 @@ impl IrcPersistentSession {
         self.joined_channels.clear();
     }
 
-    /// Transition to `Registered` state (call when RPL_WELCOME is received).
+    /// Transition to `Registered` state (call when `RPL_WELCOME` is received).
     pub fn mark_registered(&mut self) {
         self.state = ConnectionState::Registered;
         self.registered_at = Some(Instant::now());
@@ -499,30 +495,22 @@ impl IrcPersistentSession {
     /// required outbound action.
     fn apply_state_change(&mut self, msg: &IrcMessage, _event: &IrcParsedEvent) -> SessionAction {
         match msg.command.as_str() {
-            // ── RPL_WELCOME (001) ──
             "001" => {
                 self.mark_registered();
-                // Extract server name from prefix
                 if let Some(ref prefix) = msg.prefix {
                     self.server_name = Some(prefix.clone());
                 }
-                // Extract welcome text from trailing
                 if let Some(ref trailing) = msg.trailing {
                     self.welcome_message = Some(trailing.clone());
                 }
-                // The 001 line often includes our effective nick in params[0]
                 if let Some(effective_nick) = msg.params.first() {
                     if !effective_nick.is_empty() {
-                        self.current_nick = effective_nick.clone();
+                        self.current_nick.clone_from(effective_nick);
                     }
                 }
                 SessionAction::None
             }
-
-            // ── ERR_NICKNAMEINUSE (433) ──
             "433" => self.handle_nick_collision(),
-
-            // ── PING ──
             "PING" => {
                 let payload = msg
                     .trailing
@@ -531,35 +519,23 @@ impl IrcPersistentSession {
                     .unwrap_or("");
                 SessionAction::SendPong(payload.to_string())
             }
-
-            // ── JOIN ──
             "JOIN" => {
-                // If the joining nick is us, track the channel
-                let joiner_nick = msg
-                    .prefix
-                    .as_ref()
-                    .and_then(|p| extract_nick_from_prefix(p));
+                let joiner_nick = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
                 if joiner_nick
                     .as_deref()
-                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))
                 {
-                    let channel = msg.params.first().or(msg.trailing.as_ref());
-                    if let Some(ch) = channel {
+                    if let Some(ch) = msg.params.first().or(msg.trailing.as_ref()) {
                         self.joined_channels.insert(ch.clone());
                     }
                 }
                 SessionAction::None
             }
-
-            // ── PART ──
             "PART" => {
-                let parter_nick = msg
-                    .prefix
-                    .as_ref()
-                    .and_then(|p| extract_nick_from_prefix(p));
+                let parter_nick = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
                 if parter_nick
                     .as_deref()
-                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))
                 {
                     if let Some(ch) = msg.params.first() {
                         self.joined_channels.remove(ch);
@@ -567,10 +543,7 @@ impl IrcPersistentSession {
                 }
                 SessionAction::None
             }
-
-            // ── KICK ──
             "KICK" => {
-                // KICK #channel <nick> [:reason]
                 if let Some(kicked_nick) = msg.params.get(1) {
                     if kicked_nick.eq_ignore_ascii_case(&self.current_nick) {
                         if let Some(ch) = msg.params.first() {
@@ -580,35 +553,23 @@ impl IrcPersistentSession {
                 }
                 SessionAction::None
             }
-
-            // ── NICK ──
             "NICK" => {
-                // If we changed nick, track it
-                let changer = msg
-                    .prefix
-                    .as_ref()
-                    .and_then(|p| extract_nick_from_prefix(p));
+                let changer = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
                 if changer
                     .as_deref()
-                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))
                 {
-                    let new_nick = msg.trailing.as_ref().or_else(|| msg.params.first());
-                    if let Some(nn) = new_nick {
-                        self.current_nick = nn.clone();
+                    if let Some(nn) = msg.trailing.as_ref().or_else(|| msg.params.first()) {
+                        self.current_nick.clone_from(nn);
                     }
                 }
                 SessionAction::None
             }
-
-            // ── QUIT / ERROR ──
             "QUIT" => {
-                let quitter = msg
-                    .prefix
-                    .as_ref()
-                    .and_then(|p| extract_nick_from_prefix(p));
+                let quitter = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
                 if quitter
                     .as_deref()
-                    .map_or(false, |n| n.eq_ignore_ascii_case(&self.current_nick))
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))
                 {
                     self.mark_disconnected();
                 }
@@ -618,7 +579,6 @@ impl IrcPersistentSession {
                 self.mark_disconnected();
                 SessionAction::None
             }
-
             _ => SessionAction::None,
         }
     }

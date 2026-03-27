@@ -13,7 +13,7 @@ pub const DEFAULT_AUTOCOMPLETE_FIELD_MASK: &str = "suggestions.placePrediction.p
 pub const DEFAULT_PLACE_DETAILS_FIELD_MASK: &str =
     "id,name,displayName,formattedAddress,types,googleMapsUri";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GooglePlacesConfig {
     pub api_key: String,
     #[serde(default = "default_base_url")]
@@ -26,6 +26,19 @@ pub struct GooglePlacesConfig {
     pub autocomplete_field_mask: String,
     #[serde(default = "default_place_details_field_mask")]
     pub place_details_field_mask: String,
+}
+
+impl std::fmt::Debug for GooglePlacesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GooglePlacesConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("search_text_field_mask", &self.search_text_field_mask)
+            .field("autocomplete_field_mask", &self.autocomplete_field_mask)
+            .field("place_details_field_mask", &self.place_details_field_mask)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,7 +70,7 @@ pub struct GetPlaceInput {
     pub field_mask: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalizedText {
     #[serde(default)]
@@ -68,7 +81,7 @@ pub struct LocalizedText {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaceRecord {
     #[serde(default)]
@@ -87,7 +100,7 @@ pub struct PlaceRecord {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchTextResponse {
     #[serde(default)]
@@ -96,7 +109,7 @@ pub struct SearchTextResponse {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SuggestionText {
     #[serde(default)]
@@ -105,7 +118,7 @@ pub struct SuggestionText {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PlacePrediction {
     #[serde(default)]
@@ -118,7 +131,7 @@ pub struct PlacePrediction {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryPrediction {
     #[serde(default)]
@@ -127,7 +140,7 @@ pub struct QueryPrediction {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AutocompleteSuggestion {
     #[serde(default)]
@@ -138,7 +151,7 @@ pub struct AutocompleteSuggestion {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AutocompleteResponse {
     #[serde(default)]

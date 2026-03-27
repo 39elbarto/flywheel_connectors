@@ -110,6 +110,20 @@ impl GcRoots {
         }
         roots
     }
+
+    /// Iterate all root object IDs without allocating a new HashSet.
+    pub fn root_iter(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.pinned
+            .iter()
+            .copied()
+            .chain(self.zone_checkpoint.iter().copied())
+    }
+
+    /// Number of roots (zero allocation).
+    #[must_use]
+    pub fn root_count(&self) -> usize {
+        self.pinned.len() + usize::from(self.zone_checkpoint.is_some())
+    }
 }
 
 impl Default for GcRoots {
@@ -205,13 +219,11 @@ impl GarbageCollector {
         store: &dyn ObjectStore,
         current_time: u64,
     ) -> Result<SweepPlan, GcError> {
-        // 1. Compute root set
-        let root_set = roots.all_roots();
-
+        // 1. Seed BFS queue directly from root iterator (zero-allocation).
         // 2. Mark phase: traverse refs from roots
         let mut visited = HashSet::new();
         let mut live = HashSet::new();
-        let mut queue: VecDeque<ObjectId> = root_set.into_iter().collect();
+        let mut queue: VecDeque<ObjectId> = roots.root_iter().collect();
 
         while let Some(object_id) = queue.pop_front() {
             if visited.insert(object_id) {
@@ -342,10 +354,9 @@ impl GarbageCollector {
             }
         }
 
-        // Check reachability from roots
-        let root_set = roots.all_roots();
+        // Check reachability from roots (zero-allocation root seeding)
         let mut visited = HashSet::new();
-        let mut queue: VecDeque<ObjectId> = root_set.into_iter().collect();
+        let mut queue: VecDeque<ObjectId> = roots.root_iter().collect();
 
         while let Some(id) = queue.pop_front() {
             if &id == object_id {

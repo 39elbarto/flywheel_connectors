@@ -120,7 +120,15 @@ impl TokenBucket {
     }
 
     /// Refill tokens based on elapsed time.
+    ///
+    /// Fast path: if tokens are already at capacity, skip the Mutex lock entirely.
+    /// The lock is only needed to update `last_refill` when actually adding tokens.
     fn refill(&self) {
+        // Fast path: if already at capacity, no refill needed.
+        if self.tokens.load(Ordering::Acquire) >= self.capacity {
+            return;
+        }
+
         let mut last_refill = self.last_refill.lock();
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(*last_refill);

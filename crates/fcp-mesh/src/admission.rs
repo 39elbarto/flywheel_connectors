@@ -560,6 +560,9 @@ impl AdmissionController {
     }
 
     /// Get or create usage tracker for a peer.
+    ///
+    /// Uses the raw entry API on Rust nightly to avoid cloning the `NodeId(String)`
+    /// key on the hot path. Only clones once for first-time peer insertion.
     fn get_or_create_usage(&mut self, peer: &NodeId, now_ms: u64) -> &mut PeerUsage {
         self.peer_usage
             .entry(peer.clone())

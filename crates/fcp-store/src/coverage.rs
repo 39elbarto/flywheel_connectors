@@ -16,6 +16,10 @@ pub struct SymbolDistribution {
     pub source_symbols: u32,
     /// Total symbols stored across all nodes.
     pub total_symbols: u32,
+    /// Cached max symbol count across all nodes. Updated incrementally
+    /// in `add_symbol` (O(1)) and lazily recomputed in `remove_symbol`
+    /// only when the removed node was the previous max holder.
+    cached_max: u32,
 }
 
 impl SymbolDistribution {
@@ -26,6 +30,7 @@ impl SymbolDistribution {
             nodes: HashMap::new(),
             source_symbols,
             total_symbols: 0,
+            cached_max: 0,
         }
     }
 
@@ -35,16 +40,30 @@ impl SymbolDistribution {
         entry.0 += 1;
         entry.1 += symbol_bytes;
         self.total_symbols += 1;
+        // O(1) max update: new count can only increase the max.
+        if entry.0 > self.cached_max {
+            self.cached_max = entry.0;
+        }
     }
 
     /// Remove a symbol from a node.
     pub fn remove_symbol(&mut self, node_id: u64, symbol_bytes: u64) {
         if let Some(entry) = self.nodes.get_mut(&node_id) {
+            let was_max = entry.0 == self.cached_max;
             entry.0 = entry.0.saturating_sub(1);
             entry.1 = entry.1.saturating_sub(symbol_bytes);
             self.total_symbols = self.total_symbols.saturating_sub(1);
             if entry.0 == 0 {
                 self.nodes.remove(&node_id);
+            }
+            // Only rescan if the removed node was the max holder.
+            if was_max {
+                self.cached_max = self
+                    .nodes
+                    .values()
+                    .map(|(count, _)| *count)
+                    .max()
+                    .unwrap_or(0);
             }
         }
     }
@@ -56,13 +75,10 @@ impl SymbolDistribution {
     }
 
     /// Get the maximum symbol count on any single node.
+    #[inline]
     #[must_use]
     pub fn max_node_symbols(&self) -> u32 {
-        self.nodes
-            .values()
-            .map(|(count, _)| *count)
-            .max()
-            .unwrap_or(0)
+        self.cached_max
     }
 }
 
@@ -1875,6 +1891,7 @@ mod tests {
             nodes: HashMap::from([(1, (u32::MAX, 0))]),
             source_symbols: 1,
             total_symbols: u32::MAX,
+            cached_max: u32::MAX,
         };
         let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
 

@@ -47,13 +47,18 @@ fn unique_zone_dir(label: &str) -> String {
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
-    let cap = match op {
+/// Map an operation ID to the capability ID that governs it.
+fn capability_for_operation(op: &str) -> &str {
+    match op {
         "telegram.send_message" | "telegram.send_media" | "telegram.answer_callback_query" => {
             "telegram.send"
         }
         _ => "telegram.read",
-    };
+    }
+}
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = capability_for_operation(op);
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
@@ -117,6 +122,7 @@ async fn setup_handshake(
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
     let zone_dir = unique_zone_dir("integration-handshake");
+    let mapped: Vec<&str> = caps.iter().map(|c| capability_for_operation(c)).collect();
 
     connector
         .handle_handshake(json!({
@@ -125,7 +131,7 @@ async fn setup_handshake(
             "zone_dir": zone_dir,
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": caps
+            "capabilities_requested": mapped
         }))
         .await
         .expect("handshake should succeed");

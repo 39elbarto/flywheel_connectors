@@ -34,14 +34,25 @@ use fcp_openai::types::Model;
 // Helpers
 // ============================================================================
 
+/// Map an operation ID to the capability ID that governs it.
+fn capability_for_operation(op: &str) -> &str {
+    match op {
+        "openai.simple_chat" | "openai.get_usage" => "openai.chat",
+        "openai.images.generate" => "openai.images",
+        // All other operations have capability == operation ID
+        other => other,
+    }
+}
+
 /// Generate a valid COSE capability token signed by the given key.
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = capability_for_operation(op);
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -53,6 +64,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core:
 async fn setup_handshake(connector: &mut OpenAIConnector, caps: &[&str]) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let mapped: Vec<&str> = caps.iter().map(|c| capability_for_operation(c)).collect();
 
     connector
         .handle_handshake(json!({
@@ -60,7 +72,7 @@ async fn setup_handshake(connector: &mut OpenAIConnector, caps: &[&str]) -> Ed25
             "zone": "z:work",
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": caps
+            "capabilities_requested": mapped
         }))
         .await
         .expect("handshake should succeed");

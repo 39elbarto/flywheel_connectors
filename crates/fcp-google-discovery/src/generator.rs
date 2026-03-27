@@ -905,6 +905,29 @@ mod tests {
 
     const GMAIL_FIXTURE: &str = include_str!("../data/fixtures/gmail_discovery.v1.json");
     const UNKNOWN_SERVICE_FIXTURE: &str = include_str!("../data/fixtures/unknown_service.v1.json");
+
+    /// Recursively sort all JSON object keys for deterministic serialization.
+    /// serde_json's Map ordering depends on whether `preserve_order` is enabled
+    /// (BTreeMap vs IndexMap), which varies across workspace feature unification.
+    fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let sorted: std::collections::BTreeMap<String, serde_json::Value> = map
+                    .into_iter()
+                    .map(|(k, v)| (k, canonicalize_json_value(v)))
+                    .collect();
+                serde_json::Value::Object(
+                    sorted.into_iter().collect(),
+                )
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(
+                    arr.into_iter().map(canonicalize_json_value).collect(),
+                )
+            }
+            other => other,
+        }
+    }
     const GMAIL_GOLDEN_DIGEST: &str =
         include_str!("../data/golden/gmail_generated_artifacts.v1.blake3");
 
@@ -1021,14 +1044,22 @@ mod tests {
 
         let generated =
             generate_google_service_artifacts(&normalized.snapshot, &policy).expect("generation");
-        let serialized = serde_json::to_vec(&generated).expect("serialize generated artifacts");
+        // Canonicalize by converting to Value, recursively sorting all keys,
+        // and then serializing. This ensures the digest is independent of
+        // serde_json's Map ordering (which changes when the preserve_order
+        // feature is enabled transitively in full-workspace builds).
+        let value: serde_json::Value =
+            serde_json::to_value(&generated).expect("serialize to Value");
+        let canonical = canonicalize_json_value(value);
+        let serialized =
+            serde_json::to_vec(&canonical).expect("serialize canonical Value");
         let actual_digest = blake3::hash(&serialized).to_hex().to_string();
         let expected_digest = GMAIL_GOLDEN_DIGEST.trim();
 
         assert_eq!(
             actual_digest, expected_digest,
             "golden digest drift detected; update {} if this change is intentional",
-            "../data/golden/gmail_generated_artifacts.v1.blake3"
+            "data/golden/gmail_generated_artifacts.v1.blake3"
         );
     }
 

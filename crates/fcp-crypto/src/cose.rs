@@ -319,6 +319,15 @@ impl CwtClaims {
         })
     }
 
+    /// Get principal ID.
+    #[must_use]
+    pub fn get_principal_id(&self) -> Option<&str> {
+        self.get(fcp2_claims::PRINCIPAL_ID).and_then(|v| match v {
+            ciborium::Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
     /// Get holder node ID (NORMATIVE).
     ///
     /// When this claim is set, requests using this token MUST include

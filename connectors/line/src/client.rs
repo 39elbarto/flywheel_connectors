@@ -9,6 +9,14 @@ use serde_json::json;
 use std::time::Duration;
 use tracing::{debug, warn};
 
+fn truncate_error_body(body: String) -> String {
+    if body.len() > 500 {
+        format!("{}...[truncated]", &body[..500])
+    } else {
+        body
+    }
+}
+
 use crate::error::{LineError, LineResult};
 use crate::types::{
     GroupMembersResponse, GroupSummary, Message, RichMenu, RichMenuCreateResponse,
@@ -198,7 +206,7 @@ impl LineClient {
                 }
 
                 if !resp.status().is_success() {
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = truncate_error_body(resp.text().await.unwrap_or_default());
                     warn!(status, "LINE API request failed");
                     let decision = classify_http_status(status, None);
                     let err = LineError::Api {
@@ -318,7 +326,7 @@ impl LineClient {
                     ));
                 }
                 if !resp.status().is_success() {
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = truncate_error_body(resp.text().await.unwrap_or_default());
                     let decision = classify_http_status(status, None);
                     let err = LineError::Api {
                         status,
@@ -384,7 +392,7 @@ impl LineClient {
                     ));
                 }
                 if !resp.status().is_success() {
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = truncate_error_body(resp.text().await.unwrap_or_default());
                     let decision = classify_http_status(status, None);
                     let err = LineError::Api {
                         status,
@@ -507,7 +515,7 @@ impl LineClient {
                 }
 
                 if !resp.status().is_success() {
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = truncate_error_body(resp.text().await.unwrap_or_default());
                     warn!(status, "LINE API request failed");
                     let decision = classify_http_status(status, None);
                     let err = LineError::Api {

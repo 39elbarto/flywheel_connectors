@@ -6,11 +6,24 @@ use serde_json::{Value, json};
 use crate::error::{HueError, HueResult};
 use crate::types::{HueConfig, RecallSceneInput, SetLightStateInput};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HueClient {
     client: reqwest::Client,
     bridge_url: String,
     app_key: String,
+}
+
+impl std::fmt::Debug for HueClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HueClient")
+            .field("bridge_url", &self.bridge_url)
+            .field("app_key", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+fn sanitize_path_segment(s: &str) -> String {
+    s.replace(['/', '\\', '?', '#', '&', '%', '\0'], "")
 }
 
 impl HueClient {
@@ -45,9 +58,14 @@ impl HueClient {
         let status = response.status();
         let body = response.text().await?;
         if !status.is_success() {
+            let truncated = if body.len() > 500 {
+                format!("{}...[truncated]", &body[..500])
+            } else {
+                body
+            };
             return Err(HueError::Api {
                 status: status.as_u16(),
-                message: body,
+                message: truncated,
             });
         }
         Ok(serde_json::from_str(&body).unwrap_or_else(|_| json!({ "body": body })))
@@ -88,7 +106,7 @@ impl HueClient {
             fcp_core::FcpError::InvalidRequest { message, .. } => HueError::Config(message),
             other => HueError::Config(other.to_string()),
         })?;
-        let light_id = input.light_id.trim();
+        let light_id = sanitize_path_segment(input.light_id.trim());
         let mut body = json!({ "on": { "on": input.on } });
         if let Some(brightness) = input.brightness {
             body["dimming"] = json!({ "brightness": brightness });
@@ -111,7 +129,7 @@ impl HueClient {
             fcp_core::FcpError::InvalidRequest { message, .. } => HueError::Config(message),
             other => HueError::Config(other.to_string()),
         })?;
-        let scene_id = input.scene_id.trim();
+        let scene_id = sanitize_path_segment(input.scene_id.trim());
         let response = self
             .client
             .put(format!(
@@ -183,6 +201,28 @@ mod tests {
             .set_light_state(&input)
             .await
             .expect("set should succeed");
+    }
+
+    #[test]
+    fn debug_redacts_app_key() {
+        let config = HueConfig::from_value(json!({
+            "bridge_url": "https://192.168.1.100",
+            "app_key": "super-secret-key"
+        }))
+        .expect("config should parse");
+        let client = HueClient::from_config(&config).expect("client should build");
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("super-secret-key"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_strips_traversal() {
+        assert_eq!(sanitize_path_segment("../../etc/passwd"), "....etcpasswd");
+        assert_eq!(sanitize_path_segment("light-1"), "light-1");
+        assert_eq!(sanitize_path_segment("id/../../admin"), "id....admin");
+        assert_eq!(sanitize_path_segment("normal-uuid-v4"), "normal-uuid-v4");
+        assert!(!sanitize_path_segment("foo/bar").contains('/'));
     }
 
     #[fcp_async_core::runtime::test]

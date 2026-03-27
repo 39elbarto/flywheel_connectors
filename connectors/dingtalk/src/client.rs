@@ -294,6 +294,8 @@ fn ensure_media_success(body: Value) -> DingTalkResult<Value> {
 fn http_status_error(status: u16, headers: &HeaderMap, body: String) -> DingTalkError {
     let message = if body.trim().is_empty() {
         format!("DingTalk HTTP request failed with status {status}")
+    } else if body.len() > 500 {
+        format!("{}...[truncated]", &body[..500])
     } else {
         body
     };

@@ -30,24 +30,52 @@ use crate::types::{
 type Aes256CbcDec = Decryptor<Aes256>;
 const MAX_CALLBACK_BODY_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CachedAccessToken {
     token: String,
     expires_at: Instant,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for CachedAccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedAccessToken")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct WeComClient {
     config: WeComConfig,
     client: reqwest::Client,
     token_cache: Arc<Mutex<Option<CachedAccessToken>>>,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for WeComClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeComClient")
+            .field("config", &self.config)
+            .field("token_cache", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
 struct CallbackCrypto {
     token: String,
     aes_key: [u8; 32],
     receive_id: String,
+}
+
+impl std::fmt::Debug for CallbackCrypto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallbackCrypto")
+            .field("token", &"[REDACTED]")
+            .field("aes_key", &"[REDACTED]")
+            .field("receive_id", &self.receive_id)
+            .finish()
+    }
 }
 
 impl WeComClient {

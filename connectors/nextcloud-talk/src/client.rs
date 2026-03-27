@@ -41,13 +41,23 @@ struct RawResponse {
 }
 
 /// Nextcloud Talk client with typed request helpers.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NextcloudTalkClient {
     client: Client,
     server_url: String,
     auth: NextcloudTalkAuth,
     retry_config: HttpRetryConfig,
     force_language: Option<String>,
+}
+
+impl std::fmt::Debug for NextcloudTalkClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NextcloudTalkClient")
+            .field("server_url", &self.server_url)
+            .field("auth", &"[REDACTED]")
+            .field("force_language", &self.force_language)
+            .finish_non_exhaustive()
+    }
 }
 
 impl NextcloudTalkClient {

@@ -15,7 +15,6 @@ use crate::types::{ApiErrorDetail, ApiErrorResponse, BatchUpdateResponse, Docume
 const DEFAULT_BASE_URL: &str = "https://docs.googleapis.com/v1";
 
 /// Google Docs API client.
-#[derive(Debug)]
 pub struct DocsClient {
     client: Client,
     auth: GoogleMaterializedAuth,
@@ -23,6 +22,16 @@ pub struct DocsClient {
     total_requests: AtomicU64,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
+}
+
+impl std::fmt::Debug for DocsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocsClient")
+            .field("base_url", &self.base_url)
+            .field("total_requests", &self.total_requests)
+            .field("auth", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DocsClient {

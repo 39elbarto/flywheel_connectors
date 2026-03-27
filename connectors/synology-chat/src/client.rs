@@ -38,11 +38,20 @@ pub struct SynologyChatPayload {
     payload: Map<String, Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SynologyChatClient {
     client: reqwest::Client,
     target: SynologyChatDeliveryTarget,
     incoming_url: String,
+}
+
+impl std::fmt::Debug for SynologyChatClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SynologyChatClient")
+            .field("target", &self.target)
+            .field("incoming_url", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SynologyChatDispatchResult {

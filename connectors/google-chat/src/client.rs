@@ -18,7 +18,6 @@ use crate::types::{
 const DEFAULT_BASE_URL: &str = "https://chat.googleapis.com/v1";
 
 /// Google Chat API client.
-#[derive(Debug)]
 pub struct ChatClient {
     client: Client,
     auth: GoogleMaterializedAuth,
@@ -26,6 +25,16 @@ pub struct ChatClient {
     total_requests: AtomicU64,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
+}
+
+impl std::fmt::Debug for ChatClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatClient")
+            .field("base_url", &self.base_url)
+            .field("total_requests", &self.total_requests)
+            .field("auth", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ChatClient {

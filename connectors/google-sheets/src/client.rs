@@ -18,7 +18,6 @@ use crate::types::{
 const DEFAULT_BASE_URL: &str = "https://sheets.googleapis.com/v4";
 
 /// Google Sheets API client.
-#[derive(Debug)]
 pub struct SheetsClient {
     client: Client,
     auth: GoogleMaterializedAuth,
@@ -26,6 +25,16 @@ pub struct SheetsClient {
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
+}
+
+impl std::fmt::Debug for SheetsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SheetsClient")
+            .field("base_url", &self.base_url)
+            .field("total_requests", &self.total_requests)
+            .field("auth", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SheetsClient {

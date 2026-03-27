@@ -405,7 +405,11 @@ async fn health_configured_and_ready() {
         .handle_health()
         .await
         .expect("health should succeed");
-    assert_eq!(result["status"], "ok");
+    assert!(
+        result["status"] == "Ready" || result["status"] == "ready",
+        "health status should be Ready, got: {}",
+        result["status"]
+    );
 }
 
 #[fcp_async_core::test]

@@ -115,10 +115,11 @@ async fn lifecycle_introspect() {
 
 #[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_not_handshaken() {
+    let server = MockServer::start().await;
     let mut c = BigQueryConnector::new();
     c.handle_configure(json!({
         "access_token": "tok",
-        "base_url": "https://example.com",
+        "base_url": server.uri(),
     }))
     .await
     .unwrap();

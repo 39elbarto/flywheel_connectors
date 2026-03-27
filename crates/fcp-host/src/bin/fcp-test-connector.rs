@@ -12,11 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fcp_core::{
-    AgentHint, ApprovalMode, AuthCaps, CapabilityId, ConnectorId, EventCaps, FcpError,
-    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass,
-    Introspection, InvokeRequest, InvokeResponse, OAuthConfig, ObjectId, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, AuthCaps, CapabilityId, CapabilityToken, ConnectorId, EventCaps,
+    FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState,
+    IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OAuthConfig, ObjectId,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, ZoneId,
 };
 use fcp_host::ConnectorArchetype;
 use serde_json::json;
@@ -778,7 +778,7 @@ mod tests {
             r#type: "simulate".into(),
             id: RequestId::new("sim_fixture"),
             connector_id: connector_id.clone(),
-            operation: OperationId::from_static(operation),
+            operation: OperationId::new(operation).expect("valid operation id"),
             zone_id: ZoneId::work(),
             input: serde_json::json!({}),
             capability_token: CapabilityToken::test_token(),
@@ -815,6 +815,7 @@ mod tests {
             operation_mode: FixtureOperationMode::Reversible,
             simulate_mode: FixtureSimulateMode::Allowed,
             artifact_policy: FixtureArtifactPolicy::Echo,
+            handshake_mode: FixtureHandshakeMode::from_env(),
             require_handshake: false,
         };
         let operation = profile

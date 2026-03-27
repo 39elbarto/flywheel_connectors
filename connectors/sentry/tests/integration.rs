@@ -174,7 +174,7 @@ async fn shutdown_resets_state() {
 async fn invoke_list_projects() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/organizations/my-org/projects/"))
+        .and(path("/organizations/myorg/projects/"))
         .and(bearer_token("test-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": "1", "slug": "backend", "name": "Backend", "platform": "python"},
@@ -187,7 +187,7 @@ async fn invoke_list_projects() {
     let result = connector
         .handle_invoke(json!({
             "operation_id": "sentry.list_projects",
-            "input": {"organization_slug": "my-org"},
+            "input": {"organization_slug": "myorg"},
         }))
         .await
         .unwrap();
@@ -203,7 +203,7 @@ async fn invoke_list_projects() {
 async fn invoke_list_issues() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/projects/my-org/backend/issues/"))
+        .and(path("/projects/myorg/backend/issues/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": "100", "title": "NullPointerException", "level": "error", "status": "unresolved"},
         ])))
@@ -215,7 +215,7 @@ async fn invoke_list_issues() {
         .handle_invoke(json!({
             "operation_id": "sentry.list_issues",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "query": "is:unresolved",
             },
@@ -267,7 +267,7 @@ async fn invoke_get_issue() {
 async fn invoke_issue_search() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/projects/my-org/backend/issues/"))
+        .and(path("/projects/myorg/backend/issues/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": "100", "title": "NullPointerException", "level": "error", "status": "unresolved"},
             {"id": "101", "title": "TimeoutError", "level": "error", "status": "unresolved"},
@@ -280,7 +280,7 @@ async fn invoke_issue_search() {
         .handle_invoke(json!({
             "operation_id": "sentry.issue.search",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "status": "unresolved",
                 "level": "error",
@@ -398,7 +398,7 @@ async fn invoke_delete_issue() {
 async fn invoke_get_event() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/projects/my-org/backend/events/abc123/"))
+        .and(path("/projects/myorg/backend/events/abc123/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "eventID": "abc123",
             "title": "Error in handler",
@@ -413,7 +413,7 @@ async fn invoke_get_event() {
         .handle_invoke(json!({
             "operation_id": "sentry.get_event",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "event_id": "abc123",
             },
@@ -457,7 +457,7 @@ async fn invoke_list_issue_events() {
 async fn invoke_list_releases() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex("/organizations/my-org/releases/.*"))
+        .and(path_regex("/organizations/myorg/releases/.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"version": "backend@1.2.3", "dateCreated": "2026-03-01T00:00:00Z"},
         ])))
@@ -468,7 +468,7 @@ async fn invoke_list_releases() {
     let result = connector
         .handle_invoke(json!({
             "operation_id": "sentry.list_releases",
-            "input": {"organization_slug": "my-org"},
+            "input": {"organization_slug": "myorg"},
         }))
         .await
         .unwrap();
@@ -481,7 +481,7 @@ async fn invoke_list_releases() {
 async fn invoke_get_release() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex("/organizations/my-org/releases/.*/"))
+        .and(path_regex("/organizations/myorg/releases/.*/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "version": "backend@1.2.3",
             "newGroups": 5,
@@ -495,7 +495,7 @@ async fn invoke_get_release() {
         .handle_invoke(json!({
             "operation_id": "sentry.get_release",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "version": "backend@1.2.3",
             },
         }))
@@ -511,7 +511,7 @@ async fn invoke_get_release() {
 async fn invoke_list_alert_rules() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/projects/my-org/backend/rules/"))
+        .and(path("/projects/myorg/backend/rules/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": "1", "name": "High error rate", "frequency": 30},
         ])))
@@ -523,7 +523,7 @@ async fn invoke_list_alert_rules() {
         .handle_invoke(json!({
             "operation_id": "sentry.list_alert_rules",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
             },
         }))
@@ -539,7 +539,7 @@ async fn invoke_list_alert_rules() {
 async fn invoke_create_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/projects/my-org/backend/rules/"))
+        .and(path("/projects/myorg/backend/rules/"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "42",
             "name": "New alert",
@@ -553,7 +553,7 @@ async fn invoke_create_alert_rule() {
         .handle_invoke(json!({
             "operation_id": "sentry.create_alert_rule",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "name": "New alert",
                 "conditions": [{"id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition"}],
@@ -571,7 +571,7 @@ async fn invoke_create_alert_rule() {
 async fn invoke_delete_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("DELETE"))
-        .and(path("/projects/my-org/backend/rules/42/"))
+        .and(path("/projects/myorg/backend/rules/42/"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&mock)
         .await;
@@ -581,7 +581,7 @@ async fn invoke_delete_alert_rule() {
         .handle_invoke(json!({
             "operation_id": "sentry.delete_alert_rule",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "rule_id": "42",
             },
@@ -598,7 +598,7 @@ async fn invoke_delete_alert_rule() {
 async fn invoke_get_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/projects/my-org/backend/rules/42/"))
+        .and(path("/projects/myorg/backend/rules/42/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "42",
             "name": "High error rate",
@@ -615,7 +615,7 @@ async fn invoke_get_alert_rule() {
         .handle_invoke(json!({
             "operation_id": "sentry.get_alert_rule",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "rule_id": "42",
             },
@@ -634,7 +634,7 @@ async fn invoke_get_alert_rule() {
 async fn invoke_enable_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path("/projects/my-org/backend/rules/42/"))
+        .and(path("/projects/myorg/backend/rules/42/"))
         .and(bearer_token("test-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "42",
@@ -649,7 +649,7 @@ async fn invoke_enable_alert_rule() {
         .handle_invoke(json!({
             "operation_id": "sentry.enable_alert_rule",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "rule_id": "42",
             },
@@ -667,7 +667,7 @@ async fn invoke_enable_alert_rule() {
 async fn invoke_disable_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path("/projects/my-org/backend/rules/42/"))
+        .and(path("/projects/myorg/backend/rules/42/"))
         .and(bearer_token("test-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "42",
@@ -682,7 +682,7 @@ async fn invoke_disable_alert_rule() {
         .handle_invoke(json!({
             "operation_id": "sentry.disable_alert_rule",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "rule_id": "42",
             },
@@ -700,7 +700,7 @@ async fn invoke_disable_alert_rule() {
 async fn invoke_discover_query() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/organizations/my-org/events/"))
+        .and(path("/organizations/myorg/events/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {"transaction": "/api/users", "count()": 1500, "p95()": 234.5},
@@ -715,7 +715,7 @@ async fn invoke_discover_query() {
         .handle_invoke(json!({
             "operation_id": "sentry.discover_query",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "query": "event.type:transaction",
                 "fields": ["transaction", "count()", "p95()"],
                 "statsPeriod": "24h",
@@ -882,7 +882,7 @@ async fn invoke_api_500_server_error() {
 async fn invoke_update_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path("/projects/my-org/backend/rules/42/"))
+        .and(path("/projects/myorg/backend/rules/42/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "42",
             "name": "Updated alert",
@@ -896,7 +896,7 @@ async fn invoke_update_alert_rule() {
         .handle_invoke(json!({
             "operation_id": "sentry.update_alert_rule",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "rule_id": "42",
                 "name": "Updated alert",
@@ -915,7 +915,7 @@ async fn invoke_update_alert_rule() {
 async fn invoke_list_release_deploys() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex("/organizations/my-org/releases/.*/deploys/"))
+        .and(path_regex("/organizations/myorg/releases/.*/deploys/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": "1", "environment": "production", "dateFinished": "2026-03-01T00:00:00Z"},
         ])))
@@ -927,7 +927,7 @@ async fn invoke_list_release_deploys() {
         .handle_invoke(json!({
             "operation_id": "sentry.list_release_deploys",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "version": "backend@1.2.3",
             },
         }))
@@ -945,9 +945,9 @@ async fn invoke_list_release_deploys() {
 async fn invoke_get_transaction() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/projects/my-org/backend/events/tx-abc/"))
+        .and(path("/projects/myorg/backend/events/txabc/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "eventID": "tx-abc",
+            "eventID": "txabc",
             "title": "GET /api/users",
             "transaction": "/api/users",
         })))
@@ -959,9 +959,9 @@ async fn invoke_get_transaction() {
         .handle_invoke(json!({
             "operation_id": "sentry.get_transaction",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
-                "event_id": "tx-abc",
+                "event_id": "txabc",
             },
         }))
         .await
@@ -1022,7 +1022,34 @@ async fn health_tracks_error_count() {
 #[fcp_async_core::runtime::test]
 async fn doctor_fully_configured() {
     let mock = MockServer::start().await;
-    let connector = configured_connector(&mock).await;
+    // Mock the list_projects endpoint that doctor uses for auth validation
+    Mock::given(method("GET"))
+        .and(path("/organizations/myorg/projects/"))
+        .and(bearer_token("test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": "1", "slug": "backend", "name": "Backend"},
+        ])))
+        .mount(&mock)
+        .await;
+
+    // Use a custom configured_connector that includes org_slug so doctor can
+    // run the auth_validation check against the mock.
+    let mut connector = SentryConnector::new();
+    connector
+        .handle_configure(json!({
+            "auth_token": "test-token",
+            "base_url": mock.uri(),
+            "org_slug": "myorg",
+        }))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handle_handshake(json!({
+            "session_id": "test-session",
+        }))
+        .await
+        .expect("handshake should succeed");
+
     let result = connector.handle_doctor().await.unwrap();
     assert_eq!(result["status"], "healthy");
     let checks = result["checks"].as_array().unwrap();
@@ -1237,7 +1264,7 @@ async fn invoke_issue_set_priority() {
 async fn invoke_performance_transactions() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/organizations/my-org/events/"))
+        .and(path("/organizations/myorg/events/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {"transaction": "/api/users", "count()": 1500, "p50()": 120.0, "p95()": 450.0, "failure_rate()": 0.02},
@@ -1252,7 +1279,7 @@ async fn invoke_performance_transactions() {
         .handle_invoke(json!({
             "operation_id": "sentry.performance.transactions",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "transaction": "/api/users",
             },
@@ -1271,7 +1298,7 @@ async fn invoke_performance_transactions() {
 async fn invoke_performance_transaction_summary() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/organizations/my-org/events/"))
+        .and(path("/organizations/myorg/events/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {
@@ -1294,7 +1321,7 @@ async fn invoke_performance_transaction_summary() {
         .handle_invoke(json!({
             "operation_id": "sentry.performance.transaction.summary",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "transaction": "/api/users",
             },
@@ -1313,7 +1340,7 @@ async fn invoke_performance_transaction_summary() {
 async fn invoke_performance_trace_summary() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex("/organizations/my-org/events-trace/[a-f0-9]+/"))
+        .and(path_regex("/organizations/myorg/events-trace/[a-f0-9]+/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "transactions": [
                 {"transaction": "/api/users", "span_id": "abc123", "children": []},
@@ -1328,7 +1355,7 @@ async fn invoke_performance_trace_summary() {
         .handle_invoke(json!({
             "operation_id": "sentry.performance.trace.summary",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "trace_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
             },
         }))
@@ -1346,7 +1373,7 @@ async fn invoke_performance_trace_summary() {
 async fn invoke_release_health() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex("/organizations/my-org/releases/.*/health/"))
+        .and(path_regex("/organizations/myorg/releases/.*/health/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "sessionsCrashed": 5,
             "sessionsHealthy": 995,
@@ -1362,7 +1389,7 @@ async fn invoke_release_health() {
         .handle_invoke(json!({
             "operation_id": "sentry.release.health",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "project_slug": "backend",
                 "version": "backend@1.2.3",
             },
@@ -1380,7 +1407,7 @@ async fn invoke_release_health() {
 async fn invoke_release_create() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/organizations/my-org/releases/"))
+        .and(path("/organizations/myorg/releases/"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "version": "backend@1.3.0",
             "dateCreated": "2026-03-09T00:00:00Z",
@@ -1394,7 +1421,7 @@ async fn invoke_release_create() {
         .handle_invoke(json!({
             "operation_id": "sentry.release.create",
             "input": {
-                "organization_slug": "my-org",
+                "organization_slug": "myorg",
                 "version": "backend@1.3.0",
                 "projects": ["backend"],
             },

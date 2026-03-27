@@ -803,13 +803,15 @@ async fn doctor_reports_pending_materialization_for_credential_mode() {
 async fn oauth_refresh_mode_self_check_ok_with_mocked_endpoints() {
     let mock_server = MockServer::start().await;
 
+    // Use the broadest Gmail scope so the doctor's operation_scope_coverage check
+    // sees all operations as covered, yielding a fully "healthy" result.
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "ya29.integration-oauth-token",
             "token_type": "Bearer",
             "expires_in": 3600,
-            "scope": "https://www.googleapis.com/auth/gmail.readonly"
+            "scope": "https://mail.google.com/"
         })))
         .mount(&mock_server)
         .await;
@@ -826,7 +828,7 @@ async fn oauth_refresh_mode_self_check_ok_with_mocked_endpoints() {
     connector
         .handle_configure(json!({
             "base_url": mock_server.uri(),
-            "required_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+            "required_scopes": ["https://mail.google.com/"],
             "oauth_refresh": {
                 "client_id": "integration-client",
                 "client_secret": "integration-secret",

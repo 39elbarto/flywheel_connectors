@@ -1037,10 +1037,10 @@ async fn dm_send_to_existing_conversation() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/2/dm_conversations/conv-123/messages"))
+        .and(path("/2/dm_conversations/1234567890/messages"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "data": {
-                "dm_conversation_id": "conv-123",
+                "dm_conversation_id": "1234567890",
                 "dm_event_id": "evt-456"
             }
         })))
@@ -1055,13 +1055,13 @@ async fn dm_send_to_existing_conversation() {
     let result = connector
         .handle_invoke(json!({
             "operation": "twitter.dm.send",
-            "args": { "conversation_id": "conv-123", "text": "Hello via FCP!" },
+            "args": { "conversation_id": "1234567890", "text": "Hello via FCP!" },
             "capability_token": token
         }))
         .await
         .expect("dm.send should succeed");
 
-    assert_eq!(result["dm_conversation_id"], "conv-123");
+    assert_eq!(result["dm_conversation_id"], "1234567890");
     assert_eq!(result["dm_event_id"], "evt-456");
 }
 
@@ -1098,7 +1098,7 @@ async fn dm_events_happy_path() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/2/dm_conversations/conv-123/dm_events"))
+        .and(path("/2/dm_conversations/1234567890/dm_events"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {
@@ -1121,7 +1121,7 @@ async fn dm_events_happy_path() {
     let result = connector
         .handle_invoke(json!({
             "operation": "twitter.dm.events",
-            "args": { "conversation_id": "conv-123" },
+            "args": { "conversation_id": "1234567890" },
             "capability_token": token
         }))
         .await

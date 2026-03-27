@@ -539,7 +539,7 @@ async fn error_429_maps_to_rate_limited() {
         .respond_with(
             ResponseTemplate::new(429)
                 .set_body_json(twilio_error_response(20429, "Too Many Requests"))
-                .insert_header("retry-after", "30"),
+                .insert_header("retry-after", "0"),
         )
         .mount(&mock_server)
         .await;

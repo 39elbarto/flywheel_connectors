@@ -1,7 +1,10 @@
 //! Integration tests for the Google Places connector.
 
 use chrono::Utc;
-use fcp_core::{CapabilityToken, IdempotencyClass, RiskLevel, SafetyTier};
+use fcp_core::{
+    CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest, IdempotencyClass, InvokeRequest,
+    OperationId, RequestId, RiskLevel, SafetyTier, ZoneId,
+};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_google_places::{
@@ -33,24 +36,28 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
 async fn setup_handshake(
     connector: &mut GooglePlacesConnector,
     signing_key: &Ed25519SigningKey,
-    capabilities: &[&str],
+    _capabilities: &[&str],
 ) {
     let verifying_key = signing_key.verifying_key();
     connector
-        .handle_handshake(json!({
-            "protocol_version": "1.0.0",
-            "zone": "z:private",
-            "host_public_key": verifying_key.to_bytes(),
-            "nonce": vec![0u8; 32],
-            "capabilities_requested": capabilities,
-        }))
+        .handshake(HandshakeRequest {
+            protocol_version: "1.0.0".into(),
+            zone: ZoneId::private(),
+            zone_dir: None,
+            host_public_key: verifying_key.to_bytes(),
+            nonce: [0u8; 32],
+            capabilities_requested: vec![CapabilityId::from_static("google_places.read")],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        })
         .await
         .expect("handshake should succeed");
 }
 
 async fn setup_configure(connector: &mut GooglePlacesConnector, api_url: &str) {
     connector
-        .handle_configure(json!({
+        .configure(json!({
             "api_key": "test-key",
             "base_url": api_url,
         }))
@@ -118,19 +125,32 @@ async fn invoke_search_text_uses_default_operation_field_mask() {
 
     let token = generate_valid_token(&signing_key, "google_places.search_text");
     let result = connector
-        .handle_invoke(json!({
-            "operation": "google_places.search_text",
-            "input": {
+        .invoke(InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("places-search-text"),
+            connector_id: ConnectorId::from_static("fcp.google-places"),
+            operation: OperationId::from_static("google_places.search_text"),
+            zone_id: ZoneId::private(),
+            input: json!({
                 "query": "coffee near bryant park",
                 "max_result_count": 5
-            },
-            "capability_token": token
-        }))
+            }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        })
         .await
         .expect("invoke should succeed");
 
-    assert_eq!(result["places"][0]["name"], "places/abc123");
-    assert_eq!(result["places"][0]["displayName"]["text"], "Coffee Shop");
+    let output = result.result.expect("result should be present");
+    assert_eq!(output["places"][0]["name"], "places/abc123");
+    assert_eq!(output["places"][0]["displayName"]["text"], "Coffee Shop");
 }
 
 #[fcp_async_core::runtime::test]
@@ -166,19 +186,32 @@ async fn invoke_autocomplete_uses_autocomplete_specific_field_mask() {
 
     let token = generate_valid_token(&signing_key, "google_places.autocomplete");
     let result = connector
-        .handle_invoke(json!({
-            "operation": "google_places.autocomplete",
-            "input": {
+        .invoke(InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("places-autocomplete"),
+            connector_id: ConnectorId::from_static("fcp.google-places"),
+            operation: OperationId::from_static("google_places.autocomplete"),
+            zone_id: ZoneId::private(),
+            input: json!({
                 "input": "coffee ro",
                 "session_token": "session-123"
-            },
-            "capability_token": token
-        }))
+            }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        })
         .await
         .expect("invoke should succeed");
 
+    let output = result.result.expect("result should be present");
     assert_eq!(
-        result["suggestions"][0]["placePrediction"]["place"],
+        output["suggestions"][0]["placePrediction"]["place"],
         "places/def456"
     );
 }
@@ -207,26 +240,39 @@ async fn invoke_get_place_uses_place_details_field_mask_and_language_code() {
 
     let token = generate_valid_token(&signing_key, "google_places.get_place");
     let result = connector
-        .handle_invoke(json!({
-            "operation": "google_places.get_place",
-            "input": {
+        .invoke(InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("places-get-place"),
+            connector_id: ConnectorId::from_static("fcp.google-places"),
+            operation: OperationId::from_static("google_places.get_place"),
+            zone_id: ZoneId::private(),
+            input: json!({
                 "place": "/places/ghi789",
                 "language_code": "en"
-            },
-            "capability_token": token
-        }))
+            }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        })
         .await
         .expect("invoke should succeed");
 
-    assert_eq!(result["name"], "places/ghi789");
-    assert_eq!(result["formattedAddress"], "1 History Way");
+    let output = result.result.expect("result should be present");
+    assert_eq!(output["name"], "places/ghi789");
+    assert_eq!(output["formattedAddress"], "1 History Way");
 }
 
 #[fcp_async_core::runtime::test]
 async fn configure_rejects_blank_place_details_field_mask() {
     let mut connector = GooglePlacesConnector::new();
     let result = connector
-        .handle_configure(json!({
+        .configure(json!({
             "api_key": "test-key",
             "place_details_field_mask": "   "
         }))

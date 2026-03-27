@@ -14478,12 +14478,24 @@ fn parse_capability_token_bytes(
         }
     }
 
-    let raw =
-        CoseToken::from_cbor(bytes).map_err(|error| LiveAuthError::InvalidCapabilityToken {
-            source: source.to_owned(),
-            message: error.to_string(),
-        })?;
-    Ok(CapabilityToken { raw })
+    // Try CBOR parsing directly (handles both tagged and untagged COSE_Sign1).
+    if let Ok(raw) = CoseToken::from_cbor(bytes) {
+        return Ok(CapabilityToken { raw });
+    }
+
+    // Fallback: if the bytes start with CBOR tag 18 (0xD2 = major type 6, value 18),
+    // manually strip the tag byte and retry. Some CBOR encoders produce tagged
+    // COSE_Sign1 that coset's from_tagged_slice rejects due to encoding quirks.
+    if bytes.first() == Some(&0xD2) && bytes.len() > 1 {
+        if let Ok(raw) = CoseToken::from_cbor(&bytes[1..]) {
+            return Ok(CapabilityToken { raw });
+        }
+    }
+
+    Err(LiveAuthError::InvalidCapabilityToken {
+        source: source.to_owned(),
+        message: "failed to parse capability token as JSON, base64, or CBOR COSE_Sign1 (tagged or untagged)".to_owned(),
+    })
 }
 
 fn parse_capability_token_str(

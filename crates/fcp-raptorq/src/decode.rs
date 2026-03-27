@@ -177,7 +177,7 @@ impl RaptorQDecoder {
             symbols.push(ReceivedSymbol::source(esi as u32, vec![0u8; symbol_size]));
         }
 
-        match decoder.decode(symbols) {
+        match decoder.decode(symbols.clone()) {
             Ok(result) => {
                 // Reconstruct payload from first K source symbols
                 let mut payload = Vec::with_capacity(transfer_len);
@@ -190,12 +190,91 @@ impl RaptorQDecoder {
                 payload.truncate(transfer_len);
                 Ok(payload)
             }
+            Err(crate::codec::decoder::DecodeError::CorruptDecodedOutput { .. }) => {
+                // Fallback: try dense constraint matrix solver when InactivationDecoder
+                // produces corrupt output. This uses the same solver as the encoder,
+                // which is known-correct but O(L^3) instead of the faster sparse solver.
+                self.try_reconstruct_dense(&decoder, &symbols, k, symbol_size, transfer_len)
+            }
             Err(error) => Err(Self::map_decode_error(
                 error,
                 self.received_count(),
                 self.needed(),
             )),
         }
+    }
+
+    /// Dense fallback reconstruction using the same constraint matrix solver as the encoder.
+    fn try_reconstruct_dense(
+        &self,
+        decoder: &crate::codec::decoder::InactivationDecoder,
+        symbols: &[crate::codec::decoder::ReceivedSymbol],
+        k: usize,
+        symbol_size: usize,
+        transfer_len: usize,
+    ) -> Result<Vec<u8>, DecodeError> {
+        use crate::codec::systematic::ConstraintMatrix;
+
+        let params = decoder.params();
+        let l = params.l;
+
+        // Build the full L×L constraint matrix and RHS, substituting received
+        // symbols into the appropriate rows.
+        let mut matrix = ConstraintMatrix::build(params, 0);
+        let total_rows = params.s + params.h + params.k_prime;
+        let mut rhs: Vec<Vec<u8>> = (0..total_rows).map(|_| vec![0u8; symbol_size]).collect();
+
+        // The first S+H rows are constraint rows (LDPC+HDPC) with zero RHS — already set.
+        // Rows S+H..S+H+K' are LT rows. For received source symbols, the RHS is the data.
+        // For missing source symbols, we need to replace the identity LT row with a repair
+        // equation and its RHS.
+
+        // Track which source positions have been received
+        let mut source_received = vec![false; params.k_prime];
+        for sym in symbols {
+            if sym.is_source && (sym.esi as usize) < params.k_prime {
+                source_received[sym.esi as usize] = true;
+                rhs[params.s + params.h + sym.esi as usize] = sym.data.clone();
+            }
+        }
+
+        // For missing source positions, try to substitute a repair equation
+        let mut repair_iter = symbols.iter().filter(|s| !s.is_source);
+        for i in 0..params.k_prime {
+            if source_received[i] {
+                continue;
+            }
+            // This source position is missing — substitute a repair equation
+            let Some(repair) = repair_iter.next() else {
+                return Err(DecodeError::InsufficientSymbols {
+                    received: self.received_count(),
+                    needed: self.needed(),
+                });
+            };
+            let row = params.s + params.h + i;
+            // Clear the identity entry and set the repair equation
+            for col in 0..l {
+                matrix.set(row, col, crate::codec::gf256::Gf256::ZERO);
+            }
+            for (&col, &coef) in repair.columns.iter().zip(repair.coefficients.iter()) {
+                matrix.set(row, col, coef);
+            }
+            rhs[row] = repair.data.clone();
+        }
+
+        // Solve using the dense Gaussian elimination (same as encoder)
+        let intermediate = matrix.solve(&rhs).ok_or(DecodeError::InsufficientSymbols {
+            received: self.received_count(),
+            needed: self.needed(),
+        })?;
+
+        // Reconstruct payload from first K intermediate symbols
+        let mut payload = Vec::with_capacity(transfer_len);
+        for sym in &intermediate[..k] {
+            payload.extend_from_slice(sym);
+        }
+        payload.truncate(transfer_len);
+        Ok(payload)
     }
 
     #[allow(clippy::needless_pass_by_value)]

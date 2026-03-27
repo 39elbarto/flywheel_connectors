@@ -19,7 +19,8 @@ use crate::{
 /// Allows alphanumeric characters, underscores, and dots (for qualified names
 /// like `schema.table`). Must start with a letter or underscore.
 fn validate_sql_identifier<'a>(value: &'a str, field: &str) -> MysqlResult<&'a str> {
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Err(MysqlError::InvalidInput(format!(
             "{field} must not be empty"
         )));

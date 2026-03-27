@@ -23,7 +23,8 @@ pub const DEFAULT_BASE_URL: &str = "https://kubernetes.default.svc";
 /// Rejects empty/whitespace-only strings and strings containing path traversal
 /// characters (`/`, `\`, `..`, `%2f`, `%5c`).
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> KubernetesResult<&'a str> {
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Err(KubernetesError::InvalidInput(format!(
             "{field} must not be empty"
         )));

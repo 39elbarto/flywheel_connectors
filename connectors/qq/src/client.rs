@@ -268,7 +268,8 @@ pub fn direct_message_body(content: &str, msg_id: Option<&str>) -> Value {
 ///
 /// Returns an error if `value` is empty or contains path traversal characters.
 pub fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> QqResult<&'a str> {
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Err(QqError::InvalidInput(format!("{field} must not be empty")));
     }
     let lower = value.to_ascii_lowercase();

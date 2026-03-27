@@ -18,7 +18,8 @@ use crate::{
 /// like `db.schema`), and dollar signs (Snowflake allows `$` in identifiers).
 /// Rejects anything that could be used for SQL injection.
 fn validate_sql_identifier<'a>(value: &'a str, field: &str) -> SnowflakeResult<&'a str> {
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Err(SnowflakeError::InvalidInput(format!(
             "{field} must not be empty"
         )));

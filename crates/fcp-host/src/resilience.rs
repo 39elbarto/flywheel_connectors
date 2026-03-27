@@ -1307,7 +1307,7 @@ impl ErrorWindow {
     }
 
     fn roll_if_needed(&mut self) {
-        if self.started_at.elapsed() > self.duration {
+        if self.started_at.elapsed() >= self.duration {
             self.started_at = Instant::now();
             self.successes = 0;
             self.failures = 0;

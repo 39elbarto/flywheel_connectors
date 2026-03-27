@@ -1571,13 +1571,12 @@ impl DiscoveryCatalog {
 
         let worker_count = catalog_loader_worker_count(manifests.len());
         let mut connectors = if worker_count == 1 {
-            load_connector_manifests(manifests)
+            load_connector_manifests(&manifests)
         } else {
             let chunk_size = manifests.len().div_ceil(worker_count);
             thread::scope(|scope| {
-                let mut workers = Vec::new();
+                let mut workers = Vec::with_capacity(worker_count);
                 for chunk in manifests.chunks(chunk_size) {
-                    let chunk = chunk.to_vec();
                     workers.push(scope.spawn(move || load_connector_manifests(chunk)));
                 }
 
@@ -1672,7 +1671,7 @@ fn catalog_loader_worker_count(manifest_count: usize) -> usize {
     manifest_count.clamp(1, available.min(4))
 }
 
-fn load_connector_manifests(manifests: Vec<(String, PathBuf)>) -> Vec<DiscoveredConnector> {
+fn load_connector_manifests(manifests: &[(String, PathBuf)]) -> Vec<DiscoveredConnector> {
     manifests
         .into_iter()
         .filter_map(|(slug, manifest_path)| {

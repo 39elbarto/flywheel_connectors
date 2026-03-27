@@ -26,13 +26,27 @@ use fcp_google_ai::{client::GoogleAiClient, connector::GoogleAiConnector, error:
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    let cap = match op {
+        "google-ai.generate_content" | "google-ai.generate_content_stream" => "google-ai.generate",
+        "google-ai.embed_content" | "google-ai.batch_embed_contents" => "google-ai.embed",
+        "google-ai.count_tokens" | "google-ai.list_models" | "google-ai.get_model" => {
+            "google-ai.models"
+        }
+        "google-ai.tuning.list"
+        | "google-ai.tuning.get"
+        | "google-ai.tuning.get_operation"
+        | "google-ai.tuning.create"
+        | "google-ai.tuning.cancel" => "google-ai.tuning",
+        "google-ai.get_usage" => "google-ai.usage",
+        _ => "google-ai.generate",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -1997,7 +2011,7 @@ async fn invoke_tuning_create_returns_operation() {
 
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
-    let signing_key = setup_handshake(&mut connector, &["google-ai.tuning.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.tuning"]).await;
     let token = generate_valid_token(&signing_key, "google-ai.tuning.create");
 
     let result = connector
@@ -2041,7 +2055,7 @@ async fn invoke_tuning_cancel_returns_acknowledgement() {
 
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
-    let signing_key = setup_handshake(&mut connector, &["google-ai.tuning.cancel"]).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.tuning"]).await;
     let token = generate_valid_token(&signing_key, "google-ai.tuning.cancel");
 
     let result = connector

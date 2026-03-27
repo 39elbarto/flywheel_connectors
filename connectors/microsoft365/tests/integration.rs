@@ -39,25 +39,41 @@ fn capability_for_operation(op: &str) -> &str {
             "m365.mail.send"
         }
         "m365.mail.create_draft" | "m365.mail.add_attachment" => "m365.mail.write",
+        "m365.mail.list_messages"
+        | "m365.mail.get_message"
+        | "m365.mail.search_messages"
+        | "m365.mail.list_threads"
+        | "m365.mail.list_attachments" => "m365.mail.read",
         "m365.files.upload_file" | "m365.files.delete_item" | "m365.files.create_share_link" => {
             "m365.files.write"
         }
+        "m365.files.list_items"
+        | "m365.files.download_file"
+        | "m365.files.get_item"
+        | "m365.files.search" => "m365.files.read",
         "m365.word.create_document" | "m365.word.update_document" => "m365.word.write",
+        "m365.word.list_documents"
+        | "m365.word.get_document"
+        | "m365.word.extract_text"
+        | "m365.word.export_document" => "m365.word.read",
         "m365.onenote.create_page" | "m365.onenote.update_page" => "m365.onenote.write",
+        "m365.onenote.list_notebooks"
+        | "m365.onenote.list_sections"
+        | "m365.onenote.list_pages"
+        | "m365.onenote.get_page"
+        | "m365.onenote.get_page_content" => "m365.onenote.read",
         "m365.calendar.create_event"
         | "m365.calendar.delete_event"
         | "m365.calendar.update_event" => "m365.calendar.write",
+        "m365.calendar.list_events"
+        | "m365.calendar.get_event"
+        | "m365.calendar.get_freebusy" => "m365.calendar.read",
         "m365.tasks.create_task" => "m365.tasks.write",
+        "m365.tasks.list_task_lists" | "m365.tasks.list_tasks" => "m365.tasks.read",
         "m365.subscriptions.create" | "m365.subscriptions.renew" | "m365.subscriptions.delete" => {
             "m365.subscriptions.write"
         }
         "m365.delta.sync" => "m365.delta.read",
-        _ if op.starts_with("m365.mail.") => "m365.mail.read",
-        _ if op.starts_with("m365.files.") => "m365.files.read",
-        _ if op.starts_with("m365.word.") => "m365.word.read",
-        _ if op.starts_with("m365.onenote.") => "m365.onenote.read",
-        _ if op.starts_with("m365.calendar.") => "m365.calendar.read",
-        _ if op.starts_with("m365.tasks.") => "m365.tasks.read",
         _ => "m365.mail.read",
     }
 }

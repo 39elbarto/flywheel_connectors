@@ -16,13 +16,18 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    let cap = match op {
+        "s3.put_object" | "s3.create_bucket" | "s3.copy_object" => "s3.write",
+        "s3.delete_object" | "s3.delete_bucket" => "s3.delete",
+        _ => "s3.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
         .sign(signing_key)

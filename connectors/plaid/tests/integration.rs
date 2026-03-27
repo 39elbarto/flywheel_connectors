@@ -28,13 +28,12 @@ use wiremock::{
 fn capability_for_operation(op: &str) -> &str {
     match op {
         "plaid.link_token_create" | "plaid.token_exchange" => "plaid.link",
-        "plaid.accounts_get" | "plaid.accounts_balance_get" => "plaid.accounts.read",
         "plaid.transactions_get" | "plaid.transactions_sync" => "plaid.transactions.read",
         "plaid.auth_get" => "plaid.auth.read",
         "plaid.identity_get" => "plaid.identity.read",
         "plaid.investments_holdings_get" => "plaid.investments.read",
         "plaid.liabilities_get" => "plaid.liabilities.read",
-        _ => op,
+        _ => "plaid.accounts.read",
     }
 }
 

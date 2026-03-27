@@ -1927,7 +1927,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["google-ai.tuning.create"]
+                "capabilities_requested": ["google-ai.tuning"]
             }))
             .await
             .unwrap();

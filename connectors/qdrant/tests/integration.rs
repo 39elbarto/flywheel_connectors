@@ -27,13 +27,20 @@ use fcp_qdrant::connector::QdrantConnector;
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = match op {
+        "qdrant.create_collection" | "qdrant.delete_collection" => "qdrant.collections.write",
+        "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
+        "qdrant.search" | "qdrant.query_points" | "qdrant.batch_query_points"
+        | "qdrant.get_points" | "qdrant.scroll" | "qdrant.count" => "qdrant.points.read",
+        _ => "qdrant.collections.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

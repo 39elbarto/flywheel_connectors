@@ -28,13 +28,27 @@ use fcp_stripe::{client::StripeClient, connector::StripeConnector, error::Stripe
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    let cap = match op {
+        "stripe.create_customer" | "stripe.update_customer" | "stripe.delete_customer" => {
+            "stripe.write"
+        }
+        "stripe.create_payment_intent"
+        | "stripe.confirm_payment_intent"
+        | "stripe.capture_payment_intent"
+        | "stripe.cancel_payment_intent"
+        | "stripe.create_refund"
+        | "stripe.create_subscription"
+        | "stripe.cancel_subscription" => "stripe.payment",
+        "stripe.ingest_webhook_event" => "stripe.webhook",
+        _ => "stripe.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

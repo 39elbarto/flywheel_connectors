@@ -35,13 +35,24 @@ use fcp_jira::connector::JiraConnector;
 // ============================================================================
 
 /// Generate a valid COSE capability token signed by the given key.
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    let cap = match op {
+        "jira.create_issue" | "jira.update_issue" | "jira.transition_issue"
+        | "jira.move_to_sprint" | "jira.add_comment" | "jira.add_attachment"
+        | "jira.worklog.add" | "jira.worklog.update"
+        | "jira.automation.rule.create" | "jira.automation.rule.update"
+        | "jira.automation.rule.enable" | "jira.automation.rule.disable"
+        | "jira.sync.push_bead" => "jira.write",
+        "jira.delete_issue" | "jira.worklog.delete"
+        | "jira.automation.rule.delete" => "jira.delete",
+        _ => "jira.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -955,8 +966,8 @@ async fn capability_no_handshake_fails() {
         .expect_err("invoke without handshake should fail");
 
     assert!(
-        matches!(err, fcp_core::FcpError::NotConfigured),
-        "expected NotConfigured, got: {err:?}"
+        matches!(err, fcp_core::FcpError::NotHandshaken),
+        "expected NotHandshaken, got: {err:?}"
     );
 }
 
@@ -966,17 +977,19 @@ async fn capability_no_configure_fails() {
     let _ctx = AsyncTestContext::for_scenario("jira.capability.no_configure");
 
     let mut connector = JiraConnector::new();
-    let signing_key = setup_handshake(&mut connector, &["jira.get_issue"]).await;
-    let token = generate_valid_token(&signing_key, "jira.get_issue");
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
 
     let err = connector
-        .handle_invoke(json!({
-            "operation": "jira.get_issue",
-            "input": { "issue_key": "PROJ-1" },
-            "capability_token": token
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "host_public_key": verifying_key.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": ["jira.get_issue"]
         }))
         .await
-        .expect_err("invoke without configure should fail");
+        .expect_err("handshake without configure should fail");
 
     assert!(
         matches!(err, fcp_core::FcpError::NotConfigured),
@@ -1076,7 +1089,10 @@ async fn lifecycle_health_after_configure() {
 /// Handshake returns accepted with capabilities granted.
 #[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_grants_capabilities() {
+    let mock_server = MockServer::start().await;
     let mut connector = JiraConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
 

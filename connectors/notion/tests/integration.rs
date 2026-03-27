@@ -30,13 +30,21 @@ use fcp_notion::{
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    let cap = match op {
+        "notion.create_page" | "notion.update_page" | "notion.create_database"
+        | "notion.update_database" | "notion.update_block" | "notion.append_blocks"
+        | "notion.add_comment" => "notion.write",
+        "notion.delete_page" | "notion.delete_block" => "notion.delete",
+        "notion.search" => "notion.search",
+        _ => "notion.read",
+    };
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)

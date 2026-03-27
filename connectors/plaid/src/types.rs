@@ -1199,7 +1199,9 @@ mod tests {
         let cloned = resp.clone();
         assert_eq!(cloned.access_token, "access-sandbox-cd");
         let debug = format!("{resp:?}");
-        assert!(debug.contains("access-sandbox-cd"));
+        // access_token is redacted in Debug output for security
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("access-sandbox-cd"));
     }
 
     #[test]

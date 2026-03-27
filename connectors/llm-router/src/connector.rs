@@ -1519,7 +1519,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.get("response").is_some());
+        // The router returns a routing decision, not an LLM response.
+        assert!(result.get("dispatch_required").is_some());
+        assert!(result.get("dispatch_instruction").is_some());
         assert!(result.get("provider").is_some());
         assert!(result.get("model").is_some());
         assert!(result.get("routing_decision").is_some());

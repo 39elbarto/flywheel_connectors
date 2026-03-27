@@ -1111,7 +1111,7 @@ impl M365Client {
             let err = M365Error::RateLimit {
                 retry_after_ms: retry_after,
             };
-            if attempt < self.max_retries {
+            if attempt < self.retry_config.max_retries {
                 warn!(attempt, "rate limited, will retry");
                 return ErrorAction::Retry(err);
             }
@@ -1124,7 +1124,7 @@ impl M365Client {
                 status_code: Some(status.as_u16()),
                 error_code: None,
             };
-            if attempt < self.max_retries {
+            if attempt < self.retry_config.max_retries {
                 warn!(attempt, status = %status, "server error, will retry");
                 return ErrorAction::Retry(err);
             }

@@ -7,11 +7,21 @@ use serde::{Deserialize, Serialize};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// OAuth token response from Zoom Server-to-Server OAuth.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: u64,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,7 +41,7 @@ pub struct MeetingList {
 }
 
 /// A single meeting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Meeting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
@@ -63,8 +73,29 @@ pub struct Meeting {
     pub created_at: Option<String>,
 }
 
+impl std::fmt::Debug for Meeting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Meeting")
+            .field("id", &self.id)
+            .field("uuid", &self.uuid)
+            .field("topic", &self.topic)
+            .field("meeting_type", &self.meeting_type)
+            .field("start_time", &self.start_time)
+            .field("duration", &self.duration)
+            .field("timezone", &self.timezone)
+            .field("agenda", &self.agenda)
+            .field("status", &self.status)
+            .field("join_url", &self.join_url)
+            .field("start_url", &self.start_url)
+            .field("password", &"[REDACTED]")
+            .field("host_id", &self.host_id)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
 /// Request to create a meeting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CreateMeetingRequest {
     pub topic: String,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -81,8 +112,22 @@ pub struct CreateMeetingRequest {
     pub password: Option<String>,
 }
 
+impl std::fmt::Debug for CreateMeetingRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateMeetingRequest")
+            .field("topic", &self.topic)
+            .field("meeting_type", &self.meeting_type)
+            .field("start_time", &self.start_time)
+            .field("duration", &self.duration)
+            .field("timezone", &self.timezone)
+            .field("agenda", &self.agenda)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Request to update a meeting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UpdateMeetingRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
@@ -98,6 +143,20 @@ pub struct UpdateMeetingRequest {
     pub agenda: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for UpdateMeetingRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateMeetingRequest")
+            .field("topic", &self.topic)
+            .field("meeting_type", &self.meeting_type)
+            .field("start_time", &self.start_time)
+            .field("duration", &self.duration)
+            .field("timezone", &self.timezone)
+            .field("agenda", &self.agenda)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -456,5 +515,76 @@ mod tests {
         let file: RecordingFile = serde_json::from_value(json).unwrap();
         assert_eq!(file.id.as_deref(), Some("file-1"));
         assert!(file.download_url.is_none());
+    }
+
+    #[test]
+    fn token_response_debug_redacts_access_token() {
+        let resp = TokenResponse {
+            access_token: "super_secret_token".into(),
+            token_type: "bearer".into(),
+            expires_in: 3600,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("super_secret_token"));
+        assert!(dbg.contains("bearer"));
+    }
+
+    #[test]
+    fn meeting_debug_redacts_password() {
+        let meeting = Meeting {
+            id: Some(123),
+            uuid: None,
+            topic: Some("Test".into()),
+            meeting_type: None,
+            start_time: None,
+            duration: None,
+            timezone: None,
+            agenda: None,
+            status: None,
+            join_url: None,
+            start_url: None,
+            password: Some("secret_pass".into()),
+            host_id: None,
+            created_at: None,
+        };
+        let dbg = format!("{meeting:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("secret_pass"));
+        assert!(dbg.contains("Test"));
+    }
+
+    #[test]
+    fn create_meeting_request_debug_redacts_password() {
+        let req = CreateMeetingRequest {
+            topic: "Sync".into(),
+            meeting_type: None,
+            start_time: None,
+            duration: None,
+            timezone: None,
+            agenda: None,
+            password: Some("my_password".into()),
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("my_password"));
+        assert!(dbg.contains("Sync"));
+    }
+
+    #[test]
+    fn update_meeting_request_debug_redacts_password() {
+        let req = UpdateMeetingRequest {
+            topic: Some("Updated".into()),
+            meeting_type: None,
+            start_time: None,
+            duration: None,
+            timezone: None,
+            agenda: None,
+            password: Some("update_pass".into()),
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("update_pass"));
+        assert!(dbg.contains("Updated"));
     }
 }

@@ -205,7 +205,7 @@ impl OperationCategory {
 /// Opaque approval token that must be presented for gated operations in
 /// restricted zones. In production, this would be issued by a human reviewer
 /// or an approval workflow.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApprovalToken {
     /// The token value.
     pub token: String,
@@ -213,6 +213,16 @@ pub struct ApprovalToken {
     pub approved_by: String,
     /// Operation ID this token authorises.
     pub operation_id: String,
+}
+
+impl std::fmt::Debug for ApprovalToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApprovalToken")
+            .field("token", &"[REDACTED]")
+            .field("approved_by", &self.approved_by)
+            .field("operation_id", &self.operation_id)
+            .finish()
+    }
 }
 
 impl ApprovalToken {

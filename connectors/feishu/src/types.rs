@@ -7,10 +7,19 @@ use serde::{Deserialize, Serialize};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Tenant access token request.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TenantAccessTokenRequest {
     pub app_id: String,
     pub app_secret: String,
+}
+
+impl std::fmt::Debug for TenantAccessTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantAccessTokenRequest")
+            .field("app_id", &self.app_id)
+            .field("app_secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Tenant access token response.

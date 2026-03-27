@@ -464,7 +464,7 @@ pub struct ParticipantListQuery {
 }
 
 /// Request body for creating a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CreateConversationRequest {
     pub room_type: ConversationType,
     #[serde(default)]
@@ -479,6 +479,20 @@ pub struct CreateConversationRequest {
     pub object_id: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for CreateConversationRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateConversationRequest")
+            .field("room_type", &self.room_type)
+            .field("invite", &self.invite)
+            .field("source", &self.source)
+            .field("room_name", &self.room_name)
+            .field("object_type", &self.object_type)
+            .field("object_id", &self.object_id)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl CreateConversationRequest {
@@ -621,7 +635,7 @@ pub struct FileShareMetaData {
 }
 
 /// Conversation summary or detail record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
     pub token: ConversationToken,
@@ -721,8 +735,63 @@ pub struct Conversation {
     pub is_archived: Option<bool>,
 }
 
+impl std::fmt::Debug for Conversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Conversation")
+            .field("token", &"[REDACTED]")
+            .field("conversation_type", &self.conversation_type)
+            .field("name", &self.name)
+            .field("display_name", &self.display_name)
+            .field("description", &self.description)
+            .field("participant_type", &self.participant_type)
+            .field("attendee_id", &self.attendee_id)
+            .field("actor_type", &self.actor_type)
+            .field("actor_id", &self.actor_id)
+            .field("permissions", &self.permissions)
+            .field("attendee_permissions", &self.attendee_permissions)
+            .field("participant_flags", &self.participant_flags)
+            .field("read_only", &self.read_only)
+            .field("listable", &self.listable)
+            .field("message_expiration", &self.message_expiration)
+            .field("last_ping", &self.last_ping)
+            .field("session_id", &self.session_id)
+            .field("has_password", &self.has_password)
+            .field("has_call", &self.has_call)
+            .field("call_flag", &self.call_flag)
+            .field("can_start_call", &self.can_start_call)
+            .field("can_delete_conversation", &self.can_delete_conversation)
+            .field("can_leave_conversation", &self.can_leave_conversation)
+            .field("last_activity", &self.last_activity)
+            .field("is_favorite", &self.is_favorite)
+            .field("notification_level", &self.notification_level)
+            .field("lobby_state", &self.lobby_state)
+            .field("lobby_timer", &self.lobby_timer)
+            .field("sip_enabled", &self.sip_enabled)
+            .field("unread_messages", &self.unread_messages)
+            .field("unread_mention", &self.unread_mention)
+            .field("unread_mention_direct", &self.unread_mention_direct)
+            .field("last_read_message", &self.last_read_message)
+            .field("last_common_read_message", &self.last_common_read_message)
+            .field("last_message", &self.last_message)
+            .field("object_type", &self.object_type)
+            .field("object_id", &self.object_id)
+            .field("status", &self.status)
+            .field("status_icon", &self.status_icon)
+            .field("status_message", &self.status_message)
+            .field("status_clear_at", &self.status_clear_at)
+            .field("avatar_version", &self.avatar_version)
+            .field("is_custom_avatar", &self.is_custom_avatar)
+            .field("call_start_time", &self.call_start_time)
+            .field("call_recording", &self.call_recording)
+            .field("recording_consent", &self.recording_consent)
+            .field("mention_permissions", &self.mention_permissions)
+            .field("is_archived", &self.is_archived)
+            .finish()
+    }
+}
+
 /// Chat message returned by the Talk API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub id: MessageId,
@@ -764,6 +833,35 @@ pub struct ChatMessage {
     pub last_edit_timestamp: Option<u64>,
     #[serde(default)]
     pub silent: Option<bool>,
+}
+
+impl std::fmt::Debug for ChatMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatMessage")
+            .field("id", &self.id)
+            .field("token", &"[REDACTED]")
+            .field("actor_type", &self.actor_type)
+            .field("actor_id", &self.actor_id)
+            .field("actor_display_name", &self.actor_display_name)
+            .field("timestamp", &self.timestamp)
+            .field("system_message", &self.system_message)
+            .field("message_type", &self.message_type)
+            .field("is_replyable", &self.is_replyable)
+            .field("reference_id", &self.reference_id)
+            .field("message", &self.message)
+            .field("message_parameters", &self.message_parameters)
+            .field("expiration_timestamp", &self.expiration_timestamp)
+            .field("parent", &self.parent)
+            .field("reactions", &self.reactions)
+            .field("reactions_self", &self.reactions_self)
+            .field("markdown", &self.markdown)
+            .field("last_edit_actor_type", &self.last_edit_actor_type)
+            .field("last_edit_actor_id", &self.last_edit_actor_id)
+            .field("last_edit_actor_display_name", &self.last_edit_actor_display_name)
+            .field("last_edit_timestamp", &self.last_edit_timestamp)
+            .field("silent", &self.silent)
+            .finish()
+    }
 }
 
 /// Result of fetching or long-polling chat messages.
@@ -842,7 +940,7 @@ pub struct CallParticipant {
 }
 
 /// Minimal share response for files shared into a conversation.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileShareResponse {
     #[serde(default)]
@@ -857,6 +955,19 @@ pub struct FileShareResponse {
     pub token: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for FileShareResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileShareResponse")
+            .field("id", &self.id)
+            .field("item_type", &self.item_type)
+            .field("path", &self.path)
+            .field("url", &self.url)
+            .field("token", &"[REDACTED]")
+            .field("extra", &self.extra)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

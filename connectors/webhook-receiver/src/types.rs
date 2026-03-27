@@ -109,7 +109,7 @@ impl WebhookProvider {
 }
 
 /// A registered webhook endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebhookEndpoint {
     /// Unique identifier for this endpoint.
     pub endpoint_id: String,
@@ -136,6 +136,24 @@ pub struct WebhookEndpoint {
     pub secret_last_rotated_at: DateTime<Utc>,
     /// Whether this endpoint is currently active.
     pub active: bool,
+}
+
+impl std::fmt::Debug for WebhookEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookEndpoint")
+            .field("endpoint_id", &self.endpoint_id)
+            .field("path", &self.path)
+            .field("signing_secret", &"[REDACTED]")
+            .field("allowed_sources", &self.allowed_sources)
+            .field("url", &self.url)
+            .field("provider", &self.provider)
+            .field("signature_header", &self.signature_header)
+            .field("signature_algorithm", &self.signature_algorithm)
+            .field("created_at", &self.created_at)
+            .field("secret_last_rotated_at", &self.secret_last_rotated_at)
+            .field("active", &self.active)
+            .finish()
+    }
 }
 
 impl WebhookEndpoint {
@@ -579,6 +597,23 @@ mod tests {
         let ep = generic_endpoint();
         let dbg = format!("{ep:?}");
         assert!(dbg.contains("WebhookEndpoint"));
+        assert!(dbg.contains("/hooks/test"));
+    }
+
+    #[test]
+    fn endpoint_debug_redacts_signing_secret() {
+        let ep = WebhookEndpoint::new(
+            "/hooks/test".into(),
+            "super_secret_signing_key".into(),
+            vec![],
+            "https://hooks.flywheel.test",
+            WebhookProvider::Generic,
+            "X-Signature".into(),
+            "hmac-sha256".into(),
+        );
+        let dbg = format!("{ep:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("super_secret_signing_key"));
         assert!(dbg.contains("/hooks/test"));
     }
 

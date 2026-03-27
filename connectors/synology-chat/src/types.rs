@@ -266,7 +266,7 @@ fn looks_secret(segment: &str) -> bool {
 /// from Synology Chat (outgoing webhook integration). All fields are
 /// optional because different Synology Chat versions and configurations
 /// may include varying subsets.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct InboundWebhookPayload {
     /// The user ID who sent the message.
     pub user_id: Option<serde_json::Value>,
@@ -292,6 +292,25 @@ pub struct InboundWebhookPayload {
     pub thread_id: Option<serde_json::Value>,
     /// File URL attachment.
     pub file_url: Option<String>,
+}
+
+impl std::fmt::Debug for InboundWebhookPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InboundWebhookPayload")
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
+            .field("post_id", &self.post_id)
+            .field("channel_id", &self.channel_id)
+            .field("channel_name", &self.channel_name)
+            .field("channel_type", &self.channel_type)
+            .field("text", &self.text)
+            .field("timestamp", &self.timestamp)
+            .field("token", &"[REDACTED]")
+            .field("trigger_word", &self.trigger_word)
+            .field("thread_id", &self.thread_id)
+            .field("file_url", &self.file_url)
+            .finish()
+    }
 }
 
 /// Normalized inbound event produced by `synology_chat.webhook.normalize`.

@@ -149,15 +149,32 @@ pub struct Organization {
 
 // ── Login ──
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 pub struct LoginResponse {
     pub token: String,
+}
+
+impl std::fmt::Debug for LoginResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginResponse")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 // ── User (health check) ──
@@ -346,5 +363,27 @@ mod tests {
         let json = serde_json::json!({"token": "jwt-abc-123"});
         let resp: LoginResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.token, "jwt-abc-123");
+    }
+
+    #[test]
+    fn login_request_debug_redacts_password() {
+        let req = LoginRequest {
+            username: "myuser".into(),
+            password: "secret_pass_123".into(),
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(dbg.contains("myuser"));
+        assert!(!dbg.contains("secret_pass_123"));
+    }
+
+    #[test]
+    fn login_response_debug_redacts_token() {
+        let resp = LoginResponse {
+            token: "jwt-super-secret".into(),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("jwt-super-secret"));
     }
 }

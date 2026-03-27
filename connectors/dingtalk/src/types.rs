@@ -55,13 +55,22 @@ const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessTokenResponse {
     #[serde(default)]
     pub access_token: String,
     #[serde(default)]
     pub expire_in: u64,
+}
+
+impl std::fmt::Debug for AccessTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("expire_in", &self.expire_in)
+            .finish()
+    }
 }
 
 /// `DingTalk` robot callback event (inbound message via stream or HTTP callback).

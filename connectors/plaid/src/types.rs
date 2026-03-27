@@ -124,11 +124,21 @@ pub struct LinkTokenResponse {
 }
 
 /// Access token exchange response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AccessTokenResponse {
     pub access_token: String,
     pub item_id: String,
     pub request_id: Option<String>,
+}
+
+impl std::fmt::Debug for AccessTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("item_id", &self.item_id)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
 }
 
 /// Auth numbers response.

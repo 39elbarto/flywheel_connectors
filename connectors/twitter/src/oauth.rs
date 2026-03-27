@@ -45,12 +45,22 @@ const OAUTH_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'}');
 
 /// OAuth 1.0a signer for Twitter API requests.
-#[derive(Debug)]
 pub struct OAuthSigner {
     consumer_key: String,
     consumer_secret: String,
     access_token: String,
     access_token_secret: String,
+}
+
+impl std::fmt::Debug for OAuthSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthSigner")
+            .field("consumer_key", &self.consumer_key)
+            .field("consumer_secret", &"[REDACTED]")
+            .field("access_token", &"[REDACTED]")
+            .field("access_token_secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl OAuthSigner {

@@ -11,7 +11,7 @@ use crate::types::{
     SearchTextInput, SearchTextResponse,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GooglePlacesClient {
     client: reqwest::Client,
     base_url: String,
@@ -19,6 +19,18 @@ pub struct GooglePlacesClient {
     search_text_field_mask: String,
     autocomplete_field_mask: String,
     place_details_field_mask: String,
+}
+
+impl std::fmt::Debug for GooglePlacesClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GooglePlacesClient")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("search_text_field_mask", &self.search_text_field_mask)
+            .field("autocomplete_field_mask", &self.autocomplete_field_mask)
+            .field("place_details_field_mask", &self.place_details_field_mask)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GooglePlacesClient {

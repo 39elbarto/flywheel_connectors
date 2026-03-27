@@ -79,12 +79,23 @@ pub struct Cookie {
 }
 
 /// Proxy configuration for browser network routing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
     pub server: String,
     pub bypass_list: Option<Vec<String>>,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("server", &self.server)
+            .field("bypass_list", &self.bypass_list)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Result of proxy configuration operations.

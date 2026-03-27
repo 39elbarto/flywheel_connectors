@@ -109,7 +109,6 @@ fn validate_numeric_id<'a>(id: &'a str, field: &str) -> TwitterResult<&'a str> {
 }
 
 /// Twitter REST API client.
-#[derive(Debug)]
 pub struct TwitterApiClient {
     client: Client,
     base_url: String,
@@ -120,6 +119,22 @@ pub struct TwitterApiClient {
     max_delay_ms: u64,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
+}
+
+impl std::fmt::Debug for TwitterApiClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwitterApiClient")
+            .field("client", &self.client)
+            .field("base_url", &self.base_url)
+            .field("oauth_signer", &self.oauth_signer)
+            .field("bearer_token", &"[REDACTED]")
+            .field("max_retries", &self.max_retries)
+            .field("initial_delay_ms", &self.initial_delay_ms)
+            .field("max_delay_ms", &self.max_delay_ms)
+            .field("runtime", &self.runtime)
+            .field("retry_config", &self.retry_config)
+            .finish()
+    }
 }
 
 impl TwitterApiClient {

@@ -36,10 +36,18 @@ pub enum StreamEvent {
 }
 
 /// Twitter filtered stream connection.
-#[derive(Debug)]
 pub struct FilteredStream {
     config: TwitterConfig,
     bearer_token: String,
+}
+
+impl std::fmt::Debug for FilteredStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilteredStream")
+            .field("config", &self.config)
+            .field("bearer_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Handle for a single stream connection attempt.

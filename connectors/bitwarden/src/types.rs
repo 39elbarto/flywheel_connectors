@@ -45,12 +45,23 @@ pub struct Item {
 }
 
 /// Login data for a vault item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Login {
     pub username: Option<String>,
     pub password: Option<String>,
     pub totp: Option<String>,
     pub uris: Option<Vec<LoginUri>>,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("totp", &self.totp)
+            .field("uris", &self.uris)
+            .finish()
+    }
 }
 
 /// A URI associated with a login item.

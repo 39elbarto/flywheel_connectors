@@ -176,6 +176,12 @@ impl NostrConfig {
                 message: "default_query_limit must be greater than zero".into(),
             });
         }
+        if self.default_query_limit > 1000 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "default_query_limit must not exceed 1000".into(),
+            });
+        }
         for relay in &self.relay_urls {
             validate_relay_url(relay)?;
         }
@@ -397,7 +403,8 @@ pub fn build_filter(input: &Value, default_limit: u64) -> FcpResult<Value> {
     if let Some(until) = i64_field(input, "until")? {
         filter.insert("until".into(), serde_json::json!(until));
     }
-    let limit = u64_field(input, "limit")?.unwrap_or(default_limit);
+    const MAX_QUERY_LIMIT: u64 = 1000;
+    let limit = u64_field(input, "limit")?.unwrap_or(default_limit).min(MAX_QUERY_LIMIT);
     if limit == 0 {
         return Err(FcpError::InvalidRequest {
             code: 1005,

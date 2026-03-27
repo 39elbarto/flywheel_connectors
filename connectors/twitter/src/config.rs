@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the Twitter connector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TwitterConfig {
     /// OAuth 1.0a Consumer Key (API Key)
     pub consumer_key: String,
@@ -42,6 +42,23 @@ pub struct TwitterConfig {
     /// Retry configuration
     #[serde(default)]
     pub retry: RetryConfig,
+}
+
+impl std::fmt::Debug for TwitterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwitterConfig")
+            .field("consumer_key", &"[REDACTED]")
+            .field("consumer_secret", &"[REDACTED]")
+            .field("access_token", &"[REDACTED]")
+            .field("access_token_secret", &"[REDACTED]")
+            .field("bearer_token", &self.bearer_token.as_ref().map(|_| "[REDACTED]"))
+            .field("api_url", &self.api_url)
+            .field("upload_url", &self.upload_url)
+            .field("stream_url", &self.stream_url)
+            .field("timeout", &self.timeout)
+            .field("retry", &self.retry)
+            .finish()
+    }
 }
 
 fn default_api_url() -> String {

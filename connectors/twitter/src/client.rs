@@ -37,7 +37,7 @@ use crate::{
 };
 
 /// Authentication mode for the Twitter connector.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TwitterAuth {
     /// Direct OAuth 1.0a credentials.
     OAuth {
@@ -49,6 +49,22 @@ pub enum TwitterAuth {
     },
     /// Secretless mode: egress proxy injects credentials.
     CredentialId(CredentialId),
+}
+
+impl std::fmt::Debug for TwitterAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OAuth { .. } => f
+                .debug_struct("OAuth")
+                .field("consumer_key", &"[REDACTED]")
+                .field("consumer_secret", &"[REDACTED]")
+                .field("access_token", &"[REDACTED]")
+                .field("access_token_secret", &"[REDACTED]")
+                .field("bearer_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
 }
 
 impl TwitterAuth {
@@ -320,6 +336,12 @@ impl TwitterApiClient {
                 match req.send().await {
                     Ok(response) => match self.handle_response(response).await {
                         Ok(data) => AttemptOutcome::Success(data),
+                        // Rate-limited is terminal: the caller should handle
+                        // retry_after at a higher level rather than burning
+                        // through the request deadline with repeated 429s.
+                        Err(e @ TwitterError::RateLimited { .. }) => {
+                            AttemptOutcome::Terminal(e)
+                        }
                         Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
                             retry_after: e.retry_after(),
                             error: e,
@@ -371,6 +393,9 @@ impl TwitterApiClient {
                 match req.send().await {
                     Ok(response) => match self.handle_response(response).await {
                         Ok(data) => AttemptOutcome::Success(data),
+                        Err(e @ TwitterError::RateLimited { .. }) => {
+                            AttemptOutcome::Terminal(e)
+                        }
                         Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
                             retry_after: e.retry_after(),
                             error: e,

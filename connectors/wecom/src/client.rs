@@ -205,6 +205,8 @@ impl WeComClient {
         ensure_wecom_success(response.json().await?)
     }
 
+    const MAX_MEDIA_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+
     pub async fn download_media(
         &self,
         request: &WeComMediaDownloadRequest,
@@ -217,22 +219,21 @@ impl WeComClient {
             query.append_pair("media_id", request.media_id());
         }
 
-        const MAX_MEDIA_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
-
         let response = self.client.get(url).send().await?;
         let status = response.status();
         let headers = response.headers().clone();
+        let max_bytes = Self::MAX_MEDIA_BYTES;
         if let Some(cl) = response.content_length() {
-            if cl > MAX_MEDIA_BYTES {
+            if cl > max_bytes {
                 return Err(WeComError::InvalidInput(format!(
-                    "media download too large: {cl} bytes exceeds {MAX_MEDIA_BYTES} byte limit"
+                    "media download too large: {cl} bytes exceeds {max_bytes} byte limit"
                 )));
             }
         }
         let bytes = response.bytes().await?;
-        if bytes.len() as u64 > MAX_MEDIA_BYTES {
+        if bytes.len() as u64 > max_bytes {
             return Err(WeComError::InvalidInput(format!(
-                "media download too large: {} bytes exceeds {MAX_MEDIA_BYTES} byte limit",
+                "media download too large: {} bytes exceeds {max_bytes} byte limit",
                 bytes.len()
             )));
         }

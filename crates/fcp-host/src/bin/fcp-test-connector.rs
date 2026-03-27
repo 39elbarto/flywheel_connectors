@@ -12,11 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fcp_core::{
-    AgentHint, ApprovalMode, AuthCaps, CapabilityId, CapabilityToken, ConnectorId, EventCaps,
-    FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState,
-    IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OAuthConfig, ObjectId,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, ZoneId,
+    AgentHint, ApprovalMode, AuthCaps, CapabilityId, ConnectorId, EventCaps, FcpError,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass,
+    Introspection, InvokeRequest, InvokeResponse, OAuthConfig, ObjectId, OperationId,
+    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse,
 };
 use fcp_host::ConnectorArchetype;
 use serde_json::json;
@@ -759,6 +759,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::{CapabilityToken, RequestId, ZoneId};
 
     fn test_profile(require_handshake: bool) -> TestConnectorProfile {
         TestConnectorProfile {

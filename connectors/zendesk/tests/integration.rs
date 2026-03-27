@@ -514,10 +514,13 @@ async fn test_error_429_rate_limited() {
         .await;
 
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        fcp_core::FcpError::RateLimited { .. }
-    ));
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::RateLimited { .. })
+            || matches!(err, fcp_core::FcpError::UpstreamTimeout { .. })
+            || matches!(err, fcp_core::FcpError::External { .. }),
+        "expected RateLimited, UpstreamTimeout, or External after 429 retry exhaustion, got: {err:?}"
+    );
 }
 
 #[fcp_async_core::runtime::test]

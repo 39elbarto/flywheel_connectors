@@ -143,6 +143,7 @@ impl ZendeskClient {
         let http = Client::builder()
             .default_headers(headers)
             .user_agent("fcp-zendesk/0.1.0")
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(ZendeskError::Http)?;
 

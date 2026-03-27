@@ -85,6 +85,7 @@ impl GoogleAiClient {
     pub fn new_with_auth(auth: GoogleAiAuth) -> GoogleAiResult<Self> {
         let http = Client::builder()
             .user_agent("fcp-google-ai/0.1.0")
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(GoogleAiError::Http)?;
 

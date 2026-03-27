@@ -214,6 +214,7 @@ impl NotionClient {
         let http = Client::builder()
             .default_headers(headers)
             .user_agent("fcp-notion/0.1.0")
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(NotionError::Http)?;
 

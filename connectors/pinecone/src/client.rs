@@ -122,6 +122,7 @@ impl PineconeClient {
         let http = Client::builder()
             .default_headers(headers)
             .user_agent("fcp-pinecone/0.1.0")
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(PineconeError::Http)?;
 

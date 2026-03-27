@@ -81,6 +81,7 @@ impl M365Client {
     pub fn new_with_auth(auth: M365Auth) -> M365Result<Self> {
         let http = Client::builder()
             .user_agent("fcp-microsoft365/0.1.0")
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(M365Error::Http)?;
 

@@ -35,6 +35,7 @@ impl PlaidClient {
         let base_url = normalize_base_url(base_url)?;
         let http = Client::builder()
             .user_agent("fcp-plaid/0.1.0")
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(PlaidError::Http)?;
 

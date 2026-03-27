@@ -15093,7 +15093,7 @@ fn preflight_dispatch_without_host(args: &PreflightArgs) -> Result<DispatchOutco
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
-        exit_code: CliExitCode::Transport,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -32232,10 +32232,11 @@ depends_on = ["missing"]
         let (exit_code, payload) =
             execute_json(&["fwc", "--json", "preflight", "github", "issues.create"]);
 
-        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "preflight");
         assert_eq!(payload["status"], "offline");
         assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["availability"]["availability"], "offline-artifact");
         assert!(
             payload["connector"]["slug"]
                 .as_str()

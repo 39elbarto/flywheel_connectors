@@ -72,7 +72,7 @@ use wasmtime_wasi::{
 };
 
 use crate::egress::{EgressGuard, EgressHttpRequest, EgressRequest, EgressTcpConnectRequest};
-use crate::sandbox::{CompiledPolicy, SandboxError};
+use crate::sandbox::{CompiledPolicy, SandboxError, resolve_policy_path};
 use fcp_manifest::NetworkConstraints;
 
 // ============================================================================
@@ -360,23 +360,11 @@ impl FsCapabilityGate {
         let canonical = match std::fs::canonicalize(path) {
             Ok(p) => p,
             Err(_) => {
-                // Path doesn't exist yet - check parent for write operations
+                // For writes, align with the host sandbox path resolution logic:
+                // resolve through the nearest existing ancestor so nested missing
+                // paths still preserve symlink and `..` traversal semantics.
                 if write {
-                    if let Some(parent) = path.parent() {
-                        if let Ok(p) = std::fs::canonicalize(parent) {
-                            p.join(path.file_name().unwrap_or_default())
-                        } else {
-                            return Err(WasiError::FsAccessDenied {
-                                path: path.display().to_string(),
-                                reason: "parent directory does not exist".into(),
-                            });
-                        }
-                    } else {
-                        return Err(WasiError::FsAccessDenied {
-                            path: path.display().to_string(),
-                            reason: "path has no parent".into(),
-                        });
-                    }
+                    resolve_policy_path(path)
                 } else {
                     return Err(WasiError::FsAccessDenied {
                         path: path.display().to_string(),
@@ -1908,6 +1896,28 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("does not exist"));
+    }
+
+    #[test]
+    fn test_fs_capability_gate_check_access_nested_missing_write_allowed() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let allowed =
+            std::env::temp_dir().join(format!("fcp-wasi-fs-gate-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&allowed).expect("allowed directory should exist");
+
+        let gate = FsCapabilityGate::new(vec![], vec![allowed.clone()]);
+        let pending_write = allowed.join("nested").join("deeper").join("future.txt");
+
+        assert!(
+            gate.check_access(&pending_write, true).is_ok(),
+            "nested missing writes under an allowed writable root should be permitted",
+        );
     }
 
     #[test]

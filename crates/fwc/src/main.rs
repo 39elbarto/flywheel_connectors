@@ -6736,7 +6736,7 @@ fn mesh_availability_dispatch(
         });
     }
 
-    let catalog = DiscoveryCatalog::load_for_connector_filter(args.connector.as_deref())?;
+    let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {

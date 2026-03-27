@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use anyhow::{Context, Result};
 use fcp_core::{
@@ -1543,7 +1544,7 @@ impl DiscoveryCatalog {
 
     fn load_matching_slug(requested_slug: Option<&str>) -> Result<Self> {
         let connectors_dir = workspace_root().join("connectors");
-        let mut connectors = Vec::new();
+        let mut manifests = Vec::new();
 
         for entry in fs::read_dir(&connectors_dir)
             .with_context(|| format!("failed to read {}", connectors_dir.display()))?
@@ -1565,10 +1566,28 @@ impl DiscoveryCatalog {
                 continue;
             }
 
-            if let Ok(connector) = DiscoveredConnector::from_manifest(&slug, &manifest_path) {
-                connectors.push(connector);
-            }
+            manifests.push((slug, manifest_path));
         }
+
+        let worker_count = catalog_loader_worker_count(manifests.len());
+        let mut connectors = if worker_count == 1 {
+            load_connector_manifests(manifests)
+        } else {
+            let chunk_size = manifests.len().div_ceil(worker_count);
+            thread::scope(|scope| {
+                let mut workers = Vec::new();
+                for chunk in manifests.chunks(chunk_size) {
+                    let chunk = chunk.to_vec();
+                    workers.push(scope.spawn(move || load_connector_manifests(chunk)));
+                }
+
+                let mut parsed = Vec::new();
+                for worker in workers {
+                    parsed.extend(worker.join().expect("catalog worker should not panic"));
+                }
+                parsed
+            })
+        };
 
         connectors.sort_by(|left, right| left.slug.cmp(&right.slug));
         Ok(Self { connectors })
@@ -1646,6 +1665,20 @@ fn is_simple_connector_slug(selector: &str) -> bool {
         && selector
             .chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+}
+
+fn catalog_loader_worker_count(manifest_count: usize) -> usize {
+    let available = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    manifest_count.clamp(1, available.min(4))
+}
+
+fn load_connector_manifests(manifests: Vec<(String, PathBuf)>) -> Vec<DiscoveredConnector> {
+    manifests
+        .into_iter()
+        .filter_map(|(slug, manifest_path)| {
+            DiscoveredConnector::from_manifest(&slug, &manifest_path).ok()
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -7891,6 +7924,16 @@ output_schema = { type = "object" }
 
         assert!(connector_ids.contains(&"fcp.github"));
         assert!(connector_ids.len() > 1);
+    }
+
+    #[test]
+    fn catalog_loader_worker_count_caps_parallelism() {
+        let expected_cap = thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(4);
+        assert_eq!(catalog_loader_worker_count(1), 1);
+        assert_eq!(catalog_loader_worker_count(8), 8.clamp(1, expected_cap));
+        assert_eq!(catalog_loader_worker_count(usize::MAX), expected_cap);
     }
 
     #[test]

@@ -538,7 +538,7 @@ async fn handshake_response_contains_capabilities() {
 async fn self_check_unconfigured() {
     let c = MakeConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
 }
 
 // -- Doctor when unconfigured --

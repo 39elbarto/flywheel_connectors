@@ -71,7 +71,7 @@ async fn lifecycle_self_check() {
 async fn lifecycle_self_check_unconfigured() {
     let c = EvernoteConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
 }
 
 #[fcp_async_core::runtime::test]

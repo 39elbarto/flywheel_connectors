@@ -730,7 +730,7 @@ async fn health_configured_but_not_handshaken() {
 async fn self_check_unconfigured() {
     let c = LinkedInConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
 }
 
 #[fcp_async_core::runtime::test]

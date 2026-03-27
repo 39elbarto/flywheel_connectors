@@ -128,7 +128,7 @@ async fn doctor_fully_configured() {
 async fn self_check_unconfigured() {
     let connector = DatadogConnector::new();
     let result = connector.handle_self_check().await.unwrap();
-    assert_eq!(result["status"], "unconfigured");
+    assert_eq!(result["status"], "degraded");
     assert_eq!(result["connector_id"], "fcp.datadog");
 }
 

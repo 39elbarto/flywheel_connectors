@@ -350,7 +350,11 @@ impl SymbolStore for MemorySymbolStore {
         self.objects
             .read()
             .get(object_id)
-            .map(|obj| obj.symbols.values().cloned().collect())
+            .map(|obj| {
+                let mut symbols: Vec<_> = obj.symbols.values().cloned().collect();
+                symbols.sort_unstable_by_key(|symbol| symbol.meta.esi);
+                symbols
+            })
             .unwrap_or_default()
     }
 
@@ -638,6 +642,27 @@ mod tests {
             StoreLogData {
                 object_id: Some(test_object_id()),
                 symbol_count: Some(u32::try_from(symbols.len()).unwrap_or(u32::MAX)),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn get_all_symbols_returns_symbols_sorted_by_esi() {
+        run_store_test("get_all_symbols_sorted", "verify", "read", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            for esi in [4, 1, 3, 0, 2] {
+                store.put_symbol(test_symbol(esi)).await.unwrap();
+            }
+
+            let symbols = store.get_all_symbols(&test_object_id()).await;
+            let esis: Vec<u32> = symbols.into_iter().map(|symbol| symbol.meta.esi).collect();
+            assert_eq!(esis, vec![0, 1, 2, 3, 4]);
+
+            StoreLogData {
+                details: Some(json!({ "esis": esis })),
                 ..StoreLogData::default()
             }
         });

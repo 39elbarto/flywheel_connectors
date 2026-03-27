@@ -239,13 +239,14 @@ impl RaptorQDecoder {
                 requested,
                 max_supported,
             },
-            InnerError::CorruptDecodedOutput {
-                esi, byte_index, ..
-            } => DecodeError::InvalidSymbol {
-                reason: format!(
-                    "decoded output failed verification for ESI {esi} at byte {byte_index}"
-                ),
-            },
+            // `add_symbol()` deliberately tries reconstruction as soon as we
+            // have K symbols, which can be earlier than the final solvable
+            // subset when source and repair symbols arrive in arbitrary order.
+            // A verification mismatch here means "this optimistic attempt was
+            // not sufficient yet", not that the received symbol was malformed.
+            InnerError::CorruptDecodedOutput { .. } => {
+                DecodeError::InsufficientSymbols { received, needed }
+            }
         }
     }
 
@@ -1508,6 +1509,28 @@ mod tests {
             }
         }
         panic!("Failed to decode with reverse repair-first arrival order");
+    }
+
+    #[test]
+    fn corrupt_decoded_output_maps_to_recoverable_insufficient_symbols() {
+        let mapped = RaptorQDecoder::map_decode_error(
+            crate::codec::decoder::DecodeError::CorruptDecodedOutput {
+                esi: 91,
+                byte_index: 7,
+                expected: 0xAA,
+                actual: 0x55,
+            },
+            80,
+            82,
+        );
+
+        assert_eq!(
+            mapped,
+            DecodeError::InsufficientSymbols {
+                received: 80,
+                needed: 82,
+            }
+        );
     }
 
     // ── Additional decode tests (batch 2) ─────────────────────────────────

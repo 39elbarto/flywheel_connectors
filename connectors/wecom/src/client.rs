@@ -189,10 +189,25 @@ impl WeComClient {
             query.append_pair("media_id", request.media_id());
         }
 
+        const MAX_MEDIA_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+
         let response = self.client.get(url).send().await?;
         let status = response.status();
         let headers = response.headers().clone();
+        if let Some(cl) = response.content_length() {
+            if cl > MAX_MEDIA_BYTES {
+                return Err(WeComError::InvalidInput(format!(
+                    "media download too large: {cl} bytes exceeds {MAX_MEDIA_BYTES} byte limit"
+                )));
+            }
+        }
         let bytes = response.bytes().await?;
+        if bytes.len() as u64 > MAX_MEDIA_BYTES {
+            return Err(WeComError::InvalidInput(format!(
+                "media download too large: {} bytes exceeds {MAX_MEDIA_BYTES} byte limit",
+                bytes.len()
+            )));
+        }
 
         if let Some(provider_result) = parse_provider_json_response(&bytes) {
             return match provider_result {

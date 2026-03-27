@@ -79,6 +79,7 @@ pub enum RiskCeiling {
 }
 
 impl RiskCeiling {
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "low" => Some(Self::Low),
@@ -88,6 +89,7 @@ impl RiskCeiling {
         }
     }
 
+    #[must_use]
     pub fn allows(self, level: &str) -> bool {
         match self {
             Self::Low => level == "low",
@@ -107,6 +109,7 @@ pub enum SafetyCeiling {
 }
 
 impl SafetyCeiling {
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "safe" => Some(Self::Safe),
@@ -151,6 +154,7 @@ pub struct SearchResult {
 ///
 /// Returns scored results sorted by relevance (descending), then by operation
 /// ID (ascending) for deterministic output.
+#[must_use]
 pub fn search_operations(
     connectors: &[DiscoveredConnector],
     query: &str,
@@ -206,6 +210,7 @@ pub fn search_operations(
 }
 
 /// Convert results to JSON for dispatch.
+#[must_use]
 pub fn results_to_json(results: &[SearchResult], limit: usize) -> Vec<Value> {
     results
         .iter()

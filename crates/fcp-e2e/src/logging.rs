@@ -242,6 +242,10 @@ impl E2eLogEntry {
     }
 
     /// Attach typed session-transcript step metadata.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the transcript entry cannot be serialized to JSON.
     #[must_use]
     pub fn with_session_transcript_entry(mut self, entry: &TranscriptEntry) -> Self {
         self.promote_to_v2();

@@ -1861,7 +1861,7 @@ fn render_value_with_params(value: Value, params: &BTreeMap<String, Value>) -> R
                 let context = params_render_context(params);
                 if let Some(value) = resolve_json_path(&context, placeholder) {
                     return RenderedValue {
-                        value: value.clone(),
+                        value,
                         unresolved: Vec::new(),
                     };
                 }

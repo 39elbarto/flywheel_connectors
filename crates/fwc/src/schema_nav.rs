@@ -184,7 +184,7 @@ fn fill_template_at_path(
             Value::Array(
                 items
                     .iter()
-                    .map(|item| fill_template_at_path(item, bindings, item_path.as_deref()))
+                    .map(|item| fill_template_at_path(item, bindings, Some(item_path.as_str())))
                     .collect(),
             )
         }
@@ -198,10 +198,10 @@ fn root_fill_binding(bindings: &Map<String, Value>) -> Option<&Value> {
         .find_map(|path| bindings.get(path))
 }
 
-fn array_item_fill_path(current_path: Option<&str>) -> Option<String> {
+fn array_item_fill_path(current_path: Option<&str>) -> String {
     match current_path {
-        Some(path) if !path.is_empty() => Some(format!("{path}[]")),
-        Some(_) | None => Some("[]".to_owned()),
+        Some(path) if !path.is_empty() => format!("{path}[]"),
+        Some(_) | None => "[]".to_owned(),
     }
 }
 
@@ -302,7 +302,7 @@ fn validate_type(schema: &Value, value: &Value, path: &str, errors: &mut Vec<Val
     // Check enum constraints
     if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
         if !enum_values.contains(value) {
-            let allowed: Vec<String> = enum_values.iter().map(|v| v.to_string()).collect();
+            let allowed: Vec<String> = enum_values.iter().map(std::string::ToString::to_string).collect();
             errors.push(ValidationError {
                 path: path.to_owned(),
                 expected: format!("one of: {}", allowed.join(", ")),
@@ -537,16 +537,16 @@ fn scaffold_value(schema: &Value) -> Value {
     if preferred_types.len() > 1 {
         return Value::String(format!("<{}>", preferred_types.join("|")));
     }
-    let type_str = preferred_types
-        .first()
-        .map(String::as_str)
-        .unwrap_or_else(|| {
+    let type_str = preferred_types.first().map_or_else(
+        || {
             if normalized.get("properties").is_some() {
                 "object"
             } else {
                 "any"
             }
-        });
+        },
+        String::as_str,
+    );
     match type_str {
         "string" => {
             if let Some(enum_vals) = normalized.get("enum").and_then(Value::as_array) {
@@ -1005,17 +1005,18 @@ fn select_preferred_variant(schema: &Value) -> Option<&Value> {
 }
 
 fn normalize_schema(schema: &Value) -> Value {
-    let mut normalized = if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
-        let mut base = schema.clone();
-        if let Some(map) = base.as_object_mut() {
-            map.remove("allOf");
-        }
-        all_of.iter().fold(base, |acc, variant| {
-            merge_schema_values(&acc, &normalize_schema(variant))
-        })
-    } else {
-        schema.clone()
-    };
+    let mut normalized = schema.get("allOf").and_then(Value::as_array).map_or_else(
+        || schema.clone(),
+        |all_of| {
+            let mut base = schema.clone();
+            if let Some(map) = base.as_object_mut() {
+                map.remove("allOf");
+            }
+            all_of.iter().fold(base, |acc, variant| {
+                merge_schema_values(&acc, &normalize_schema(variant))
+            })
+        },
+    );
     normalize_nested_schema(&mut normalized);
     normalized
 }

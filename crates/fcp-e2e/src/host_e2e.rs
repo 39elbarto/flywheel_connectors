@@ -563,6 +563,7 @@ impl SessionE2eRunner {
         }
     }
 
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn build_evidence_bundle(
         &self,
         script: &SessionScript,

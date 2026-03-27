@@ -410,7 +410,7 @@ impl E2eRunReport {
         if let Some(transcript) = &self.session_transcript {
             let transport = transcript
                 .transport
-                .map_or("unspecified".to_string(), |transport| transport.to_string());
+                .map_or_else(|| "unspecified".to_string(), |transport| transport.to_string());
             let _ = writeln!(
                 out,
                 "Session Transcript: {} with {} entries ({} passed, {} failed, {} skipped, {} timed out)",

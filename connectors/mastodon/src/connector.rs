@@ -709,7 +709,7 @@ impl MastodonConnector {
                     .input
                     .get("limit")
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                    .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
                 let statuses = client
                     .get_home_timeline(runtime, limit)
                     .await
@@ -728,7 +728,7 @@ impl MastodonConnector {
                     .input
                     .get("limit")
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                    .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
                 let statuses = client
                     .get_public_timeline(runtime, local, limit)
                     .await
@@ -856,7 +856,7 @@ impl MastodonConnector {
                     .input
                     .get("limit")
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                    .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
                 let notifications = client
                     .get_notifications(runtime, limit)
                     .await
@@ -877,7 +877,7 @@ impl MastodonConnector {
                     .input
                     .get("limit")
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                    .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
                 let results = client
                     .search(runtime, q, search_type, limit)
                     .await

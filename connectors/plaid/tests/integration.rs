@@ -25,13 +25,27 @@ use wiremock::{
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+fn capability_for_operation(op: &str) -> &str {
+    match op {
+        "plaid.link_token_create" | "plaid.token_exchange" => "plaid.link",
+        "plaid.accounts_get" | "plaid.accounts_balance_get" => "plaid.accounts.read",
+        "plaid.transactions_get" | "plaid.transactions_sync" => "plaid.transactions.read",
+        "plaid.auth_get" => "plaid.auth.read",
+        "plaid.identity_get" => "plaid.identity.read",
+        "plaid.investments_holdings_get" => "plaid.investments.read",
+        "plaid.liabilities_get" => "plaid.liabilities.read",
+        _ => op,
+    }
+}
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    let cap = capability_for_operation(op);
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -39,9 +53,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> Capabilit
     CapabilityToken { raw: cose }
 }
 
-async fn setup_handshake(connector: &mut PlaidConnector, caps: &[&str]) -> Ed25519SigningKey {
+async fn setup_handshake(connector: &mut PlaidConnector, ops: &[&str]) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let caps: Vec<&str> = ops.iter().map(|op| capability_for_operation(op)).collect();
     connector
         .handle_handshake(json!({
             "protocol_version": "2.0",

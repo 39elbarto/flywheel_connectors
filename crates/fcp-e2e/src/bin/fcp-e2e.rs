@@ -1,6 +1,11 @@
 //! Minimal CLI for fcp-e2e JSONL output.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::too_many_arguments,
+    clippy::or_fun_call,
+    clippy::manual_map,
+)]
 
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -1203,7 +1208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None,
                     response_path
                         .as_ref()
-                        .and_then(|_| stdout_path.as_ref())
+                        .and(stdout_path.as_ref())
                         .and_then(|path| {
                             if step_artifacts
                                 .iter()

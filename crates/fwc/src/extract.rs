@@ -293,7 +293,7 @@ fn parse_chain(s: &str) -> Result<Vec<ChainSegment>, ExtractError> {
         } else {
             // Field name — read until `.` or `[`
             let end = remaining
-                .find(|c: char| c == '.' || c == '[')
+                .find(['.', '['])
                 .unwrap_or(remaining.len());
             let field = &remaining[..end];
             if field.is_empty() {

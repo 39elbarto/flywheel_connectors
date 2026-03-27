@@ -241,12 +241,12 @@ impl<T> ProvenanceMetadataField<T> {
     }
 
     /// Returns `true` when a verified value is present.
-    pub fn is_known(&self) -> bool {
+    pub const fn is_known(&self) -> bool {
         self.field.is_known()
     }
 
     /// Borrow the inner value if `Known`.
-    pub fn as_known(&self) -> Option<&T> {
+    pub const fn as_known(&self) -> Option<&T> {
         self.field.as_known()
     }
 
@@ -1710,9 +1710,9 @@ fn catalog_loader_worker_count(manifest_count: usize) -> usize {
 
 fn load_connector_manifests(manifests: &[(String, PathBuf)]) -> Vec<DiscoveredConnector> {
     manifests
-        .into_iter()
+        .iter()
         .filter_map(|(slug, manifest_path)| {
-            DiscoveredConnector::from_manifest(&slug, &manifest_path).ok()
+            DiscoveredConnector::from_manifest(slug, manifest_path).ok()
         })
         .collect()
 }
@@ -2136,32 +2136,30 @@ fn parse_manifest_for_discovery(raw: &str, manifest_path: &Path) -> Result<Conne
 fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
     let mut document: toml::Value =
         toml::from_str(raw).context("failed to parse manifest TOML for discovery normalization")?;
-    let mut changed = false;
-
-    if let Some(provides) = document
+    let streaming_removed = document
         .get_mut("provides")
         .and_then(toml::Value::as_table_mut)
-        && provides.remove("streaming").is_some()
-    {
-        changed = true;
-    }
+        .and_then(|provides| provides.remove("streaming"))
+        .is_some();
 
-    if let Some(operations) = document
+    let network_removed = document
         .get_mut("provides")
         .and_then(toml::Value::as_table_mut)
         .and_then(|provides| provides.get_mut("operations"))
         .and_then(toml::Value::as_table_mut)
-    {
-        for (_, operation) in operations.iter_mut() {
-            if let Some(operation_table) = operation.as_table_mut() {
-                if operation_table.remove("network").is_some() {
-                    changed = true;
+        .is_some_and(|operations| {
+            let mut any_removed = false;
+            for (_, operation) in operations.iter_mut() {
+                if let Some(operation_table) = operation.as_table_mut() {
+                    if operation_table.remove("network").is_some() {
+                        any_removed = true;
+                    }
                 }
             }
-        }
-    }
+            any_removed
+        });
 
-    if changed {
+    if streaming_removed || network_removed {
         Ok(Some(document))
     } else {
         Ok(None)

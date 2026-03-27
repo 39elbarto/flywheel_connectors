@@ -817,7 +817,7 @@ fn apply_filter(
         TemplateFilter::Join(sep) => {
             // If the string looks like a JSON array, join its elements
             if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(s) {
-                let strs: Vec<String> = arr.iter().map(|v| value_to_string(v)).collect();
+                let strs: Vec<String> = arr.iter().map(value_to_string).collect();
                 Ok(strs.join(sep.as_str()))
             } else {
                 Ok(s.to_string())

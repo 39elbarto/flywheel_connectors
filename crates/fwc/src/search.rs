@@ -58,7 +58,7 @@ pub struct SearchFilters {
 }
 
 impl SearchFilters {
-    fn has_active_filters(&self) -> bool {
+    const fn has_active_filters(&self) -> bool {
         self.connector.is_some()
             || self.capability.is_some()
             || self.risk_max.is_some()

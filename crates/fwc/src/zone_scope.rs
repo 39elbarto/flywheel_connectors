@@ -578,12 +578,11 @@ pub fn check_cross_zone(
     // General check: any shared connectors between zones
     let source_connectors = registry.connectors_in_zone(source);
     let target_connectors = registry.connectors_in_zone(target);
-    let shared: Vec<&String> = source_connectors
+    let has_shared = source_connectors
         .iter()
-        .filter(|c| target_connectors.contains(*c))
-        .collect();
+        .any(|c| target_connectors.contains(c));
 
-    if shared.is_empty() {
+    if !has_shared {
         CrossZoneCheckResult {
             source: source_str.clone(),
             target: target_str.clone(),
@@ -988,7 +987,7 @@ pub fn plan_migration(
 /// without force), rolls back.
 pub fn execute_migration(
     plan: &MigrationPlan,
-    source_config: &mut ConnectorZoneConfig,
+    source_config: &ConnectorZoneConfig,
     target_config: &mut ConnectorZoneConfig,
     force: bool,
 ) -> MigrationResult {
@@ -1247,8 +1246,8 @@ pub fn format_zones_toon(infos: &[ZoneInfo]) -> String {
     let _ = writeln!(out, "Zones: {total} configured");
     let _ = writeln!(
         out,
-        "{:<20} {:>5} {:>5}  {:<12} {:<24} {}",
-        "ZONE", "CONN", "TOOLS", "POLICY", "CAPABILITIES", "CONNECTORS"
+        "{:<20} {:>5} {:>5}  {:<12} {:<24} CONNECTORS",
+        "ZONE", "CONN", "TOOLS", "POLICY", "CAPABILITIES"
     );
     for info in infos {
         let connectors_display = summarize_zone_items(&info.connectors, 2);

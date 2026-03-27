@@ -867,7 +867,7 @@ pub fn format_decision_guide_toon(entries: &[DecisionGuideEntry]) -> String {
     let _ = writeln!(out, "FWC Decision Guide: When to Use What");
     let _ = writeln!(out, "=====================================");
     let _ = writeln!(out);
-    let _ = writeln!(out, "{:<42} {:<40} {}", "GOAL", "COMMAND", "SURFACE");
+    let _ = writeln!(out, "{:<42} {:<40} SURFACE", "GOAL", "COMMAND");
     for e in entries {
         let _ = writeln!(
             out,

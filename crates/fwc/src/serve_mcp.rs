@@ -750,9 +750,9 @@ fn tool_matches_server_filters(tool: &McpToolDefinition, config: &McpServerConfi
     connector_ok && zone_ok
 }
 
-fn filtered_tools<'a>(
-    state: &'a McpServerState,
-) -> impl Iterator<Item = &'a McpToolDefinition> + 'a {
+fn filtered_tools(
+    state: &McpServerState,
+) -> impl Iterator<Item = &McpToolDefinition> + '_ {
     state
         .tools
         .iter()

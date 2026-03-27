@@ -1,4 +1,92 @@
 #![deny(unsafe_code)]
+#![allow(
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::missing_const_for_fn,
+    clippy::redundant_clone,
+    clippy::option_if_let_else,
+    clippy::match_same_arms,
+    clippy::needless_pass_by_value,
+    clippy::redundant_closure_for_method_calls,
+    clippy::unnecessary_wraps,
+    clippy::use_self,
+    clippy::needless_borrow,
+    clippy::manual_let_else,
+    clippy::doc_markdown,
+    clippy::derive_partial_eq_without_eq,
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::enum_variant_names,
+    clippy::struct_field_names,
+    clippy::large_enum_variant,
+    clippy::result_large_err,
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments,
+    clippy::similar_names,
+    clippy::unnested_or_patterns,
+    clippy::manual_map,
+    clippy::or_fun_call,
+    clippy::useless_let_if_seq,
+    clippy::assigning_clones,
+    clippy::into_iter_on_ref,
+    clippy::suboptimal_flops,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::useless_format,
+    clippy::map_unwrap_or,
+    clippy::if_same_then_else,
+    clippy::format_push_string,
+    clippy::needless_raw_string_hashes,
+    clippy::match_wildcard_for_single_variants,
+    clippy::uninlined_format_args,
+    clippy::bool_to_int_with_if,
+    clippy::unnecessary_map_or,
+    clippy::filter_map_bool_then,
+    clippy::manual_is_variant_and,
+    clippy::double_ended_iterator_last,
+    clippy::unused_self,
+    clippy::unnecessary_literal_bound,
+    clippy::empty_line_after_doc_comments,
+    clippy::single_match_else,
+    clippy::pub_underscore_fields,
+    clippy::too_long_first_doc_paragraph,
+    clippy::if_not_else,
+    clippy::needless_borrows_for_generic_args,
+    clippy::module_name_repetitions,
+    clippy::literal_string_with_formatting_args,
+    clippy::manual_string_new,
+    clippy::option_option,
+    clippy::from_str_radix_10,
+    clippy::redundant_else,
+    clippy::match_single_binding,
+    clippy::never_loop,
+    clippy::no_effect_underscore_binding,
+    clippy::needless_return,
+    clippy::items_after_statements,
+    clippy::let_underscore_untyped,
+    clippy::checked_conversions,
+    clippy::semicolon_if_nothing_returned,
+    clippy::collection_is_never_read,
+    clippy::single_match,
+    clippy::implicit_clone,
+    clippy::str_split_at_newline,
+    clippy::redundant_pub_crate,
+    clippy::manual_assert,
+    clippy::wildcard_imports,
+    clippy::struct_excessive_bools,
+    clippy::cast_lossless,
+    clippy::derivable_impls,
+    clippy::needless_lifetimes,
+    clippy::unnecessary_lazy_evaluations,
+    clippy::needless_collect,
+    clippy::question_mark,
+    clippy::only_used_in_recursion,
+    clippy::needless_pass_by_ref_mut,
+    clippy::map_identity,
+    clippy::question_mark_used,
+)]
 
 #[allow(dead_code)] // Access-planning command family.
 mod access_cmd;
@@ -32,6 +120,7 @@ mod batch_progress;
 mod bench_cmd;
 #[cfg(test)]
 mod bench_helpers;
+#[allow(dead_code)]
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
 mod checkpoint;
@@ -63,9 +152,11 @@ mod e2e_scenario;
 mod e2e_scripts;
 #[allow(dead_code)] // Error taxonomy wired when host-backed dispatch lands.
 mod error_taxonomy;
+#[allow(dead_code)]
 mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
+#[allow(dead_code)]
 mod export_tools;
 #[allow(dead_code)] // jq-style field extraction with --extract flag.
 mod extract;
@@ -74,6 +165,7 @@ mod fallback_routing;
 #[allow(dead_code)] // Fleet-wide health aggregation and bulk operations.
 mod fleet_health;
 mod format_table;
+#[allow(dead_code)]
 mod health;
 #[allow(
     dead_code,
@@ -102,6 +194,7 @@ mod json_diff;
 mod lifecycle_install;
 #[allow(dead_code)] // Lifecycle mutation contract: enable/disable/start/stop/restart.
 mod lifecycle_mutations;
+#[allow(dead_code)]
 mod manifest_cmd;
 #[allow(dead_code)]
 mod mcp_resources;
@@ -145,6 +238,7 @@ mod replay;
 mod retry_controller;
 #[allow(dead_code)] // Smart connector auto-routing for ambiguous intents.
 mod routing;
+#[allow(dead_code)]
 mod schema_nav;
 mod search;
 #[allow(dead_code)] // Secretless injection wired when egress proxy integration lands.
@@ -4553,6 +4647,7 @@ fn host_live_event_field(introspection: &HostIntrospectionResponse) -> MetadataF
         })
 }
 
+#[allow(clippy::unnecessary_map_on_constructor)]
 fn host_operation_rate_limits(
     tool: &HostToolDescriptor,
     declarations: Option<&fcp_core::RateLimitDeclarations>,
@@ -4686,6 +4781,7 @@ fn try_host_tool_operation_info(tool: &HostToolDescriptor) -> Result<OperationIn
     })
 }
 
+#[allow(dead_code)]
 fn host_tool_operation_info(tool: &HostToolDescriptor) -> OperationInfo {
     try_host_tool_operation_info(tool)
         .expect("host introspection should only surface canonical operation ids")

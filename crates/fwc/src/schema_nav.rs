@@ -817,8 +817,7 @@ fn describe_schema_inline(schema: &Value) -> String {
         return match type_str {
             "array" => normalized
                 .get("items")
-                .map(|items| format!("[{}]", describe_schema_inline(items)))
-                .unwrap_or_else(|| "[any]".to_owned()),
+                .map_or_else(|| "[any]".to_owned(), |items| format!("[{}]", describe_schema_inline(items))),
             "object" => describe_object_shape(&normalized),
             _ => type_str.to_owned(),
         };
@@ -929,8 +928,7 @@ fn summarize_object_member(schema: &Value) -> String {
         return match type_str {
             "array" => normalized
                 .get("items")
-                .map(|items| format!("[{}]", summarize_object_member(items)))
-                .unwrap_or_else(|| "[any]".to_owned()),
+                .map_or_else(|| "[any]".to_owned(), |items| format!("[{}]", summarize_object_member(items))),
             "object" => "object".to_owned(),
             _ => type_str.to_owned(),
         };
@@ -1069,10 +1067,9 @@ fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
                         for (name, prop_schema) in additional {
                             let merged_prop = props
                                 .get(name)
-                                .map(|existing_prop| {
+                                .map_or_else(|| prop_schema.clone(), |existing_prop| {
                                     merge_schema_values(existing_prop, prop_schema)
-                                })
-                                .unwrap_or_else(|| prop_schema.clone());
+                                });
                             props.insert(name.clone(), merged_prop);
                         }
                         Value::Object(props)
@@ -1103,8 +1100,7 @@ fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
             "items" => {
                 let combined = merged
                     .get("items")
-                    .map(|existing| merge_schema_values(existing, overlay_value))
-                    .unwrap_or_else(|| overlay_value.clone());
+                    .map_or_else(|| overlay_value.clone(), |existing| merge_schema_values(existing, overlay_value));
                 merged.insert(key.clone(), combined);
             }
             _ => {

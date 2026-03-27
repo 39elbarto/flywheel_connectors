@@ -2195,7 +2195,7 @@ mod tests {
     }
 
     #[test]
-    fn circuit_error_rate_all_failures() {
+    fn circuit_error_rate_mixed() {
         let mut cb = CircuitBreaker::new(100, Duration::minutes(5));
         for _ in 0..10 {
             cb.record_success();
@@ -2203,7 +2203,8 @@ mod tests {
         for _ in 0..3 {
             cb.record_failure();
         }
-        assert_eq!(cb.error_rate(), 30);
+        // 3 failures out of 13 total = 23%
+        assert_eq!(cb.error_rate(), 23);
     }
 
     #[test]

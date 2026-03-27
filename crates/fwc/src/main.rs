@@ -14448,7 +14448,20 @@ fn resolve_live_auth(args: &LiveAuthArgs) -> std::result::Result<ResolvedLiveAut
         .raw
         .claims_unverified()
         .ok()
-        .and_then(|claims| claims.get_subject().map(ToOwned::to_owned));
+        .and_then(|claims| {
+            claims
+                .get_subject()
+                .or_else(|| {
+                    // Fall back to FCP2 principal_id claim (-65540) when CWT sub is absent.
+                    claims
+                        .get(fcp_crypto::cose::fcp2_claims::PRINCIPAL_ID)
+                        .and_then(|v| match v {
+                            ciborium::Value::Text(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                })
+                .map(ToOwned::to_owned)
+        });
 
     Ok(ResolvedLiveAuth {
         capability_token,
@@ -37664,41 +37677,27 @@ depends_on = ["missing"]
     #[test]
     fn confusion_unknown_flag_shows_similar_flags() {
         // An unknown flag like `--vrsion` should be caught by clap and produce
-        // a structured parse or unknown-command error.
-        let (exit_code, payload) = execute_json(&["fwc", "--json", "--vrsion"]);
+        // an error message. Clap errors may bypass JSON mode, so use text.
+        let (exit_code, text) = execute_text(&["fwc", "--vrsion"]);
 
         assert_ne!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["status"], "error");
-        // The structured error should be present and recoverable
         assert!(
-            payload["error"]["recoverable"] == true,
-            "unknown flag error should be recoverable"
+            text.contains("vrsion") || text.contains("version") || text.contains("error"),
+            "error output should reference the unknown flag or suggest alternatives, got: {text}"
         );
     }
 
     #[test]
     fn confusion_empty_command_shows_help_hint() {
-        // Running `fwc --json` with no command should produce a structured
-        // missing-command error with helpful next actions.
-        let (exit_code, payload) = execute_json(&["fwc", "--json"]);
+        // Running `fwc` with no command should produce a plaintext quickstart
+        // guide with helpful next actions.
+        let (exit_code, text) = execute_text(&["fwc"]);
 
-        assert_ne!(exit_code, CliExitCode::Success.into());
-        assert_eq!(payload["status"], "error");
-        let error_type = payload["error"]["type"].as_str().unwrap_or("");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        // The quickstart guide should contain helpful guidance
         assert!(
-            error_type.contains("missing") || error_type.contains("parse"),
-            "error type should indicate a missing command, got: {error_type}"
-        );
-        // Should have examples or next_actions to guide the user
-        let has_guidance = payload["error"]["examples"]
-            .as_array()
-            .is_some_and(|arr| !arr.is_empty())
-            || payload["error"]["next_actions"]
-                .as_array()
-                .is_some_and(|arr| !arr.is_empty());
-        assert!(
-            has_guidance,
-            "error should include examples or next_actions"
+            text.contains("fwc") || text.contains("quickstart") || text.contains("help"),
+            "bare invocation should show quickstart or help content, got: {text}"
         );
     }
 

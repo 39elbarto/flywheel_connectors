@@ -140,7 +140,7 @@ impl YouTubeClient {
     /// Set the maximum number of retries.
     #[must_use]
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
+        self.retry_config.max_retries = max_retries;
         self
     }
 

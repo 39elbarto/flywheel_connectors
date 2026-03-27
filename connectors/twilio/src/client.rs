@@ -109,7 +109,7 @@ pub struct TwilioClient {
     account_sid: String,
     max_retries: u32,
     runtime: ConnectorRuntime,
-    retry_config: HttpRetryConfig,
+    pub(crate) retry_config: HttpRetryConfig,
 }
 
 impl std::fmt::Debug for TwilioClient {
@@ -223,8 +223,8 @@ impl TwilioClient {
 
     /// Set the maximum number of retries.
     #[must_use]
-    pub const fn with_retry_config(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
+    pub fn with_retry_config(mut self, max_retries: u32) -> Self {
+        self.retry_config.max_retries = max_retries;
         self
     }
 
@@ -1847,8 +1847,7 @@ mod tests {
         let client = TwilioClient::new("ACtest", "tok")
             .unwrap()
             .with_retry_config(5);
-        let debug = format!("{client:?}");
-        assert!(debug.contains("max_retries: 5"), "debug: {debug}");
+        assert_eq!(client.retry_config.max_retries, 5);
     }
 
     #[test]
@@ -1861,7 +1860,7 @@ mod tests {
         assert!(debug.contains("TwilioClient"), "debug: {debug}");
         assert!(debug.contains("ACfmt"), "debug: {debug}");
         assert!(debug.contains("http://test.local"), "debug: {debug}");
-        assert!(debug.contains("max_retries: 3"), "debug: {debug}");
+        assert_eq!(client.retry_config.max_retries, 3);
     }
 
     #[test]

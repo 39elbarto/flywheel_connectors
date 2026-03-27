@@ -4647,7 +4647,7 @@ fn host_live_event_field(introspection: &HostIntrospectionResponse) -> MetadataF
         })
 }
 
-#[allow(clippy::unnecessary_map_on_constructor)]
+#[allow(clippy::single_option_map)]
 fn host_operation_rate_limits(
     tool: &HostToolDescriptor,
     declarations: Option<&fcp_core::RateLimitDeclarations>,
@@ -4837,6 +4837,7 @@ fn try_host_mcp_tool_definitions(
         .collect()
 }
 
+#[allow(dead_code)]
 fn host_mcp_tool_definitions(
     connector: &HostConnectorRecord,
     introspection: &HostIntrospectionResponse,

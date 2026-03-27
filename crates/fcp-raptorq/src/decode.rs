@@ -179,6 +179,46 @@ impl RaptorQDecoder {
 
         match decoder.decode(symbols.clone()) {
             Ok(result) => {
+                // Verify the decoded source symbols match all received source data.
+                // The InactivationDecoder's verify_decoded_output checks that intermediate
+                // symbols satisfy the equation system, but if the system is underdetermined
+                // (e.g., during early decode attempts with exactly K symbols), there may be
+                // multiple valid solutions. Cross-checking against received source data
+                // catches incorrect solutions.
+                // Verify decoded source symbols match received source data AND
+                // that reconstructed repair data matches received repair data.
+                for (&esi, data) in &self.received {
+                    let idx = esi as usize;
+                    if idx < k {
+                        // Source symbol: decoded source[esi] must match received data
+                        if result.source[idx] != *data {
+                            return Err(DecodeError::InsufficientSymbols {
+                                received: self.received_count(),
+                                needed: self.needed(),
+                            });
+                        }
+                    } else {
+                        // Repair symbol: reconstruct from intermediate and compare
+                        let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
+                        let mut reconstructed = vec![0u8; symbol_size];
+                        for (&col, &coef) in columns.iter().zip(coefficients.iter()) {
+                            if !coef.is_zero() && col < result.intermediate.len() {
+                                crate::codec::gf256::gf256_addmul_slice(
+                                    &mut reconstructed,
+                                    &result.intermediate[col],
+                                    coef,
+                                );
+                            }
+                        }
+                        if reconstructed != *data {
+                            return Err(DecodeError::InsufficientSymbols {
+                                received: self.received_count(),
+                                needed: self.needed(),
+                            });
+                        }
+                    }
+                }
+
                 // Reconstruct payload from first K source symbols
                 let mut payload = Vec::with_capacity(transfer_len);
 

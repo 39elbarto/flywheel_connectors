@@ -157,13 +157,13 @@ impl FigmaClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub const fn with_retry_config(
+    pub fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,
         max_delay_ms: u64,
     ) -> Self {
-        self.max_retries = max_retries;
+        self.retry_config.max_retries = max_retries;
         self.initial_delay_ms = initial_delay_ms;
         self.max_delay_ms = max_delay_ms;
         self.retry_config = HttpRetryConfig {

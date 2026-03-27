@@ -387,6 +387,7 @@ pub fn note_tags(input: &Value) -> FcpResult<Value> {
 /// Returns an error if any filter field has the wrong type or if the computed
 /// limit is zero.
 pub fn build_filter(input: &Value, default_limit: u64) -> FcpResult<Value> {
+    const MAX_QUERY_LIMIT: u64 = 1000;
     let mut filter = serde_json::Map::new();
     if let Some(authors) = string_array_field(input, "authors")? {
         filter.insert("authors".into(), Value::Array(authors));
@@ -403,7 +404,6 @@ pub fn build_filter(input: &Value, default_limit: u64) -> FcpResult<Value> {
     if let Some(until) = i64_field(input, "until")? {
         filter.insert("until".into(), serde_json::json!(until));
     }
-    const MAX_QUERY_LIMIT: u64 = 1000;
     let limit = u64_field(input, "limit")?.unwrap_or(default_limit).min(MAX_QUERY_LIMIT);
     if limit == 0 {
         return Err(FcpError::InvalidRequest {

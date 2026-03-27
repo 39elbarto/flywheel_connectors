@@ -1527,6 +1527,21 @@ impl DiscoveryCatalog {
     /// This stays honest about runtime state: discovery is manifest-backed until
     /// host-backed lifecycle/status surfaces land in later beads.
     pub fn load() -> Result<Self> {
+        Self::load_matching_slug(None)
+    }
+
+    /// Load the current workspace connector catalog, optionally scoped to one
+    /// simple connector slug for faster offline filtered commands.
+    pub fn load_for_connector_filter(connector_filter: Option<&str>) -> Result<Self> {
+        match connector_filter.map(normalize_connector_selector) {
+            Some(normalized) if is_simple_connector_slug(&normalized) => {
+                Self::load_matching_slug(Some(normalized.as_str()))
+            }
+            _ => Self::load(),
+        }
+    }
+
+    fn load_matching_slug(requested_slug: Option<&str>) -> Result<Self> {
         let connectors_dir = workspace_root().join("connectors");
         let mut connectors = Vec::new();
 
@@ -1540,6 +1555,11 @@ impl DiscoveryCatalog {
             }
 
             let slug = entry.file_name().to_string_lossy().into_owned();
+            if requested_slug
+                .is_some_and(|requested| normalize_connector_selector(&slug) != requested)
+            {
+                continue;
+            }
             let manifest_path = entry.path().join("manifest.toml");
             if !manifest_path.is_file() {
                 continue;
@@ -1619,6 +1639,13 @@ impl DiscoveryCatalog {
             )),
         }
     }
+}
+
+fn is_simple_connector_slug(selector: &str) -> bool {
+    !selector.is_empty()
+        && selector
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 #[derive(Clone, Debug)]
@@ -7841,6 +7868,29 @@ output_schema = { type = "object" }
 
         assert!(connector_ids.contains(&"fcp.discord"));
         assert!(connector_ids.contains(&"fcp.telegram"));
+    }
+
+    #[test]
+    fn discovery_catalog_connector_filter_loads_only_requested_slug() {
+        let catalog = DiscoveryCatalog::load_for_connector_filter(Some("GitHub Connector"))
+            .expect("filtered catalog should load");
+
+        assert_eq!(catalog.connectors().len(), 1);
+        assert_eq!(catalog.connectors()[0].slug, "github");
+    }
+
+    #[test]
+    fn discovery_catalog_connector_filter_falls_back_for_non_slug_selector() {
+        let catalog = DiscoveryCatalog::load_for_connector_filter(Some("fcp.github"))
+            .expect("catalog should load");
+        let connector_ids = catalog
+            .connectors()
+            .iter()
+            .map(|connector| connector.detail.summary.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(connector_ids.contains(&"fcp.github"));
+        assert!(connector_ids.len() > 1);
     }
 
     #[test]

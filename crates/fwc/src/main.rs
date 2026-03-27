@@ -6736,7 +6736,7 @@ fn mesh_availability_dispatch(
         });
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    let catalog = DiscoveryCatalog::load_for_connector_filter(args.connector.as_deref())?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
@@ -8589,7 +8589,7 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    let catalog = DiscoveryCatalog::load_for_connector_filter(args.connector.as_deref())?;
 
     let filters = search::SearchFilters {
         connector: args.connector.clone(),

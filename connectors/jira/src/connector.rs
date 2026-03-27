@@ -2313,13 +2313,15 @@ impl JiraConnector {
                     .await
                     .map_err(|error: JiraError| error.to_fcp_error())?;
 
-                if status_transition_required(bead.status.as_deref(), jira.status.as_deref()) {
-                    self.sync_transition_issue_status(
-                        issue_key,
-                        bead.status.as_deref().unwrap(),
-                        transition_comment,
-                    )
-                    .await?;
+                if let Some(target_status) = bead.status.as_deref() {
+                    if status_transition_required(Some(target_status), jira.status.as_deref()) {
+                        self.sync_transition_issue_status(
+                            issue_key,
+                            target_status,
+                            transition_comment,
+                        )
+                        .await?;
+                    }
                 }
 
                 let refreshed = self.load_sync_issue(issue_key, custom_field_id).await?;
@@ -2369,15 +2371,17 @@ impl JiraConnector {
             let mut issue = self.load_sync_issue(&created.key, custom_field_id).await?;
             let mut jira = issue_to_bead_record(&issue, Some(&bead.bead_id), custom_field_id)?;
 
-            if status_transition_required(bead.status.as_deref(), jira.status.as_deref()) {
-                self.sync_transition_issue_status(
-                    &created.key,
-                    bead.status.as_deref().unwrap(),
-                    transition_comment,
-                )
-                .await?;
-                issue = self.load_sync_issue(&created.key, custom_field_id).await?;
-                jira = issue_to_bead_record(&issue, Some(&bead.bead_id), custom_field_id)?;
+            if let Some(target_status) = bead.status.as_deref() {
+                if status_transition_required(Some(target_status), jira.status.as_deref()) {
+                    self.sync_transition_issue_status(
+                        &created.key,
+                        target_status,
+                        transition_comment,
+                    )
+                    .await?;
+                    issue = self.load_sync_issue(&created.key, custom_field_id).await?;
+                    jira = issue_to_bead_record(&issue, Some(&bead.bead_id), custom_field_id)?;
+                }
             }
 
             let sync_state = build_sync_state(

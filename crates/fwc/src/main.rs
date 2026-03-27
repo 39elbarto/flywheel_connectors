@@ -8679,7 +8679,16 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    // Try the exact-slug fast path first, but fall back to the full catalog so
+    // aliases and unique prefixes keep resolving exactly as before.
+    let catalog = {
+        let filtered = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+        if filtered.resolve_connector(&args.connector).is_ok() {
+            filtered
+        } else {
+            DiscoveryCatalog::load()?
+        }
+    };
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
@@ -8790,7 +8799,16 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    // Try the exact-slug fast path first, but fall back to the full catalog so
+    // aliases and unique prefixes keep resolving exactly as before.
+    let catalog = {
+        let filtered = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+        if filtered.resolve_connector(&args.connector).is_ok() {
+            filtered
+        } else {
+            DiscoveryCatalog::load()?
+        }
+    };
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
@@ -8872,7 +8890,16 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    // Try the exact-slug fast path first, but fall back to the full catalog so
+    // aliases and unique prefixes keep resolving exactly as before.
+    let catalog = {
+        let filtered = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+        if filtered.resolve_connector(&args.connector).is_ok() {
+            filtered
+        } else {
+            DiscoveryCatalog::load()?
+        }
+    };
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
@@ -9080,7 +9107,16 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    // Try the exact-slug fast path first, but fall back to the full catalog so
+    // aliases and unique prefixes keep resolving exactly as before.
+    let catalog = {
+        let filtered = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+        if filtered.resolve_connector(&args.connector).is_ok() {
+            filtered
+        } else {
+            DiscoveryCatalog::load()?
+        }
+    };
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
@@ -11302,7 +11338,18 @@ fn parse_auth_expiry(raw: &str) -> std::result::Result<DateTime<Utc>, String> {
 fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     match &args.command {
         ConfigCommand::Schema(target) => {
-            let catalog = DiscoveryCatalog::load()?;
+            // Try the exact-slug fast path first, but fall back to the full
+            // catalog so aliases and unique prefixes keep resolving exactly as
+            // before.
+            let catalog = {
+                let filtered =
+                    DiscoveryCatalog::load_for_connector_filter(Some(target.connector.as_str()))?;
+                if filtered.resolve_connector(&target.connector).is_ok() {
+                    filtered
+                } else {
+                    DiscoveryCatalog::load()?
+                }
+            };
             let connector = match catalog.resolve_connector(&target.connector) {
                 Ok(connector) => connector,
                 Err(error) => {
@@ -13601,7 +13648,23 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    let catalog = if args.after.is_none() && args.goal.is_none() {
+        if let Some(selector) = args.connector.as_deref() {
+            // Try the exact-slug fast path first, but fall back to the full
+            // catalog so aliases and unique prefixes keep resolving exactly as
+            // before.
+            let filtered = DiscoveryCatalog::load_for_connector_filter(Some(selector))?;
+            if filtered.resolve_connector(selector).is_ok() {
+                filtered
+            } else {
+                DiscoveryCatalog::load()?
+            }
+        } else {
+            DiscoveryCatalog::load()?
+        }
+    } else {
+        DiscoveryCatalog::load()?
+    };
 
     if let Some(after_op) = &args.after {
         return suggest_after_dispatch(&catalog, after_op, args);
@@ -13983,7 +14046,16 @@ fn template_dispatch(args: &TemplateArgs, host: Option<&str>) -> Result<Dispatch
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    // Try the exact-slug fast path first, but fall back to the full catalog so
+    // aliases and unique prefixes keep resolving exactly as before.
+    let catalog = {
+        let filtered = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+        if filtered.resolve_connector(&args.connector).is_ok() {
+            filtered
+        } else {
+            DiscoveryCatalog::load()?
+        }
+    };
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
@@ -14218,7 +14290,16 @@ fn validate_dispatch(args: &ValidateArgs, host: Option<&str>) -> Result<Dispatch
         ));
     }
 
-    let catalog = DiscoveryCatalog::load()?;
+    // Try the exact-slug fast path first, but fall back to the full catalog so
+    // aliases and unique prefixes keep resolving exactly as before.
+    let catalog = {
+        let filtered = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+        if filtered.resolve_connector(&args.connector).is_ok() {
+            filtered
+        } else {
+            DiscoveryCatalog::load()?
+        }
+    };
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
@@ -14451,15 +14532,7 @@ fn resolve_live_auth(args: &LiveAuthArgs) -> std::result::Result<ResolvedLiveAut
         .and_then(|claims| {
             claims
                 .get_subject()
-                .or_else(|| {
-                    // Fall back to FCP2 principal_id claim (-65540) when CWT sub is absent.
-                    claims
-                        .get(fcp_crypto::cose::fcp2_claims::PRINCIPAL_ID)
-                        .and_then(|v| match v {
-                            ciborium::Value::Text(s) => Some(s.as_str()),
-                            _ => None,
-                        })
-                })
+                .or_else(|| claims.get_principal_id())
                 .map(ToOwned::to_owned)
         });
 
@@ -28304,6 +28377,16 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_show_offline_preserves_prefix_resolution() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "show", "gith", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "show");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
+    }
+
+    #[test]
     fn execute_ops_offline_filters_out_risky_operations() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -28336,6 +28419,16 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_ops_offline_preserves_prefix_resolution() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "ops", "gith", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
+    }
+
+    #[test]
     fn execute_schema_offline_resolves_friendly_operation_selector() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -28364,6 +28457,23 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_schema_offline_preserves_prefix_connector_resolution() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "schema",
+            "gith",
+            "issues.create",
+            "--offline",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
+    }
+
+    #[test]
     fn execute_examples_offline_resolves_friendly_operation_selector() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -28386,6 +28496,23 @@ deny_ptrace = true
                 .and_then(Value::as_str)
                 .is_some_and(|example| example.contains("\"title\": \"Bug report\""))
         }));
+    }
+
+    #[test]
+    fn execute_examples_offline_preserves_prefix_connector_resolution() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "examples",
+            "gith",
+            "issues.create",
+            "--offline",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
     }
 
     #[test]
@@ -28420,6 +28547,32 @@ deny_ptrace = true
                     suggestions
                         .iter()
                         .any(|suggestion| suggestion["operation"] == "github.create_issue")
+                })
+        );
+    }
+
+    #[test]
+    fn execute_suggest_offline_preserves_prefix_connector_resolution() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "suggest",
+            "--connector",
+            "gith",
+            "--offline",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "suggest");
+        assert_eq!(payload["suggest_mode"], "overview");
+        assert!(
+            payload["suggestions"]
+                .as_array()
+                .is_some_and(|suggestions| {
+                    !suggestions.is_empty()
+                        && suggestions
+                            .iter()
+                            .all(|suggestion| suggestion["connector"] == "github")
                 })
         );
     }
@@ -28498,6 +28651,23 @@ deny_ptrace = true
         assert_template_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
         assert_eq!(payload["template"]["title"], "<string:required>");
+    }
+
+    #[test]
+    fn execute_template_offline_preserves_prefix_connector_resolution() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "template",
+            "gith",
+            "issues.create",
+            "--offline",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "template");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
     }
 
     #[test]
@@ -28593,6 +28763,26 @@ deny_ptrace = true
         assert_eq!(payload["source"], "workspace-manifests");
         assert_eq!(payload["valid"], false);
         assert!(payload["error_count"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[test]
+    fn execute_validate_offline_preserves_prefix_connector_resolution() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "validate",
+            "gith",
+            "issues.create",
+            "--offline",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Bug report\"}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "validate");
+        assert_eq!(payload["connector"], "github");
+        assert_eq!(payload["operation"], "issues.create");
+        assert_eq!(payload["valid"], true);
     }
 
     #[test]
@@ -33502,6 +33692,18 @@ depends_on = ["missing"]
     }
 
     #[test]
+    fn config_schema_preserves_prefix_connector_resolution() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "schema", "gith"]);
+        assert!(
+            exit_code == CliExitCode::Success.into() || exit_code == CliExitCode::Validation.into()
+        );
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "schema");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
+    }
+
+    #[test]
     fn config_get_offline_reports_missing_host() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "config", "get", "github"]);
         assert_eq!(exit_code, CliExitCode::Transport.into());
@@ -37676,9 +37878,10 @@ depends_on = ["missing"]
 
     #[test]
     fn confusion_unknown_flag_shows_similar_flags() {
-        // An unknown flag like `--vrsion` should be caught by clap and produce
-        // an error message. Clap errors may bypass JSON mode, so use text.
-        let (exit_code, text) = execute_text(&["fwc", "--vrsion"]);
+        // An unknown flag like `--vrsion` on a real subcommand should be caught
+        // by clap and produce an error. Use `list` as the subcommand so clap
+        // actually parses the flag rather than falling through to the quickstart.
+        let (exit_code, text) = execute_text(&["fwc", "list", "--vrsion"]);
 
         assert_ne!(exit_code, CliExitCode::Success.into());
         assert!(

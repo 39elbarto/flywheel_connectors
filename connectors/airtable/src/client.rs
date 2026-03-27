@@ -77,7 +77,7 @@ pub struct AirtableClient {
     max_delay_ms: u64,
     total_requests: AtomicU64,
     runtime: ConnectorRuntime,
-    retry_config: HttpRetryConfig,
+    pub(crate) retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for AirtableClient {
@@ -1532,9 +1532,9 @@ mod tests {
         let client = AirtableClient::new("tok")
             .unwrap()
             .with_retry_config(5, 2000, 120_000);
-        assert_eq!(client.max_retries, 5);
-        assert_eq!(client.initial_delay_ms, 2000);
-        assert_eq!(client.max_delay_ms, 120_000);
+        assert_eq!(client.retry_config.max_retries, 5);
+        assert_eq!(client.retry_config.initial_delay_ms, 2000);
+        assert_eq!(client.retry_config.max_delay_ms, 120_000);
     }
 
     #[test]
@@ -1561,8 +1561,7 @@ mod tests {
         let client = AirtableClient::new("tok")
             .unwrap()
             .with_retry_config(7, 500, 30_000);
-        let dbg = format!("{client:?}");
-        assert!(dbg.contains('7'));
+        assert_eq!(client.retry_config.max_retries, 7);
     }
 
     #[test]
@@ -1596,9 +1595,9 @@ mod tests {
             .with_base_url("https://example.com")
             .with_retry_config(1, 100, 500);
         assert_eq!(client.base_url, "https://example.com");
-        assert_eq!(client.max_retries, 1);
-        assert_eq!(client.initial_delay_ms, 100);
-        assert_eq!(client.max_delay_ms, 500);
+        assert_eq!(client.retry_config.max_retries, 1);
+        assert_eq!(client.retry_config.initial_delay_ms, 100);
+        assert_eq!(client.retry_config.max_delay_ms, 500);
     }
 
     #[test]
@@ -1606,9 +1605,9 @@ mod tests {
         let client = AirtableClient::new("tok")
             .unwrap()
             .with_retry_config(0, 0, 0);
-        assert_eq!(client.max_retries, 0);
-        assert_eq!(client.initial_delay_ms, 0);
-        assert_eq!(client.max_delay_ms, 0);
+        assert_eq!(client.retry_config.max_retries, 0);
+        assert_eq!(client.retry_config.initial_delay_ms, 0);
+        assert_eq!(client.retry_config.max_delay_ms, 0);
     }
 
     #[test]
@@ -1623,9 +1622,9 @@ mod tests {
             AirtableClient::new("tok")
                 .unwrap()
                 .with_retry_config(u32::MAX, u64::MAX, u64::MAX);
-        assert_eq!(client.max_retries, u32::MAX);
-        assert_eq!(client.initial_delay_ms, u64::MAX);
-        assert_eq!(client.max_delay_ms, u64::MAX);
+        assert_eq!(client.retry_config.max_retries, u32::MAX);
+        assert_eq!(client.retry_config.initial_delay_ms, u64::MAX);
+        assert_eq!(client.retry_config.max_delay_ms, u64::MAX);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Calendly API client.
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, Url};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -97,23 +97,32 @@ impl CalendlyClient {
         min_start_time: Option<&str>,
         max_start_time: Option<&str>,
     ) -> CalendlyResult<EventListResponse> {
-        let mut url = format!("{}/scheduled_events?user={}", self.base_url, user_uri);
-        if let Some(c) = count {
-            url.push_str(&format!("&count={c}"));
+        let base = format!("{}/scheduled_events", self.base_url);
+        let mut url = Url::parse(&base).map_err(|e| CalendlyError::Api {
+            status: 0,
+            message: format!("invalid base URL: {e}"),
+            title: None,
+        })?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("user", user_uri);
+            if let Some(c) = count {
+                q.append_pair("count", &c.to_string());
+            }
+            if let Some(pt) = page_token {
+                q.append_pair("page_token", pt);
+            }
+            if let Some(s) = status {
+                q.append_pair("status", s);
+            }
+            if let Some(min) = min_start_time {
+                q.append_pair("min_start_time", min);
+            }
+            if let Some(max) = max_start_time {
+                q.append_pair("max_start_time", max);
+            }
         }
-        if let Some(pt) = page_token {
-            url.push_str(&format!("&page_token={pt}"));
-        }
-        if let Some(s) = status {
-            url.push_str(&format!("&status={s}"));
-        }
-        if let Some(min) = min_start_time {
-            url.push_str(&format!("&min_start_time={min}"));
-        }
-        if let Some(max) = max_start_time {
-            url.push_str(&format!("&max_start_time={max}"));
-        }
-        self.get_json(runtime, &url).await
+        self.get_json(runtime, url.as_str()).await
     }
 
     /// Get a single scheduled event by UUID.
@@ -135,14 +144,23 @@ impl CalendlyClient {
         count: Option<u32>,
         page_token: Option<&str>,
     ) -> CalendlyResult<EventTypeListResponse> {
-        let mut url = format!("{}/event_types?user={}", self.base_url, user_uri);
-        if let Some(c) = count {
-            url.push_str(&format!("&count={c}"));
+        let base = format!("{}/event_types", self.base_url);
+        let mut url = Url::parse(&base).map_err(|e| CalendlyError::Api {
+            status: 0,
+            message: format!("invalid base URL: {e}"),
+            title: None,
+        })?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("user", user_uri);
+            if let Some(c) = count {
+                q.append_pair("count", &c.to_string());
+            }
+            if let Some(pt) = page_token {
+                q.append_pair("page_token", pt);
+            }
         }
-        if let Some(pt) = page_token {
-            url.push_str(&format!("&page_token={pt}"));
-        }
-        self.get_json(runtime, &url).await
+        self.get_json(runtime, url.as_str()).await
     }
 
     /// List invitees for an event.

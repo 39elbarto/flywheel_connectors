@@ -183,34 +183,65 @@ impl ObsidianClient {
         })
     }
 
-    /// Create a new note.
+    /// Create a new note (atomic: uses `create_new` to avoid TOCTOU).
     pub fn create_note(&self, note_path: &str, content: &str) -> ObsidianResult<Note> {
         let full_path = self.safe_note_path(note_path)?;
-        if full_path.exists() {
-            return Err(ObsidianError::AlreadyExists(note_path.to_string()));
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&full_path, content)?;
+        // Atomic create-if-not-exists to avoid TOCTOU race between
+        // exists() check and write().
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&full_path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(content.as_bytes())?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(ObsidianError::AlreadyExists(note_path.to_string()));
+            }
+            Err(e) => return Err(e.into()),
+        }
         self.get_note(note_path)
     }
 
     /// Update an existing note.
     pub fn update_note(&self, note_path: &str, content: &str) -> ObsidianResult<Note> {
         let full_path = self.safe_note_path(note_path)?;
-        if !full_path.exists() {
-            return Err(ObsidianError::NotFound(note_path.to_string()));
+        // Open with write+truncate but WITHOUT create — fails if file doesn't exist.
+        // This avoids TOCTOU: the open() call atomically checks existence and locks.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&full_path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(content.as_bytes())?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ObsidianError::NotFound(note_path.to_string()));
+            }
+            Err(e) => return Err(e.into()),
         }
-        std::fs::write(&full_path, content)?;
         self.get_note(note_path)
     }
 
     /// Delete a note.
     pub fn delete_note(&self, note_path: &str) -> ObsidianResult<()> {
         let full_path = self.safe_note_path(note_path)?;
-        if !full_path.exists() {
-            return Err(ObsidianError::NotFound(note_path.to_string()));
+        // Remove directly — if the file doesn't exist, map to NotFound,
+        // avoiding TOCTOU between exists() and remove_file().
+        match std::fs::remove_file(&full_path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(ObsidianError::NotFound(note_path.to_string()))
+            }
+            Err(e) => Err(e.into()),
         }
-        std::fs::remove_file(&full_path)?;
-        Ok(())
     }
 
     /// Search notes for a text pattern.

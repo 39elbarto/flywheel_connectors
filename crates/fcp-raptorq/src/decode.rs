@@ -1533,6 +1533,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decoder_roundtrip_with_shuffled_mixed_subset() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 10000,
+            max_object_size: 1024 * 1024,
+            decode_timeout: Duration::from_secs(30),
+            max_chunk_threshold: 256 * 1024,
+            chunk_size: 64 * 1024,
+        };
+        let payload: Vec<u8> = (0..(50 * 64)).map(|i| (i % 251) as u8).collect();
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let mut symbols = encoder.encode_all();
+        let oti = encoder.transmission_info();
+        let k = usize::try_from(encoder.source_symbols()).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(0xA460_0004);
+        for i in (1..symbols.len()).rev() {
+            let j = rng.gen_range(0..=i);
+            symbols.swap(i, j);
+        }
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for (esi, data) in symbols.into_iter().take(k + 16) {
+            match decoder.add_symbol(esi, data) {
+                Ok(Some(decoded)) => {
+                    assert_eq!(decoded, payload);
+                    return;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    panic!("shuffled mixed subset should remain recoverable, got {err:?}")
+                }
+            }
+        }
+
+        panic!("Failed to decode from shuffled mixed source/repair subset");
+    }
+
     // ── Additional decode tests (batch 2) ─────────────────────────────────
 
     #[test]

@@ -3,7 +3,7 @@
 //!
 //! These fixtures run real TCP listeners that speak SSE or raw line-delimited
 //! JSON, giving connectors a genuine network boundary to test against without
-//! requiring a remote SaaS provider.
+//! requiring a remote `SaaS` provider.
 //!
 //! # Integration with session-script DSL
 //!
@@ -106,7 +106,7 @@ impl SseEvent {
 // ---------------------------------------------------------------------------
 
 /// A scripted action for the streaming fixture server to perform.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub enum StreamingAction {
     /// Send an SSE event.
@@ -143,7 +143,7 @@ impl StreamingAction {
 
     /// Send a JSON line.
     #[must_use]
-    pub fn send_json(body: serde_json::Value) -> Self {
+    pub const fn send_json(body: serde_json::Value) -> Self {
         Self::SendJson { body }
     }
 
@@ -238,12 +238,20 @@ impl StreamingFixtureServer {
     }
 
     /// Enqueue scripted actions to be played back on the next connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal actions lock is poisoned.
     pub fn script(&self, actions: Vec<StreamingAction>) {
         let mut queue = self.state.actions.lock().expect("actions lock poisoned");
         queue.extend(actions);
     }
 
     /// Enqueue a single action.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal actions lock is poisoned.
     pub fn enqueue(&self, action: StreamingAction) {
         let mut queue = self.state.actions.lock().expect("actions lock poisoned");
         queue.push_back(action);
@@ -266,6 +274,7 @@ impl StreamingFixtureServer {
         self.state.running.store(false, Ordering::SeqCst);
     }
 
+    #[allow(clippy::needless_pass_by_value)]  // called from thread::spawn move closure
     fn accept_loop(listener: TcpListener, state: Arc<FixtureState>) {
         while state.running.load(Ordering::SeqCst) {
             match listener.accept() {
@@ -284,6 +293,7 @@ impl StreamingFixtureServer {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]  // called from thread::spawn move closure
     fn handle_connection(mut stream: TcpStream, state: Arc<FixtureState>) {
         // Read the HTTP request (we don't parse it fully, just consume it)
         let mut buf = [0u8; 4096];
@@ -304,10 +314,7 @@ impl StreamingFixtureServer {
         // Play back scripted actions
         loop {
             let action = {
-                let mut queue = match state.actions.lock() {
-                    Ok(q) => q,
-                    Err(_) => return,
-                };
+                let Ok(mut queue) = state.actions.lock() else { return };
                 queue.pop_front()
             };
 
@@ -368,7 +375,7 @@ impl Drop for StreamingFixtureServer {
 
 /// Pre-built streaming scenario scripts for common acceptance patterns.
 pub mod streaming_scenarios {
-    use super::*;
+    use super::{Duration, SseEvent, StreamingAction};
     use serde_json::json;
 
     /// SSE: deliver N events with sequential IDs.
@@ -465,7 +472,7 @@ mod duration_ms_serde {
     where
         S: Serializer,
     {
-        serializer.serialize_u64(duration.as_millis() as u64)
+        serializer.serialize_u64(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>

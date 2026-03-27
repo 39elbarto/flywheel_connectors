@@ -48,6 +48,7 @@ pub enum MetadataProvenance {
 
 impl MetadataProvenance {
     /// Machine-readable tag for JSON output.
+    #[must_use]
     pub const fn tag(self) -> &'static str {
         match self {
             Self::DeclaredByConnector => "declared-by-connector",
@@ -59,6 +60,7 @@ impl MetadataProvenance {
     }
 
     /// Human-readable explanation of this provenance source.
+    #[must_use]
     pub const fn explanation(self) -> &'static str {
         match self {
             Self::DeclaredByConnector => "Value declared by the connector manifest.",
@@ -70,20 +72,22 @@ impl MetadataProvenance {
     }
 
     /// Whether this source is considered authoritative for live operations.
+    #[must_use]
     pub const fn is_authoritative(self) -> bool {
         matches!(self, Self::ObservedByHost | Self::MeasuredAtRuntime)
     }
 }
 
-/// Explicit metadata-field wrapper that distinguishes between "we have a
-/// value", "we have not queried yet", "the connector does not implement
-/// this surface", and "the data should exist but is temporarily
-/// unreachable."
+/// Explicit metadata-field wrapper that distinguishes between field states.
+///
+/// Distinguishes "we have a value", "we have not queried yet", "the
+/// connector does not implement this surface", and "the data should exist
+/// but is temporarily unreachable."
 ///
 /// Serialises as an object with `status` + optional `value` so consumers
 /// never have to guess whether a missing JSON key means "unknown" or
 /// "not applicable."
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetadataField<T> {
     /// The field has a verified value.
     Known(T),
@@ -102,12 +106,12 @@ pub enum MetadataField<T> {
 
 impl<T> MetadataField<T> {
     /// Returns `true` when a verified value is present.
-    pub fn is_known(&self) -> bool {
+    pub const fn is_known(&self) -> bool {
         matches!(self, Self::Known(_))
     }
 
     /// Borrow the inner value if `Known`.
-    pub fn as_known(&self) -> Option<&T> {
+    pub const fn as_known(&self) -> Option<&T> {
         match self {
             Self::Known(value) => Some(value),
             _ => None,
@@ -126,7 +130,7 @@ impl<T> MetadataField<T> {
     }
 
     /// Machine-readable status tag for this field.
-    pub fn status_tag(&self) -> &'static str {
+    pub const fn status_tag(&self) -> &'static str {
         match self {
             Self::Known(_) => "known",
             Self::Unknown => "unknown",
@@ -139,18 +143,12 @@ impl<T> MetadataField<T> {
     /// Upgrade a legacy `Option<T>` into a `MetadataField`.  `None` becomes
     /// `Unknown` because the old code path could not distinguish states.
     pub fn from_option(value: Option<T>) -> Self {
-        match value {
-            Some(value) => Self::Known(value),
-            None => Self::Unknown,
-        }
+        value.map_or_else(|| Self::Unknown, Self::Known)
     }
 }
 
 fn declared_metadata_field<T>(value: Option<T>) -> MetadataField<T> {
-    match value {
-        Some(value) => MetadataField::Known(value),
-        None => MetadataField::Unknown,
-    }
+    value.map_or_else(|| MetadataField::Unknown, MetadataField::Known)
 }
 
 impl<T: Serialize> Serialize for MetadataField<T> {
@@ -179,13 +177,13 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for MetadataField<T> {
         }
         let raw = Raw::<T>::deserialize(deserializer)?;
         match raw.status.as_str() {
-            "known" => raw.value.map(MetadataField::Known).ok_or_else(|| {
+            "known" => raw.value.map(Self::Known).ok_or_else(|| {
                 serde::de::Error::custom("MetadataField status 'known' requires a value")
             }),
-            "unknown" => Ok(MetadataField::Unknown),
-            "unsupported" => Ok(MetadataField::Unsupported),
-            "unavailable" => Ok(MetadataField::Unavailable),
-            "not-applicable" => Ok(MetadataField::NotApplicable),
+            "unknown" => Ok(Self::Unknown),
+            "unsupported" => Ok(Self::Unsupported),
+            "unavailable" => Ok(Self::Unavailable),
+            "not-applicable" => Ok(Self::NotApplicable),
             other => Err(serde::de::Error::custom(format!(
                 "unknown MetadataField status: {other}"
             ))),
@@ -195,10 +193,11 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for MetadataField<T> {
 
 // ── Provenance-tracking metadata field ──────────────────────────────────
 
-/// A metadata field paired with its provenance — where the value
-/// came from.  This is the full-fidelity wrapper that downstream
-/// consumers (MCP export, workflow engine, discovery UI) should use
-/// when the origin of a value matters for trust decisions.
+/// A metadata field paired with its provenance.
+///
+/// Where the value came from.  This is the full-fidelity wrapper that
+/// downstream consumers (MCP export, workflow engine, discovery UI) should
+/// use when the origin of a value matters for trust decisions.
 ///
 /// Serialises as `{ "status": "...", "provenance": "...", "value": ... }`.
 #[derive(Clone, Debug)]
@@ -224,6 +223,7 @@ impl<T> ProvenanceMetadataField<T> {
     }
 
     /// Convenience: create an `Unknown` field with provenance.
+    #[must_use]
     pub const fn unknown(provenance: MetadataProvenance) -> Self {
         Self {
             field: MetadataField::Unknown,
@@ -232,6 +232,7 @@ impl<T> ProvenanceMetadataField<T> {
     }
 
     /// Convenience: create an `Unsupported` field with provenance.
+    #[must_use]
     pub const fn unsupported(provenance: MetadataProvenance) -> Self {
         Self {
             field: MetadataField::Unsupported,
@@ -438,6 +439,10 @@ pub fn metadata_state_repr(status_tag: &str) -> Option<&'static MetadataStateRep
 /// Look up the representation for a `MetadataField` value.
 #[allow(dead_code)]
 #[must_use]
+///
+/// # Panics
+///
+/// Panics if internal state is inconsistent.
 pub fn field_repr<T>(field: &MetadataField<T>) -> &'static MetadataStateRepr {
     metadata_state_repr(field.status_tag())
         .expect("every MetadataField variant has a representation")
@@ -539,6 +544,7 @@ pub enum CommandAvailability {
 
 impl CommandAvailability {
     /// Machine-readable tag for JSON envelopes.
+    #[must_use]
     pub const fn tag(&self) -> &'static str {
         match self {
             Self::LiveRuntime => "live-runtime",
@@ -552,6 +558,7 @@ impl CommandAvailability {
     }
 
     /// Human-readable one-line explanation of what this state means.
+    #[must_use]
     pub const fn explanation(&self) -> &'static str {
         match self {
             Self::LiveRuntime => "Result is backed by a live host connection.",
@@ -575,6 +582,7 @@ impl CommandAvailability {
     }
 
     /// Whether an agent should consider retrying or remediating.
+    #[must_use]
     pub const fn is_recoverable(&self) -> bool {
         match self {
             Self::LiveRuntime | Self::OfflineArtifact | Self::Unsupported | Self::Planned => false,
@@ -583,17 +591,20 @@ impl CommandAvailability {
     }
 
     /// Whether the result carries authoritative runtime data.
+    #[must_use]
     pub const fn is_authoritative(&self) -> bool {
         matches!(self, Self::LiveRuntime)
     }
 
     /// Whether the result represents a successful data delivery
     /// (live or offline).
+    #[must_use]
     pub const fn is_success(&self) -> bool {
         matches!(self, Self::LiveRuntime | Self::OfflineArtifact)
     }
 
     /// Suggested next actions for the caller based on this state.
+    #[must_use]
     pub fn next_actions(&self, command: &str) -> Vec<String> {
         match self {
             Self::LiveRuntime => vec![],
@@ -638,6 +649,7 @@ impl CommandAvailability {
     ///
     /// This maps availability states to the `CliExitCode` semantic
     /// buckets defined in `main.rs` without importing the enum itself.
+    #[must_use]
     pub const fn exit_code_u8(&self) -> u8 {
         match self {
             Self::LiveRuntime | Self::OfflineArtifact | Self::Planned => 0, // success / preview
@@ -652,6 +664,7 @@ impl CommandAvailability {
     /// Returns a short string like `"LIVE"`, `"OFFLINE"`, `"DENIED [remediate]"`
     /// that fits in a status column or agent summary line.  Bracket suffixes
     /// indicate whether the caller can act.
+    #[must_use]
     pub const fn compact_label(&self) -> &'static str {
         match self {
             Self::LiveRuntime => "LIVE",
@@ -667,6 +680,7 @@ impl CommandAvailability {
     /// Short actionable help text for the given command, suitable for
     /// inline display in `--help`, error banners, and agent tool-call
     /// responses.  More detailed guidance lives in `next_actions()`.
+    #[must_use]
     pub fn help_text(&self, command: &str) -> String {
         match self {
             Self::LiveRuntime => {
@@ -711,6 +725,7 @@ impl CommandAvailability {
     }
 
     /// CLI-friendly symbol for tabular rendering.
+    #[must_use]
     pub const fn cli_symbol(&self) -> &'static str {
         match self {
             Self::LiveRuntime => "[+]",
@@ -724,6 +739,7 @@ impl CommandAvailability {
     }
 
     /// Severity category for sorting and filtering.
+    #[must_use]
     pub const fn severity_rank(&self) -> u8 {
         match self {
             Self::LiveRuntime => 0,
@@ -773,6 +789,7 @@ pub enum CommandTruthMode {
 
 impl CommandTruthMode {
     /// Machine-readable tag.
+    #[must_use]
     pub const fn tag(&self) -> &'static str {
         match self {
             Self::LiveOnly => "live-only",
@@ -784,6 +801,7 @@ impl CommandTruthMode {
     }
 
     /// Human-readable description.
+    #[must_use]
     pub const fn description(&self) -> &'static str {
         match self {
             Self::LiveOnly => "Requires a live host connection.",
@@ -795,6 +813,7 @@ impl CommandTruthMode {
     }
 
     /// Whether this mode can produce authoritative runtime data.
+    #[must_use]
     pub const fn can_be_authoritative(&self) -> bool {
         matches!(self, Self::LiveOnly | Self::Hybrid)
     }
@@ -1059,6 +1078,7 @@ pub const COMMAND_FAMILY_CLASSIFICATION: &[CommandFamilyEntry] = &[
 ];
 
 /// Look up the truth-boundary classification for a command name.
+#[must_use]
 pub fn classify_command(name: &str) -> Option<&'static CommandFamilyEntry> {
     COMMAND_FAMILY_CLASSIFICATION
         .iter()
@@ -1086,6 +1106,7 @@ pub struct CommandEnvelope {
 
 impl CommandEnvelope {
     /// Build an envelope from an availability state and command name.
+    #[must_use]
     pub fn new(availability: CommandAvailability, command: &str) -> Self {
         let authoritative = availability.is_authoritative();
         let explanation = availability.explanation().to_owned();
@@ -1116,6 +1137,7 @@ impl CommandEnvelope {
     ///
     /// Format: `[symbol] LABEL: explanation`
     /// Example: `[!] UNAVAILABLE [retry]: The operation should be available but the host or endpoint is temporarily unreachable.`
+    #[must_use]
     pub fn compact_line(&self) -> String {
         format!(
             "{} {}: {}",
@@ -1130,6 +1152,7 @@ impl CommandEnvelope {
     /// Returns a JSON value with a stable schema suitable for audit
     /// trails and transcript reconstruction.  Unlike `inject_into()`,
     /// this is self-contained and includes a timestamp placeholder.
+    #[must_use]
     pub fn transcript_entry(&self) -> Value {
         serde_json::json!({
             "type": "availability_verdict",
@@ -1147,11 +1170,13 @@ impl CommandEnvelope {
     }
 
     /// Help-text suitable for inline display in error banners.
+    #[must_use]
     pub fn help_banner(&self) -> String {
         self.availability.help_text(&self.command)
     }
 
     /// Exit code derived from availability semantics.
+    #[must_use]
     pub const fn exit_code(&self) -> u8 {
         self.availability.exit_code_u8()
     }
@@ -1527,12 +1552,20 @@ impl DiscoveryCatalog {
     ///
     /// This stays honest about runtime state: discovery is manifest-backed until
     /// host-backed lifecycle/status surfaces land in later beads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load() -> Result<Self> {
         Self::load_matching_slug(None)
     }
 
     /// Load the current workspace connector catalog, optionally scoped to one
     /// simple connector slug for faster offline filtered commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_for_connector_filter(connector_filter: Option<&str>) -> Result<Self> {
         match connector_filter.map(normalize_connector_selector) {
             Some(normalized) if is_simple_connector_slug(&normalized) => {
@@ -1614,6 +1647,10 @@ impl DiscoveryCatalog {
             .collect()
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn resolve_connector(&self, selector: &str) -> Result<&DiscoveredConnector, SelectorError> {
         let normalized = normalize_connector_selector(selector);
         let exact = self
@@ -1815,8 +1852,8 @@ impl DiscoveredConnector {
             .map(|archetype| archetype.as_str().to_owned())
             .collect::<Vec<_>>();
         let summary_archetypes =
-            declared_metadata_field((!archetypes.is_empty()).then_some(archetypes.clone()));
-        let connector_rate_limits = declared_metadata_field(connector_rate_limits.clone());
+            declared_metadata_field((!archetypes.is_empty()).then_some(archetypes));
+        let connector_rate_limits = declared_metadata_field(connector_rate_limits);
         let connector_archetypes_schema = serde_json::to_value(summary_archetypes.as_known())?;
         let summary = ConnectorSummary {
             id: connector_id.clone(),
@@ -1994,6 +2031,10 @@ impl DiscoveredConnector {
                 .any(|archetype| archetype == category)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn resolve_operation(&self, selector: &str) -> Result<&DiscoveredOperation, SelectorError> {
         let normalized = normalize_operation_selector(selector);
         let exact = self
@@ -2214,6 +2255,10 @@ impl DiscoveredOperation {
             .any(|candidate| candidate.starts_with(selector))
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_operation_info(&self) -> Result<OperationInfo> {
         Ok(OperationInfo {
             id: OperationId::new(self.actual_id.clone()).with_context(|| {
@@ -2282,6 +2327,10 @@ impl DiscoveredOperation {
     }
 
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics if internal state is inconsistent.
     pub fn operation_info(&self) -> OperationInfo {
         self.try_operation_info()
             .expect("discovery catalog should only surface valid metadata labels")
@@ -2302,6 +2351,7 @@ impl DiscoveredOperation {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn discovered_connector_from_toml(
     slug: &str,
     manifest_path: &Path,
@@ -2400,7 +2450,7 @@ fn discovered_connector_from_toml(
         MetadataField::Unknown
     };
     let supported_zones = extract_supported_zones_from_toml(document.get("zones"));
-    let summary_archetypes = declared_metadata_field(archetypes.clone());
+    let summary_archetypes = declared_metadata_field(archetypes);
     let connector_archetypes_schema = serde_json::to_value(summary_archetypes.as_known())?;
 
     let summary = ConnectorSummary {
@@ -2494,6 +2544,7 @@ fn discovered_connector_from_toml(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn discovered_operation_from_toml(
     namespace: &str,
     operation_id: &str,
@@ -2794,6 +2845,7 @@ fn parse_approval_mode(label: &str) -> Result<Option<ApprovalMode>> {
     }
 }
 
+#[must_use]
 pub const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
     match level {
         fcp_core::RiskLevel::Low => "low",
@@ -2803,6 +2855,7 @@ pub const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
     }
 }
 
+#[must_use]
 pub const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
     match tier {
         fcp_core::SafetyTier::Safe => "safe",
@@ -2813,6 +2866,7 @@ pub const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
     }
 }
 
+#[must_use]
 pub const fn idempotency_label(idempotency: fcp_core::IdempotencyClass) -> &'static str {
     match idempotency {
         fcp_core::IdempotencyClass::None => "none",
@@ -2901,6 +2955,7 @@ fn pluralize_object(object: &str) -> String {
     }
 }
 
+#[must_use]
 pub fn normalize_connector_selector(selector: &str) -> String {
     selector
         .trim()
@@ -2917,6 +2972,7 @@ fn normalize_zone_selector(selector: &str) -> String {
     selector.trim().to_lowercase()
 }
 
+#[must_use]
 pub fn normalize_operation_selector(selector: &str) -> String {
     selector.trim().to_lowercase().replace('-', "_")
 }
@@ -2955,6 +3011,7 @@ fn suggest_operation_selectors(operations: &[DiscoveredOperation], selector: &st
         .collect()
 }
 
+#[must_use]
 pub fn selector_distance(left: &str, right: &str) -> usize {
     let right_chars = right.chars().collect::<Vec<_>>();
     let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
@@ -3943,9 +4000,10 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
 /// Typed connectors with manifests are assessed as **Ready**.
 /// JSON connectors are assessed as **Ready** (schemas present) but with
 /// cosmetic `AgentHints` gaps since they lack typed `when_to_use` fields.
-/// Connectors missing `manifest.toml` stay **NotReady** because critical
+/// Connectors missing `manifest.toml` stay **`NotReady`** because critical
 /// identity/config metadata is unavailable.
 #[allow(clippy::too_many_lines)]
+#[must_use]
 pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
     CONNECTOR_INVENTORY
         .iter()

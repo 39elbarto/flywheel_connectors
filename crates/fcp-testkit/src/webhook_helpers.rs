@@ -424,6 +424,10 @@ impl WebhookAttachmentFixture {
     }
 
     /// Mount a JSON attachment on the provided fixture server and return its URL.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the JSON body cannot be serialized to bytes.
     #[must_use]
     pub fn mount_json(fixture: &HttpFixtureServer, path: &str, body: &Value) -> Self {
         let encoded =
@@ -531,10 +535,7 @@ impl WebhookIngressHarness {
         for attempt in 1..=max_attempts {
             let record = self.send_once(payload, attempt).await;
             let should_retry = attempt < max_attempts
-                && match record.status {
-                    Some(status) => policy.retry_statuses.contains(&status),
-                    None => true,
-                };
+                && record.status.is_none_or(|status| policy.retry_statuses.contains(&status));
             transcript.attempts.push(record);
 
             if !should_retry {

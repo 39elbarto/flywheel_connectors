@@ -286,7 +286,7 @@ impl FixtureStartupProbe {
 }
 
 /// Deterministic record of state preloaded into a truthful local fixture.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixtureSeedRecord {
     /// Table, bucket, namespace, or similar scope.
     pub resource: String,
@@ -313,7 +313,7 @@ impl FixtureSeedRecord {
 }
 
 /// A state mutation the fixture run is expected to exercise.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixtureMutationRecord {
     /// Mutation operation (`insert`, `update`, `delete`, `put`, etc.).
     pub operation: String,
@@ -387,7 +387,7 @@ impl FixtureCleanupCheck {
 }
 
 /// Cleanup verification emitted after a stateful fixture teardown.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupVerificationResult {
     /// Cleanup check identifier that was exercised.
     pub check_id: String,
@@ -426,7 +426,7 @@ impl CleanupVerificationResult {
 }
 
 /// Serializable contract for a seeded truthful local fixture pack.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeededStatefulFixturePack {
     /// Version marker for the contract itself.
     pub contract_version: String,
@@ -514,6 +514,10 @@ impl SeededStatefulFixturePack {
     }
 
     /// Serialize the pack to JSON for manifest/report emission.
+    ///
+    /// # Panics
+    /// Panics if the fixture pack cannot be serialized, which should not happen
+    /// for well-formed fixture data.
     #[must_use]
     pub fn to_json(&self) -> Value {
         serde_json::to_value(self).expect("seeded stateful fixture pack should serialize")

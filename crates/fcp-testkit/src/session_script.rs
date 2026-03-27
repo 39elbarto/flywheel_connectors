@@ -123,7 +123,7 @@ pub enum Fault {
 // ---------------------------------------------------------------------------
 
 /// How to match an expected message against actual received data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum MessageMatcher {
     // NOTE: intentionally no Eq — serde_json::Value does not impl Eq
@@ -158,7 +158,7 @@ pub enum AckMode {
 // ---------------------------------------------------------------------------
 
 /// A single step in a session script.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub enum ScriptStep {
     /// Open a connection to the given path.
@@ -255,17 +255,17 @@ impl ScriptStep {
     }
 
     #[must_use]
-    pub fn disconnect() -> Self {
+    pub const fn disconnect() -> Self {
         Self::Disconnect
     }
 
     #[must_use]
-    pub fn send_message(body: serde_json::Value) -> Self {
+    pub const fn send_message(body: serde_json::Value) -> Self {
         Self::SendMessage { body }
     }
 
     #[must_use]
-    pub fn expect_message(body: serde_json::Value) -> Self {
+    pub const fn expect_message(body: serde_json::Value) -> Self {
         Self::ExpectMessage {
             matcher: MessageMatcher::Exact { body },
             timeout: default_expect_timeout(),
@@ -274,7 +274,7 @@ impl ScriptStep {
     }
 
     #[must_use]
-    pub fn expect_message_containing(fragment: serde_json::Value) -> Self {
+    pub const fn expect_message_containing(fragment: serde_json::Value) -> Self {
         Self::ExpectMessage {
             matcher: MessageMatcher::Contains { fragment },
             timeout: default_expect_timeout(),
@@ -283,7 +283,7 @@ impl ScriptStep {
     }
 
     #[must_use]
-    pub fn expect_any_message() -> Self {
+    pub const fn expect_any_message() -> Self {
         Self::ExpectMessage {
             matcher: MessageMatcher::Any,
             timeout: default_expect_timeout(),
@@ -292,7 +292,7 @@ impl ScriptStep {
     }
 
     #[must_use]
-    pub fn expect_count(count: u32, matcher: MessageMatcher) -> Self {
+    pub const fn expect_count(count: u32, matcher: MessageMatcher) -> Self {
         Self::ExpectCount {
             count,
             matcher,
@@ -301,32 +301,32 @@ impl ScriptStep {
     }
 
     #[must_use]
-    pub fn expect_silence(duration: Duration) -> Self {
+    pub const fn expect_silence(duration: Duration) -> Self {
         Self::ExpectSilence { duration }
     }
 
     #[must_use]
-    pub fn wait(duration: Duration) -> Self {
+    pub const fn wait(duration: Duration) -> Self {
         Self::Wait { duration }
     }
 
     #[must_use]
-    pub fn assert_health(expected: ScriptHealthState) -> Self {
+    pub const fn assert_health(expected: ScriptHealthState) -> Self {
         Self::AssertHealth { expected }
     }
 
     #[must_use]
-    pub fn assert_reconnect_count(expected: u32) -> Self {
+    pub const fn assert_reconnect_count(expected: u32) -> Self {
         Self::AssertReconnectCount { expected }
     }
 
     #[must_use]
-    pub fn assert_messages_received(min: u64) -> Self {
+    pub const fn assert_messages_received(min: u64) -> Self {
         Self::AssertMessagesReceived { min }
     }
 
     #[must_use]
-    pub fn inject_fault(fault: Fault) -> Self {
+    pub const fn inject_fault(fault: Fault) -> Self {
         Self::InjectFault { fault }
     }
 
@@ -340,7 +340,7 @@ impl ScriptStep {
     }
 
     #[must_use]
-    pub fn webhook_expect_ack() -> Self {
+    pub const fn webhook_expect_ack() -> Self {
         Self::WebhookExpectAck {
             timeout: default_expect_timeout(),
         }
@@ -355,7 +355,7 @@ impl ScriptStep {
 
     /// Override the timeout for expect-style steps.
     #[must_use]
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         match &mut self {
             Self::ExpectMessage { timeout: t, .. }
             | Self::ExpectCount { timeout: t, .. }
@@ -367,7 +367,7 @@ impl ScriptStep {
 
     /// Override the ack mode for expect-message steps.
     #[must_use]
-    pub fn with_ack(mut self, ack: AckMode) -> Self {
+    pub const fn with_ack(mut self, ack: AckMode) -> Self {
         if let Self::ExpectMessage { ack: a, .. } = &mut self {
             *a = ack;
         }
@@ -409,7 +409,7 @@ impl SessionScript {
     }
 
     #[must_use]
-    pub fn with_transport(mut self, transport: Transport) -> Self {
+    pub const fn with_transport(mut self, transport: Transport) -> Self {
         self.default_transport = Some(transport);
         self
     }
@@ -536,6 +536,7 @@ impl SessionTranscript {
     ///
     /// Panics if any entry cannot be serialized to JSON (should not happen
     /// with well-formed transcript data).
+    #[must_use]
     pub fn to_jsonl(&self) -> String {
         let mut lines = Vec::with_capacity(self.entries.len() + 1);
         // Header line
@@ -546,7 +547,7 @@ impl SessionTranscript {
             "phase": "setup",
             "correlation_id": self.run_id,
             "result": self.outcome.to_string(),
-            "duration_ms": self.total_duration.as_millis() as u64,
+            "duration_ms": u64::try_from(self.total_duration.as_millis()).unwrap_or(u64::MAX),
             "assertions": {
                 "passed": self.summary.passed,
                 "failed": self.summary.failed
@@ -565,7 +566,7 @@ impl SessionTranscript {
                     .unwrap_or(&self.run_id),
                 "step_number": entry.step_index,
                 "result": entry.outcome.to_string(),
-                "duration_ms": entry.duration.as_millis() as u64,
+                "duration_ms": u64::try_from(entry.duration.as_millis()).unwrap_or(u64::MAX),
                 "details": entry.detail,
             });
             lines.push(serde_json::to_string(&line).expect("transcript entry should serialize"));
@@ -585,18 +586,18 @@ const fn step_phase(step: &ScriptStep) -> &'static str {
     match step {
         ScriptStep::Connect { .. } => "setup",
         ScriptStep::Disconnect => "teardown",
-        ScriptStep::SendMessage { .. } => "invoke",
-        ScriptStep::ExpectMessage { .. }
+        ScriptStep::SendMessage { .. }
+        | ScriptStep::ExpectMessage { .. }
         | ScriptStep::ExpectCount { .. }
-        | ScriptStep::ExpectSilence { .. } => "invoke",
-        ScriptStep::Wait { .. } => "invoke",
-        ScriptStep::AssertHealth { .. }
+        | ScriptStep::ExpectSilence { .. }
+        | ScriptStep::Wait { .. }
+        | ScriptStep::AssertHealth { .. }
         | ScriptStep::AssertReconnectCount { .. }
-        | ScriptStep::AssertMessagesReceived { .. } => "invoke",
-        ScriptStep::InjectFault { .. } => "invoke",
-        ScriptStep::WebhookDeliver { .. } => "invoke",
-        ScriptStep::WebhookExpectAck { .. } => "invoke",
-        ScriptStep::Annotate { .. } => "invoke",
+        | ScriptStep::AssertMessagesReceived { .. }
+        | ScriptStep::InjectFault { .. }
+        | ScriptStep::WebhookDeliver { .. }
+        | ScriptStep::WebhookExpectAck { .. }
+        | ScriptStep::Annotate { .. } => "invoke",
     }
 }
 
@@ -606,7 +607,9 @@ const fn step_phase(step: &ScriptStep) -> &'static str {
 
 /// Pre-built canonical scenarios that connector acceptance tests can reuse.
 pub mod scenarios {
-    use super::*;
+    use super::{
+        AckMode, Fault, MessageMatcher, ScriptHealthState, ScriptStep, SessionScript, Transport,
+    };
     use std::time::Duration;
 
     /// WebSocket: connect, exchange hello/pong, verify health.
@@ -737,23 +740,36 @@ mod humantime_serde {
     }
 
     fn parse_duration(s: &str) -> Result<Duration, String> {
-        if let Some(ms) = s.strip_suffix("ms") {
-            ms.parse::<u64>()
-                .map(Duration::from_millis)
-                .map_err(|e| e.to_string())
-        } else if let Some(secs) = s.strip_suffix('s') {
-            secs.parse::<u64>()
-                .map(Duration::from_secs)
-                .map_err(|e| e.to_string())
-        } else if let Some(mins) = s.strip_suffix('m') {
-            mins.parse::<u64>()
-                .map(|m| Duration::from_secs(m * 60))
-                .map_err(|e| e.to_string())
-        } else {
-            s.parse::<u64>()
-                .map(Duration::from_millis)
-                .map_err(|e| format!("cannot parse duration '{s}': {e}"))
-        }
+        s.strip_suffix("ms").map_or_else(
+            || {
+                s.strip_suffix('s').map_or_else(
+                    || {
+                        s.strip_suffix('m').map_or_else(
+                            || {
+                                s.parse::<u64>()
+                                    .map(Duration::from_millis)
+                                    .map_err(|e| format!("cannot parse duration '{s}': {e}"))
+                            },
+                            |mins| {
+                                mins.parse::<u64>()
+                                    .map(|m| Duration::from_secs(m * 60))
+                                    .map_err(|e| e.to_string())
+                            },
+                        )
+                    },
+                    |secs| {
+                        secs.parse::<u64>()
+                            .map(Duration::from_secs)
+                            .map_err(|e| e.to_string())
+                    },
+                )
+            },
+            |ms| {
+                ms.parse::<u64>()
+                    .map(Duration::from_millis)
+                    .map_err(|e| e.to_string())
+            },
+        )
     }
 }
 

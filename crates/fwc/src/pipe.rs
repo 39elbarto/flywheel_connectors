@@ -59,6 +59,10 @@ pub struct MappingResult {
 /// Parse a `--map` expression string into a `MappingSpec`.
 ///
 /// Format: `"source.path -> target, source2 -> target2"`
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn parse_map_expression(expr: &str) -> Result<MappingSpec, String> {
     let mut rules = Vec::new();
     for segment in expr.split(',') {
@@ -88,6 +92,10 @@ pub fn parse_map_expression(expr: &str) -> Result<MappingSpec, String> {
 /// Parse a JSON mapping file into a `MappingSpec`.
 ///
 /// File format: `[{"source": "a.x", "target": "b.x"}, ...]`
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn parse_map_file(content: &str) -> Result<MappingSpec, String> {
     let rules: Vec<MapRule> =
         serde_json::from_str(content).map_err(|e| format!("invalid map file JSON: {e}"))?;
@@ -100,6 +108,7 @@ pub fn parse_map_file(content: &str) -> Result<MappingSpec, String> {
 // ── Evaluation ──────────────────────────────────────────────────────────
 
 /// Apply a mapping specification to transform source output into target input.
+#[must_use]
 pub fn apply_mapping(source_output: &Value, spec: &MappingSpec) -> MappingResult {
     let mut output = Map::new();
     let mut errors = Vec::new();
@@ -1085,10 +1094,12 @@ fn parse_builtin_recipe_spec(spec: &BuiltInRecipeSpec) -> Result<BuiltInRecipe, 
     })
 }
 
+#[must_use]
 pub fn builtin_recipe_slugs() -> Vec<&'static str> {
     BUILTIN_RECIPES.iter().map(|spec| spec.slug).collect()
 }
 
+#[must_use]
 pub fn builtin_recipe_summaries() -> Vec<BuiltInRecipeSummary> {
     let mut summaries = BUILTIN_RECIPES
         .iter()
@@ -1130,6 +1141,10 @@ pub fn builtin_recipe_summaries() -> Vec<BuiltInRecipeSummary> {
     summaries
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn load_builtin_recipe(reference: &str) -> Result<BuiltInRecipe, String> {
     let spec = BUILTIN_RECIPES
         .iter()
@@ -1138,10 +1153,15 @@ pub fn load_builtin_recipe(reference: &str) -> Result<BuiltInRecipe, String> {
     parse_builtin_recipe_spec(spec)
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn parse_pipeline_definition(content: &str) -> Result<PipelineDefinition, String> {
     toml::from_str(content).map_err(|error| format!("invalid pipeline TOML: {error}"))
 }
 
+#[must_use]
 pub fn validate_pipeline_definition(definition: &PipelineDefinition) -> PipelineValidation {
     let mut errors = Vec::new();
 
@@ -1230,6 +1250,10 @@ pub fn validate_pipeline_definition(definition: &PipelineDefinition) -> Pipeline
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn bind_pipeline_params(
     definition: &PipelineDefinition,
     raw_params: &[String],
@@ -1300,6 +1324,10 @@ pub fn bind_pipeline_params(
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_pipeline_plan(
     definition: &PipelineDefinition,
     params: &BTreeMap<String, PipelineParamBinding>,
@@ -1353,6 +1381,10 @@ pub fn build_pipeline_plan(
 }
 
 #[allow(clippy::too_many_lines)]
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn estimate_pipeline(
     plan: &PipelinePlan,
     operations: &BTreeMap<String, PipelineOperationMetadata>,
@@ -1518,6 +1550,10 @@ pub fn default_pipeline_roots(cwd: &Path) -> PipelineRoots {
     PipelineRoots { project, user }
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn discover_pipelines(roots: &PipelineRoots) -> Result<Vec<DiscoveredPipeline>, String> {
     let mut directories = vec![("project".to_owned(), roots.project.clone())];
     if let Some(user_root) = &roots.user {
@@ -1528,6 +1564,10 @@ pub fn discover_pipelines(roots: &PipelineRoots) -> Result<Vec<DiscoveredPipelin
     discover_pipelines_in_directories(&directories)
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn resolve_pipeline_reference(
     reference: &str,
     roots: &PipelineRoots,

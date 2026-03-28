@@ -303,10 +303,13 @@ impl PcsGroupState {
 
         let removed = self.members.remove(idx);
 
-        // Rebuild index after removal.
-        self.member_index.clear();
-        for (i, m) in self.members.iter().enumerate() {
-            self.member_index.insert(m.node_id.as_str().to_string(), i);
+        // Update index incrementally: remove the deleted entry and fix shifted indices.
+        // This avoids re-allocating String keys for all N members on every removal.
+        self.member_index.remove(removed.node_id.as_str());
+        for i in idx..self.members.len() {
+            if let Some(entry) = self.member_index.get_mut(self.members[i].node_id.as_str()) {
+                *entry = i;
+            }
         }
 
         // Inject fresh entropy from the removed member's leaf position

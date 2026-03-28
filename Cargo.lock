@@ -3704,6 +3704,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-kernel"
+version = "0.1.0"
+dependencies = [
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fcp-kubernetes"
 version = "0.1.0"
 dependencies = [

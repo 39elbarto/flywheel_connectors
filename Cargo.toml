@@ -14,6 +14,7 @@ members = [
     "crates/fcp-google-discovery",
     "crates/fcp-graphql",
     "crates/fcp-host",
+    "crates/fcp-kernel",
     "crates/fcp-manifest",
     "crates/fcp-mesh",
     "crates/fcp-oauth",

@@ -77,7 +77,7 @@ impl SymbolDistribution {
     /// Get the maximum symbol count on any single node.
     #[inline]
     #[must_use]
-    pub fn max_node_symbols(&self) -> u32 {
+    pub const fn max_node_symbols(&self) -> u32 {
         self.cached_max
     }
 }

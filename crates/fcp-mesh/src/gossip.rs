@@ -915,15 +915,14 @@ impl MeshGossip {
     }
 
     /// Get or create zone state.
+    ///
+    /// Borrows `config` and `zone_states` as disjoint fields to avoid
+    /// cloning `GossipConfig` on every call.
     fn get_or_create_zone(&mut self, zone_id: &ZoneId) -> &mut GossipState {
-        // We need to clone config to pass it into the closure, but we can't capture &self.config
-        // mutable borrow of self.zone_states conflicts with immutable borrow of self.config
-        // So we clone config cheaply (it's small) or extract fields.
-        let config = self.config.clone();
-
+        let config = &self.config;
         self.zone_states
             .entry(zone_id.clone())
-            .or_insert_with(|| GossipState::new(zone_id.clone(), &config))
+            .or_insert_with(|| GossipState::new(zone_id.clone(), config))
     }
 
     /// Announce object availability (NORMATIVE).

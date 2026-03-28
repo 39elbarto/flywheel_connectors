@@ -111,7 +111,7 @@ impl GcRoots {
         roots
     }
 
-    /// Iterate all root object IDs without allocating a new HashSet.
+    /// Iterate all root object IDs without allocating a new `HashSet`.
     pub fn root_iter(&self) -> impl Iterator<Item = ObjectId> + '_ {
         self.pinned
             .iter()

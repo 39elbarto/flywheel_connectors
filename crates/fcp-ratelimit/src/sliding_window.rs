@@ -54,6 +54,7 @@ impl SlidingWindow {
         let mut timestamps = self.timestamps.lock();
         self.cleanup_locked(&mut timestamps, now);
         let len_u32 = u32::try_from(timestamps.len()).unwrap_or(u32::MAX);
+        drop(timestamps);
         self.limit.saturating_sub(len_u32)
     }
 }

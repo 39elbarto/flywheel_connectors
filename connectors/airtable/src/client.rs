@@ -136,7 +136,7 @@ impl AirtableClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub fn with_retry_config(
+    pub const fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,

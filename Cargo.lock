@@ -2974,6 +2974,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-evidence"
+version = "0.1.0"
+dependencies = [
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fcp-exa"
 version = "0.1.0"
 dependencies = [
@@ -4548,6 +4558,16 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-policy"
+version = "0.1.0"
+dependencies = [
+ "fcp-async-core",
+ "fcp-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

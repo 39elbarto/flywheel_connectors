@@ -104,6 +104,9 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+fcp-kernel = { workspace = true }
+fcp-policy = { workspace = true }
+fcp-evidence = { workspace = true }
 fcp-crypto = { workspace = true }
 fcp-telemetry = { workspace = true }
 fcp-anthropic = { path = "../../connectors/anthropic" }

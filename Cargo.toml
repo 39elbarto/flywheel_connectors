@@ -301,9 +301,12 @@ fcp-crypto = { path = "crates/fcp-crypto" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
 fcp-host = { path = "crates/fcp-host" }
+fcp-kernel = { path = "crates/fcp-kernel" }
 fcp-manifest = { path = "crates/fcp-manifest" }
 fcp-mesh = { path = "crates/fcp-mesh" }
 fcp-oauth = { path = "crates/fcp-oauth" }
+fcp-policy = { path = "crates/fcp-policy" }
+fcp-evidence = { path = "crates/fcp-evidence" }
 fcp-protocol = { path = "crates/fcp-protocol" }
 fcp-raptorq = { path = "crates/fcp-raptorq" }
 fcp-ratelimit = { path = "crates/fcp-ratelimit" }

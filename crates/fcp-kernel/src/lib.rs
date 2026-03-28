@@ -98,6 +98,58 @@ pub use fcp_core::{CostEstimate, ResourceAvailability, UsageMetric, UsageMetricK
 
 pub use fcp_core::{IdempotencyClass, IdempotencyEntry, OperationIntent, OperationReceipt};
 
+// ── Lease & Execution Authority ────────────────────────────────────
+
+pub use fcp_core::{
+    Lease, LeaseHandoff, LeaseId, LeasePurpose, LeaseParams, LeaseRequest, LeaseResponse,
+    LeaseTransferValidationError, LeaseValidationError,
+};
+
+// ── Checkpoint & Recovery ──────────────────────────────────────────
+
+pub use fcp_core::{
+    CheckpointAdvanceState, CheckpointChunkError, CheckpointProposal, CheckpointTransferEncoding,
+    CheckpointTrigger, CheckpointValidationError, ChunkedCheckpoint, ChunkedObjectManifest,
+    ComputationCheckpoint, ForkDetectionResult, ForkEvidence, FreshnessResult,
+    MigrationCapabilityContext,
+};
+
+// ── Computation Migration & State ──────────────────────────────────
+
+pub use fcp_core::{
+    ComputationMigrationError, ConnectorStateDelta, ConnectorStateModel, ConnectorStateObject,
+    ConnectorStateRoot, ConnectorStateSnapshot, CrdtType, CursorState, ForkEvent, ForkResolution,
+    ForkResolutionOutcome, MigratableComputation, MigratableComputationState,
+    StateForkDetectionResult, StateForkDetector,
+};
+
+// ── Budget & Resource Accounting ───────────────────────────────────
+
+pub use fcp_core::{
+    BudgetEnforcement, BudgetStatus, UsageBudgetLimit, UsageBudgetPolicy, UsageBudgetSnapshot,
+    UsageBudgetUsage,
+};
+
+// ── Rate Limiting (execution-level) ────────────────────────────────
+
+pub use fcp_core::{
+    AggregatedRateLimits, BackpressureLevel, BackpressureSignal, LimitType, RateLimitConfig,
+    RateLimitDeclarationError, RateLimitDeclarations, RateLimitEnforcement, RateLimitInfo,
+    RateLimitPool, RateLimitScope, RateLimitStatus, RateLimitUnit, ThrottleViolation,
+    ThrottleViolationInput,
+};
+
+// ── Quorum & Consensus (execution safety) ──────────────────────────
+
+pub use fcp_core::{
+    DegradedModeState, NodeSignature, QuorumFailureReason, QuorumPolicy, QuorumPurpose,
+    QuorumVerificationResult, RiskTier, SignatureSet,
+};
+
+// ── Shutdown & Drain ───────────────────────────────────────────────
+
+pub use fcp_core::{ShutdownAck, ShutdownRequest};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +183,69 @@ mod tests {
     fn kernel_exports_operation_id() {
         let id = OperationId::from_static("test.op");
         assert_eq!(id.as_str(), "test.op");
+    }
+
+    #[test]
+    fn kernel_exports_lease_types() {
+        let _: LeasePurpose = LeasePurpose::OperationExecution;
+        let _: LeasePurpose = LeasePurpose::ComputationMigration;
+        let _: LeasePurpose = LeasePurpose::ConnectorStateWrite;
+    }
+
+    #[test]
+    fn kernel_exports_checkpoint_types() {
+        // CheckpointTrigger variants have data fields, just verify the type exists
+        let _trigger: fn(u64, u64) -> CheckpointTrigger = |elapsed, threshold| {
+            CheckpointTrigger::TimeElapsed {
+                elapsed_secs: elapsed,
+                threshold_secs: threshold,
+            }
+        };
+    }
+
+    #[test]
+    fn kernel_exports_computation_migration_types() {
+        let _: MigratableComputationState = MigratableComputationState::Running;
+        let _: MigratableComputationState = MigratableComputationState::Suspended;
+        let _: ConnectorStateModel = ConnectorStateModel::Stateless;
+    }
+
+    #[test]
+    fn kernel_exports_budget_types() {
+        let _: BudgetEnforcement = BudgetEnforcement::Warn;
+        let _: BudgetEnforcement = BudgetEnforcement::Deny;
+        let _: BudgetStatus = BudgetStatus::Ok;
+    }
+
+    #[test]
+    fn kernel_exports_rate_limit_types() {
+        let _: LimitType = LimitType::Rpm;
+        let _: LimitType = LimitType::Concurrent;
+        let _: BackpressureLevel = BackpressureLevel::Normal;
+        let _: RateLimitEnforcement = RateLimitEnforcement::Hard;
+    }
+
+    #[test]
+    fn kernel_exports_quorum_types() {
+        let _: RiskTier = RiskTier::Safe;
+        let _: RiskTier = RiskTier::Risky;
+        let _: QuorumPurpose = QuorumPurpose::AuditHead;
+    }
+
+    #[test]
+    fn kernel_exports_shutdown_types() {
+        let req = ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 5000,
+            drain: true,
+            reason: Some("test".into()),
+        };
+        assert!(req.drain);
+        assert_eq!(req.deadline_ms, 5000);
+    }
+
+    #[test]
+    fn kernel_exports_idempotency_types() {
+        let _: IdempotencyClass = IdempotencyClass::Strict;
     }
 }

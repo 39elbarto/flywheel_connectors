@@ -171,10 +171,10 @@ impl CwtClaims {
     /// Set FCP2 allowed operations claim.
     #[must_use]
     pub fn operations(mut self, ops: &[&str]) -> Self {
-        let values: Vec<ciborium::Value> = ops
-            .iter()
-            .map(|s| ciborium::Value::Text((*s).into()))
-            .collect();
+        let mut values = Vec::with_capacity(ops.len());
+        for s in ops {
+            values.push(ciborium::Value::Text((*s).into()));
+        }
         self.claims
             .insert(fcp2_claims::OPERATIONS, ciborium::Value::Array(values));
         self
@@ -211,10 +211,10 @@ impl CwtClaims {
     /// Set FCP2 grant object IDs.
     #[must_use]
     pub fn grant_objects(mut self, object_ids: &[&[u8]]) -> Self {
-        let values: Vec<ciborium::Value> = object_ids
-            .iter()
-            .map(|id| ciborium::Value::Bytes(id.to_vec()))
-            .collect();
+        let mut values = Vec::with_capacity(object_ids.len());
+        for id in object_ids {
+            values.push(ciborium::Value::Bytes(id.to_vec()));
+        }
         self.claims.insert(
             fcp2_claims::GRANT_OBJECT_IDS,
             ciborium::Value::Array(values),
@@ -357,7 +357,9 @@ impl CwtClaims {
     ///
     /// Returns an error if serialization fails.
     pub fn to_cbor(&self) -> CryptoResult<Vec<u8>> {
-        let mut bytes = Vec::new();
+        // Pre-allocate for typical CWT claims (~200-300 bytes CBOR).
+        // Avoids 2-3 reallocations during ciborium serialization.
+        let mut bytes = Vec::with_capacity(256);
         ciborium::into_writer(&self.claims, &mut bytes)
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
         Ok(bytes)

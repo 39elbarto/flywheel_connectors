@@ -482,14 +482,16 @@ pub fn reconstruct_secret(shares: &[ShamirShare]) -> ShamirResult<ZeroizingSecre
         return Err(ShamirError::MismatchedLengths);
     }
 
-    // Reconstruct each byte of the secret
+    // Reconstruct each byte of the secret.
+    // Reuse a single points buffer across all bytes to avoid per-byte allocation.
     let mut secret = Vec::with_capacity(secret_len);
+    let mut points = Vec::with_capacity(shares.len());
 
     for byte_idx in 0..secret_len {
-        let points: Vec<(Gf256, Gf256)> = shares
-            .iter()
-            .map(|s| (Gf256::new(s.index), Gf256::new(s.data[byte_idx])))
-            .collect();
+        points.clear();
+        for s in shares {
+            points.push((Gf256::new(s.index), Gf256::new(s.data[byte_idx])));
+        }
 
         let recovered = lagrange_interpolate_at_zero(&points);
         secret.push(recovered.value());

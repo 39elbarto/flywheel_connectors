@@ -540,7 +540,10 @@ impl GossipSummary {
     /// Panics if any field byte length exceeds `u32::MAX`.
     #[must_use]
     pub fn signing_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        // Pre-allocate: 22 (prefix) + ~50 (from+zone+epoch with lengths)
+        // + 64 (digests) + 8 (counts) + iblt.len() + 8 (timestamp)
+        let estimated = 152 + self.iblt.len();
+        let mut bytes = Vec::with_capacity(estimated);
         bytes.extend_from_slice(b"FCP2-GOSSIP-SUMMARY-V1");
 
         let from_bytes = self.from.as_str().as_bytes();

@@ -17,6 +17,8 @@ members = [
     "crates/fcp-kernel",
     "crates/fcp-manifest",
     "crates/fcp-mesh",
+    "crates/fcp-policy",
+    "crates/fcp-evidence",
     "crates/fcp-oauth",
     "crates/fcp-protocol",
     "crates/fcp-raptorq",

@@ -390,7 +390,8 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
     }
 
     if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let mut text = resp.text().await.unwrap_or_default();
+        text.truncate(2048);
         warn!(status, "CircleCI request failed");
         let message = serde_json::from_str::<ApiErrorResponse>(&text)
             .map(|e| e.message)
@@ -438,7 +439,8 @@ async fn handle_response_as_list<T: serde::de::DeserializeOwned>(
     }
 
     if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let mut text = resp.text().await.unwrap_or_default();
+        text.truncate(2048);
         warn!(status, "CircleCI request failed");
         let message = serde_json::from_str::<ApiErrorResponse>(&text)
             .map(|e| e.message)

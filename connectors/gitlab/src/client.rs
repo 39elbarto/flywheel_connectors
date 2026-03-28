@@ -144,7 +144,8 @@ impl GitLabClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
 
-        let body = resp.text().await.unwrap_or_default();
+        let mut body = resp.text().await.unwrap_or_default();
+        body.truncate(2048);
         let detail = serde_json::from_str::<ApiErrorResponse>(&body)
             .ok()
             .and_then(|e| e.error.or_else(|| e.message.map(|m| m.to_string())))

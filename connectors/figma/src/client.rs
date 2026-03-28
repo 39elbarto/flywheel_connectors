@@ -139,7 +139,8 @@ impl FigmaClient {
             return Err(FigmaError::Unauthorized);
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let mut body = response.text().await.unwrap_or_default();
+            body.truncate(2048);
             return Err(FigmaError::Api {
                 status: status.as_u16(),
                 message: body,
@@ -470,7 +471,8 @@ impl FigmaClient {
                     });
                 }
                 if !status.is_success() {
-                    let body = resp.text().await.unwrap_or_default();
+                    let mut body = resp.text().await.unwrap_or_default();
+                    body.truncate(2048);
                     let err = FigmaError::Api {
                         status: status.as_u16(),
                         message: body,
@@ -525,7 +527,8 @@ impl FigmaClient {
                     return AttemptOutcome::Terminal(FigmaError::Unauthorized);
                 }
                 if !status.is_success() {
-                    let body_text = resp.text().await.unwrap_or_default();
+                    let mut body_text = resp.text().await.unwrap_or_default();
+                    body_text.truncate(2048);
                     let err = FigmaError::Api {
                         status: status.as_u16(),
                         message: body_text,
@@ -586,7 +589,8 @@ impl FigmaClient {
                     });
                 }
                 if !status.is_success() {
-                    let body_text = resp.text().await.unwrap_or_default();
+                    let mut body_text = resp.text().await.unwrap_or_default();
+                    body_text.truncate(2048);
                     let err = FigmaError::Api {
                         status: status.as_u16(),
                         message: body_text,

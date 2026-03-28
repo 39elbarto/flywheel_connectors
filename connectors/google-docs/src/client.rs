@@ -159,7 +159,8 @@ impl DocsClient {
             return resp.json().await.map_err(DocsError::Http);
         }
         let code = status.as_u16();
-        let body = resp.text().await.unwrap_or_default();
+        let mut body = resp.text().await.unwrap_or_default();
+        body.truncate(2048);
         if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&body) {
             Err(map_api_error(api_err.error))
         } else {

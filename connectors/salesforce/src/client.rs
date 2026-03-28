@@ -287,7 +287,8 @@ impl SalesforceClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
 
-        let body = resp.text().await.unwrap_or_default();
+        let mut body = resp.text().await.unwrap_or_default();
+        body.truncate(2048);
 
         // Salesforce can return either an array of errors or a single message object.
         let detail = serde_json::from_str::<Vec<crate::types::ApiErrorItem>>(&body)

@@ -7,6 +7,8 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+blake3 = { workspace = true }
+chrono = { workspace = true }
 fcp-core = { path = "../fcp-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }

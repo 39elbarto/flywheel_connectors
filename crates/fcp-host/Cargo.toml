@@ -14,6 +14,7 @@ unsafe_code = "forbid"
 [dependencies]
 # Core FCP types
 fcp-core = { path = "../fcp-core" }
+fcp-kernel = { path = "../fcp-kernel" }
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }
@@ -53,7 +54,6 @@ fcp-sandbox = { version = "0.1.0", path = "../fcp-sandbox" }
 
 [dev-dependencies]
 fcp-conformance = { path = "../fcp-conformance" }
-fcp-e2e = { path = "../fcp-e2e" }
 fcp-testkit = { path = "../fcp-testkit" }
 reqwest.workspace = true
 tempfile = "3"

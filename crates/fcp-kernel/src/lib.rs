@@ -12,10 +12,15 @@
 //! - **Session establishment**: `HandshakeRequest`, `HandshakeResponse`, `SessionId`
 //! - **Connector traits**: `FcpConnector`, `RequestResponse`, `Streaming`,
 //!   `Bidirectional`, `Polling`, `Webhook`
+//! - **Provisioning lifecycle**: provisioning session ids, recipe payloads, and
+//!   setup descriptors
 //! - **Lifecycle state machine**: `LifecycleState`, `LifecycleManager`,
 //!   `LifecycleTransition`
 //! - **Operation metadata**: `OperationInfo`, `Introspection`, `AgentHint`
-//! - **Execution control**: `CancelReason`, `CleanupBehavior`, `ProgressUpdate`
+//! - **Execution control**: `CancelReason`, `CleanupBehavior`,
+//!   `CancellationRequest`, `CancellationResponse`, `ProgressUnit`,
+//!   `ProgressUpdate`, `ProgressNotification`, `ProgressOptions`,
+//!   `RolloutObservation`, `RolloutDecision`, `RolloutEvidence`
 //!
 //! ## Migration Note
 //!
@@ -25,11 +30,13 @@
 
 #![forbid(unsafe_code)]
 
+mod execution_control;
+
 // ── Invocation Protocol ──────────────────────────────────────────
 
 pub use fcp_core::{
-    InvokeContext, InvokeRequest, InvokeResponse, InvokeStatus, InvokeValidationError,
-    RequestId, ResponseMetadata,
+    InvokeContext, InvokeRequest, InvokeResponse, InvokeStatus, InvokeValidationError, RequestId,
+    ResponseMetadata,
 };
 
 // ── Handshake / Session ──────────────────────────────────────────
@@ -44,7 +51,20 @@ pub use fcp_core::{SimulateRequest, SimulateResponse};
 
 // ── Subscription / Events ────────────────────────────────────────
 
-pub use fcp_core::{EventAck, EventData, EventEnvelope, EventNack};
+pub use fcp_core::{
+    EventAck, EventData, EventEnvelope, EventNack, EventStream, ReplayBufferInfo, SubscribeRequest,
+    SubscribeResponse, SubscribeResult, UnsubscribeRequest,
+};
+
+// ── Provisioning ─────────────────────────────────────────────────
+
+pub use fcp_core::{
+    HumanPrompt, HumanPromptType, ProvisioningAbortInput, ProvisioningAbortOutput,
+    ProvisioningCompleteInput, ProvisioningCompleteOutput, ProvisioningInput,
+    ProvisioningPollInput, ProvisioningPollOutput, ProvisioningProgress, ProvisioningRecipe,
+    ProvisioningSessionId, ProvisioningStartInput, ProvisioningStartOutput, ProvisioningState,
+    ProvisioningStatus, ProvisioningValidation, RecipeId, SetupDescriptor, StepId,
+};
 
 // ── Connector Traits ─────────────────────────────────────────────
 
@@ -78,17 +98,15 @@ pub use fcp_core::{ConnectorId, InstanceId, OperationId};
 
 pub use fcp_core::{FcpError, FcpResult};
 
-// ── Execution Control (PENDING-CARVE: definitions will move here) ─
+// ── Execution Control ─────────────────────────────────────────────
 
-// These types are currently defined in fcp-host but should be platform-canonical.
-// They will be defined here and re-exported by fcp-host in a future phase.
-//
-// - CancelReason (from fcp-host::cancellation)
-// - CleanupBehavior (from fcp-host::cancellation)
-// - ProgressUpdate (from fcp-host::progress)
-// - RolloutDecision (from fcp-host::rollout)
-// - RolloutEvidence (from fcp-host::rollout)
-// - RolloutObservation (from fcp-host::rollout)
+pub use execution_control::{
+    AggregatedProgress, CancelReason, CancellationAuditEvent, CancellationOutcome,
+    CancellationRequest, CancellationResponse, CheckpointInfo, CleanupBehavior, CleanupResult,
+    PartialResult, PhaseTransition, ProgressNotification, ProgressOptions, ProgressPayload,
+    ProgressUnit, ProgressUpdate, RolloutAuditEvent, RolloutDecision, RolloutEvidence,
+    RolloutObservation, RolloutOutcome,
+};
 
 // ── Cost & Usage ─────────────────────────────────────────────────
 
@@ -101,7 +119,7 @@ pub use fcp_core::{IdempotencyClass, IdempotencyEntry, OperationIntent, Operatio
 // ── Lease & Execution Authority ────────────────────────────────────
 
 pub use fcp_core::{
-    Lease, LeaseHandoff, LeaseId, LeasePurpose, LeaseParams, LeaseRequest, LeaseResponse,
+    Lease, LeaseHandoff, LeaseId, LeaseParams, LeasePurpose, LeaseRequest, LeaseResponse,
     LeaseTransferValidationError, LeaseValidationError,
 };
 
@@ -195,12 +213,11 @@ mod tests {
     #[test]
     fn kernel_exports_checkpoint_types() {
         // CheckpointTrigger variants have data fields, just verify the type exists
-        let _trigger: fn(u64, u64) -> CheckpointTrigger = |elapsed, threshold| {
-            CheckpointTrigger::TimeElapsed {
+        let _trigger: fn(u64, u64) -> CheckpointTrigger =
+            |elapsed, threshold| CheckpointTrigger::TimeElapsed {
                 elapsed_secs: elapsed,
                 threshold_secs: threshold,
-            }
-        };
+            };
     }
 
     #[test]
@@ -247,5 +264,73 @@ mod tests {
     #[test]
     fn kernel_exports_idempotency_types() {
         let _: IdempotencyClass = IdempotencyClass::Strict;
+    }
+
+    #[test]
+    fn kernel_exports_subscription_types() {
+        let request = SubscribeRequest {
+            r#type: "subscribe".into(),
+            id: RequestId::new("sub-1"),
+            topics: vec!["events.update".into()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+        assert_eq!(request.topics, vec!["events.update"]);
+
+        let result = SubscribeResult {
+            confirmed_topics: vec!["events.update".into()],
+            cursors: std::collections::HashMap::new(),
+            replay_supported: true,
+            buffer: Some(ReplayBufferInfo {
+                min_events: 10,
+                overflow: "drop_oldest".into(),
+            }),
+        };
+        assert!(result.replay_supported);
+    }
+
+    #[test]
+    fn kernel_exports_provisioning_types() {
+        let recipe =
+            ProvisioningRecipe::new(RecipeId::new("bootstrap"), "1", "Bootstrap a connector");
+        let output = ProvisioningStartOutput {
+            session_id: Some(ProvisioningSessionId::new("prov-1")),
+            state: ProvisioningState {
+                status: ProvisioningStatus::AwaitingHuman,
+                current_step: Some(StepId::new("collect-token")),
+                completed_steps: Vec::new(),
+                remaining_steps: vec![StepId::new("collect-token")],
+                awaiting_human: vec![HumanPrompt {
+                    step_id: StepId::new("collect-token"),
+                    prompt_type: HumanPromptType::Secret,
+                    message: "Enter API token".into(),
+                    url: None,
+                }],
+                error_message: None,
+            },
+            progress: Some(ProvisioningProgress {
+                current_step: Some(StepId::new("collect-token")),
+                completed: Vec::new(),
+                remaining: vec![StepId::new("collect-token")],
+                awaiting_human: Vec::new(),
+            }),
+            recipe: Some(recipe),
+            setup: Some(SetupDescriptor {
+                tool_descriptor: serde_json::json!({
+                    "name": "fcp.provision.start",
+                    "title": "Bootstrap",
+                }),
+                human_prompts: Vec::new(),
+                estimated_duration_ms: Some(30_000),
+            }),
+            details: None,
+        };
+        assert_eq!(output.state.status, ProvisioningStatus::AwaitingHuman);
+        assert!(output.session_id.is_some());
+        assert!(output.recipe.is_some());
+        assert!(output.setup.is_some());
     }
 }

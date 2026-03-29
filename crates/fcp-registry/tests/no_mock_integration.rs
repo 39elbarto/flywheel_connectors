@@ -13,13 +13,14 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_manifest::{AttestationType, Base64Bytes, ConnectorManifest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_registry::{
-    AttestationEvidence, ConnectorBundle, ConnectorTarget, ReconstructedConnectorBinary,
-    RegistryError, RegistryTrustPolicy, RegistryVerificationReport, RegistryVerifier,
-    SupplyChainEvidence, SupplyChainVerificationConfig, SupplyChainVerificationError,
+    AttestationEvidence, ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBundle,
+    ConnectorManifestObject, ConnectorTarget, ReconstructedConnectorBinary, RegistryError,
+    RegistryTrustPolicy, RegistryVerificationReport, RegistryVerifier, SupplyChainEvidence,
+    SupplyChainVerificationConfig, SupplyChainVerificationError,
 };
 use fcp_store::{
     MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-    ObjectStore, ObjectSymbolMeta, SymbolStore,
+    ObjectStore, ObjectSymbolMeta, ObjectTransmissionInfo, SymbolStore,
 };
 use semver::Version;
 
@@ -761,6 +762,56 @@ async fn mirror_bundle_binary_refs_manifest() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn test_registry_uses_canonical_schemas() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+            Some(17),
+        )
+        .await
+        .expect("mirror symbols");
+
+    let manifest = store
+        .get(&mirror.manifest_object_id)
+        .await
+        .expect("manifest");
+    let binary = store.get(&mirror.binary_object_id).await.expect("binary");
+    let descriptor = store
+        .get(&symbol_result.descriptor_object_id)
+        .await
+        .expect("descriptor");
+
+    assert_eq!(manifest.header.schema, ConnectorManifestObject::schema());
+    assert_eq!(binary.header.schema, ConnectorBinaryObject::schema());
+    assert_eq!(descriptor.header.schema, ConnectorBinarySymbolSet::schema());
+    assert_eq!(manifest.header.schema.namespace, "fcp.core");
+    assert_eq!(binary.header.schema.namespace, "fcp.core");
+    assert_eq!(descriptor.header.schema.namespace, "fcp.core");
+}
+
+#[fcp_async_core::runtime::test]
 async fn mirror_bundle_deterministic_hashes() {
     let (bundle, trust) = signed_bundle("pub1");
     let verifier = RegistryVerifier::new(trust.clone());
@@ -1011,7 +1062,13 @@ async fn reconstruct_binary_from_symbol_subset_uses_repairs() {
         .put_object_meta(ObjectSymbolMeta {
             object_id: descriptor.binary_object_id,
             zone_id: zone,
-            oti: descriptor.oti,
+            oti: ObjectTransmissionInfo {
+                transfer_length: descriptor.oti.transfer_length,
+                symbol_size: descriptor.oti.symbol_size,
+                source_blocks: descriptor.oti.source_blocks,
+                sub_blocks: descriptor.oti.sub_blocks,
+                alignment: descriptor.oti.alignment,
+            },
             source_symbols: descriptor.source_symbols,
             first_symbol_at: descriptor.mirrored_at,
         })

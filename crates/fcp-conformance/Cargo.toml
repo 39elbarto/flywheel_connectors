@@ -47,3 +47,7 @@ pretty_assertions.workspace = true
 fcp-testkit = { path = "../fcp-testkit" }
 fcp-async-core = { path = "../fcp-async-core" }
 async-trait.workspace = true
+base64.workspace = true
+sha2.workspace = true
+fcp-registry = { path = "../fcp-registry" }
+fcp-raptorq = { path = "../fcp-raptorq" }

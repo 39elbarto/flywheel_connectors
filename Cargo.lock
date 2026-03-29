@@ -2506,6 +2506,7 @@ name = "fcp-conformance"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "ciborium",
  "clap",
@@ -2516,6 +2517,8 @@ dependencies = [
  "fcp-manifest",
  "fcp-mesh",
  "fcp-protocol",
+ "fcp-raptorq",
+ "fcp-registry",
  "fcp-store",
  "fcp-tailscale",
  "fcp-testkit",
@@ -2527,6 +2530,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "uuid",
 ]
 
@@ -2812,6 +2816,7 @@ dependencies = [
  "fcp-duckdb",
  "fcp-elasticsearch",
  "fcp-evernote",
+ "fcp-evidence",
  "fcp-figma",
  "fcp-gcp",
  "fcp-github",
@@ -2825,6 +2830,7 @@ dependencies = [
  "fcp-hubspot",
  "fcp-intercom",
  "fcp-jira",
+ "fcp-kernel",
  "fcp-kubernetes",
  "fcp-linear",
  "fcp-linkedin",
@@ -2846,6 +2852,7 @@ dependencies = [
  "fcp-pandadoc",
  "fcp-pinecone",
  "fcp-plaid",
+ "fcp-policy",
  "fcp-postgresql",
  "fcp-posthog",
  "fcp-pulumi",

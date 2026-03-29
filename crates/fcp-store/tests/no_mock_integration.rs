@@ -8,8 +8,9 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use fcp_core::{
-    ObjectHeader, ObjectId, ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta,
-    StoredObject, ZoneId,
+    ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo,
+    ConnectorManifestObject, ConnectorTarget, ObjectHeader, ObjectId, ObjectIdKey,
+    ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use fcp_store::{
     AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig, GcResult,
@@ -104,6 +105,19 @@ fn test_object_meta(n: u8) -> ObjectSymbolMeta {
         },
         source_symbols: 10,
         first_symbol_at: 1000,
+    }
+}
+
+fn durable_header(schema: fcp_cbor::SchemaId, zone: ZoneId) -> ObjectHeader {
+    ObjectHeader {
+        schema,
+        zone_id: zone.clone(),
+        created_at: 1_700_000_000,
+        provenance: Provenance::new(zone),
+        refs: vec![],
+        foreign_refs: vec![],
+        ttl_secs: None,
+        placement: None,
     }
 }
 
@@ -1714,4 +1728,161 @@ fn memory_object_store_config_default() {
 fn memory_symbol_store_config_default() {
     let config = MemorySymbolStoreConfig::default();
     assert!(config.max_bytes > 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_durable_object_roundtrip() {
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let zone = test_zone();
+    let key = ObjectIdKey::from_bytes([0x33; 32]);
+
+    let manifest = ConnectorManifestObject {
+        manifest_toml: "[connector]\nid = \"fcp.example\"\n".into(),
+        manifest_hash: "sha256:manifest".into(),
+    };
+    let manifest_header = durable_header(ConnectorManifestObject::schema(), zone.clone());
+    let manifest_body =
+        fcp_cbor::CanonicalSerializer::serialize(&manifest, &ConnectorManifestObject::schema())
+            .expect("manifest body");
+    let manifest_object_id =
+        StoredObject::derive_id(&manifest_header, &manifest_body, &key).expect("manifest id");
+
+    let binary = ConnectorBinaryObject {
+        target: ConnectorTarget {
+            os: "linux".into(),
+            arch: "arm64".into(),
+        },
+        binary_hash: "sha256:binary".into(),
+        binary: vec![0xAA; 128],
+    };
+    let mut binary_header = durable_header(ConnectorBinaryObject::schema(), zone.clone());
+    binary_header.refs.push(manifest_object_id);
+    let binary_body =
+        fcp_cbor::CanonicalSerializer::serialize(&binary, &ConnectorBinaryObject::schema())
+            .expect("binary body");
+    let binary_object_id =
+        StoredObject::derive_id(&binary_header, &binary_body, &key).expect("binary id");
+
+    let descriptor = ConnectorBinarySymbolSet {
+        manifest_object_id,
+        binary_object_id,
+        target: binary.target.clone(),
+        binary_hash: binary.binary_hash.clone(),
+        encoded_body_hash: "sha256:encoded".into(),
+        oti: ConnectorBinaryTransmissionInfo::new(128, 32, 1, 1, 8),
+        source_symbols: 4,
+        total_symbols: 6,
+        mirrored_at: 1_700_000_100,
+    };
+    let mut descriptor_header = durable_header(ConnectorBinarySymbolSet::schema(), zone);
+    descriptor_header.refs.push(manifest_object_id);
+    descriptor_header.refs.push(binary_object_id);
+    let descriptor_body =
+        fcp_cbor::CanonicalSerializer::serialize(&descriptor, &ConnectorBinarySymbolSet::schema())
+            .expect("descriptor body");
+    let descriptor_object_id =
+        StoredObject::derive_id(&descriptor_header, &descriptor_body, &key).expect("descriptor id");
+
+    store
+        .put(StoredObject {
+            object_id: manifest_object_id,
+            header: manifest_header,
+            body: manifest_body,
+            storage: StorageMeta {
+                retention: RetentionClass::Pinned,
+            },
+        })
+        .await
+        .expect("put manifest");
+    store
+        .put(StoredObject {
+            object_id: binary_object_id,
+            header: binary_header,
+            body: binary_body,
+            storage: StorageMeta {
+                retention: RetentionClass::Pinned,
+            },
+        })
+        .await
+        .expect("put binary");
+    store
+        .put(StoredObject {
+            object_id: descriptor_object_id,
+            header: descriptor_header,
+            body: descriptor_body,
+            storage: StorageMeta {
+                retention: RetentionClass::Pinned,
+            },
+        })
+        .await
+        .expect("put descriptor");
+
+    let manifest_back = store.get(&manifest_object_id).await.expect("get manifest");
+    let binary_back = store.get(&binary_object_id).await.expect("get binary");
+    let descriptor_back = store
+        .get(&descriptor_object_id)
+        .await
+        .expect("get descriptor");
+
+    let manifest_roundtrip: ConnectorManifestObject = fcp_cbor::CanonicalSerializer::deserialize(
+        &manifest_back.body,
+        &ConnectorManifestObject::schema(),
+    )
+    .expect("manifest roundtrip");
+    let binary_roundtrip: ConnectorBinaryObject = fcp_cbor::CanonicalSerializer::deserialize(
+        &binary_back.body,
+        &ConnectorBinaryObject::schema(),
+    )
+    .expect("binary roundtrip");
+    let descriptor_roundtrip: ConnectorBinarySymbolSet =
+        fcp_cbor::CanonicalSerializer::deserialize(
+            &descriptor_back.body,
+            &ConnectorBinarySymbolSet::schema(),
+        )
+        .expect("descriptor roundtrip");
+
+    assert_eq!(manifest_roundtrip, manifest);
+    assert_eq!(binary_roundtrip, binary);
+    assert_eq!(descriptor_roundtrip, descriptor);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_schema_evolution_backward_compat() {
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let zone = test_zone();
+    let key = ObjectIdKey::from_bytes([0x44; 32]);
+
+    let manifest = ConnectorManifestObject {
+        manifest_toml: "[connector]\nid = \"fcp.example\"\n".into(),
+        manifest_hash: "sha256:manifest".into(),
+    };
+    let future_schema = fcp_cbor::SchemaId::new(
+        "fcp.core",
+        "ConnectorManifestObject",
+        semver::Version::new(2, 0, 0),
+    );
+    let header = durable_header(future_schema.clone(), zone);
+    let body =
+        fcp_cbor::CanonicalSerializer::serialize(&manifest, &ConnectorManifestObject::schema())
+            .expect("body");
+    let object_id = StoredObject::derive_id(&header, &body, &key).expect("id");
+
+    store
+        .put(StoredObject {
+            object_id,
+            header: header.clone(),
+            body: body.clone(),
+            storage: StorageMeta {
+                retention: RetentionClass::Pinned,
+            },
+        })
+        .await
+        .expect("put");
+
+    let fetched = store.get(&object_id).await.expect("get");
+    let fetched_header = store.get_header(&object_id).await.expect("header");
+
+    assert_eq!(fetched.header.schema, future_schema);
+    assert_eq!(fetched_header.schema, future_schema);
+    assert_eq!(fetched.body, body);
 }

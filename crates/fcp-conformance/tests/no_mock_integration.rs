@@ -4,6 +4,7 @@
 //! verifying that compliance, schemas, interop, reqcheck, and vector modules
 //! compose correctly across boundaries.
 
+use base64::Engine;
 use fcp_conformance::compliance::{
     CheckStatus, ComplianceFinding, ComplianceReport, DynamicCompliance, StaticCompliance,
 };
@@ -12,7 +13,19 @@ use fcp_conformance::reqcheck::{
     RequirementEntry, RequirementsIndexParser, ValidationError, ValidationReport, ValidationWarning,
 };
 use fcp_conformance::schemas::{self, ForensicsRuleDiagnostic, ForensicsValidationError};
+use fcp_core::{ObjectIdKey, ZoneId};
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_manifest::{Base64Bytes, ConnectorManifest};
+use fcp_raptorq::RaptorQConfig;
+use fcp_registry::{
+    ConnectorBundle, ConnectorTarget, RegistryError, RegistryTrustPolicy, RegistryVerifier,
+};
+use fcp_store::{
+    MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+    ObjectStore,
+};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 // ═══════════════════════════════════════════════════════════════
 // 1. CheckStatus + ComplianceFinding construction
@@ -972,4 +985,230 @@ fn forensics_validation_produces_deterministic_diagnostics() {
     };
     assert_eq!(finding.check, "forensics.asupersync.forensics.v1.trace_id");
     assert_eq!(finding.status, CheckStatus::Fail);
+}
+
+const REGISTRY_PLACEHOLDER_HASH: &str =
+    "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+
+fn registry_base_manifest_toml() -> String {
+    let raw = include_str!("../../../tests/vectors/manifest/manifest_minimal.toml");
+    let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("manifest");
+    let hash = unchecked.compute_interface_hash().expect("interface hash");
+    raw.replace(REGISTRY_PLACEHOLDER_HASH, &hash.to_string())
+}
+
+fn registry_sign_manifest(
+    manifest_toml: &str,
+    signing_key: &Ed25519SigningKey,
+    binary_hash: &str,
+) -> Base64Bytes {
+    let manifest = ConnectorManifest::parse_str(manifest_toml).expect("manifest");
+    let signing_bytes = fcp_registry::manifest_signing_bytes(&manifest).expect("signing bytes");
+    let message = fcp_registry::signature_message(&signing_bytes, binary_hash);
+    let signature =
+        signing_key.sign_with_context(fcp_registry::MANIFEST_SIGNATURE_CONTEXT, &message);
+    Base64Bytes::try_from(format!(
+        "base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    ))
+    .expect("base64 sig")
+}
+
+fn registry_publisher_sig_toml(kid: &str, sig: &Base64Bytes) -> String {
+    format!(
+        r#"[signatures]
+publisher_threshold = "1-of-1"
+
+[[signatures.publisher_signatures]]
+kid = "{kid}"
+sig = "{sig}"
+"#,
+        sig = String::from(sig.clone())
+    )
+}
+
+fn registry_binary_hash(binary: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(binary);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn registry_symbol_config() -> RaptorQConfig {
+    RaptorQConfig {
+        symbol_size: 128,
+        repair_ratio_bps: 10_000,
+        ..RaptorQConfig::default()
+    }
+}
+
+fn registry_signed_bundle(binary: Vec<u8>) -> (ConnectorBundle, RegistryTrustPolicy) {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary_hash = registry_binary_hash(&binary);
+    let unsigned = registry_base_manifest_toml();
+    let sig = registry_sign_manifest(&unsigned, &signing_key, &binary_hash);
+    let manifest_toml = format!("{unsigned}\n{}", registry_publisher_sig_toml("pub1", &sig));
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        },
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key);
+    (bundle, trust)
+}
+
+fn registry_patterned_binary(size: usize) -> Vec<u8> {
+    (0..size)
+        .map(|idx| u8::try_from(idx % 251).expect("pattern byte fits u8"))
+        .collect()
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 17. Registry/store/manifest durability conformance
+// ═══════════════════════════════════════════════════════════════
+
+#[fcp_async_core::runtime::test]
+async fn fcps_registry_reconstruction_roundtrip_remains_manifest_compliant() {
+    let binary = registry_patterned_binary(4096);
+    let (bundle, trust) = registry_signed_bundle(binary.clone());
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([7u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &registry_symbol_config(),
+            Some(21),
+        )
+        .await
+        .expect("mirror symbols");
+
+    store
+        .delete(&mirror.binary_object_id)
+        .await
+        .expect("delete mirrored binary");
+
+    let recovered = verifier
+        .reconstruct_bundle_from_symbol_descriptor(
+            &symbol_result.descriptor_object_id,
+            &store,
+            &symbol_store,
+            &registry_symbol_config(),
+        )
+        .await
+        .expect("reconstruct bundle");
+
+    assert_eq!(recovered.binary, binary);
+    assert_eq!(recovered.target, bundle.target);
+    ConnectorManifest::parse_str(&recovered.manifest_toml).expect("parse recovered manifest");
+
+    let static_checks = StaticCompliance::run_manifest(&recovered.manifest_toml);
+    assert!(
+        static_checks.passed,
+        "recovered manifest should remain statically compliant: {:?}",
+        static_checks.findings
+    );
+
+    let reverified = verifier
+        .verify_bundle(&recovered, None, None, None)
+        .expect("reverify recovered bundle");
+    assert_eq!(reverified.manifest_hash, verified.manifest_hash);
+    assert_eq!(reverified.binary_hash, verified.binary_hash);
+}
+
+#[fcp_async_core::runtime::test]
+async fn fcps_registry_reconstruction_rejects_tampered_manifest_object() {
+    let binary = registry_patterned_binary(4096);
+    let (bundle, trust) = registry_signed_bundle(binary);
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([9u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &registry_symbol_config(),
+            Some(23),
+        )
+        .await
+        .expect("mirror symbols");
+
+    let mut manifest_record = store
+        .get(&mirror.manifest_object_id)
+        .await
+        .expect("get manifest");
+    let replacement_hash = format!("sha256:{}", "0".repeat(64));
+    let original_hash = verified.manifest_hash.as_bytes();
+    let replacement_hash_bytes = replacement_hash.as_bytes();
+    let position = manifest_record
+        .body
+        .windows(original_hash.len())
+        .position(|window| window == original_hash)
+        .expect("manifest hash bytes present");
+    manifest_record.body[position..position + original_hash.len()]
+        .copy_from_slice(replacement_hash_bytes);
+
+    store
+        .delete(&mirror.manifest_object_id)
+        .await
+        .expect("delete manifest");
+    store
+        .put(manifest_record)
+        .await
+        .expect("put tampered manifest");
+
+    let err = verifier
+        .reconstruct_bundle_from_symbol_descriptor(
+            &symbol_result.descriptor_object_id,
+            &store,
+            &symbol_store,
+            &registry_symbol_config(),
+        )
+        .await
+        .expect_err("tampered manifest hash should fail reconstruction");
+    assert!(matches!(
+        err,
+        RegistryError::ReconstructedManifestHashMismatch { .. }
+    ));
 }

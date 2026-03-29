@@ -13,13 +13,14 @@ use fcp_core::{
     ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use fcp_store::{
-    AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig, GcResult,
-    GcRoots, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
-    MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectStore, ObjectStoreError,
-    ObjectSymbolMeta, ObjectTransmissionInfo, OfflineAccess, OfflineCapability, OfflineStatus,
-    PromotionReason, QuarantineError, QuarantineStore, QuarantinedObject, RepairController,
-    RepairControllerConfig, RepairPlanningOptions, RepairReasonCode, RepairRequest, RepairResult,
-    StoredSymbol, SymbolDistribution, SymbolMeta, SymbolStore,
+    AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig,
+    GcDecisionAction, GcReasonCode, GcResult, GcRoots, GcRunReport, MemoryObjectStore,
+    MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig, ObjectAdmissionPolicy,
+    ObjectStore, ObjectStoreError, ObjectSymbolMeta, ObjectTransmissionInfo, OfflineAccess,
+    OfflineCapability, OfflineStatus, PromotionReason, QuarantineError, QuarantineStore,
+    QuarantinedObject, RepairController, RepairControllerConfig, RepairPlanningOptions,
+    RepairReasonCode, RepairRequest, RepairResult, StoredSymbol, SymbolDistribution, SymbolMeta,
+    SymbolStore,
 };
 
 // ── helpers ──
@@ -1060,6 +1061,150 @@ async fn gc_checkpoint_root_survives() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn gc_collect_with_transcript_exposes_reason_log() {
+    let gc = GarbageCollector::new(GcConfig {
+        max_evictions_per_run: 1,
+        ..GcConfig::default()
+    });
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+
+    let root = test_stored_object_with_retention(1, RetentionClass::Ephemeral);
+    let root_id = root.object_id;
+    let reachable_id = test_object_id(2);
+    store.put(root).await.expect("put root");
+    store
+        .put(StoredObject {
+            object_id: reachable_id,
+            header: ObjectHeader {
+                schema: test_schema(),
+                zone_id: test_zone(),
+                created_at: 1_000_000,
+                provenance: Provenance::new(test_zone()),
+                refs: vec![],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            },
+            body: vec![2_u8; 32],
+            storage: StorageMeta {
+                retention: RetentionClass::Ephemeral,
+            },
+        })
+        .await
+        .expect("put reachable");
+    store
+        .set_retention(&root_id, RetentionClass::Ephemeral)
+        .await
+        .expect("retention");
+
+    let mut root_header = store.get(&root_id).await.expect("get root");
+    root_header.header.refs = vec![reachable_id];
+    store.delete(&root_id).await.expect("delete old root");
+    store.put(root_header).await.expect("re-put root");
+
+    let active_lease_id = test_object_id(3);
+    store
+        .put(test_stored_object_with_retention(
+            3,
+            RetentionClass::Lease { expires_at: 5_000 },
+        ))
+        .await
+        .expect("put active lease");
+    let expired_lease_id = test_object_id(4);
+    store
+        .put(test_stored_object_with_retention(
+            4,
+            RetentionClass::Lease { expires_at: 500 },
+        ))
+        .await
+        .expect("put expired lease");
+    let deferred_ephemeral_id = test_object_id(5);
+    store
+        .put(test_stored_object_with_retention(
+            5,
+            RetentionClass::Ephemeral,
+        ))
+        .await
+        .expect("put deferred ephemeral");
+
+    let mut roots = GcRoots::new();
+    roots.set_checkpoint(root_id);
+
+    let report = gc
+        .collect_with_transcript(&test_zone(), &roots, &store, 1_000)
+        .await
+        .expect("gc with transcript");
+
+    assert_eq!(
+        report
+            .transcript
+            .decisions
+            .iter()
+            .map(|decision| decision.object_id)
+            .collect::<Vec<_>>(),
+        vec![
+            root_id,
+            reachable_id,
+            active_lease_id,
+            expired_lease_id,
+            deferred_ephemeral_id,
+        ]
+    );
+    assert_eq!(
+        report
+            .transcript
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == root_id)
+            .expect("root decision")
+            .reason_code,
+        GcReasonCode::RootCheckpoint
+    );
+    assert_eq!(
+        report
+            .transcript
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == reachable_id)
+            .expect("reachable decision")
+            .reason_code,
+        GcReasonCode::ReachableRef
+    );
+    assert_eq!(
+        report
+            .transcript
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == active_lease_id)
+            .expect("active lease decision")
+            .reason_code,
+        GcReasonCode::LeaseActive
+    );
+    assert_eq!(
+        report
+            .transcript
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == expired_lease_id)
+            .expect("expired lease decision")
+            .action,
+        GcDecisionAction::Evict
+    );
+    assert_eq!(
+        report
+            .transcript
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == deferred_ephemeral_id)
+            .expect("deferred decision")
+            .action,
+        GcDecisionAction::Defer
+    );
+    assert!(!store.exists(&expired_lease_id).await);
+    assert!(store.exists(&deferred_ephemeral_id).await);
+}
+
+#[fcp_async_core::runtime::test]
 async fn gc_would_collect() {
     let gc = GarbageCollector::new(GcConfig::default());
     let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
@@ -1124,6 +1269,36 @@ fn gc_result_serde() {
     let deserialized: GcResult = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(deserialized.live, 10);
     assert_eq!(deserialized.evicted, 3);
+}
+
+#[test]
+fn gc_run_report_serde() {
+    let object_id = test_object_id(9);
+    let report = GcRunReport {
+        result: GcResult {
+            live: 2,
+            evicted: 1,
+            expired_leases: 1,
+            pinned: 0,
+        },
+        transcript: fcp_store::GcTranscript {
+            zone_id: test_zone(),
+            current_time: 1_000,
+            checkpoint_root: Some(object_id),
+            root_count: 1,
+            decisions: vec![fcp_store::GcDecision {
+                object_id,
+                retention: RetentionClass::Ephemeral,
+                action: GcDecisionAction::Keep,
+                reason_code: GcReasonCode::RootCheckpoint,
+                authoritative_checkpoint: Some(object_id),
+            }],
+        },
+    };
+
+    let json = serde_json::to_string(&report).expect("serialize");
+    let deserialized: GcRunReport = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(deserialized, report);
 }
 
 // ── RepairController ──

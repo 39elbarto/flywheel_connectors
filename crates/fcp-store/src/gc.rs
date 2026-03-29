@@ -3,6 +3,7 @@
 //! Implements reachability-based GC from `FCP_Specification_V2.md` §3.7.
 
 use std::collections::{HashSet, VecDeque};
+use std::fmt;
 
 use fcp_core::{ObjectId, RetentionClass, ZoneId};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ struct SweepPlan {
     live_count: usize,
     skipped_pinned_count: usize,
     candidates: Vec<SweepCandidate>,
+    transcript: GcTranscript,
 }
 
 #[derive(Debug)]
@@ -30,8 +32,112 @@ struct SymbolSnapshot {
     symbols: Vec<StoredSymbol>,
 }
 
+/// Action taken for an object during a GC sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GcDecisionAction {
+    /// The object remains in store after this sweep.
+    Keep,
+    /// The object is selected for eviction in this sweep.
+    Evict,
+    /// The object is eligible for eviction but deferred by sweep budget.
+    Defer,
+}
+
+/// Stable reason code explaining a GC decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GcReasonCode {
+    /// Object is the authoritative checkpoint root.
+    #[serde(rename = "gc.root_checkpoint")]
+    RootCheckpoint,
+    /// Object is an explicit pinned root.
+    #[serde(rename = "gc.root_pin")]
+    RootPin,
+    /// Object remains reachable from the current root set.
+    #[serde(rename = "gc.reachable_ref")]
+    ReachableRef,
+    /// Object is unreachable but kept because retention is pinned.
+    #[serde(rename = "gc.retention_pinned")]
+    RetentionPinned,
+    /// Object is lease-retained and its lease is still active.
+    #[serde(rename = "gc.lease_active")]
+    LeaseActive,
+    /// Object is lease-retained and its lease has expired.
+    #[serde(rename = "gc.lease_expired")]
+    LeaseExpired,
+    /// Object is lease-retained and collected despite an active lease because
+    /// lease expiry enforcement is disabled.
+    #[serde(rename = "gc.lease_policy_collect")]
+    LeasePolicyCollect,
+    /// Object is ephemeral and unreachable.
+    #[serde(rename = "gc.unreachable_ephemeral")]
+    UnreachableEphemeral,
+}
+
+impl GcReasonCode {
+    /// Return the stable wire-format string for this reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RootCheckpoint => "gc.root_checkpoint",
+            Self::RootPin => "gc.root_pin",
+            Self::ReachableRef => "gc.reachable_ref",
+            Self::RetentionPinned => "gc.retention_pinned",
+            Self::LeaseActive => "gc.lease_active",
+            Self::LeaseExpired => "gc.lease_expired",
+            Self::LeasePolicyCollect => "gc.lease_policy_collect",
+            Self::UnreachableEphemeral => "gc.unreachable_ephemeral",
+        }
+    }
+}
+
+impl fmt::Display for GcReasonCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Explainable per-object GC decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcDecision {
+    /// Object the collector evaluated.
+    pub object_id: ObjectId,
+    /// Retention state observed during evaluation.
+    pub retention: RetentionClass,
+    /// Decision applied for this sweep.
+    pub action: GcDecisionAction,
+    /// Stable reason explaining the action.
+    pub reason_code: GcReasonCode,
+    /// Current authoritative checkpoint root, if any.
+    pub authoritative_checkpoint: Option<ObjectId>,
+}
+
+/// Machine-readable audit transcript for a GC sweep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcTranscript {
+    /// Zone the sweep was planned for.
+    pub zone_id: ZoneId,
+    /// Sweep wall-clock used for lease-expiry evaluation.
+    pub current_time: u64,
+    /// Current authoritative checkpoint root, if any.
+    pub checkpoint_root: Option<ObjectId>,
+    /// Number of GC roots considered by the collector.
+    pub root_count: usize,
+    /// Per-object decisions in deterministic object-ID order.
+    pub decisions: Vec<GcDecision>,
+}
+
+/// Final GC outcome plus the audit transcript that justified it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcRunReport {
+    /// Aggregate sweep result.
+    pub result: GcResult,
+    /// Deterministic audit transcript for the sweep.
+    pub transcript: GcTranscript,
+}
+
 /// Result of a garbage collection run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcResult {
     /// Number of live (reachable) objects.
     pub live: usize,
@@ -160,6 +266,23 @@ impl GarbageCollector {
         store: &dyn ObjectStore,
         current_time: u64,
     ) -> Result<GcResult, GcError> {
+        Ok(self
+            .collect_with_transcript(zone_id, roots, store, current_time)
+            .await?
+            .result)
+    }
+
+    /// Run garbage collection on a zone and return the audit transcript.
+    ///
+    /// # Errors
+    /// Returns error if object store operations fail.
+    pub async fn collect_with_transcript(
+        &self,
+        zone_id: &ZoneId,
+        roots: &GcRoots,
+        store: &dyn ObjectStore,
+        current_time: u64,
+    ) -> Result<GcRunReport, GcError> {
         let plan = self
             .collect_internal(zone_id, roots, store, current_time)
             .await?;
@@ -181,6 +304,30 @@ impl GarbageCollector {
         symbol_store: &dyn SymbolStore,
         current_time: u64,
     ) -> Result<GcResult, GcError> {
+        Ok(self
+            .collect_and_prune_symbols_with_transcript(
+                zone_id,
+                roots,
+                store,
+                symbol_store,
+                current_time,
+            )
+            .await?
+            .result)
+    }
+
+    /// Run GC, prune matching symbols, and return the audit transcript.
+    ///
+    /// # Errors
+    /// Returns error if object store or symbol store operations fail.
+    pub async fn collect_and_prune_symbols_with_transcript(
+        &self,
+        zone_id: &ZoneId,
+        roots: &GcRoots,
+        store: &dyn ObjectStore,
+        symbol_store: &dyn SymbolStore,
+        current_time: u64,
+    ) -> Result<GcRunReport, GcError> {
         let plan = self
             .collect_internal(zone_id, roots, store, current_time)
             .await?;
@@ -209,7 +356,7 @@ impl GarbageCollector {
             }
         }
 
-        Ok(self.build_result(&plan, evicted, expired_leases))
+        Ok(self.build_run_report(&plan, evicted, expired_leases))
     }
 
     async fn collect_internal(
@@ -252,47 +399,82 @@ impl GarbageCollector {
         // store read failures cannot partially advance deletions.
         let mut skipped_pinned_count = 0;
         let mut candidates = Vec::new();
-
-        let all_objects = store.list_zone(zone_id).await;
+        let checkpoint_root = roots.zone_checkpoint;
+        let mut all_objects = store.list_zone(zone_id).await;
+        all_objects.sort_unstable();
+        let mut transcript = GcTranscript {
+            zone_id: zone_id.clone(),
+            current_time,
+            checkpoint_root,
+            root_count: roots.root_count(),
+            decisions: Vec::with_capacity(all_objects.len()),
+        };
 
         for object_id in all_objects {
-            if live.contains(&object_id) {
-                // Reachable objects are never evicted.
-                continue;
-            }
-
-            // Object is unreachable
             let meta = store.get_storage_meta(&object_id).await?;
-            match meta.retention {
-                RetentionClass::Pinned => {
-                    // Never evict pinned objects, even when unreachable.
-                    skipped_pinned_count += 1;
-                }
-                RetentionClass::Lease { expires_at } => {
-                    if candidates.len() < self.config.max_evictions_per_run
-                        && (!self.config.enforce_lease_expiry || expires_at <= current_time)
-                    {
-                        candidates.push(SweepCandidate {
-                            object_id,
-                            expired_lease: expires_at <= current_time,
-                        });
+            let retention = meta.retention;
+            let (action, reason_code) = if checkpoint_root == Some(object_id) {
+                (GcDecisionAction::Keep, GcReasonCode::RootCheckpoint)
+            } else if roots.pinned.contains(&object_id) {
+                (GcDecisionAction::Keep, GcReasonCode::RootPin)
+            } else if live.contains(&object_id) {
+                (GcDecisionAction::Keep, GcReasonCode::ReachableRef)
+            } else {
+                match retention {
+                    RetentionClass::Pinned => {
+                        skipped_pinned_count += 1;
+                        (GcDecisionAction::Keep, GcReasonCode::RetentionPinned)
+                    }
+                    RetentionClass::Lease { expires_at } => {
+                        let expired_lease = expires_at <= current_time;
+                        let reason_code = if expired_lease {
+                            GcReasonCode::LeaseExpired
+                        } else if self.config.enforce_lease_expiry {
+                            GcReasonCode::LeaseActive
+                        } else {
+                            GcReasonCode::LeasePolicyCollect
+                        };
+
+                        if self.config.enforce_lease_expiry && !expired_lease {
+                            (GcDecisionAction::Keep, reason_code)
+                        } else if candidates.len() < self.config.max_evictions_per_run {
+                            candidates.push(SweepCandidate {
+                                object_id,
+                                expired_lease,
+                            });
+                            (GcDecisionAction::Evict, reason_code)
+                        } else {
+                            (GcDecisionAction::Defer, reason_code)
+                        }
+                    }
+                    RetentionClass::Ephemeral => {
+                        if candidates.len() < self.config.max_evictions_per_run {
+                            candidates.push(SweepCandidate {
+                                object_id,
+                                expired_lease: false,
+                            });
+                            (GcDecisionAction::Evict, GcReasonCode::UnreachableEphemeral)
+                        } else {
+                            (GcDecisionAction::Defer, GcReasonCode::UnreachableEphemeral)
+                        }
                     }
                 }
-                RetentionClass::Ephemeral => {
-                    if candidates.len() < self.config.max_evictions_per_run {
-                        candidates.push(SweepCandidate {
-                            object_id,
-                            expired_lease: false,
-                        });
-                    }
-                }
-            }
+            };
+
+            transcript.decisions.push(GcDecision {
+                object_id,
+                retention,
+                action,
+                reason_code,
+                authoritative_checkpoint: checkpoint_root,
+            });
         }
 
         Ok(SweepPlan {
             live_count: live.len(),
             skipped_pinned_count,
             candidates,
+            transcript,
         })
     }
 
@@ -300,7 +482,7 @@ impl GarbageCollector {
         &self,
         plan: &SweepPlan,
         store: &dyn ObjectStore,
-    ) -> Result<GcResult, GcError> {
+    ) -> Result<GcRunReport, GcError> {
         let mut evicted = 0;
         let mut expired_leases = 0;
 
@@ -312,7 +494,7 @@ impl GarbageCollector {
             }
         }
 
-        Ok(self.build_result(plan, evicted, expired_leases))
+        Ok(self.build_run_report(plan, evicted, expired_leases))
     }
 
     #[allow(clippy::unused_self, clippy::missing_const_for_fn)]
@@ -322,6 +504,18 @@ impl GarbageCollector {
             evicted,
             expired_leases,
             pinned: plan.skipped_pinned_count,
+        }
+    }
+
+    fn build_run_report(
+        &self,
+        plan: &SweepPlan,
+        evicted: usize,
+        expired_leases: usize,
+    ) -> GcRunReport {
+        GcRunReport {
+            result: self.build_result(plan, evicted, expired_leases),
+            transcript: plan.transcript.clone(),
         }
     }
 
@@ -623,6 +817,14 @@ mod tests {
             body: vec![0_u8; 100],
             storage: StorageMeta { retention },
         }
+    }
+
+    fn transcript_decision(transcript: &GcTranscript, object_id: ObjectId) -> &GcDecision {
+        transcript
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == object_id)
+            .unwrap_or_else(|| panic!("missing transcript entry for {object_id}"))
     }
 
     #[test]
@@ -1025,6 +1227,193 @@ mod tests {
         });
     }
 
+    #[test]
+    fn gc_collect_with_transcript_records_deterministic_reasons() {
+        run_store_test(
+            "gc_collect_with_transcript_records_deterministic_reasons",
+            "verify",
+            "gc",
+            17,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let gc = GarbageCollector::new(GcConfig {
+                    max_evictions_per_run: 1,
+                    ..GcConfig::default()
+                });
+
+                let root_id = ObjectId::from_bytes([1; 32]);
+                let reachable_id = ObjectId::from_bytes([2; 32]);
+                let pinned_id = ObjectId::from_bytes([3; 32]);
+                let active_lease_id = ObjectId::from_bytes([4; 32]);
+                let expired_lease_id = ObjectId::from_bytes([5; 32]);
+                let deferred_ephemeral_id = ObjectId::from_bytes([6; 32]);
+
+                store
+                    .put(test_object(1, vec![2], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object(2, vec![], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object(3, vec![], RetentionClass::Pinned))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object(
+                        4,
+                        vec![],
+                        RetentionClass::Lease { expires_at: 2_000 },
+                    ))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object(
+                        5,
+                        vec![],
+                        RetentionClass::Lease { expires_at: 500 },
+                    ))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object(6, vec![], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+
+                let mut roots = GcRoots::new();
+                roots.set_checkpoint(root_id);
+
+                let report = gc
+                    .collect_with_transcript(&test_zone(), &roots, &store, 1_000)
+                    .await
+                    .unwrap();
+
+                assert_eq!(report.result.live, 2);
+                assert_eq!(report.result.evicted, 1);
+                assert_eq!(report.result.expired_leases, 1);
+                assert_eq!(report.result.pinned, 1);
+                assert_eq!(report.transcript.zone_id, test_zone());
+                assert_eq!(report.transcript.current_time, 1_000);
+                assert_eq!(report.transcript.checkpoint_root, Some(root_id));
+                assert_eq!(report.transcript.root_count, 1);
+                assert_eq!(
+                    report
+                        .transcript
+                        .decisions
+                        .iter()
+                        .map(|decision| decision.object_id)
+                        .collect::<Vec<_>>(),
+                    vec![
+                        root_id,
+                        reachable_id,
+                        pinned_id,
+                        active_lease_id,
+                        expired_lease_id,
+                        deferred_ephemeral_id,
+                    ]
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, root_id).reason_code,
+                    GcReasonCode::RootCheckpoint
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, reachable_id).reason_code,
+                    GcReasonCode::ReachableRef
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, pinned_id).reason_code,
+                    GcReasonCode::RetentionPinned
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, active_lease_id).reason_code,
+                    GcReasonCode::LeaseActive
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, expired_lease_id).action,
+                    GcDecisionAction::Evict
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, expired_lease_id).reason_code,
+                    GcReasonCode::LeaseExpired
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, deferred_ephemeral_id).action,
+                    GcDecisionAction::Defer
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, deferred_ephemeral_id).reason_code,
+                    GcReasonCode::UnreachableEphemeral
+                );
+                assert!(!store.exists(&expired_lease_id).await);
+                assert!(store.exists(&deferred_ephemeral_id).await);
+
+                StoreLogData {
+                    object_id: Some(expired_lease_id),
+                    details: Some(json!({
+                        "transcript_decisions": report.transcript.decisions.len(),
+                        "deferred": deferred_ephemeral_id.to_string()
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn gc_collect_with_transcript_records_policy_collection_for_active_leases() {
+        run_store_test(
+            "gc_collect_with_transcript_records_policy_collection_for_active_leases",
+            "verify",
+            "gc",
+            6,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let gc = GarbageCollector::new(GcConfig {
+                    enforce_lease_expiry: false,
+                    ..GcConfig::default()
+                });
+                let lease_id = ObjectId::from_bytes([9; 32]);
+
+                store
+                    .put(test_object(
+                        9,
+                        vec![],
+                        RetentionClass::Lease { expires_at: 2_000 },
+                    ))
+                    .await
+                    .unwrap();
+
+                let report = gc
+                    .collect_with_transcript(&test_zone(), &GcRoots::new(), &store, 1_000)
+                    .await
+                    .unwrap();
+
+                assert_eq!(report.result.evicted, 1);
+                assert_eq!(report.result.expired_leases, 0);
+                assert_eq!(
+                    transcript_decision(&report.transcript, lease_id).action,
+                    GcDecisionAction::Evict
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, lease_id).reason_code,
+                    GcReasonCode::LeasePolicyCollect
+                );
+                assert_eq!(
+                    transcript_decision(&report.transcript, lease_id).retention,
+                    RetentionClass::Lease { expires_at: 2_000 }
+                );
+                assert!(!store.exists(&lease_id).await);
+
+                StoreLogData {
+                    object_id: Some(lease_id),
+                    details: Some(json!({"reason_code": "gc.lease_policy_collect"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
     // --- Additional GC tests ---
 
     #[test]
@@ -1133,6 +1522,49 @@ mod tests {
         let cloned = result.clone();
         assert_eq!(cloned.live, result.live);
         assert_eq!(cloned.evicted, result.evicted);
+    }
+
+    #[test]
+    fn gc_reason_code_wire_format_is_stable() {
+        assert_eq!(GcReasonCode::RootCheckpoint.as_str(), "gc.root_checkpoint");
+        assert_eq!(
+            GcReasonCode::RootCheckpoint.to_string(),
+            "gc.root_checkpoint"
+        );
+        assert_eq!(
+            serde_json::to_string(&GcReasonCode::LeasePolicyCollect).unwrap(),
+            "\"gc.lease_policy_collect\""
+        );
+    }
+
+    #[test]
+    fn gc_run_report_serde_roundtrip() {
+        let checkpoint = ObjectId::from_bytes([7; 32]);
+        let report = GcRunReport {
+            result: GcResult {
+                live: 3,
+                evicted: 1,
+                expired_leases: 0,
+                pinned: 1,
+            },
+            transcript: GcTranscript {
+                zone_id: test_zone(),
+                current_time: 42,
+                checkpoint_root: Some(checkpoint),
+                root_count: 2,
+                decisions: vec![GcDecision {
+                    object_id: checkpoint,
+                    retention: RetentionClass::Ephemeral,
+                    action: GcDecisionAction::Keep,
+                    reason_code: GcReasonCode::RootCheckpoint,
+                    authoritative_checkpoint: Some(checkpoint),
+                }],
+            },
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let roundtrip: GcRunReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, report);
     }
 
     #[test]

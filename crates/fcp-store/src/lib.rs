@@ -1,4 +1,4 @@
-//! FCP2 object and symbol stores (placement, repair, retention).
+//! FCPS-aligned object and symbol stores (placement, repair, retention).
 //!
 //! This crate implements the storage layer from `FCP_Specification_V2.md`:
 //!
@@ -41,7 +41,10 @@ mod symbol_store;
 
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
 pub use error::{GcError, ObjectStoreError, QuarantineError, RepairError, SymbolStoreError};
-pub use gc::{GarbageCollector, GcConfig, GcResult, GcRoots};
+pub use gc::{
+    GarbageCollector, GcConfig, GcDecision, GcDecisionAction, GcReasonCode, GcResult, GcRoots,
+    GcRunReport, GcTranscript,
+};
 pub use object_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
 pub use quarantine::{
     ObjectAdmissionClass, ObjectAdmissionPolicy, PromotionReason, QuarantineStats, QuarantineStore,

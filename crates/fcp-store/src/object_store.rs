@@ -1,4 +1,4 @@
-//! Object store interface for FCP2.
+//! Object store interface for FCPS durable objects.
 //!
 //! Provides content-addressed storage for complete mesh objects.
 
@@ -89,6 +89,9 @@ impl Default for MemoryObjectStoreConfig {
 /// Suitable for testing and single-node deployments.
 pub struct MemoryObjectStore {
     objects: RwLock<HashMap<ObjectId, StoredObject>>,
+    /// Secondary index: zone → set of object IDs in that zone.
+    /// Maintained on `put()` and `delete()` for O(1) `list_zone()`.
+    zone_index: RwLock<HashMap<ZoneId, Vec<ObjectId>>>,
     config: MemoryObjectStoreConfig,
     used_bytes: AtomicU64,
 }
@@ -99,6 +102,7 @@ impl MemoryObjectStore {
     pub fn new(config: MemoryObjectStoreConfig) -> Self {
         Self {
             objects: RwLock::new(HashMap::new()),
+            zone_index: RwLock::new(HashMap::new()),
             config,
             used_bytes: AtomicU64::new(0),
         }
@@ -131,7 +135,12 @@ impl ObjectStore for MemoryObjectStore {
         }
 
         let id = object.object_id;
+        let zone_id = object.header.zone_id.clone();
         objects.insert(id, object);
+        drop(objects);
+
+        // Maintain zone index for O(1) list_zone().
+        self.zone_index.write().entry(zone_id).or_default().push(id);
         self.used_bytes.fetch_add(size, Ordering::SeqCst);
 
         Ok(())
@@ -154,6 +163,13 @@ impl ObjectStore for MemoryObjectStore {
         let obj = objects.remove(id).ok_or(ObjectStoreError::NotFound(*id))?;
 
         let size = Self::object_size(&obj);
+        let zone_id = &obj.header.zone_id;
+
+        // Remove from zone index.
+        if let Some(ids) = self.zone_index.write().get_mut(zone_id) {
+            ids.retain(|oid| oid != id);
+        }
+
         self.used_bytes
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 Some(current.saturating_sub(size))
@@ -192,12 +208,12 @@ impl ObjectStore for MemoryObjectStore {
     }
 
     async fn list_zone(&self, zone_id: &ZoneId) -> Vec<ObjectId> {
-        self.objects
+        // O(1) lookup via zone index instead of scanning all objects.
+        self.zone_index
             .read()
-            .values()
-            .filter(|obj| &obj.header.zone_id == zone_id)
-            .map(|obj| obj.object_id)
-            .collect()
+            .get(zone_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     async fn storage_used(&self) -> u64 {

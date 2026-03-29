@@ -26,6 +26,7 @@ fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-telemetry = { path = "../fcp-telemetry" }
 
 [dev-dependencies]
+jsonschema.workspace = true
 semver.workspace = true
 fcp-cbor = { path = "../fcp-cbor" }
 serde_json.workspace = true
@@ -33,7 +34,6 @@ chrono.workspace = true
 uuid.workspace = true
 rand.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
-fcp-testkit = { path = "../fcp-testkit", default-features = false }
 
 [[bench]]
 name = "symbol_store"

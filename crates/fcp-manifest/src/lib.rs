@@ -15,8 +15,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_core::{
     ApprovalMode as CoreApprovalMode, CapabilityId, ConnectorId, IdValidationError,
-    IdempotencyClass, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool, RiskLevel,
-    SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
+    IdempotencyClass, ObjectId, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool,
+    RiskLevel, SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
 };
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -1919,7 +1919,12 @@ pub struct SignaturesSection {
     pub publisher_signatures: Vec<SignatureEntry>,
     pub publisher_threshold: Option<SignatureThreshold>,
     pub registry_signature: Option<SignatureEntry>,
-    pub transparency_log_entry: Option<ObjectIdRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "fcp_core::util::objectid_prefixed::option"
+    )]
+    pub transparency_log_entry: Option<ObjectId>,
 }
 
 impl SignaturesSection {
@@ -2059,7 +2064,8 @@ impl SupplyChainSection {
 pub struct SupplyChainAttestationRef {
     #[serde(rename = "type")]
     pub attestation_type: AttestationType,
-    pub object_id: ObjectIdRef,
+    #[serde(with = "fcp_core::util::objectid_prefixed")]
+    pub object_id: ObjectId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2168,58 +2174,6 @@ impl Serialize for Base64Bytes {
         S: serde::Serializer,
     {
         serializer.serialize_str(&String::from(self.clone()))
-    }
-}
-
-/// Reference to an `ObjectId` in `objectid:<hex>` form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectIdRef([u8; 32]);
-
-impl fmt::Display for ObjectIdRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "objectid:{}", hex::encode(self.0))
-    }
-}
-
-impl TryFrom<String> for ObjectIdRef {
-    type Error = ManifestError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        let hex_str = value.strip_prefix("objectid:").unwrap_or(value.as_str());
-        let bytes = hex::decode(hex_str).map_err(|_| ManifestError::Invalid {
-            field: "objectid",
-            message: "object id must be hex".into(),
-        })?;
-        let id: [u8; 32] = bytes.try_into().map_err(|_| ManifestError::Invalid {
-            field: "objectid",
-            message: "object id must be 32 bytes".into(),
-        })?;
-        Ok(Self(id))
-    }
-}
-
-impl From<ObjectIdRef> for String {
-    fn from(value: ObjectIdRef) -> Self {
-        value.to_string()
-    }
-}
-
-impl<'de> Deserialize<'de> for ObjectIdRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::try_from(s).map_err(serde::de::Error::custom)
-    }
-}
-
-impl Serialize for ObjectIdRef {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -2475,6 +2429,35 @@ deny_ptrace = true
 
         let err = ConnectorManifest::parse_str(&test_manifest_toml(&bad)).unwrap_err();
         assert!(matches!(err, ManifestError::InterfaceHashMismatch { .. }));
+    }
+
+    #[test]
+    fn test_manifest_hash_stability() {
+        let _log = TestLog::new(
+            "test_manifest_hash_stability",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(2),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let base = with_computed_hash(&test_manifest_toml(&placeholder));
+        let base_manifest = ConnectorManifest::parse_str(&base).expect("base manifest");
+        let base_hash = base_manifest.compute_interface_hash().expect("base hash");
+
+        let variant = format!(
+            "{base}\n[supply_chain]\n[[supply_chain.attestations]]\ntype = \"in-toto\"\nobject_id = \"objectid:{}\"\n\n[policy]\nrequire_transparency_log = true\nrequire_attestation_types = [\"code-review\"]\nmin_slsa_level = 2\ntrusted_builders = [\"builder-a\", \"builder-b\"]\n",
+            "11".repeat(32)
+        );
+        let variant_manifest =
+            ConnectorManifest::parse_str_unchecked(&variant).expect("variant manifest");
+
+        assert_eq!(
+            variant_manifest
+                .compute_interface_hash()
+                .expect("variant hash"),
+            base_hash
+        );
     }
 
     #[test]
@@ -3660,43 +3643,65 @@ deny_ptrace = true
         assert!(err.to_string().contains("insufficient"));
     }
 
-    // ── ObjectIdRef ────────────────────────────────────────────────────
+    // ── ObjectId ───────────────────────────────────────────────────────
 
     #[test]
-    fn object_id_ref_roundtrip() {
-        let hex_str = "objectid:".to_string() + &"ab".repeat(32);
-        let oid = ObjectIdRef::try_from(hex_str.clone()).unwrap();
-        let display = oid.to_string();
+    fn object_id_prefixed_roundtrip() {
+        let hex_str = format!("objectid:{}", "ab".repeat(32));
+        let oid = ObjectId::parse_prefixed(&hex_str).unwrap();
+        let display = oid.to_prefixed_string();
         assert_eq!(display, hex_str);
     }
 
     #[test]
-    fn object_id_ref_serde_roundtrip() {
+    fn object_id_prefixed_serde_roundtrip() {
+        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+        struct Wrapper {
+            #[serde(with = "fcp_core::util::objectid_prefixed")]
+            object_id: ObjectId,
+        }
+
         let hex_str = format!("objectid:{}", "cd".repeat(32));
-        let oid = ObjectIdRef::try_from(hex_str).unwrap();
-        let json = serde_json::to_string(&oid).unwrap();
-        let deserialized: ObjectIdRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, oid);
+        let oid = ObjectId::parse_prefixed(&hex_str).unwrap();
+        let json = serde_json::to_string(&Wrapper { object_id: oid }).unwrap();
+        let deserialized: Wrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.object_id, oid);
     }
 
     #[test]
-    fn object_id_ref_wrong_length() {
-        let err = ObjectIdRef::try_from("objectid:abcdef".to_string()).unwrap_err();
+    fn object_id_prefixed_wrong_length() {
+        let err = ObjectId::parse_prefixed("objectid:abcdef").unwrap_err();
         assert!(err.to_string().contains("32 bytes"));
     }
 
     #[test]
-    fn object_id_ref_invalid_hex() {
-        let err = ObjectIdRef::try_from("objectid:zzzz".to_string()).unwrap_err();
+    fn object_id_prefixed_invalid_hex() {
+        let err = ObjectId::parse_prefixed("objectid:zzzz").unwrap_err();
         assert!(err.to_string().contains("hex"));
     }
 
     #[test]
-    fn object_id_ref_without_prefix() {
-        // ObjectIdRef::try_from strips "objectid:" prefix or uses raw hex
+    fn object_id_prefixed_without_prefix() {
         let hex_str = "ab".repeat(32);
-        let oid = ObjectIdRef::try_from(hex_str).unwrap();
-        assert!(oid.to_string().starts_with("objectid:"));
+        let oid = ObjectId::parse_prefixed(&hex_str).unwrap();
+        assert_eq!(oid.to_prefixed_string(), format!("objectid:{hex_str}"));
+    }
+
+    #[test]
+    fn object_id_prefixed_serde_option_roundtrip() {
+        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+        struct Wrapper {
+            #[serde(default, with = "fcp_core::util::objectid_prefixed::option")]
+            object_id: Option<ObjectId>,
+        }
+
+        let oid = ObjectId::from_bytes([0xcd; 32]);
+        let json = serde_json::to_string(&Wrapper {
+            object_id: Some(oid),
+        })
+        .unwrap();
+        let deserialized: Wrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.object_id, Some(oid));
     }
 
     // ── Base64Bytes edge cases ─────────────────────────────────────────
@@ -4423,7 +4428,7 @@ deny_ptrace = true
 
     #[test]
     fn supply_chain_duplicate_object_id() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0xaa; 32]);
         let section = SupplyChainSection {
             attestations: vec![
                 SupplyChainAttestationRef {
@@ -4442,8 +4447,8 @@ deny_ptrace = true
 
     #[test]
     fn supply_chain_valid() {
-        let oid1 = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
-        let oid2 = ObjectIdRef::try_from("objectid:".to_string() + &"bb".repeat(32)).unwrap();
+        let oid1 = ObjectId::from_bytes([0xaa; 32]);
+        let oid2 = ObjectId::from_bytes([0xbb; 32]);
         let section = SupplyChainSection {
             attestations: vec![
                 SupplyChainAttestationRef {
@@ -4935,37 +4940,38 @@ deny_ptrace = true
         assert_eq!(b, deserialized);
     }
 
-    // ── ObjectIdRef parsing ──────────────────────────────────────────
+    // ── ObjectId parsing ─────────────────────────────────────────────
 
     #[test]
-    fn object_id_ref_valid_with_prefix() {
+    fn object_id_prefixed_valid_with_prefix() {
         let hex_str = "aa".repeat(32);
-        let oid = ObjectIdRef::try_from(format!("objectid:{hex_str}")).unwrap();
-        assert_eq!(oid.to_string(), format!("objectid:{hex_str}"));
+        let oid = ObjectId::parse_prefixed(&format!("objectid:{hex_str}")).unwrap();
+        assert_eq!(oid.to_prefixed_string(), format!("objectid:{hex_str}"));
     }
 
     #[test]
-    fn object_id_ref_valid_without_prefix() {
+    fn object_id_prefixed_valid_without_prefix() {
         let hex_str = "bb".repeat(32);
-        let oid = ObjectIdRef::try_from(hex_str.clone()).unwrap();
-        assert_eq!(oid.to_string(), format!("objectid:{hex_str}"));
+        let oid = ObjectId::parse_prefixed(&hex_str).unwrap();
+        assert_eq!(oid.to_prefixed_string(), format!("objectid:{hex_str}"));
     }
 
     #[test]
-    fn object_id_ref_wrong_length_rejected() {
-        let err = ObjectIdRef::try_from("objectid:aabb".to_string()).unwrap_err();
+    fn object_id_prefixed_wrong_length_rejected() {
+        let err = ObjectId::parse_prefixed("objectid:aabb").unwrap_err();
         assert!(err.to_string().contains("32 bytes"));
     }
 
     #[test]
-    fn object_id_ref_invalid_hex_rejected() {
-        let err = ObjectIdRef::try_from("objectid:".to_string() + &"gg".repeat(32)).unwrap_err();
+    fn object_id_prefixed_invalid_hex_rejected() {
+        let err =
+            ObjectId::parse_prefixed(&("objectid:".to_string() + &"gg".repeat(32))).unwrap_err();
         assert!(err.to_string().contains("hex"));
     }
 
     #[test]
-    fn object_id_ref_empty_hex_after_prefix_rejected() {
-        let err = ObjectIdRef::try_from("objectid:".to_string()).unwrap_err();
+    fn object_id_prefixed_empty_hex_after_prefix_rejected() {
+        let err = ObjectId::parse_prefixed("objectid:").unwrap_err();
         assert!(err.to_string().contains("32 bytes"));
     }
 
@@ -6084,13 +6090,13 @@ deny_ptrace = true
     }
 
     // ══════════════════════════════════════════════════════════════════
-    // NEW TESTS: ObjectIdRef extended
+    // NEW TESTS: ObjectId extended
     // ══════════════════════════════════════════════════════════════════
 
     #[test]
-    fn object_id_ref_copy_clone_hash() {
+    fn object_id_copy_clone_hash() {
         use std::collections::HashSet;
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"ff".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0xff; 32]);
         let copied = oid;
         assert_eq!(oid, copied);
         let mut set = HashSet::new();
@@ -6100,17 +6106,17 @@ deny_ptrace = true
     }
 
     #[test]
-    fn object_id_ref_debug() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"ab".repeat(32)).unwrap();
+    fn object_id_debug() {
+        let oid = ObjectId::from_bytes([0xab; 32]);
         let dbg = format!("{oid:?}");
-        assert!(dbg.contains("ObjectIdRef"));
+        assert!(dbg.contains("ObjectId"));
     }
 
     #[test]
-    fn object_id_ref_display_format() {
+    fn object_id_prefixed_display_format() {
         let hex = "cc".repeat(32);
-        let oid = ObjectIdRef::try_from(format!("objectid:{hex}")).unwrap();
-        let display = format!("{oid}");
+        let oid = ObjectId::parse_prefixed(&format!("objectid:{hex}")).unwrap();
+        let display = oid.to_prefixed_string();
         assert_eq!(display, format!("objectid:{hex}"));
     }
 
@@ -6369,7 +6375,7 @@ deny_ptrace = true
 
     #[test]
     fn supply_chain_attestation_ref_serde_roundtrip() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"dd".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0xdd; 32]);
         let att = SupplyChainAttestationRef {
             attestation_type: AttestationType::ReproducibleBuild,
             object_id: oid,
@@ -6385,7 +6391,7 @@ deny_ptrace = true
 
     #[test]
     fn supply_chain_attestation_ref_clone_debug() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"ee".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0xee; 32]);
         let att = SupplyChainAttestationRef {
             attestation_type: AttestationType::InToto,
             object_id: oid,
@@ -6817,7 +6823,7 @@ deny_ptrace = true
 
     #[test]
     fn supply_chain_section_serde_roundtrip() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0xaa; 32]);
         let section = SupplyChainSection {
             attestations: vec![SupplyChainAttestationRef {
                 attestation_type: AttestationType::InToto,
@@ -7445,38 +7451,38 @@ deny_ptrace = true
     }
 
     // ══════════════════════════════════════════════════════════════════
-    // EXPANDED TESTS: ObjectIdRef edge cases
+    // EXPANDED TESTS: ObjectId edge cases
     // ══════════════════════════════════════════════════════════════════
 
     #[test]
-    fn object_id_ref_all_zeros() {
+    fn object_id_prefixed_all_zeros() {
         let hex_str = "00".repeat(32);
-        let oid = ObjectIdRef::try_from(format!("objectid:{hex_str}")).unwrap();
-        assert_eq!(oid.to_string(), format!("objectid:{hex_str}"));
+        let oid = ObjectId::parse_prefixed(&format!("objectid:{hex_str}")).unwrap();
+        assert_eq!(oid.to_prefixed_string(), format!("objectid:{hex_str}"));
     }
 
     #[test]
-    fn object_id_ref_all_ff() {
+    fn object_id_prefixed_all_ff() {
         let hex_str = "ff".repeat(32);
-        let oid = ObjectIdRef::try_from(format!("objectid:{hex_str}")).unwrap();
-        assert_eq!(oid.to_string(), format!("objectid:{hex_str}"));
+        let oid = ObjectId::parse_prefixed(&format!("objectid:{hex_str}")).unwrap();
+        assert_eq!(oid.to_prefixed_string(), format!("objectid:{hex_str}"));
     }
 
     #[test]
-    fn object_id_ref_into_string() {
+    fn object_id_prefixed_into_string() {
         let hex_str = "ab".repeat(32);
-        let oid = ObjectIdRef::try_from(format!("objectid:{hex_str}")).unwrap();
-        let s: String = oid.into();
+        let oid = ObjectId::parse_prefixed(&format!("objectid:{hex_str}")).unwrap();
+        let s = oid.to_prefixed_string();
         assert_eq!(s, format!("objectid:{hex_str}"));
     }
 
     #[test]
-    fn object_id_ref_uppercase_hex_parses() {
+    fn object_id_prefixed_uppercase_hex_parses() {
         // hex::decode handles uppercase
         let hex_str = "AB".repeat(32);
-        let oid = ObjectIdRef::try_from(format!("objectid:{hex_str}")).unwrap();
+        let oid = ObjectId::parse_prefixed(&format!("objectid:{hex_str}")).unwrap();
         // display is lowercase
-        assert!(oid.to_string().contains(&"ab".repeat(32)));
+        assert!(oid.to_prefixed_string().contains(&"ab".repeat(32)));
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -7783,7 +7789,7 @@ schema_version = "2.1"
 
     #[test]
     fn supply_chain_single_attestation_valid() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"11".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0x11; 32]);
         let section = SupplyChainSection {
             attestations: vec![SupplyChainAttestationRef {
                 attestation_type: AttestationType::ReproducibleBuild,
@@ -7795,9 +7801,9 @@ schema_version = "2.1"
 
     #[test]
     fn supply_chain_three_unique_attestations_valid() {
-        let oid1 = ObjectIdRef::try_from("objectid:".to_string() + &"11".repeat(32)).unwrap();
-        let oid2 = ObjectIdRef::try_from("objectid:".to_string() + &"22".repeat(32)).unwrap();
-        let oid3 = ObjectIdRef::try_from("objectid:".to_string() + &"33".repeat(32)).unwrap();
+        let oid1 = ObjectId::from_bytes([0x11; 32]);
+        let oid2 = ObjectId::from_bytes([0x22; 32]);
+        let oid3 = ObjectId::from_bytes([0x33; 32]);
         let section = SupplyChainSection {
             attestations: vec![
                 SupplyChainAttestationRef {
@@ -7840,7 +7846,7 @@ schema_version = "2.1"
 
     #[test]
     fn signatures_section_with_transparency_log() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"cc".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0xcc; 32]);
         let section = SignaturesSection {
             publisher_signatures: vec![SignatureEntry {
                 kid: "key1".into(),
@@ -8181,18 +8187,19 @@ schema_version = "2.1"
         assert!(dbg.contains("SignatureThreshold"));
     }
 
-    // ── ObjectIdRef boundary ─────────────────────────────────────────
+    // ── ObjectId boundary ────────────────────────────────────────────
 
     #[test]
-    fn object_id_ref_ne() {
-        let oid1 = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
-        let oid2 = ObjectIdRef::try_from("objectid:".to_string() + &"bb".repeat(32)).unwrap();
+    fn object_id_ne() {
+        let oid1 = ObjectId::from_bytes([0xaa; 32]);
+        let oid2 = ObjectId::from_bytes([0xbb; 32]);
         assert_ne!(oid1, oid2);
     }
 
     #[test]
-    fn object_id_ref_too_long_rejected() {
-        let err = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(33)).unwrap_err();
+    fn object_id_prefixed_too_long_rejected() {
+        let err =
+            ObjectId::parse_prefixed(&("objectid:".to_string() + &"aa".repeat(33))).unwrap_err();
         assert!(err.to_string().contains("32 bytes"));
     }
 
@@ -8908,7 +8915,7 @@ schema_version = "2.1"
 
     #[test]
     fn supply_chain_section_single_attestation() {
-        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"11".repeat(32)).unwrap();
+        let oid = ObjectId::from_bytes([0x11; 32]);
         let section = SupplyChainSection {
             attestations: vec![SupplyChainAttestationRef {
                 attestation_type: AttestationType::CodeReview,
@@ -8924,18 +8931,15 @@ schema_version = "2.1"
             attestations: vec![
                 SupplyChainAttestationRef {
                     attestation_type: AttestationType::InToto,
-                    object_id: ObjectIdRef::try_from("objectid:".to_string() + &"11".repeat(32))
-                        .unwrap(),
+                    object_id: ObjectId::from_bytes([0x11; 32]),
                 },
                 SupplyChainAttestationRef {
                     attestation_type: AttestationType::ReproducibleBuild,
-                    object_id: ObjectIdRef::try_from("objectid:".to_string() + &"22".repeat(32))
-                        .unwrap(),
+                    object_id: ObjectId::from_bytes([0x22; 32]),
                 },
                 SupplyChainAttestationRef {
                     attestation_type: AttestationType::CodeReview,
-                    object_id: ObjectIdRef::try_from("objectid:".to_string() + &"33".repeat(32))
-                        .unwrap(),
+                    object_id: ObjectId::from_bytes([0x33; 32]),
                 },
             ],
         };

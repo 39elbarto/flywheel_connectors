@@ -125,8 +125,13 @@ impl CacheMetadata {
         max_age_seconds: u32,
         stale_while_revalidate_seconds: Option<u32>,
     ) -> Self {
-        let bytes = serde_json::to_vec(payload).expect("cache metadata payload should serialize");
-        let etag = format!("\"{}\"", blake3::hash(&bytes).to_hex());
+        // Stream JSON directly into the BLAKE3 hasher to avoid allocating
+        // a temporary Vec<u8> of the entire serialized payload. BLAKE3's
+        // Hasher implements std::io::Write, so serde_json can write to it.
+        let mut hasher = blake3::Hasher::new();
+        serde_json::to_writer(&mut hasher, payload)
+            .expect("cache metadata payload should serialize");
+        let etag = format!("\"{}\"", hasher.finalize().to_hex());
         Self {
             etag,
             last_modified,
@@ -172,9 +177,12 @@ pub struct ResponseMeta {
 
 impl ResponseMeta {
     fn not_modified() -> Self {
+        // Use a String literal directly instead of .to_string() on &str.
+        // The allocation is unavoidable (message is Option<String>), but
+        // this form is idiomatic and clear about intent.
         Self {
             status: 304,
-            message: Some("Not Modified".to_string()),
+            message: Some(String::from("Not Modified")),
         }
     }
 }

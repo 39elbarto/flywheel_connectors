@@ -8,10 +8,15 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
-use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
+use fcp_cbor::{CanonicalSerializer, SerializationError};
 use fcp_core::{
     CapabilityId, ObjectHeader, ObjectId, ObjectIdKey, Provenance, RateLimitDeclarations,
     RetentionClass, StorageMeta, StoredObject, ZoneId, ZonePolicyObject,
+    connector_manifest_signing_view_schema,
+};
+pub use fcp_core::{
+    ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo,
+    ConnectorManifestObject, ConnectorTarget,
 };
 use fcp_crypto::ed25519::{Ed25519Signature, Ed25519VerifyingKey};
 use fcp_manifest::{
@@ -23,7 +28,6 @@ use fcp_store::{
     ObjectStore, ObjectStoreError, ObjectSymbolMeta, ObjectTransmissionInfo, StoredSymbol,
     SymbolMeta, SymbolStore, SymbolStoreError,
 };
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -99,34 +103,6 @@ pub struct ConnectorBundle {
     pub manifest_toml: String,
     pub binary: Vec<u8>,
     pub target: ConnectorTarget,
-}
-
-/// Operating system + CPU architecture pairing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConnectorTarget {
-    pub os: String,
-    pub arch: String,
-}
-
-impl ConnectorTarget {
-    /// Build the target from the current process environment.
-    #[must_use]
-    pub fn from_env() -> Self {
-        let arch = match std::env::consts::ARCH {
-            "x86_64" => "amd64",
-            "aarch64" => "arm64",
-            other => other,
-        };
-        Self {
-            os: std::env::consts::OS.to_string(),
-            arch: arch.to_string(),
-        }
-    }
-
-    #[must_use]
-    pub fn as_string(&self) -> String {
-        format!("{}-{}", self.os, self.arch)
-    }
 }
 
 /// Trust roots used for registry verification.
@@ -638,20 +614,6 @@ pub struct MirrorResult {
     pub binary_hash: String,
 }
 
-/// Symbol-layer metadata for a mirrored connector binary object.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ConnectorBinarySymbolSet {
-    pub manifest_object_id: ObjectId,
-    pub binary_object_id: ObjectId,
-    pub target: ConnectorTarget,
-    pub binary_hash: String,
-    pub encoded_body_hash: String,
-    pub oti: ObjectTransmissionInfo,
-    pub source_symbols: u32,
-    pub total_symbols: u32,
-    pub mirrored_at: u64,
-}
-
 /// Symbol mirroring outcome.
 #[derive(Debug, Clone)]
 pub struct SymbolMirrorResult {
@@ -770,10 +732,8 @@ impl RegistryVerifier {
             binary_hash: verified.binary_hash.clone(),
             binary: bundle.binary.clone(),
         };
-
-        let manifest_schema =
-            SchemaId::new("fcp.registry", "ConnectorManifest", Version::new(1, 0, 0));
-        let binary_schema = SchemaId::new("fcp.registry", "ConnectorBinary", Version::new(1, 0, 0));
+        let manifest_schema = ConnectorManifestObject::schema();
+        let binary_schema = ConnectorBinaryObject::schema();
 
         let manifest_body = CanonicalSerializer::serialize(&manifest_obj, &manifest_schema)
             .map_err(RegistryError::Canonical)?;
@@ -864,12 +824,12 @@ impl RegistryVerifier {
             binary_hash: verified.binary_hash.clone(),
             binary: bundle.binary.clone(),
         };
-        let binary_schema = SchemaId::new("fcp.registry", "ConnectorBinary", Version::new(1, 0, 0));
+        let binary_schema = ConnectorBinaryObject::schema();
         let binary_body = CanonicalSerializer::serialize(&binary_obj, &binary_schema)
             .map_err(RegistryError::Canonical)?;
 
         let encoder = RaptorQEncoder::new(&binary_body, config)?;
-        let oti = ObjectTransmissionInfo::from(encoder.transmission_info());
+        let store_oti = ObjectTransmissionInfo::from(encoder.transmission_info());
         let source_symbols = encoder.source_symbols();
         let total_symbols = encoder.total_symbols();
         let mirrored_at = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
@@ -877,7 +837,7 @@ impl RegistryVerifier {
         let symbol_meta = ObjectSymbolMeta {
             object_id: mirror.binary_object_id,
             zone_id: zone_id.clone(),
-            oti,
+            oti: store_oti,
             source_symbols,
             first_symbol_at: mirrored_at,
         };
@@ -903,16 +863,12 @@ impl RegistryVerifier {
             target: verified.target.clone(),
             binary_hash: verified.binary_hash.clone(),
             encoded_body_hash: hash_bytes(&binary_body),
-            oti,
+            oti: descriptor_oti_from_store(store_oti),
             source_symbols,
             total_symbols,
             mirrored_at,
         };
-        let descriptor_schema = SchemaId::new(
-            "fcp.registry",
-            "ConnectorBinarySymbolSet",
-            Version::new(1, 0, 0),
-        );
+        let descriptor_schema = ConnectorBinarySymbolSet::schema();
         let descriptor_body = CanonicalSerializer::serialize(&descriptor, &descriptor_schema)
             .map_err(RegistryError::Canonical)?;
         let descriptor_header = ObjectHeader {
@@ -958,11 +914,7 @@ impl RegistryVerifier {
         store: &dyn ObjectStore,
     ) -> Result<ConnectorBinarySymbolSet, RegistryError> {
         let descriptor = store.get(descriptor_object_id).await?;
-        let descriptor_schema = SchemaId::new(
-            "fcp.registry",
-            "ConnectorBinarySymbolSet",
-            Version::new(1, 0, 0),
-        );
+        let descriptor_schema = ConnectorBinarySymbolSet::schema();
         CanonicalSerializer::deserialize(&descriptor.body, &descriptor_schema)
             .map_err(RegistryError::Canonical)
     }
@@ -993,7 +945,8 @@ impl RegistryVerifier {
             .await;
         symbols.sort_by_key(|symbol| symbol.meta.esi);
 
-        let mut decoder = RaptorQDecoder::new(descriptor.oti.to_oti(), config);
+        let mut decoder =
+            RaptorQDecoder::new(store_oti_from_descriptor(descriptor.oti).to_oti(), config);
         let mut decoded = None;
         for symbol in symbols {
             if let Some(bytes) = decoder.add_symbol(symbol.meta.esi, symbol.data.to_vec())? {
@@ -1027,7 +980,7 @@ impl RegistryVerifier {
             });
         }
 
-        let binary_schema = SchemaId::new("fcp.registry", "ConnectorBinary", Version::new(1, 0, 0));
+        let binary_schema = ConnectorBinaryObject::schema();
         let binary_obj: ConnectorBinaryObject =
             CanonicalSerializer::deserialize(body, &binary_schema)
                 .map_err(RegistryError::Canonical)?;
@@ -1081,8 +1034,7 @@ impl RegistryVerifier {
             .load_symbol_descriptor(descriptor_object_id, store)
             .await?;
         let manifest = store.get(&descriptor.manifest_object_id).await?;
-        let manifest_schema =
-            SchemaId::new("fcp.registry", "ConnectorManifest", Version::new(1, 0, 0));
+        let manifest_schema = ConnectorManifestObject::schema();
         let manifest_obj: ConnectorManifestObject =
             CanonicalSerializer::deserialize(&manifest.body, &manifest_schema)
                 .map_err(RegistryError::Canonical)?;
@@ -1106,19 +1058,6 @@ impl RegistryVerifier {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConnectorManifestObject {
-    manifest_toml: String,
-    manifest_hash: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConnectorBinaryObject {
-    target: ConnectorTarget,
-    binary_hash: String,
-    binary: Vec<u8>,
-}
-
 /// Compute canonical signing bytes for a manifest (excludes signatures section).
 ///
 /// # Errors
@@ -1128,8 +1067,28 @@ pub fn manifest_signing_bytes(manifest: &ConnectorManifest) -> Result<Vec<u8>, R
     if let Some(object) = value.as_object_mut() {
         object.remove("signatures");
     }
-    let schema = SchemaId::new("fcp.registry", "ManifestSigningView", Version::new(1, 0, 0));
+    let schema = connector_manifest_signing_view_schema();
     CanonicalSerializer::serialize(&value, &schema).map_err(RegistryError::SigningBytes)
+}
+
+fn descriptor_oti_from_store(oti: ObjectTransmissionInfo) -> ConnectorBinaryTransmissionInfo {
+    ConnectorBinaryTransmissionInfo::new(
+        oti.transfer_length,
+        oti.symbol_size,
+        oti.source_blocks,
+        oti.sub_blocks,
+        oti.alignment,
+    )
+}
+
+fn store_oti_from_descriptor(oti: ConnectorBinaryTransmissionInfo) -> ObjectTransmissionInfo {
+    ObjectTransmissionInfo {
+        transfer_length: oti.transfer_length,
+        symbol_size: oti.symbol_size,
+        source_blocks: oti.source_blocks,
+        sub_blocks: oti.sub_blocks,
+        alignment: oti.alignment,
+    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -1340,6 +1299,8 @@ mod tests {
     use super::*;
     use base64::Engine;
     use chrono::Utc;
+    use fcp_cbor::SchemaId;
+    use semver::Version;
     use fcp_core::{DecisionReceiptPolicy, ZoneTransportPolicy};
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::PolicySection;
@@ -4276,15 +4237,11 @@ sig = "base64:{sig_b64}"
                     min_slsa_level: None,
                     trusted_builders: Vec::new(),
                 });
-                // Add a transparency_log_entry so the first check passes
-                use fcp_manifest::ObjectIdRef;
                 manifest.signatures = Some(SignaturesSection {
                     publisher_signatures: vec![],
                     publisher_threshold: None,
                     registry_signature: None,
-                    transparency_log_entry: Some(
-                        ObjectIdRef::try_from("objectid:0000000000000000000000000000000000000000000000000000000000000000".to_string()).unwrap()
-                    ),
+                    transparency_log_entry: Some(ObjectId::from_bytes([0_u8; 32])),
                 });
 
                 let evidence = SupplyChainEvidence {

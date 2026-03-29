@@ -36,7 +36,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 [dev-dependencies]
 ciborium.workspace = true
 criterion.workspace = true
-fcp-testkit = { path = "../fcp-testkit" }
+jsonschema.workspace = true
 semver.workspace = true
 rand = "0.9"
 

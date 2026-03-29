@@ -3,6 +3,8 @@
 //! These tests validate the posture attestation system per `docs/STANDARD_Testing_Logging.md`.
 //! All tests emit structured JSONL logs and validate against the E2E schema.
 
+mod support;
+
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -11,8 +13,8 @@ use fcp_core::{
     NodeId, PostureAttestation, PostureAttributeKey, PostureAttributeValue, PostureCheckResult,
     PostureRequirement, PostureRequirements,
 };
-use fcp_testkit::LogCapture;
 use serde_json::json;
+use support::LogCapture;
 use uuid::Uuid;
 
 /// Test context for structured logging.

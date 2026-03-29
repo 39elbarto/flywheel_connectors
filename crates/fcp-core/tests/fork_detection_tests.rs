@@ -10,13 +10,15 @@
 //!
 //! All tests emit structured JSONL per `docs/STANDARD_Testing_Logging.md`.
 
+mod support;
+
 use chrono::Utc;
 use fcp_core::{
     ConnectorId, ConnectorStateModel, CrdtType, ForkEvent, ForkResolution, ForkResolutionOutcome,
     ObjectId, StateForkDetectionResult, StateForkDetector, ZoneId,
 };
-use fcp_testkit::LogCapture;
 use std::time::Instant;
+use support::LogCapture;
 
 fn test_object_id(label: &str) -> ObjectId {
     ObjectId::from_unscoped_bytes(label.as_bytes())

@@ -15,15 +15,14 @@ workspace = true
 # Core FCP types
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-core = { path = "../fcp-core" }
-fcp-conformance = { path = "../fcp-conformance" }
 fcp-sdk = { path = "../fcp-sdk" }
-fcp-store = { path = "../fcp-store", optional = true }
 
 # Async runtime
 async-trait.workspace = true
 futures-util.workspace = true
 
 # Serialization
+jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 fcp-cbor = { path = "../fcp-cbor" }
@@ -55,7 +54,3 @@ regex.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 hex.workspace = true
-
-[features]
-default = ["cursor-store-object-store"]
-cursor-store-object-store = ["fcp-sdk/cursor-store-object-store", "dep:fcp-store"]

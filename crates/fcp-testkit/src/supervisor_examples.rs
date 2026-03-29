@@ -30,19 +30,12 @@ use fcp_core::{
     ConnectorId, ConnectorStateSnapshot, CursorState, ObjectHeader, ObjectId, Provenance,
     Signature, TaintLevel, ZoneId,
 };
-#[cfg(feature = "cursor-store-object-store")]
-use fcp_sdk::runtime::ObjectStoreCursorBackend;
 use fcp_sdk::runtime::{
     CursorLease, CursorStore, CursorStoreError, InMemoryCursorStoreBackend, InMemoryPollingCursor,
     InMemoryStreamingSession, PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats,
     StreamingSession, SupervisorConfig, SupervisorOutcome,
 };
 use semver::Version;
-
-#[cfg(feature = "cursor-store-object-store")]
-use fcp_core::ObjectIdKey;
-#[cfg(feature = "cursor-store-object-store")]
-use fcp_store::MemoryObjectStore;
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake Polling API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -409,83 +402,6 @@ impl FakeCursorStoreConnector {
 
         let header = ObjectHeader {
             schema: SchemaId::new("fcp.test", "ConnectorStateObject", Version::new(1, 0, 0)),
-            zone_id: self.zone_id.clone(),
-            created_at,
-            provenance: Provenance {
-                origin_zone: self.zone_id.clone(),
-                chain: Vec::new(),
-                taint: TaintLevel::Untainted,
-                elevated: false,
-                elevation_token: None,
-            },
-            refs: Vec::new(),
-            foreign_refs: Vec::new(),
-            ttl_secs: None,
-            placement: None,
-        };
-
-        let head = store.commit_cursor(cursor_state.clone(), header, lease, Signature::zero())?;
-        let _snapshot = Self::build_snapshot(
-            head,
-            &cursor_state,
-            self.connector_id.clone(),
-            self.zone_id.clone(),
-            created_at,
-        );
-
-        Ok(cursor_state)
-    }
-
-    /// Execute a single poll + commit cycle using an `ObjectStoreCursorBackend`.
-    ///
-    /// Demonstrates mesh-persistent cursor storage via `ObjectStore`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the cursor store cannot load or commit the cursor state.
-    #[cfg(feature = "cursor-store-object-store")]
-    pub fn run_once_object_store(
-        &self,
-        object_store: Arc<MemoryObjectStore>,
-        object_id_key: ObjectIdKey,
-        lease: CursorLease,
-        created_at: u64,
-    ) -> Result<CursorState, CursorStoreError> {
-        let backend = ObjectStoreCursorBackend::new(
-            object_store,
-            object_id_key,
-            self.connector_id.clone(),
-            self.zone_id.clone(),
-        );
-        let mut store = CursorStore::new(backend, self.connector_id.clone(), self.zone_id.clone());
-        let previous = store.load_cursor()?;
-        let offset = previous.as_ref().and_then(|cursor| cursor.offset);
-
-        let result = self.api.poll(offset);
-        let updates = match result {
-            PollResult::Success(items) => items,
-            _ => Vec::new(),
-        };
-
-        let mut cursor = offset.map_or_else(InMemoryPollingCursor::new, |offset| {
-            InMemoryPollingCursor::with_offset(offset)
-        });
-
-        let mut last_seen = None;
-        for update in updates {
-            cursor.advance_if_newer(update.id);
-            last_seen = Some(update.id.to_string());
-            self.processed_updates.fetch_add(1, Ordering::SeqCst);
-        }
-
-        let cursor_state = CursorState {
-            offset: cursor.offset(),
-            last_seen_id: last_seen,
-            watermark: Some(created_at),
-        };
-
-        let header = ObjectHeader {
-            schema: SchemaId::new("fcp.connector_state", "state_object", Version::new(1, 0, 0)),
             zone_id: self.zone_id.clone(),
             created_at,
             provenance: Provenance {

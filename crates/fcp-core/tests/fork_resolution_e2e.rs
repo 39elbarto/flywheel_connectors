@@ -15,6 +15,8 @@
 
 #![forbid(unsafe_code)]
 
+mod support;
+
 use std::time::Instant;
 
 use chrono::Utc;
@@ -23,9 +25,9 @@ use fcp_core::{
     ConnectorId, ConnectorStateModel, ConnectorStateObject, ForkResolution, ObjectHeader, ObjectId,
     Provenance, Signature, StateForkDetectionResult, StateForkDetector, ZoneId,
 };
-use fcp_testkit::LogCapture;
 use semver::Version;
 use serde_json::json;
+use support::LogCapture;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────

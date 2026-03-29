@@ -4,6 +4,8 @@
 //! Per `docs/STANDARD_Testing_Logging.md`, all tests emit structured JSONL logs
 //! and validate against the E2E schema.
 
+mod support;
+
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -16,8 +18,8 @@ use fcp_core::{
     ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
 };
 use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
-use fcp_testkit::LogCapture;
 use serde_json::json;
+use support::LogCapture;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────

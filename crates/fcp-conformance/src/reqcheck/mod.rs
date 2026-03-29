@@ -542,7 +542,7 @@ mod tests {
     use std::fmt::Write as _;
 
     use chrono::Utc;
-    use fcp_testkit::LogCapture;
+    use crate::LogCapture;
     use serde_json::json;
     use uuid::Uuid;
 

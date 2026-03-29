@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use fcp_conformance::schemas::validate_policy_bundle;
-use fcp_testkit::LogCapture;
+use fcp_conformance::LogCapture;
 use serde_json::{Value, json};
 use uuid::Uuid;
 

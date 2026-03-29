@@ -946,7 +946,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    use fcp_testkit::LogCapture;
+    use fcp_conformance::LogCapture;
     use serde_json::json;
 
     #[test]

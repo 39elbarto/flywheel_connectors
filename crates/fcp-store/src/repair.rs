@@ -212,7 +212,12 @@ impl RepairSloMetrics {
         hot_object_count: usize,
         hot_object_available_count: usize,
     ) -> Self {
-        coverage_samples.sort_unstable();
+        // Skip sort if samples are already in order (common when list_zone
+        // returns objects in deterministic order and coverage is monotonic).
+        let is_sorted = coverage_samples.windows(2).all(|w| w[0] <= w[1]);
+        if !is_sorted {
+            coverage_samples.sort_unstable();
+        }
 
         Self {
             coverage_p50_bps: percentile_bps(coverage_samples, 50),
@@ -750,6 +755,10 @@ impl RepairController {
         let mut hot_object_available_count = 0usize;
         let mut candidates = Vec::new();
 
+        // Build HashSet once for O(1) hot-object checks instead of
+        // O(hot_objects.len()) linear scan per object in the loop below.
+        let hot_set: std::collections::HashSet<&ObjectId> = options.hot_objects.iter().collect();
+
         for object_id in object_ids {
             let Some(policy) = policies.get(&object_id).cloned() else {
                 continue;
@@ -774,10 +783,7 @@ impl RepairController {
 
             let coverage = CoverageEvaluation::from_distribution(object_id, &dist);
             coverage_samples.push(coverage.coverage_bps);
-            let is_hot_object = options
-                .hot_objects
-                .iter()
-                .any(|candidate| candidate == &object_id);
+            let is_hot_object = hot_set.contains(&object_id);
             if is_hot_object {
                 hot_object_count += 1;
                 if coverage.is_available {
@@ -1039,13 +1045,30 @@ mod tests {
 
     use bytes::Bytes;
     use chrono::Utc;
-    use fcp_testkit::LogCapture;
+    use jsonschema::Validator;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde_json::json;
     use uuid::Uuid;
 
     use crate::symbol_store::{ObjectTransmissionInfo, StoredSymbol, SymbolMeta};
     use crate::{MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, SymbolDistribution};
+
+    const E2E_LOG_V1_SCHEMA: &str =
+        include_str!("../../fcp-conformance/src/schemas/E2E_Log_v1.schema.json");
+
+    fn validate_e2e_log_entry(value: &serde_json::Value) -> Result<(), String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(E2E_LOG_V1_SCHEMA).map_err(|err| err.to_string())?;
+        let validator = Validator::new(&schema)
+            .map_err(|err| format!("schema compile failed: {err}"))?;
+        validator
+            .validate(value)
+            .map_err(|err| err.to_string())
+    }
+
+    fn assert_valid_e2e_log_entry(value: &serde_json::Value) {
+        validate_e2e_log_entry(value).expect("expected log entry to match the E2E schema");
+    }
 
     #[derive(Default)]
     struct StoreLogData {
@@ -1300,7 +1323,6 @@ mod tests {
                 assert_eq!(request.coverage.distinct_nodes, 1);
                 assert!(!request.coverage.meets_diversity_for_reconstruction(&policy));
 
-                let capture = LogCapture::new();
                 let entry = json!({
                     "timestamp": Utc::now().to_rfc3339(),
                     "test_name": "repair_queued_for_diversity_deficit",
@@ -1317,8 +1339,7 @@ mod tests {
                         "repair_queued": true
                     }
                 });
-                capture.push_value(&entry).expect("serialize log entry");
-                capture.assert_valid();
+                assert_valid_e2e_log_entry(&entry);
 
                 let dist = store.get_distribution(&object_id).await.unwrap();
 

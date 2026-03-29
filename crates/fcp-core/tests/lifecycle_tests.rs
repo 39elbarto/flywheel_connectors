@@ -11,6 +11,8 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::uninlined_format_args)]
 
+mod support;
+
 use std::time::Instant;
 
 use chrono::Utc;
@@ -18,8 +20,8 @@ use fcp_core::{
     CanaryPolicy, ConnectorId, HealthMetrics, LifecycleError, LifecycleRecord, LifecycleState,
     TransitionReason,
 };
-use fcp_testkit::LogCapture;
 use serde_json::json;
+use support::LogCapture;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────

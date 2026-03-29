@@ -14,6 +14,8 @@
 
 #![forbid(unsafe_code)]
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -24,8 +26,8 @@ use fcp_core::{
     CanaryPolicy, ConnectorId, HealthMetrics, LifecycleError, LifecycleManager, LifecycleRecord,
     LifecycleState, LifecycleStatus, TransitionReason,
 };
-use fcp_testkit::LogCapture;
 use serde_json::json;
+use support::LogCapture;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────

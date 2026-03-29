@@ -248,16 +248,28 @@ mod duration_secs {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use fcp_testkit::LogCapture;
+    use jsonschema::Validator;
     use serde_json::json;
 
+    const E2E_LOG_V1_SCHEMA: &str =
+        include_str!("../../fcp-conformance/src/schemas/E2E_Log_v1.schema.json");
+
+    fn validate_e2e_log_entry(value: &serde_json::Value) -> Result<(), String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(E2E_LOG_V1_SCHEMA).map_err(|err| err.to_string())?;
+        let validator = Validator::new(&schema)
+            .map_err(|err| format!("schema compile failed: {err}"))?;
+        validator
+            .validate(value)
+            .map_err(|err| err.to_string())
+    }
+
+    fn assert_valid_e2e_log_entry(value: &serde_json::Value) {
+        validate_e2e_log_entry(value).expect("expected log entry to match the E2E schema");
+    }
+
     #[allow(clippy::needless_pass_by_value)]
-    fn log_selection(
-        capture: &LogCapture,
-        test_name: &str,
-        phase: &str,
-        context: serde_json::Value,
-    ) {
+    fn log_selection(test_name: &str, phase: &str, context: serde_json::Value) {
         let entry = json!({
             "timestamp": Utc::now().to_rfc3339(),
             "test_name": test_name,
@@ -269,7 +281,7 @@ mod tests {
             "assertions": { "passed": 1, "failed": 0 },
             "context": context,
         });
-        capture.push_value(&entry).expect("serialize log entry");
+        assert_valid_e2e_log_entry(&entry);
     }
 
     #[test]
@@ -439,7 +451,6 @@ mod tests {
 
     #[test]
     fn preset_selection_logs_and_validates_jsonl() {
-        let capture = LogCapture::new();
         let test_name = "preset_selection_logs_and_validates_jsonl";
 
         let lan = RaptorQPreset::for_profile(RaptorQPathProfile::Lan);
@@ -449,7 +460,6 @@ mod tests {
         assert_eq!(derp.profile, RaptorQPathProfile::Derp);
 
         log_selection(
-            &capture,
             test_name,
             "execute",
             json!({
@@ -462,7 +472,6 @@ mod tests {
         );
 
         log_selection(
-            &capture,
             test_name,
             "verify",
             json!({
@@ -473,13 +482,10 @@ mod tests {
                 "repair_ratio_bps": derp.repair_ratio_bps,
             }),
         );
-
-        capture.assert_valid();
     }
 
     #[test]
     fn from_preset_clamps_to_mtu_bounds_and_logs() {
-        let capture = LogCapture::new();
         let test_name = "from_preset_clamps_to_mtu_bounds_and_logs";
         let preset = RaptorQPreset {
             profile: RaptorQPathProfile::Lan,
@@ -494,7 +500,6 @@ mod tests {
         assert_eq!(config.repair_ratio_bps, 700);
 
         log_selection(
-            &capture,
             test_name,
             "verify",
             json!({
@@ -506,13 +511,10 @@ mod tests {
                 "repair_ratio_bps": config.repair_ratio_bps,
             }),
         );
-
-        capture.assert_valid();
     }
 
     #[test]
     fn bound_symbol_size_respects_override_and_logs() {
-        let capture = LogCapture::new();
         let test_name = "bound_symbol_size_respects_override_and_logs";
 
         let mut config = RaptorQConfig {
@@ -528,7 +530,6 @@ mod tests {
         assert_eq!(config.symbol_size, 512);
 
         log_selection(
-            &capture,
             test_name,
             "verify",
             json!({
@@ -538,8 +539,6 @@ mod tests {
                 "bounded_symbol_size": adjusted,
             }),
         );
-
-        capture.assert_valid();
     }
 
     // ── Repair symbols edge cases ──────────────────────────────────────────

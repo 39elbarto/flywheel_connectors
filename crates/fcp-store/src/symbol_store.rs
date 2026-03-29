@@ -1,4 +1,4 @@
-//! Symbol store interface for FCP2.
+//! Symbol store interface for FCPS durable repair data.
 //!
 //! Provides storage for `RaptorQ` symbols to enable partial object availability.
 
@@ -464,9 +464,26 @@ mod tests {
     use super::*;
     use crate::coverage::CoverageEvaluation;
     use chrono::Utc;
-    use fcp_testkit::LogCapture;
+    use jsonschema::Validator;
     use serde_json::json;
     use uuid::Uuid;
+
+    const E2E_LOG_V1_SCHEMA: &str =
+        include_str!("../../fcp-conformance/src/schemas/E2E_Log_v1.schema.json");
+
+    fn validate_e2e_log_entry(value: &serde_json::Value) -> Result<(), String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(E2E_LOG_V1_SCHEMA).map_err(|err| err.to_string())?;
+        let validator = Validator::new(&schema)
+            .map_err(|err| format!("schema compile failed: {err}"))?;
+        validator
+            .validate(value)
+            .map_err(|err| err.to_string())
+    }
+
+    fn assert_valid_e2e_log_entry(value: &serde_json::Value) {
+        validate_e2e_log_entry(value).expect("expected log entry to match the E2E schema");
+    }
 
     #[derive(Default)]
     struct StoreLogData {
@@ -764,7 +781,6 @@ mod tests {
                 let dist = store.get_distribution(&test_object_id()).await.unwrap();
                 let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
 
-                let capture = LogCapture::new();
                 let entry = json!({
                     "timestamp": Utc::now().to_rfc3339(),
                     "test_name": "can_reconstruct_with_policy_diversity",
@@ -780,8 +796,7 @@ mod tests {
                         "diversity_bps": eval.diversity_bps(policy.min_source_diversity)
                     }
                 });
-                capture.push_value(&entry).expect("serialize log entry");
-                capture.assert_valid();
+                assert_valid_e2e_log_entry(&entry);
 
                 StoreLogData {
                     object_id: Some(test_object_id()),

@@ -25,6 +25,7 @@
 pub mod compliance;
 pub mod harness;
 pub mod interop;
+pub mod log_capture;
 pub mod reqcheck;
 pub mod schemas;
 pub mod vecgen;
@@ -50,6 +51,7 @@ pub use vectors::signing::{QuorumSortGoldenVector, SigningBytesGoldenVector};
 pub use harness::{
     LogCollector, LogEntry, MockClock, SharedMockClock, SimulatedNetwork, TestHarness, TestMeshNode,
 };
+pub use log_capture::LogCapture;
 
 // Re-export interop types for convenience
 pub use interop::{

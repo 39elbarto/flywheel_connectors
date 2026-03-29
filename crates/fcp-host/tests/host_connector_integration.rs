@@ -13,7 +13,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
+use fcp_async_core::process::{
+    Child as AsyncChild, ChildStdin as AsyncChildStdin, ChildStdout as AsyncChildStdout,
+    Command as AsyncCommand, Stdio as AsyncStdio,
+};
 use fcp_async_core::sync::Mutex;
+use fcp_async_core::task::JoinHandle as AsyncJoinHandle;
 use fcp_core::{
     ApprovalMode, AttestationMaterial, AttestationMetadata, AttestationPredicateType,
     CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
@@ -26,7 +32,6 @@ use fcp_core::{
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
-use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
     CancellationResponse, CleanupBehavior, ConfigDiffKind, ConfigRevisionRecord,
@@ -102,6 +107,149 @@ const TEST_OPERATION: &str = "test.echo";
 const TEST_CAPABILITY_ID: &str = "cap.test.echo";
 const TRUSTED_CAPABILITY_SIGNING_KEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
+
+struct ConnectorProcessRunner {
+    child: AsyncChild,
+    stdin: AsyncChildStdin,
+    stdout: AsyncBufReader<AsyncChildStdout>,
+    _stderr_task: AsyncJoinHandle<()>,
+}
+
+impl ConnectorProcessRunner {
+    async fn spawn(command: &str, args: &[&str], env: &[(&str, &str)]) -> std::io::Result<Self> {
+        let mut cmd = AsyncCommand::new(command);
+        cmd.args(args)
+            .stdin(AsyncStdio::piped())
+            .stdout(AsyncStdio::piped())
+            .stderr(AsyncStdio::piped())
+            .kill_on_drop(true);
+
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn()?;
+        let stdin = child
+            .stdin()
+            .ok_or_else(|| std::io::Error::other("connector stdin unavailable"))?;
+        let stdout = child
+            .stdout()
+            .ok_or_else(|| std::io::Error::other("connector stdout unavailable"))?;
+        let stderr = child
+            .stderr()
+            .ok_or_else(|| std::io::Error::other("connector stderr unavailable"))?;
+
+        let stderr_task = fcp_async_core::task::spawn(async move {
+            let mut reader = AsyncBufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            stdin,
+            stdout: AsyncBufReader::new(stdout),
+            _stderr_task: stderr_task,
+        })
+    }
+
+    async fn send_json(&mut self, value: &serde_json::Value) -> std::io::Result<()> {
+        let line = serde_json::to_string(value)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        self.stdin.write_all(line.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await?;
+        Ok(())
+    }
+
+    async fn read_json(&mut self) -> std::io::Result<serde_json::Value> {
+        let mut line = String::new();
+        let bytes = self.stdout.read_line(&mut line).await?;
+        if bytes == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connector closed stdout",
+            ));
+        }
+        serde_json::from_str::<serde_json::Value>(line.trim())
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    }
+
+    async fn request(&mut self, value: &serde_json::Value) -> std::io::Result<serde_json::Value> {
+        self.send_json(value).await?;
+        let response = self.read_json().await?;
+        validate_jsonrpc_response(value, response)
+    }
+
+    fn terminate(&mut self) -> std::io::Result<()> {
+        self.child.kill().map_err(Into::into)
+    }
+}
+
+fn validate_jsonrpc_response(
+    request: &serde_json::Value,
+    response: serde_json::Value,
+) -> std::io::Result<serde_json::Value> {
+    let response_object = response.as_object().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "connector response must be a JSON object",
+        )
+    })?;
+
+    match response_object.get("jsonrpc").and_then(serde_json::Value::as_str) {
+        Some("2.0") => {}
+        Some(version) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("connector response used unsupported jsonrpc version '{version}'"),
+            ));
+        }
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "connector response missing jsonrpc version",
+            ));
+        }
+    }
+
+    if let Some(expected_id) = request.get("id") {
+        match response_object.get("id") {
+            Some(actual_id) if actual_id == expected_id => {}
+            Some(actual_id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "connector response id mismatch: expected {expected_id}, got {actual_id}"
+                    ),
+                ));
+            }
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "connector response missing id",
+                ));
+            }
+        }
+    }
+
+    let has_result = response_object.contains_key("result");
+    let has_error = response_object.contains_key("error");
+    if has_result == has_error {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "connector response must contain exactly one of result or error",
+        ));
+    }
+
+    Ok(response)
+}
 
 fn valid_digest() -> String {
     format!("blake3-256:{}", "a".repeat(64))
@@ -4185,22 +4333,26 @@ async fn fcp_host_binary_invoke_route_rejects_invalid_capability_signature()
 
 #[test]
 fn host_log_schema_example() {
-    let mut logger = E2eLogger::new();
     let correlation_id = CorrelationId::new().to_string();
-
-    logger.push(E2eLogEntry::new(
-        "info",
-        "host_connector_integration",
-        "fcp-host",
-        "execute",
-        &correlation_id,
-        "pass",
-        5,
-        AssertionsSummary::new(1, 0),
-        json!({ "connector_count": 2 }),
-    ));
-
-    let payload = logger.to_json_lines();
+    let payload = serde_json::to_string(&json!({
+        "timestamp": Utc::now(),
+        "log_version": "v1",
+        "level": "info",
+        "test_name": "host_connector_integration",
+        "module": "fcp-host",
+        "phase": "execute",
+        "correlation_id": correlation_id,
+        "result": "pass",
+        "duration_ms": 5,
+        "assertions": {
+            "passed": 1,
+            "failed": 0,
+        },
+        "context": {
+            "connector_count": 2,
+        },
+    }))
+    .expect("serialize host log schema example");
     let capture = LogCapture::new();
     capture.push_line(&payload);
     capture.assert_valid();

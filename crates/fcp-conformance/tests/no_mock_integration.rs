@@ -18,7 +18,8 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_manifest::{Base64Bytes, ConnectorManifest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_registry::{
-    ConnectorBundle, ConnectorTarget, RegistryError, RegistryTrustPolicy, RegistryVerifier,
+    ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBundle, ConnectorManifestObject,
+    ConnectorTarget, RegistryError, RegistryTrustPolicy, RegistryVerifier,
 };
 use fcp_store::{
     MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
@@ -1107,6 +1108,26 @@ async fn fcps_registry_reconstruction_roundtrip_remains_manifest_compliant() {
         )
         .await
         .expect("mirror symbols");
+
+    let manifest = store
+        .get(&mirror.manifest_object_id)
+        .await
+        .expect("manifest");
+    let mirrored_binary = store.get(&mirror.binary_object_id).await.expect("binary");
+    let descriptor = store
+        .get(&symbol_result.descriptor_object_id)
+        .await
+        .expect("descriptor");
+
+    assert_eq!(manifest.header.schema, ConnectorManifestObject::schema());
+    assert_eq!(
+        mirrored_binary.header.schema,
+        ConnectorBinaryObject::schema()
+    );
+    assert_eq!(descriptor.header.schema, ConnectorBinarySymbolSet::schema());
+    assert_eq!(manifest.header.schema.namespace, "fcp.core");
+    assert_eq!(mirrored_binary.header.schema.namespace, "fcp.core");
+    assert_eq!(descriptor.header.schema.namespace, "fcp.core");
 
     store
         .delete(&mirror.binary_object_id)

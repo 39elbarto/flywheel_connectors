@@ -2042,8 +2042,8 @@ fn host_allowed_by_network_constraints(host: &str) -> bool {
         return true;
     }
 
-    // Allow localhost hosts for deterministic mock-server tests.
-    if (cfg!(test) || cfg!(feature = "testing"))
+    // Allow localhost hosts for deterministic debug/test harnesses.
+    if (cfg!(test) || cfg!(debug_assertions))
         && (host == "localhost" || host == "127.0.0.1" || host == "::1")
     {
         return true;

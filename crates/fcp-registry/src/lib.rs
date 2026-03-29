@@ -1,4 +1,4 @@
-//! Registry verification and mirroring for FCP2 connectors.
+//! Registry verification and FCPS artifact mirroring for connectors.
 //!
 //! This crate validates connector manifests and binaries against supply-chain
 //! policies and mirrors verified bundles into the object store.
@@ -1300,11 +1300,11 @@ mod tests {
     use base64::Engine;
     use chrono::Utc;
     use fcp_cbor::SchemaId;
-    use semver::Version;
     use fcp_core::{DecisionReceiptPolicy, ZoneTransportPolicy};
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::PolicySection;
     use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig};
+    use semver::Version;
     use serde_json::json;
     use std::panic::{self, AssertUnwindSafe};
     use std::time::Instant;

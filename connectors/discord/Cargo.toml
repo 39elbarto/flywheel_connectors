@@ -40,7 +40,6 @@ uuid.workspace = true
 testing = []
 
 [dev-dependencies]
-fcp-discord = { path = ".", features = ["testing"] }
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

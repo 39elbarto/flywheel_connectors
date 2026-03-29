@@ -1377,8 +1377,11 @@ mod tests {
     #[test]
     fn uptime_is_positive() {
         let session = IrcPersistentSession::with_default_capacity("flywheel");
-        // Uptime should be non-negative (it's measured from creation)
-        assert!(session.uptime().as_nanos() > 0 || session.uptime() == Duration::ZERO);
+        // Verify uptime() doesn't panic and returns a valid duration.
+        let _uptime = session.uptime();
+        // Wait a tiny bit, then verify uptime advanced.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(session.uptime().as_millis() >= 1);
     }
 
     #[test]

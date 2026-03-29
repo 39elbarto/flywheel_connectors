@@ -670,21 +670,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn sliding_window_partial_expiry() {
-        // With 3 permits and 100ms window: acquire 3, wait 60ms, acquire 1 more
-        // The first request should not yet be expired after 60ms
-        let limiter = SlidingWindow::new(3, Duration::from_millis(100));
-        limiter.try_acquire().await;
-        sleep(Duration::from_millis(20)).await;
-        limiter.try_acquire().await;
-        sleep(Duration::from_millis(20)).await;
-        limiter.try_acquire().await;
-        assert!(!limiter.try_acquire().await);
+        // Wider margins to avoid flakiness under heavy load.
+        // Window = 1s, gaps = 200ms → clear separation between expiry times.
+        let limiter = SlidingWindow::new(3, Duration::from_millis(1000));
+        limiter.try_acquire().await; // t≈0ms
+        sleep(Duration::from_millis(200)).await;
+        limiter.try_acquire().await; // t≈200ms
+        sleep(Duration::from_millis(200)).await;
+        limiter.try_acquire().await; // t≈400ms
+        assert!(!limiter.try_acquire().await); // full
 
-        // Wait enough for the first request to expire, but not the others
-        sleep(Duration::from_millis(65)).await;
-        assert!(limiter.try_acquire().await);
-        // The second and third are still within window
-        assert!(!limiter.try_acquire().await);
+        // Wait for #1 to expire (needs >1000ms from t=0) but not #2 (needs >1200ms)
+        sleep(Duration::from_millis(700)).await; // t≈1100ms → #1 expired, #2 still alive
+        assert!(limiter.try_acquire().await); // #1 slot freed
+        assert!(!limiter.try_acquire().await); // #2, #3 still within window
     }
 
     // ── FixedWindow: edge cases ───────────────────────────────────────

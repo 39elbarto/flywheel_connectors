@@ -1,6 +1,6 @@
 [package]
 name = "fcp-sdk"
-description = "FCP2 connector authoring SDK"
+description = "FCP3 connector authoring SDK"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-core = { path = "../fcp-core" }
+fcp-kernel = { path = "../fcp-kernel" }
 fcp-cbor = { path = "../fcp-cbor", optional = true }
 fcp-manifest = { path = "../fcp-manifest" }
 fcp-store = { path = "../fcp-store", optional = true }

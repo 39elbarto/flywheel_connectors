@@ -5,6 +5,10 @@
 //! duplicated runtime bootstrap, retry loop, and error mapping code across
 //! connector crates.
 //!
+//! This module is an implementation helper, not the primary SDK contract.
+//! New connector authoring should start from [`crate::ConnectorApp`] and use the
+//! migration helpers only where they clarify runtime integration details.
+//!
 //! # Components
 //!
 //! - [`ConnectorRuntime`]: Lifecycle wrapper providing `ExecutionContext` creation,

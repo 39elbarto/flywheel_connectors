@@ -1,8 +1,10 @@
-//! FCP2 Connector SDK
+//! FCP3 Connector SDK
 //!
-//! This crate provides the SDK for authoring FCP2-compliant connectors.
-//! It re-exports key types from `fcp-core` and provides convenience utilities
-//! to make implementing connectors easy and correct.
+//! This crate provides the SDK for authoring FCP3-compliant connector
+//! applications. It re-exports platform-owned execution types from
+//! `fcp-kernel`, keeps policy and evidence types available from the lower
+//! layers, and exposes authoring utilities that make the shared runtime model
+//! explicit instead of host-specific.
 //!
 //! # Quick Start
 //!
@@ -28,16 +30,35 @@
 //!
 //!     // ... implement other methods
 //! }
+//!
+//! impl ConnectorApp for MyConnector {
+//!     fn describe(&self) -> ConnectorAppDescriptor {
+//!         ConnectorAppDescriptor::new(self.id().clone())
+//!             .with_execution_form(ConnectorRuntimeFormat::Native)
+//!             .with_archetype(ConnectorArchetype::Operational)
+//!             .with_state_model(ConnectorStateModel::Stateless)
+//!             .with_diagnostics(
+//!                 DiagnosticsSurface::connector_author_defaults()
+//!                     .with_fixture_scenario("my_connector.happy_path"),
+//!             )
+//!     }
+//! }
 //! ```
 //!
 //! # Architecture
 //!
 //! The SDK is structured around:
 //!
-//! - **[`FcpConnector`]**: The core trait all connectors must implement
+//! - **[`FcpConnector`]**: The low-level runtime trait all connectors implement
+//! - **[`ConnectorApp`]**: The execution-form-neutral connector app contract
+//! - **[`ConnectorAppContract`]**: The self-contained published contract carrying
+//!   both runtime semantics and full connector introspection
 //! - **[`BaseConnector`]**: A base implementation with common functionality
 //! - **[`FcpError`]**: Structured error types with recovery hints
 //! - **Archetype traits**: [`Streaming`], [`Bidirectional`], [`Polling`], [`Webhook`]
+//!
+//! Connector authors should treat [`ConnectorApp`] as the stable authoring
+//! contract and [`FcpConnector`] as the low-level runtime surface beneath it.
 //!
 //! # Error Handling
 //!
@@ -58,98 +79,142 @@
 #![warn(missing_docs)]
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Re-exports from fcp-core
+// Re-exports from platform owner crates
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Core connector trait and base implementation.
-pub use fcp_core::{
+/// Execution and lifecycle types owned by `fcp-kernel`.
+pub use fcp_kernel::{
+    AgentHint,
+    ApprovalMode,
     BaseConnector,
     Bidirectional,
-    // Capability tokens
-    CapabilityGrant,
-    CapabilityToken,
-
-    // Identifiers
+    BudgetEnforcement,
+    BudgetStatus,
+    CheckpointProposal,
+    CheckpointTrigger,
+    ComputationCheckpoint,
     ConnectorId,
     ConnectorMetrics,
-    CorrelationId,
     // Cost and availability
     CostEstimate,
-    CostEstimateConfidence,
-    CurrencyCost,
     CursorState,
-    // Error types
-    ErrorCategory,
-    // Events
+    // Capability tokens
     EventAck,
     EventCaps,
     EventData,
     EventEnvelope,
+    EventInfo,
     EventNack,
     EventStream,
     FcpConnector,
     FcpError,
-    FcpErrorResponse,
     FcpResult,
-
-    // Protocol messages
     HandshakeRequest,
     HandshakeResponse,
-    // Health and metrics
     HealthSnapshot,
     HealthState,
+    HumanPrompt,
+    HumanPromptType,
+    IdempotencyClass,
     InstanceId,
     Introspection,
     InvokeContext,
     InvokeRequest,
     InvokeResponse,
     InvokeStatus,
+    Lease,
+    LeaseHandoff,
+    LeaseId,
+    LeaseParams,
+    LeasePurpose,
+    LeaseRequest,
+    LeaseResponse,
+    OperationId,
+    OperationInfo,
+    OperationIntent,
+    OperationReceipt,
+    Polling,
+    ProvisioningAbortInput,
+    ProvisioningAbortOutput,
+    ProvisioningCompleteInput,
+    ProvisioningCompleteOutput,
+    ProvisioningInput,
+    ProvisioningPollInput,
+    ProvisioningPollOutput,
+    ProvisioningProgress,
+    ProvisioningRecipe,
+    ProvisioningSessionId,
+    ProvisioningStartInput,
+    ProvisioningStartOutput,
+    ProvisioningState,
+    ProvisioningStatus,
+    ProvisioningValidation,
+    RateLimitDeclarations,
+    RecipeId,
+    ReplayBufferInfo,
+    RequestId,
+    RequestResponse,
+    ResourceAvailability,
+    ResourceTypeInfo,
+    SelfCheckReport,
+    SelfCheckStatus,
+    SessionId,
+    SetupDescriptor,
+    ShutdownAck,
+    ShutdownRequest,
+    SimulateRequest,
+    SimulateResponse,
+    StepId,
+    Streaming,
+    SubscribeRequest,
+    SubscribeResponse,
+    SubscribeResult,
+    UnsubscribeRequest,
+    UsageBudgetLimit,
+    UsageBudgetPolicy,
+    UsageBudgetSnapshot,
+    UsageBudgetUsage,
+    UsageMetric,
+    UsageMetricKind,
+    Webhook,
+    async_trait,
+};
+
+/// Policy, provenance, and evidence-adjacent types still re-exported from
+/// their lower-level crates while consumer rewiring continues.
+pub use fcp_core::{
+    CapabilityGrant,
+    CapabilityId,
+    CapabilityToken,
+    CorrelationId,
+    CostEstimateConfidence,
+    CurrencyCost,
+    ErrorCategory,
+    // Events
+    FcpErrorResponse,
     LivenessResponse,
     ObjectId,
-    OperationId,
-    Polling,
     Principal,
     // Provenance
     Provenance,
     ProvenanceStep,
     RateLimitConfig,
-    RateLimitDeclarations,
     RateLimitEnforcement,
     RateLimitPool,
     RateLimitScope,
     RateLimitStatus,
     RateLimitUnit,
     ReadinessResponse,
-    ReplayBufferInfo,
-    RequestId,
-    RequestResponse,
-    ResourceAvailability,
-    SelfCheckReport,
-    SelfCheckStatus,
-    SessionId,
-    ShutdownAck,
-    ShutdownRequest,
-    SimulateRequest,
-    SimulateResponse,
-    Streaming,
-    SubscribeRequest,
-    SubscribeResponse,
-    SubscribeResult,
+    RiskLevel,
+    // Observability
+    SafetyTier,
     TaintFlag,
     TaintLevel,
     ThreadInfo,
     ThreadKind,
-    // Observability
     TraceContext,
     TrustLevel,
-    UnsubscribeRequest,
-    UsageMetric,
-    UsageMetricKind,
-    Webhook,
     ZoneId,
-
-    // Core connector infrastructure
-    async_trait,
 };
 
 /// Re-exports from fcp-manifest for connector configuration.
@@ -161,6 +226,7 @@ pub use fcp_manifest::{
 // SDK-specific modules
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub mod contract;
 pub mod formatting;
 pub mod migration;
 pub mod prelude;
@@ -168,6 +234,13 @@ pub mod ratelimit;
 pub mod retry;
 pub mod runtime;
 pub mod streaming;
+
+/// Execution-form-neutral connector app contract types.
+pub use contract::{
+    BudgetSurface, CheckpointSurface, ConnectorApp, ConnectorAppContract, ConnectorAppDescriptor,
+    ConnectorCapabilityCatalog, ConnectorOperationCapability, DiagnosticsSurface, DrainSurface,
+    EvidenceSurface, InvokeSurface, ProvisioningSurface, ResumeSurface, StreamingSurface,
+};
 
 /// Formatting helpers with safe fallback behavior.
 pub use formatting::{

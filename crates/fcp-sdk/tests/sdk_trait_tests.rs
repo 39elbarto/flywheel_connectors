@@ -137,6 +137,73 @@ impl FcpConnector for MinimalConnector {
     }
 }
 
+impl ConnectorApp for MinimalConnector {
+    fn describe(&self) -> ConnectorAppDescriptor {
+        ConnectorAppDescriptor::new(self.id().clone())
+            .with_execution_form(ConnectorRuntimeFormat::Native)
+            .with_archetype(ConnectorArchetype::Operational)
+            .with_state_model(ConnectorStateModel::Stateless)
+            .with_budget(BudgetSurface {
+                declares_rate_limits: false,
+                supports_usage_snapshots: true,
+                supports_preflight_cost_estimates: true,
+            })
+            .with_evidence(EvidenceSurface {
+                trace_context: true,
+                decision_receipts: false,
+                operation_receipts: true,
+                audit_events: false,
+            })
+            .with_diagnostics(
+                DiagnosticsSurface::connector_author_defaults()
+                    .with_reason_code("self_check_unsupported")
+                    .with_fixture_scenario("minimal.happy_path")
+                    .with_local_repro_command(
+                        "cargo test -p fcp-sdk sdk_trait_tests::test_connector_app_contract -- --nocapture",
+                    ),
+            )
+    }
+
+    fn contract_introspection(&self) -> Introspection {
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static("test.op"),
+                summary: "Test operation".to_string(),
+                description: Some(
+                    "Published through the execution-form-neutral app contract".into(),
+                ),
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                capability: CapabilityId::from_static("test.op.invoke"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint::default(),
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            }],
+            events: vec![EventInfo {
+                topic: "test.events".to_string(),
+                schema: json!({"type": "object"}),
+                requires_ack: false,
+            }],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+        }
+    }
+
+    fn capability_catalog_for(&self, introspection: &Introspection) -> ConnectorCapabilityCatalog {
+        ConnectorCapabilityCatalog::from_introspection_and_rate_limits(introspection, None)
+            .with_policy_assumption("requires a zone-scoped capability token")
+    }
+}
+
 /// Streaming connector for testing streaming-specific functionality.
 #[derive(Debug)]
 struct StreamingConnector {
@@ -465,6 +532,97 @@ fn test_connector_introspect() {
         assert!(introspection.operations.is_empty());
         assert!(introspection.events.is_empty());
     });
+}
+
+#[test]
+fn test_connector_app_contract() {
+    let connector = MinimalConnector::new();
+
+    let contract = connector.app_contract();
+
+    assert_eq!(contract.description.connector_id, connector.id().clone());
+    assert_eq!(
+        contract.description.execution_forms,
+        vec![ConnectorRuntimeFormat::Native]
+    );
+    assert_eq!(
+        contract.description.archetypes,
+        vec![ConnectorArchetype::Operational]
+    );
+    assert!(contract.description.budget.supports_usage_snapshots);
+    assert!(contract.description.evidence.operation_receipts);
+    assert_eq!(contract.introspection.operations.len(), 1);
+    assert_eq!(contract.introspection.events.len(), 1);
+    assert_eq!(
+        contract.introspection.operations[0].id,
+        OperationId::from_static("test.op")
+    );
+    assert!(
+        contract
+            .description
+            .diagnostics
+            .testkit_entry_points
+            .contains(&"fcp_testkit::ConnectorTestHarness".to_string())
+    );
+    assert_eq!(contract.capabilities.operations.len(), 1);
+    assert_eq!(
+        contract.capabilities.required_capabilities,
+        vec![CapabilityId::from_static("test.op.invoke")]
+    );
+}
+
+#[test]
+fn test_connector_capability_catalog_deduplicates_capabilities() {
+    let introspection = Introspection {
+        operations: vec![
+            fcp_core::OperationInfo {
+                id: OperationId::from_static("alpha.read"),
+                summary: "alpha".to_string(),
+                description: None,
+                input_schema: json!({}),
+                output_schema: json!({}),
+                capability: CapabilityId::from_static("alpha.read"),
+                risk_level: fcp_core::RiskLevel::Low,
+                safety_tier: fcp_core::SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: fcp_core::AgentHint::default(),
+                rate_limit: None,
+                requires_approval: None,
+            },
+            fcp_core::OperationInfo {
+                id: OperationId::from_static("alpha.list"),
+                summary: "alpha list".to_string(),
+                description: None,
+                input_schema: json!({}),
+                output_schema: json!({}),
+                capability: CapabilityId::from_static("alpha.read"),
+                risk_level: fcp_core::RiskLevel::Low,
+                safety_tier: fcp_core::SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: fcp_core::AgentHint::default(),
+                rate_limit: None,
+                requires_approval: None,
+            },
+        ],
+        events: vec![],
+        resource_types: vec![],
+        auth_caps: None,
+        event_caps: None,
+    };
+
+    let catalog =
+        ConnectorCapabilityCatalog::from_introspection_and_rate_limits(&introspection, None)
+            .with_policy_assumption("operator must pre-issue alpha.read");
+
+    assert_eq!(catalog.operations.len(), 2);
+    assert_eq!(
+        catalog.required_capabilities,
+        vec![CapabilityId::from_static("alpha.read")]
+    );
+    assert_eq!(
+        catalog.policy_assumptions,
+        vec!["operator must pre-issue alpha.read".to_string()]
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

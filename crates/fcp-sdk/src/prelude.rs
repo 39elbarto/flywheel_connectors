@@ -10,8 +10,8 @@
 
 // Core traits
 pub use crate::{
-    BaseConnector, Bidirectional, FcpConnector, Polling, RequestResponse, Streaming, Webhook,
-    async_trait,
+    BaseConnector, Bidirectional, ConnectorApp, FcpConnector, Polling, RequestResponse, Streaming,
+    Webhook, async_trait,
 };
 
 // Error types
@@ -19,15 +19,20 @@ pub use crate::{FcpError, FcpResult};
 
 // Protocol messages
 pub use crate::{
-    HandshakeRequest, HandshakeResponse, Introspection, InvokeContext, InvokeRequest,
-    InvokeResponse, InvokeStatus, ShutdownAck, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    AgentHint, ApprovalMode, EventInfo, HandshakeRequest, HandshakeResponse, HumanPrompt,
+    HumanPromptType, Introspection, InvokeContext, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationInfo, ProvisioningAbortInput, ProvisioningAbortOutput, ProvisioningCompleteInput,
+    ProvisioningCompleteOutput, ProvisioningInput, ProvisioningPollInput, ProvisioningPollOutput,
+    ProvisioningProgress, ProvisioningRecipe, ProvisioningSessionId, ProvisioningStartInput,
+    ProvisioningStartOutput, ProvisioningState, ProvisioningStatus, ProvisioningValidation,
+    RecipeId, ResourceTypeInfo, SetupDescriptor, ShutdownAck, ShutdownRequest, SimulateRequest,
+    SimulateResponse, StepId, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 
 // Cost and availability
 pub use crate::{
-    CostEstimate, CostEstimateConfidence, CurrencyCost, ResourceAvailability, UsageMetric,
-    UsageMetricKind,
+    CostEstimate, CostEstimateConfidence, CurrencyCost, IdempotencyClass, ResourceAvailability,
+    RiskLevel, SafetyTier, UsageMetric, UsageMetricKind,
 };
 
 // Rate limits
@@ -49,8 +54,15 @@ pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState, SelfCheckReport, 
 // Identifiers
 pub use crate::{ConnectorId, InstanceId, ObjectId, RequestId, ZoneId};
 
+// Execution-form-neutral contract
+pub use crate::{
+    BudgetSurface, CheckpointSurface, ConnectorAppContract, ConnectorAppDescriptor,
+    ConnectorCapabilityCatalog, ConnectorOperationCapability, DiagnosticsSurface, DrainSurface,
+    EvidenceSurface, InvokeSurface, ProvisioningSurface, ResumeSurface, StreamingSurface,
+};
+
 // Capability tokens
-pub use crate::CapabilityToken;
+pub use crate::{CapabilityId, CapabilityToken};
 
 // Provenance
 pub use crate::{Provenance, TaintFlag, TaintLevel, TrustLevel};
@@ -61,6 +73,13 @@ pub use crate::Principal;
 // Archetypes and state models
 pub use crate::{
     ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel, CursorState,
+};
+
+// Checkpoint, lease, and budget primitives
+pub use crate::{
+    BudgetEnforcement, BudgetStatus, CheckpointProposal, CheckpointTrigger, ComputationCheckpoint,
+    Lease, LeaseHandoff, LeaseId, LeaseParams, LeasePurpose, LeaseRequest, LeaseResponse,
+    UsageBudgetLimit, UsageBudgetPolicy, UsageBudgetSnapshot, UsageBudgetUsage,
 };
 
 // Streaming helpers

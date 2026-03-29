@@ -362,7 +362,8 @@ fn canonicalize_map(
 ) -> Result<(), SerializationError> {
     use std::cmp::Ordering;
 
-    let mut scratch = Vec::new();
+    // Pre-allocate scratch buffer. Typical CBOR map keys are 10-50 bytes each.
+    let mut scratch = Vec::with_capacity(entries.len() * 32);
     let mut with_keys = Vec::with_capacity(entries.len());
 
     for (mut key, mut value) in std::mem::take(entries) {

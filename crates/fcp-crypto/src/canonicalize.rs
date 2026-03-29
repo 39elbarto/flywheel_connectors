@@ -79,11 +79,27 @@ pub fn verify_signature_order(node_ids: &[&[u8]]) -> CryptoResult<()> {
 ///
 /// Returns an error if serialization fails.
 pub fn to_deterministic_cbor<T: serde::Serialize>(value: &T) -> CryptoResult<Vec<u8>> {
+    to_deterministic_cbor_with_capacity(value, 0)
+}
+
+/// Same as [`to_deterministic_cbor`] but pre-allocates the output buffer.
+///
+/// Use when the typical serialized size is known (e.g., AAD ~128 bytes,
+/// capability tokens ~256 bytes) to avoid reallocations during encoding.
+///
+/// # Errors
+///
+/// Returns `CryptoError::SerializationError` if the value cannot be serialized
+/// to deterministic CBOR.
+pub fn to_deterministic_cbor_with_capacity<T: serde::Serialize>(
+    value: &T,
+    capacity: usize,
+) -> CryptoResult<Vec<u8>> {
     let mut v = ciborium::value::Value::serialized(value)
         .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
     canonicalize_value_in_place(&mut v)?;
 
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(capacity);
     ciborium::into_writer(&v, &mut bytes)
         .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
     Ok(bytes)

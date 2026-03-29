@@ -305,11 +305,14 @@ impl SymbolStore for MemorySymbolStore {
             return Ok(());
         }
 
+        // Pre-allocate the symbols HashMap to the expected source symbol count.
+        // This avoids multiple rehashes as symbols arrive (K symbols typical).
+        let capacity = meta.source_symbols as usize;
         objects.insert(
             meta.object_id,
             ObjectSymbols {
                 meta,
-                symbols: HashMap::new(),
+                symbols: HashMap::with_capacity(capacity),
             },
         );
 

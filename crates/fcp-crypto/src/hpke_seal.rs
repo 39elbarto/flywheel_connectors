@@ -139,7 +139,8 @@ impl Fcp2Aad {
     ///
     /// Returns an error if CBOR serialization fails.
     pub fn encode(&self) -> CryptoResult<Vec<u8>> {
-        crate::canonicalize::to_deterministic_cbor(self)
+        // Typical AAD CBOR is ~120 bytes (32 zone + 32 node + 13-16 purpose + 8 timestamp + overhead).
+        crate::canonicalize::to_deterministic_cbor_with_capacity(self, 128)
     }
 }
 

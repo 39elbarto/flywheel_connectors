@@ -155,35 +155,36 @@ impl TransportSelector {
             return Vec::new();
         }
 
-        let ranked = Self::rank_paths(paths, policy);
-        let mut eligible: Vec<RankedPath> = ranked.into_iter().filter(|p| p.eligible).collect();
+        // Filter eligible paths in-place instead of creating a second Vec.
+        let mut eligible = Self::rank_paths(paths, policy);
+        eligible.retain(|p| p.eligible);
         if eligible.is_empty() {
             return Vec::new();
         }
 
         eligible.sort_by_key(|entry| Reverse(entry.priority));
 
-        let mut selected = Vec::new();
+        let mut selected = Vec::with_capacity(fanout.min(eligible.len()));
         let mut idx = 0;
         while idx < eligible.len() && selected.len() < fanout {
             let current_priority = eligible[idx].priority;
-            let mut group = Vec::new();
+            let group_start = idx;
             while idx < eligible.len() && eligible[idx].priority == current_priority {
-                group.push(eligible[idx].path.clone());
                 idx += 1;
             }
 
-            group.sort_by(|a, b| {
-                let ha = path_weight(object_id, symbol_index, &a.path_id);
-                let hb = path_weight(object_id, symbol_index, &b.path_id);
+            // Sort the priority group slice in-place by path weight.
+            eligible[group_start..idx].sort_by(|a, b| {
+                let ha = path_weight(object_id, symbol_index, &a.path.path_id);
+                let hb = path_weight(object_id, symbol_index, &b.path.path_id);
                 ha.cmp(&hb)
             });
 
-            for path in group {
+            for entry in &eligible[group_start..idx] {
                 if selected.len() >= fanout {
                     break;
                 }
-                selected.push(path);
+                selected.push(entry.path.clone());
             }
         }
 

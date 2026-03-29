@@ -311,17 +311,23 @@ impl OAuth2Client {
                 params.append_pair("redirect_uri", redirect_uri);
             }
 
-            // Combine default scopes with requested scopes
-            let all_scopes: Vec<&str> = self
+            // Combine default scopes with requested scopes.
+            // Build the space-joined string directly to avoid intermediate Vec allocation.
+            let scope_iter = self
                 .config
                 .default_scopes
                 .iter()
                 .map(String::as_str)
-                .chain(scopes.iter().copied())
-                .collect();
-
-            if !all_scopes.is_empty() {
-                params.append_pair("scope", &all_scopes.join(" "));
+                .chain(scopes.iter().copied());
+            let mut scope_str = String::new();
+            for (i, s) in scope_iter.enumerate() {
+                if i > 0 {
+                    scope_str.push(' ');
+                }
+                scope_str.push_str(s);
+            }
+            if !scope_str.is_empty() {
+                params.append_pair("scope", &scope_str);
             }
 
             // PKCE parameters

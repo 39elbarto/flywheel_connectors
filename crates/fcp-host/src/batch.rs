@@ -558,9 +558,10 @@ fn has_cycle(operations: &[BatchOperation]) -> bool {
 fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionTier>> {
     let id_set: HashSet<&str> = operations.iter().map(|o| o.id.as_str()).collect();
 
-    // Build adjacency and in-degree.
-    let mut in_degree: HashMap<&str, usize> = HashMap::new();
-    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    // Build adjacency and in-degree. Pre-allocate for the known operation count
+    // to avoid rehashing as the maps grow.
+    let mut in_degree: HashMap<&str, usize> = HashMap::with_capacity(operations.len());
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::with_capacity(operations.len());
 
     for op in operations {
         let mut degree = 0;

@@ -283,6 +283,7 @@ impl ExponentialBackoff {
     /// Create a new backoff calculator.
     #[must_use]
     pub fn new(initial: Duration, max: Duration, multiplier: f64) -> Self {
+        let initial = initial.min(max);
         Self {
             initial,
             max,
@@ -2608,11 +2609,10 @@ mod tests {
     }
 
     #[test]
-    fn backoff_zero_max_clamps_subsequent_to_zero() {
+    fn backoff_zero_max_clamps_all_delays_to_zero() {
         let mut backoff = ExponentialBackoff::new(Duration::from_millis(100), Duration::ZERO, 2.0);
-        // First call returns initial (attempt 0 short-circuits before clamping).
-        assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
-        // Subsequent calls clamp to max (zero).
+        assert_eq!(backoff.current_delay(), Duration::ZERO);
+        assert_eq!(backoff.next_backoff(), Duration::ZERO);
         assert_eq!(backoff.next_backoff(), Duration::ZERO);
         assert_eq!(backoff.next_backoff(), Duration::ZERO);
     }
@@ -2624,6 +2624,15 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(backoff.next_backoff(), fixed);
         }
+    }
+
+    #[test]
+    fn backoff_initial_above_max_clamps_immediately() {
+        let max = Duration::from_millis(250);
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), max, 2.0);
+        assert_eq!(backoff.current_delay(), max);
+        assert_eq!(backoff.next_backoff(), max);
+        assert_eq!(backoff.next_backoff(), max);
     }
 
     // ── Additional SupervisorConfig tests ──

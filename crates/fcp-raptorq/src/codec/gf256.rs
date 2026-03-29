@@ -229,6 +229,7 @@ impl Gf256 {
     ///
     /// Returns `ONE` for any base raised to the zero power.
     /// Returns `ZERO` for zero raised to any positive power.
+    #[inline]
     #[must_use]
     pub fn pow(self, exp: u8) -> Self {
         if exp == 0 {
@@ -413,6 +414,7 @@ pub fn gf256_addmul_slices2(
 // Scalar inner kernels
 // ============================================================================
 
+#[inline]
 fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
 
@@ -460,6 +462,7 @@ fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     }
 }
 
+#[inline]
 fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
     if c.is_zero() {
         dst.fill(0);
@@ -477,6 +480,7 @@ fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
     }
 }
 
+#[inline]
 fn gf256_addmul_slice_scalar(dst: &mut [u8], src: &[u8], c: Gf256) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
     if c.is_zero() {

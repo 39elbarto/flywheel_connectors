@@ -133,8 +133,7 @@ where
         loop {
             // Check if batch is full
             if this.batch.len() >= *this.max_size {
-                let batch = std::mem::take(this.batch);
-                *this.batch = Vec::with_capacity(*this.max_size);
+                let batch = std::mem::replace(this.batch, Vec::with_capacity(*this.max_size));
                 this.deadline.set(None);
                 return Poll::Ready(Some(batch));
             }

@@ -1,4 +1,4 @@
-//! FCP2 connector manifest parsing and validation.
+//! Connector manifest parsing and validation with FCPS durable references.
 //!
 //! This crate provides a strict, machine-checkable interpretation of the
 //! connector manifest contract in `FCP_Specification_V2.md` §11 and
@@ -256,7 +256,7 @@ impl ConnectorManifest {
                     port_allow.sort_unstable();
 
                     let mut ip_allow = nc.ip_allow.clone();
-                    ip_allow.sort_unstable();
+                    ip_allow.sort();
 
                     let mut cidr_deny: Vec<&str> =
                         nc.cidr_deny.iter().map(String::as_str).collect();

@@ -27,6 +27,34 @@ impl ObjectId {
         &self.0
     }
 
+    /// Parse a human-facing object id string.
+    ///
+    /// Accepts either raw lowercase/uppercase hex or the manifest-facing
+    /// `objectid:<hex>` form used in TOML/JSON payloads.
+    ///
+    /// # Errors
+    /// Returns [`ObjectIdParseError`] if the string is not valid hex or does
+    /// not decode to exactly 32 bytes.
+    pub fn parse_prefixed(value: &str) -> Result<Self, ObjectIdParseError> {
+        let hex_str = value.strip_prefix("objectid:").unwrap_or(value);
+        let bytes = hex::decode(hex_str).map_err(|_| ObjectIdParseError::InvalidHex)?;
+        if bytes.len() != 32 {
+            return Err(ObjectIdParseError::WrongLength {
+                actual: bytes.len(),
+            });
+        }
+
+        let mut object_id = [0_u8; 32];
+        object_id.copy_from_slice(&bytes);
+        Ok(Self::from_bytes(object_id))
+    }
+
+    /// Render the object id in the manifest-facing `objectid:<hex>` form.
+    #[must_use]
+    pub fn to_prefixed_string(&self) -> String {
+        format!("objectid:{self}")
+    }
+
     /// Create `ObjectId` from content, zone, and schema (NORMATIVE for security objects).
     #[must_use]
     pub fn new(content: &[u8], zone: &ZoneId, schema: &SchemaId, key: &ObjectIdKey) -> Self {
@@ -73,6 +101,15 @@ impl AsRef<[u8]> for ObjectId {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
+}
+
+/// Parse failures for manifest-facing object id references.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ObjectIdParseError {
+    #[error("object id must be hex")]
+    InvalidHex,
+    #[error("object id must be 32 bytes")]
+    WrongLength { actual: usize },
 }
 
 /// Secret per-zone object-id key (NORMATIVE).
@@ -256,6 +293,33 @@ mod tests {
         let bytes = [0xab_u8; 32];
         let object_id = ObjectId::from_bytes(bytes);
         assert_eq!(object_id.to_string(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn object_id_prefixed_roundtrip() {
+        let prefixed = format!("objectid:{}", "ab".repeat(32));
+        let object_id = ObjectId::parse_prefixed(&prefixed).unwrap();
+        assert_eq!(object_id.to_prefixed_string(), prefixed);
+    }
+
+    #[test]
+    fn object_id_prefixed_accepts_raw_hex() {
+        let hex = "cd".repeat(32);
+        let object_id = ObjectId::parse_prefixed(&hex).unwrap();
+        assert_eq!(object_id.to_string(), hex);
+        assert_eq!(object_id.to_prefixed_string(), format!("objectid:{hex}"));
+    }
+
+    #[test]
+    fn object_id_prefixed_rejects_invalid_hex() {
+        let err = ObjectId::parse_prefixed("objectid:gg").unwrap_err();
+        assert!(matches!(err, ObjectIdParseError::InvalidHex));
+    }
+
+    #[test]
+    fn object_id_prefixed_rejects_wrong_length() {
+        let err = ObjectId::parse_prefixed("objectid:aabb").unwrap_err();
+        assert!(matches!(err, ObjectIdParseError::WrongLength { actual: 2 }));
     }
 
     #[test]

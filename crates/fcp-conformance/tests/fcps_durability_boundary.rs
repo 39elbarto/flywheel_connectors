@@ -27,7 +27,7 @@ use fcp_core::{
 use fcp_protocol::{
     FCPS_HEADER_LEN, FCPS_MAGIC, FCPS_VERSION, FcpsFrameHeader, FrameFlags, SYMBOL_RECORD_OVERHEAD,
 };
-use fcp_raptorq::{RaptorQConfig, RaptorQEncoder};
+use fcp_raptorq::{ObjectTransmissionInformation, RaptorQConfig, RaptorQEncoder};
 use fcp_store::{
     GarbageCollector, GcConfig, GcDecisionAction, GcReasonCode, GcRoots, MemoryObjectStore,
     MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore,
@@ -199,14 +199,9 @@ async fn build_recovery_artifact_bundle() -> Value {
         .put_object_meta(ObjectSymbolMeta {
             object_id: payload_id,
             zone_id: zone.clone(),
-            oti: ObjectTransmissionInfo {
-                transfer_length: 1024,
-                symbol_size: 256,
-                source_blocks: 1,
-                sub_blocks: 1,
-                alignment: 1,
-                payload_hash: None,
-            },
+            oti: ObjectTransmissionInfo::from_oti(ObjectTransmissionInformation::new(
+                1024, 256, 1, 1, 1,
+            )),
             source_symbols: 3,
             first_symbol_at: 1_000,
         })

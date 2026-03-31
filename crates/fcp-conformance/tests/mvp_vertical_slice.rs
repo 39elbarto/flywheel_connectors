@@ -33,6 +33,7 @@ use fcp_core::{
 use fcp_mesh::ObjectAdmissionClass;
 use fcp_tailscale::NodeId;
 use semver::Version;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -40,6 +41,7 @@ use uuid::Uuid;
 type CoreNodeId = fcp_core::NodeId;
 
 const SEED: u64 = 0xDEAD_BEEF;
+const OFFLINE_REPAIR_SCENARIO: &str = "offline_repair";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -145,6 +147,124 @@ fn emit_log(
             "details": details,
         }),
     ));
+}
+
+const OFFLINE_REPAIR_CONTRACT_ID: &str = "contract.offline_repair_recovery";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ScenarioAssertionEvidence {
+    phase: String,
+    assertion: String,
+    result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RecoveryReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    object_id: String,
+    failed_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RecoveryCoverageEvidence {
+    degraded_coverage_bps: u16,
+    recovered_coverage_bps: u16,
+    minimum_healthy_coverage_bps: u16,
+    running_nodes_before_repair: u8,
+    running_nodes_after_repair: u8,
+    available_replicas_before_repair: u8,
+    available_replicas_after_repair: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RecoveryArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: RecoveryReplayEvidence,
+    coverage: RecoveryCoverageEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn coverage_bps(available_nodes: usize, total_nodes: usize) -> u16 {
+    let numerator = available_nodes.saturating_mul(10_000);
+    let ratio = numerator / total_nodes.max(1);
+    u16::try_from(ratio).expect("coverage basis points fit in u16")
+}
+
+fn count_available_replicas(
+    harness: &mut TestHarness,
+    zone: &ZoneId,
+    object_id: &ObjectId,
+    node_indices: &[usize],
+) -> usize {
+    node_indices
+        .iter()
+        .copied()
+        .filter(|&idx| {
+            harness.nodes[idx]
+                .mesh_mut()
+                .is_some_and(|mesh| mesh.gossip_mut().has_object(zone, object_id))
+        })
+        .count()
+}
+
+fn build_recovery_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    object_id: ObjectId,
+    failed_node_id: &NodeId,
+    running_nodes_before_repair: usize,
+    running_nodes_after_repair: usize,
+    available_replicas_before_repair: usize,
+    available_replicas_after_repair: usize,
+    degraded_coverage_bps: u16,
+    recovered_coverage_bps: u16,
+    log_jsonl_valid: bool,
+) -> RecoveryArtifactBundle {
+    let assertions = logs
+        .iter()
+        .filter(|entry| entry.test_name == OFFLINE_REPAIR_SCENARIO)
+        .map(|entry| ScenarioAssertionEvidence {
+            phase: entry.phase.clone(),
+            assertion: entry.event_type.clone(),
+            result: entry
+                .details
+                .get("result")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+        })
+        .collect();
+
+    RecoveryArtifactBundle {
+        scenario_key: "offline_repair".to_string(),
+        contract_id: OFFLINE_REPAIR_CONTRACT_ID.to_string(),
+        replay: RecoveryReplayEvidence {
+            seed: SEED,
+            zone_id: zone.to_string(),
+            object_id: object_id.to_string(),
+            failed_node_id: failed_node_id.as_str().to_string(),
+        },
+        coverage: RecoveryCoverageEvidence {
+            degraded_coverage_bps,
+            recovered_coverage_bps,
+            minimum_healthy_coverage_bps: 5_000,
+            running_nodes_before_repair: u8::try_from(running_nodes_before_repair)
+                .expect("running node count fits in u8"),
+            running_nodes_after_repair: u8::try_from(running_nodes_after_repair)
+                .expect("running node count fits in u8"),
+            available_replicas_before_repair: u8::try_from(available_replicas_before_repair)
+                .expect("replica count fits in u8"),
+            available_replicas_after_repair: u8::try_from(available_replicas_after_repair)
+                .expect("replica count fits in u8"),
+        },
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+        assertions,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -654,7 +774,7 @@ fn offline_repair_reduced_availability_then_recovery() {
 
     emit_log(
         &harness.logs,
-        "offline_repair",
+        OFFLINE_REPAIR_SCENARIO,
         "distribute",
         "object_distributed",
         "pass",
@@ -672,7 +792,7 @@ fn offline_repair_reduced_availability_then_recovery() {
 
     emit_log(
         &harness.logs,
-        "offline_repair",
+        OFFLINE_REPAIR_SCENARIO,
         "failure",
         "node_crashed",
         "pass",
@@ -680,21 +800,32 @@ fn offline_repair_reduced_availability_then_recovery() {
     );
 
     // Phase 3: Verify reduced coverage.
-    // With 1 of 3 nodes down, coverage = 2/3 ≈ 0.667.
-    let coverage = harness.running_count() as f64 / 3.0;
+    // With 1 of 3 replicas unavailable, degraded replica coverage is 2/3.
+    let running_nodes_before_repair = harness.running_count();
+    let available_replicas_before_repair =
+        count_available_replicas(&mut harness, &zone, &object_id, &[0, 1]);
+    let coverage = available_replicas_before_repair as f64 / 3.0;
+    let degraded_coverage_bps = coverage_bps(available_replicas_before_repair, 3);
     assert!(coverage < 1.0, "coverage should be reduced");
     assert!(coverage > 0.5, "coverage should be above minimum");
+    assert_eq!(running_nodes_before_repair, 2);
+    assert_eq!(available_replicas_before_repair, 2);
+    assert_eq!(degraded_coverage_bps, 6_666);
 
     let head = create_audit_head(test_object_id("audit-head-offline"), 5, coverage);
     assert!(head.coverage < 1.0);
 
     emit_log(
         &harness.logs,
-        "offline_repair",
+        OFFLINE_REPAIR_SCENARIO,
         "degraded",
         "coverage_reduced",
         "pass",
-        json!({"coverage": coverage, "threshold": 0.5}),
+        json!({
+            "coverage": coverage,
+            "threshold": 0.5,
+            "available_replicas": available_replicas_before_repair,
+        }),
     );
 
     // Phase 4: Repair — restart node, heal partition.
@@ -702,7 +833,8 @@ fn offline_repair_reduced_availability_then_recovery() {
     harness.heal_partition();
     harness.register_all_peers();
 
-    assert_eq!(harness.running_count(), 3);
+    let running_nodes_after_repair = harness.running_count();
+    assert_eq!(running_nodes_after_repair, 3);
 
     // Re-announce object from surviving nodes.
     let now_secs = harness.now_ms() / 1000;
@@ -721,24 +853,93 @@ fn offline_repair_reduced_availability_then_recovery() {
     harness.advance_time(Duration::from_secs(5));
     harness.gossip_exchange_round();
 
-    let recovered_coverage = harness.running_count() as f64 / 3.0;
+    let available_replicas_after_repair =
+        count_available_replicas(&mut harness, &zone, &object_id, &[0, 1, 2]);
+    let repaired_node_has_object = harness.nodes[2]
+        .mesh_mut()
+        .is_some_and(|mesh| mesh.gossip_mut().has_object(&zone, &object_id));
+    let recovered_coverage = available_replicas_after_repair as f64 / 3.0;
+    let recovered_coverage_bps = coverage_bps(available_replicas_after_repair, 3);
     assert!((recovered_coverage - 1.0).abs() < f64::EPSILON);
+    assert_eq!(available_replicas_after_repair, 3);
+    assert_eq!(recovered_coverage_bps, 10_000);
+    assert!(
+        repaired_node_has_object,
+        "restarted node should recover the repaired object"
+    );
 
     emit_log(
         &harness.logs,
-        "offline_repair",
+        OFFLINE_REPAIR_SCENARIO,
         "recovery",
         "coverage_restored",
         "pass",
-        json!({"coverage": recovered_coverage, "running_count": 3}),
+        json!({
+            "coverage": recovered_coverage,
+            "running_count": running_nodes_after_repair,
+            "available_replicas": available_replicas_after_repair,
+            "repaired_node_has_object": repaired_node_has_object,
+        }),
     );
 
     let logs = harness.log_entries();
-    let count = logs
+    let offline_repair_logs = logs
         .iter()
-        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("offline_repair"))
-        .count();
-    assert_eq!(count, 4);
+        .filter(|entry| entry.test_name == OFFLINE_REPAIR_SCENARIO)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(offline_repair_logs.len(), 4);
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "offline repair logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_recovery_artifact_bundle(
+        &offline_repair_logs,
+        &zone,
+        object_id,
+        &failed_node_id,
+        running_nodes_before_repair,
+        running_nodes_after_repair,
+        available_replicas_before_repair,
+        available_replicas_after_repair,
+        degraded_coverage_bps,
+        recovered_coverage_bps,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, OFFLINE_REPAIR_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["distribute", "failure", "degraded", "recovery"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, offline_repair_logs.len());
+    assert!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .all(|entry| entry.result == "pass")
+    );
+    assert_eq!(artifact_bundle.coverage.running_nodes_before_repair, 2);
+    assert_eq!(artifact_bundle.coverage.running_nodes_after_repair, 3);
+    assert_eq!(artifact_bundle.coverage.available_replicas_before_repair, 2);
+    assert_eq!(artifact_bundle.coverage.available_replicas_after_repair, 3);
+    assert_eq!(artifact_bundle.coverage.degraded_coverage_bps, 6_666);
+    assert_eq!(artifact_bundle.coverage.recovered_coverage_bps, 10_000);
+    assert_eq!(
+        artifact_bundle.replay.failed_node_id,
+        failed_node_id.as_str().to_string()
+    );
+
+    let artifact_json = serde_json::to_value(&artifact_bundle).unwrap();
+    let roundtrip: RecoveryArtifactBundle = serde_json::from_value(artifact_json).unwrap();
+    assert_eq!(roundtrip, artifact_bundle);
 
     harness.stop_all().unwrap();
 }

@@ -1,6 +1,7 @@
 //! FCPS (Flywheel Connector Protocol - Symbol) frame parsing and serialization.
 //!
-//! Implements the normative data-plane frame format defined in `FCP_Specification_V2.md` §4.3.
+//! Implements the normative data-plane frame format defined in `FCP_Specification_V3.md`
+//! §9.8.2 (FCPS Frame Format) and §9.8.3 (Frame Flags).
 //!
 //! # Wire Format
 //!

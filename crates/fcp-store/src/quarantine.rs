@@ -1,6 +1,7 @@
 //! Quarantine store for untrusted/unreferenced objects (NORMATIVE).
 //!
-//! Implements the object admission pipeline from `FCP_Specification_V2.md` §8.4.1.
+//! Implements the object admission pipeline from `FCP_Specification_V3.md` §11.7.2
+//! (Unreferenced Object Quarantine) and §9.8.5 (Symbol-Plane Admission Control).
 
 use std::collections::{BTreeSet, HashMap};
 

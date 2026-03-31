@@ -1,6 +1,7 @@
 //! Control-plane object model and retention classification.
 //!
-//! Implements the normative control-plane object model from `FCP_Specification_V2.md` §9.4.
+//! Implements the normative control-plane object model from `FCP_Specification_V3.md`
+//! §9.2.1 (Control-Plane Object Model).
 //! Control-plane objects wrap protocol messages with canonical serialization and retention
 //! classification for auditability.
 

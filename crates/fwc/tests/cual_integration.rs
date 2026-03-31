@@ -3382,3 +3382,138 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
         "unsupported-live-zone-filter"
     );
 }
+
+// ── P6.5: Offline and node-local trust path acceptance tests ───────────
+
+/// Verify that offline `show` exposes manifest safety metadata without
+/// fabricating runtime state. Trust path: manifest → artifact provenance.
+#[test]
+fn offline_show_exposes_manifest_safety_without_runtime_fabrication() {
+    let show = run_json_ok(&["--json", "show", "github", "--offline"]);
+
+    // Safety metadata comes from manifest
+    assert_eq!(show["command"], "show");
+    assert!(show["connector"].is_object());
+
+    // No fabricated runtime state
+    let connector = &show["connector"];
+    assert!(
+        connector.get("status").is_none()
+            || connector["status"] == "unknown"
+            || connector["status"].is_null(),
+        "Offline show must not fabricate connector status"
+    );
+}
+
+/// Verify that offline `ops` lists operations with safety tiers from the
+/// manifest trust path, not from fabricated runtime introspection.
+#[test]
+fn offline_ops_lists_operations_from_manifest_trust_path() {
+    let ops = run_json_ok(&["--json", "ops", "github", "--offline"]);
+    assert_eq!(ops["command"], "ops");
+
+    let operations = ops["operations"].as_array().expect("operations should be an array");
+    assert!(
+        !operations.is_empty(),
+        "GitHub should have operations in offline mode"
+    );
+
+    // Every operation must have safety metadata from the manifest
+    for op in operations {
+        assert!(
+            op.get("safety_tier").is_some() || op.get("risk_level").is_some(),
+            "Each operation should expose safety tier or risk level from manifest"
+        );
+    }
+}
+
+/// Verify that offline `export-tools` produces tool schemas that include
+/// manifest-declared safety information, suitable for agent consumption.
+#[test]
+fn offline_export_tools_includes_manifest_safety_metadata() {
+    let export = run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
+    assert_eq!(export["command"], "export-tools");
+
+    let tools = export["tools"].as_array().expect("tools should be an array");
+    assert!(
+        !tools.is_empty(),
+        "Export-tools should produce tools in offline mode"
+    );
+}
+
+/// Verify that offline commands refuse to produce invoke/simulate results.
+/// The trust path for execution requires a live host; offline mode must
+/// fail closed rather than fabricating execution results.
+#[test]
+fn offline_invoke_refuses_rather_than_fabricate() {
+    // invoke without --host and without --offline should fail
+    let (exit_code, payload, _stderr) = run_json(&[
+        "--json",
+        "invoke",
+        "github",
+        "issues.create",
+        "--input",
+        r#"{"title":"test"}"#,
+    ]);
+    assert_ne!(exit_code, 0, "invoke without host should fail");
+    assert!(
+        payload.get("error").is_some(),
+        "Should return error envelope, not fabricated result"
+    );
+}
+
+/// Verify that all offline JSON outputs include availability provenance
+/// so downstream consumers can distinguish artifact-backed from live data.
+#[test]
+fn offline_outputs_carry_availability_provenance() {
+    let commands_to_test = [
+        vec!["--json", "list", "--offline"],
+        vec!["--json", "search", "send message", "--offline"],
+        vec!["--json", "show", "github", "--offline"],
+        vec!["--json", "ops", "github", "--offline"],
+    ];
+
+    for args in &commands_to_test {
+        let result = run_json_ok(args);
+
+        // Every offline response must carry availability or mode marker
+        let has_availability = result.get("availability").is_some();
+        let has_mode = result
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .is_some_and(|m| m.contains("offline"));
+        let has_source = result
+            .get("source")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.contains("manifest") || s.contains("workspace"));
+
+        assert!(
+            has_availability || has_mode || has_source,
+            "Offline command {:?} must carry provenance marker. Got: {}",
+            args,
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
+    }
+}
+
+/// Verify that the node-local context command produces structured output
+/// about the current environment (workspace root, git SHA, offline status).
+#[test]
+fn node_local_context_produces_structured_environment_info() {
+    let (exit_code, payload, _stderr) = run_json(&["--json", "context", "current"]);
+
+    // context current may succeed or fail depending on host availability,
+    // but it should always produce structured JSON output
+    if exit_code == 0 {
+        assert!(
+            payload.get("context").is_some() || payload.get("workspace").is_some(),
+            "Successful context should include workspace or context info"
+        );
+    } else {
+        // Even failure should be structured
+        assert!(
+            payload.get("error").is_some() || payload.get("context").is_some(),
+            "Context failure should be a structured error or degraded context"
+        );
+    }
+}

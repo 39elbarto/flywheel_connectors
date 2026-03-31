@@ -1,6 +1,7 @@
 //! `SymbolEnvelope` encryption and decryption for FCPS frames.
 //!
-//! Implements the per-symbol AEAD encryption layer defined in `FCP_Specification_V2.md`.
+//! Implements the per-symbol AEAD encryption layer defined in `FCP_Specification_V3.md`
+//! §9.8.1 (Symbol Envelope).
 //!
 //! # Encryption Model
 //!

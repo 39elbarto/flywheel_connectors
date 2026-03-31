@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// MTU-safe defaults from `FCP_Specification_V2.md`.
+/// MTU-safe defaults from `FCP_Specification_V3.md` §9.8.2.
 pub const DEFAULT_MAX_DATAGRAM_BYTES: u16 = 1200;
 
 /// Default symbols per FCPS frame (single-symbol frames are safest for MTU).

@@ -1,6 +1,7 @@
-//! Offline capability tracking for FCP2 mesh objects.
+//! Offline capability tracking for FCP mesh objects.
 //!
-//! Implements quantifiable offline access from `FCP_Specification_V2.md` section 21.
+//! Implements quantifiable offline access from `FCP_Specification_V3.md` §11.5
+//! (Offline and Repair Behavior).
 //!
 //! # Overview
 //!

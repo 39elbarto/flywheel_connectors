@@ -1,6 +1,7 @@
 //! Mesh object primitives: `ObjectId`, `ObjectHeader`, and storage metadata.
 //!
-//! This module implements the foundational primitives from `FCP_Specification_V2.md` §3.
+//! This module implements the foundational primitives from `FCP_Specification_V3.md`
+//! §3.3 (Object Header) and §3.1 (Canonical Identifiers).
 
 use std::fmt;
 

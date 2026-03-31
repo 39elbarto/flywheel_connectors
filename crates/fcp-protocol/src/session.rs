@@ -1,6 +1,7 @@
-//! FCP2 mesh session primitives (handshake, key derivation, and FCPS datagram MACs).
+//! FCP mesh session primitives (handshake, key derivation, and FCPS datagram MACs).
 //!
-//! Implements the normative session handshake defined in `FCP_Specification_V2.md` §4.2.
+//! Implements the normative session handshake defined in `FCP_Specification_V3.md`
+//! §9.7.1 (Handshake and Session Establishment) and §9.7.2 (Mesh Session Authentication).
 use fcp_cbor::{SerializationError, to_canonical_cbor};
 use fcp_core::TailscaleNodeId;
 use fcp_crypto::{

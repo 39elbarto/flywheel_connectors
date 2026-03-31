@@ -1,7 +1,7 @@
 //! Credential Golden Vectors and Validation Tests (NORMATIVE).
 //!
-//! This module implements comprehensive tests for the FCP2 credential system
-//! from `FCP_Specification_V2.md` §11 (Secretless Egress).
+//! This module implements comprehensive tests for the FCP credential system
+//! from `FCP_Specification_V3.md` §5.6 (Network Guard and Secret Use).
 //!
 //! # Test Categories
 //!

@@ -1,11 +1,11 @@
-//! FCP2 canonical serialization (deterministic CBOR + schema hashing).
+//! FCP canonical serialization (deterministic CBOR + schema hashing).
 //!
-//! This crate implements the byte-level foundation for FCP2 content-addressed objects:
+//! This crate implements the byte-level foundation for FCP content-addressed objects:
 //! - `SchemaId` and `SchemaHash` for schema binding
 //! - Deterministic RFC 8949 canonical CBOR encoding
 //! - Schema-hash-prefixed payloads (`schema_hash || canonical_cbor`)
 //!
-//! See `FCP_Specification_V2.md` §3.3–3.5.
+//! See `FCP_Specification_V3.md` §3.2 (Canonical Serialization).
 
 #![forbid(unsafe_code)]
 

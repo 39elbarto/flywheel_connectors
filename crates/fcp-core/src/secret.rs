@@ -1,7 +1,8 @@
-//! Secret storage and access types for FCP2 (NORMATIVE).
+//! Secret storage and access types for FCP (NORMATIVE).
 //!
 //! This module implements `SecretObject` and `SecretAccessToken` as described in
-//! `FCP_Specification_V2.md` for secure credential handling.
+//! `FCP_Specification_V3.md` §11.8 (Threshold Secret Use) and §5.6 (Network Guard
+//! and Secret Use) for secure credential handling.
 //!
 //! **Security guarantees:**
 //! - Secret material MUST be zeroized immediately after use.

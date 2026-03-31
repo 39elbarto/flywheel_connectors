@@ -1,7 +1,7 @@
 //! Enrollment Golden Vectors and Adversarial Tests (NORMATIVE).
 //!
-//! This module implements comprehensive tests for the FCP2 enrollment system
-//! from `FCP_Specification_V2.md` §7.
+//! This module implements comprehensive tests for the FCP enrollment system
+//! from `FCP_Specification_V3.md` §2.2.1 (Mesh Identity and Node Attestation).
 //!
 //! # Test Categories
 //!

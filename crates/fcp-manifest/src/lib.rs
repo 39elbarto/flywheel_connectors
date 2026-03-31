@@ -1,8 +1,9 @@
 //! Connector manifest parsing and validation with FCPS durable references.
 //!
 //! This crate provides a strict, machine-checkable interpretation of the
-//! connector manifest contract in `FCP_Specification_V2.md` §11 and
-//! `docs/fcp_model_connectors_rust.md` §11.
+//! connector manifest contract in `FCP_Specification_V3.md` §10 (Manifest,
+//! Provisioning, and Isolation). Manifest objects are stored durably as per
+//! §6 (Durable Object and Evidence Model).
 
 #![forbid(unsafe_code)]
 

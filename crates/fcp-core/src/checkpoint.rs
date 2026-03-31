@@ -1,7 +1,7 @@
 //! Checkpoint/Frontier Management: Advancement Protocol, Fork Detection, Convergence (NORMATIVE).
 //!
 //! This module implements the checkpoint advancement protocol as described in
-//! `FCP_Specification_V2.md` §24. `ZoneCheckpoints` are the "heartbeat" of mesh security;
+//! `FCP_Specification_V3.md` §6.5 (Zone Checkpoints). `ZoneCheckpoints` are the "heartbeat" of mesh security;
 //! stale checkpoints mean stale revocation/audit enforcement.
 //!
 //! # Protocol Overview

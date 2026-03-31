@@ -1,11 +1,12 @@
-//! FCP2 `RaptorQ` encoding/decoding and chunking policy.
+//! FCP `RaptorQ` encoding/decoding and chunking policy.
 //!
 //! This module implements the `RaptorQ` fountain code encoding/decoding and chunked object
-//! manifest functionality from `FCP_Specification_V2.md`.
+//! manifest functionality from `FCP_Specification_V3.md` §9.8 (FCPS Object and Symbol Plane)
+//! and Appendix B (RaptorQ and Symbol Transport Notes).
 //!
 //! # Overview
 //!
-//! FCP2 uses `RaptorQ` as the universal encoding scheme because:
+//! FCP uses `RaptorQ` as the universal encoding scheme because:
 //! - Any K' symbols reconstruct the original (K' ≈ K × 1.002)
 //! - No symbol is special - all are equally useful for reconstruction
 //! - No coordination needed - receivers don't need to coordinate which symbols they receive

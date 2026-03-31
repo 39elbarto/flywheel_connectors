@@ -1,7 +1,7 @@
-//! Exactly-once semantics for FCP2 operations.
+//! Exactly-once semantics for FCP operations.
 //!
 //! This module implements `OperationIntent` and `OperationReceipt` as defined in
-//! `FCP_Specification_V2.md` §15. Together with idempotency keys, these objects
+//! `FCP_Specification_V3.md` §6.1 (Receipts). Together with idempotency keys, these objects
 //! provide exactly-once semantics for external side effects.
 //!
 //! # Core Concepts

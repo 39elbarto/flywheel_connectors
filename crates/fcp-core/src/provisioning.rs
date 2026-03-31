@@ -1,7 +1,7 @@
 //! Automation recipes and provisioning interface (NORMATIVE).
 //!
 //! Implements the recipe model and provisioning workflow described in
-//! `FCP_Specification_V2.md` §12. This is the standard connector-facing
+//! `FCP_Specification_V3.md` §10.4 (Provisioning and Automation Recipes). This is the standard connector-facing
 //! interface for automated setup (OAuth, webhooks, secret capture) with
 //! minimal human prompts and deterministic, idempotent steps.
 

@@ -3,7 +3,7 @@
 //! These vectors ensure that FCPC frame encoding, AEAD, and header parsing
 //! produce exact byte sequences that can be validated across implementations.
 //!
-//! Format reference: `FCP_Specification_V2.md` §9.4
+//! Format reference: `FCP_Specification_V3.md` §9.2 and §9.3
 
 use fcp_protocol::{
     FCPC_HEADER_LEN, FCPC_MAGIC, FCPC_TAG_LEN, FCPC_VERSION, FcpcFrame, FcpcFrameFlags,

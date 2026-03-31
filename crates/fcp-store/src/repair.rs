@@ -1,6 +1,7 @@
 //! Repair controller for maintaining object coverage (NORMATIVE).
 //!
-//! Implements bounded, convergent repair from `FCP_Specification_V2.md`.
+//! Implements bounded, convergent repair from `FCP_Specification_V3.md` §11.5
+//! (Offline and Repair Behavior) and Appendix Z (Coverage and Repair Playbook).
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -1414,6 +1415,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 8,
+                payload_hash: None,
             },
             source_symbols,
             first_symbol_at: 1_000_000,
@@ -1490,6 +1492,7 @@ mod tests {
                     source_blocks: 1,
                     sub_blocks: 1,
                     alignment: 8,
+                    payload_hash: None,
                 };
                 let meta = ObjectSymbolMeta {
                     object_id,
@@ -2021,6 +2024,7 @@ mod tests {
                         source_blocks: 1,
                         sub_blocks: 1,
                         alignment: 8,
+                        payload_hash: None,
                     },
                     source_symbols,
                     first_symbol_at: 1_000_000,
@@ -2161,6 +2165,7 @@ mod tests {
                         source_blocks: 1,
                         sub_blocks: 1,
                         alignment: 8,
+                        payload_hash: None,
                     },
                     source_symbols,
                     first_symbol_at: 2_000_000,
@@ -2309,6 +2314,7 @@ mod tests {
                             source_blocks: 1,
                             sub_blocks: 1,
                             alignment: 8,
+                            payload_hash: None,
                         },
                         source_symbols,
                         first_symbol_at: 3_000_000,
@@ -3978,6 +3984,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 8,
+                payload_hash: None,
             },
             source_symbols: 16,
             first_symbol_at: 1_000_000,

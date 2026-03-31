@@ -1,7 +1,10 @@
 //! Registry verification and FCPS artifact mirroring for connectors.
 //!
 //! This crate validates connector manifests and binaries against supply-chain
-//! policies and mirrors verified bundles into the object store.
+//! policies and mirrors verified bundles into the object store per
+//! `FCP_Specification_V3.md` §12 (Registry and Supply Chain) and §12.4
+//! (Mirroring and Sovereignty). Mirrored symbols are stored durably and
+//! MUST be packable into FCPS frames per §9.8.2.
 
 use std::collections::{HashMap, HashSet};
 
@@ -1074,13 +1077,17 @@ pub fn manifest_signing_bytes(manifest: &ConnectorManifest) -> Result<Vec<u8>, R
 }
 
 fn descriptor_oti_from_store(oti: ObjectTransmissionInfo) -> ConnectorBinaryTransmissionInfo {
-    ConnectorBinaryTransmissionInfo::new(
+    let descriptor = ConnectorBinaryTransmissionInfo::new(
         oti.transfer_length,
         oti.symbol_size,
         oti.source_blocks,
         oti.sub_blocks,
         oti.alignment,
-    )
+    );
+    match oti.payload_hash {
+        Some(payload_hash) => descriptor.with_payload_hash(payload_hash),
+        None => descriptor,
+    }
 }
 
 fn store_oti_from_descriptor(oti: ConnectorBinaryTransmissionInfo) -> ObjectTransmissionInfo {
@@ -1090,6 +1097,7 @@ fn store_oti_from_descriptor(oti: ConnectorBinaryTransmissionInfo) -> ObjectTran
         source_blocks: oti.source_blocks,
         sub_blocks: oti.sub_blocks,
         alignment: oti.alignment,
+        payload_hash: oti.payload_hash,
     }
 }
 

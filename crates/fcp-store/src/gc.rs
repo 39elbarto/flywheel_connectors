@@ -1,6 +1,7 @@
-//! Garbage collection for FCP2 stores (NORMATIVE).
+//! Garbage collection for FCP stores (NORMATIVE).
 //!
-//! Implements reachability-based GC from `FCP_Specification_V2.md` §3.7.
+//! Implements reachability-based GC from `FCP_Specification_V3.md` §6.5
+//! (Zone Checkpoints) and Appendix Z (Coverage and Repair Playbook).
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
@@ -1158,6 +1159,7 @@ mod tests {
                     source_blocks: 1,
                     sub_blocks: 1,
                     alignment: 8,
+                    payload_hash: None,
                 },
                 source_symbols: 4,
                 first_symbol_at: 1_000_000,
@@ -1888,6 +1890,7 @@ mod tests {
                         source_blocks: 1,
                         sub_blocks: 1,
                         alignment: 8,
+                        payload_hash: None,
                     },
                     source_symbols: 1,
                     first_symbol_at: 1_000_000,
@@ -1966,6 +1969,7 @@ mod tests {
                         source_blocks: 1,
                         sub_blocks: 1,
                         alignment: 8,
+                        payload_hash: None,
                     },
                     source_symbols: 1,
                     first_symbol_at: 2_000_000,
@@ -2885,6 +2889,7 @@ mod tests {
                         source_blocks: 1,
                         sub_blocks: 1,
                         alignment: 8,
+                        payload_hash: None,
                     },
                     source_symbols: 2,
                     first_symbol_at: 1_000_000,
@@ -2973,6 +2978,7 @@ mod tests {
                         source_blocks: 1,
                         sub_blocks: 1,
                         alignment: 8,
+                        payload_hash: None,
                     },
                     source_symbols: 1,
                     first_symbol_at: 1_000_000,

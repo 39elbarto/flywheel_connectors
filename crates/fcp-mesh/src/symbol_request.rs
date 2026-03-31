@@ -1,7 +1,7 @@
 //! Symbol request handling with admission control and targeted repair.
 //!
 //! This module implements the NORMATIVE symbol request handling from
-//! `FCP_Specification_V2.md`, including:
+//! `FCP_Specification_V3.md` §9.1.3 (Symbol Request Bounding), including:
 //!
 //! - [`SymbolRequestHandler`] - Validates and processes bounded symbol requests
 //! - [`SymbolResponseBuilder`] - Builds bounded responses with targeted repair

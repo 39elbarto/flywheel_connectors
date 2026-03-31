@@ -1,6 +1,6 @@
-//! Revocation types for FCP2 (NORMATIVE).
+//! Revocation types for FCP (NORMATIVE).
 //!
-//! This module implements the revocation system from `FCP_Specification_V2.md` §14.3.
+//! This module implements the revocation system from `FCP_Specification_V3.md` §6.4.
 //! Revocations make compromised devices/keys/tokens recoverable. Without revocation,
 //! "compromised device" recovery is mostly imaginary.
 //!

@@ -1,6 +1,7 @@
 //! Device enrollment and key lifecycle types (NORMATIVE).
 //!
-//! This module implements the enrollment protocol from `FCP_Specification_V2.md` §7.
+//! This module implements the enrollment protocol from `FCP_Specification_V3.md`
+//! §2.2.1 (Mesh Identity and Node Attestation).
 //!
 //! # Overview
 //!

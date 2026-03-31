@@ -1,6 +1,8 @@
 //! FCPS-aligned object and symbol stores (placement, repair, retention).
 //!
-//! This crate implements the storage layer from `FCP_Specification_V2.md`:
+//! This crate implements the durable storage layer from `FCP_Specification_V3.md`
+//! §6 (Durable Object and Evidence Model), §6.5 (Zone Checkpoints), and §11.5
+//! (Offline and Repair Behavior):
 //!
 //! # Overview
 //!

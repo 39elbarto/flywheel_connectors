@@ -1,6 +1,7 @@
-//! FCP2 Gossip Layer for Object Availability and Reconciliation.
+//! FCP Gossip Layer for Object Availability and Reconciliation.
 //!
-//! This module implements the gossip baseline from `FCP_Specification_V2.md` §8.2:
+//! This module implements the gossip baseline from `FCP_Specification_V3.md`
+//! §11.6.8 (Gossip and Anti-Entropy Mechanics):
 //! - Object/symbol availability announcements
 //! - Compact summaries for anti-entropy
 //! - Bounded reconciliation (no unbounded work)

@@ -1,6 +1,7 @@
 //! FCPC (Flywheel Connector Protocol - Control) frame parsing and serialization.
 //!
-//! Implements the normative control-plane framing defined in `FCP_Specification_V2.md` §9.4.
+//! Implements the normative control-plane framing defined in `FCP_Specification_V3.md`
+//! §9.2 (FCPC Design Requirements) and §9.3 (FCPC Envelope).
 //! Frames are authenticated (and by default encrypted) with the session `k_ctx`.
 
 use bitflags::bitflags;

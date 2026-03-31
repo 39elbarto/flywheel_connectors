@@ -1,6 +1,7 @@
 //! Coverage evaluation for symbol distribution.
 //!
-//! Implements quantifiable offline resilience metrics from `FCP_Specification_V2.md`.
+//! Implements quantifiable offline resilience metrics from `FCP_Specification_V3.md`
+//! §6.5 (Zone Checkpoints) and §11.5 (Offline and Repair Behavior).
 
 use std::collections::HashMap;
 
@@ -85,7 +86,7 @@ impl SymbolDistribution {
 /// Symbol coverage evaluation result (NORMATIVE).
 ///
 /// Uses fixed-point basis points for interop stability across implementations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageEvaluation {
     /// The object being evaluated.
     pub object_id: ObjectId,

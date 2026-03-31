@@ -1,7 +1,8 @@
-//! Credential types for FCP2 secretless egress (NORMATIVE).
+//! Credential types for FCP secretless egress (NORMATIVE).
 //!
 //! This module implements `CredentialObject` and `CredentialId` for "secretless"
-//! credential injection as described in `FCP_Specification_V2.md`.
+//! credential injection as described in `FCP_Specification_V3.md` §5.6
+//! (Network Guard and Secret Use).
 //!
 //! **Core principle:** Connectors SHOULD NOT receive raw credential bytes. They
 //! reference a `CredentialId` in egress requests, and the `MeshNode` egress proxy

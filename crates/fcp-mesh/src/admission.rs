@@ -1,7 +1,7 @@
-//! Admission control for FCP2 mesh nodes.
+//! Admission control for FCP mesh nodes.
 //!
 //! This module implements the NORMATIVE admission control requirements from
-//! `FCP_Specification_V2.md` §8.4, including:
+//! `FCP_Specification_V3.md` §11.7.1 (Admission Control and DoS Resistance), including:
 //!
 //! - [`PeerBudget`] - Per-peer resource limits
 //! - [`AdmissionPolicy`] - Policy configuration
@@ -534,7 +534,7 @@ impl PeerUsage {
 /// Admission controller for mesh node traffic.
 ///
 /// Enforces per-peer resource budgets and anti-amplification rules
-/// as specified in `FCP_Specification_V2.md` §8.4.
+/// as specified in `FCP_Specification_V3.md` §11.7.1.
 #[derive(Debug)]
 pub struct AdmissionController {
     /// Admission policy configuration.

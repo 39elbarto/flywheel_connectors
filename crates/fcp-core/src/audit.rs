@@ -1,7 +1,7 @@
-//! Audit + explainability types for FCP2 (NORMATIVE).
+//! Audit + explainability types for FCP (NORMATIVE).
 //!
 //! This module implements audit chain primitives and explainability receipts as
-//! described in `FCP_Specification_V2.md` §23.
+//! described in `FCP_Specification_V3.md` §6.3 (Audit Chain).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

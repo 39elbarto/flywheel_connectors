@@ -1,6 +1,6 @@
 //! Distributed lease coordination (NORMATIVE).
 //!
-//! Implements the lease semantics defined in `FCP_Specification_V2.md` §10.
+//! Implements the lease semantics defined in `FCP_Specification_V3.md` §11.3 (Leases).
 //!
 //! # Core Concepts
 //!

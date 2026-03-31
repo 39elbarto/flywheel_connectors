@@ -20,7 +20,7 @@ use fcp_crypto::cose::{CoseToken, CwtClaims, fcp2_claims};
 
 /// Canonical identifier validation error (NORMATIVE).
 ///
-/// Applies to the identifier set in `FCP_Specification_V2.md` §3.4.2.
+/// Applies to the identifier set in `FCP_Specification_V3.md` §3.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IdValidationError {
     #[error("identifier must not be empty")]

@@ -3,7 +3,7 @@
 //! This crate provides the foundational types, traits, and error handling for
 //! FCP connectors.
 //!
-//! This crate is being migrated to the `FCP_Specification_V2.md` contract.
+//! This crate implements the `FCP_Specification_V3.md` foundational semantics.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]

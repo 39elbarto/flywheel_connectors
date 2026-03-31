@@ -1,7 +1,7 @@
 //! Revocation Golden Vectors and Adversarial Tests (NORMATIVE).
 //!
-//! This module implements comprehensive tests for the FCP2 revocation system
-//! from `FCP_Specification_V2.md` §14.3.
+//! This module implements comprehensive tests for the FCP revocation system
+//! from `FCP_Specification_V3.md` §6.4 (Revocation).
 //!
 //! # Test Categories
 //!

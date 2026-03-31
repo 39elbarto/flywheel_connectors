@@ -7,9 +7,10 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
-use fcp_core::{
+use fcp_core::ZoneId;
+use fcp_kernel::{
     BudgetEnforcement, BudgetStatus, FcpError, UsageBudgetPolicy, UsageBudgetSnapshot,
-    UsageBudgetUsage, UsageMetric, UsageMetricKind, ZoneId,
+    UsageBudgetUsage, UsageMetric, UsageMetricKind,
 };
 use serde::{Deserialize, Serialize};
 

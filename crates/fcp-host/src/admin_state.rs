@@ -13,9 +13,11 @@ use blake3::hash;
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_core::{
-    ApprovalToken, CapabilityConstraints, CapabilityToken, ConnectorId, CredentialId,
-    LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState, LifecycleStatus,
-    ObjectPlacementPolicy, TransitionReason,
+    ApprovalToken, CapabilityConstraints, CapabilityToken, CredentialId, ObjectPlacementPolicy,
+};
+use fcp_kernel::{
+    ConnectorId, LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState,
+    LifecycleStatus, TransitionReason,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};

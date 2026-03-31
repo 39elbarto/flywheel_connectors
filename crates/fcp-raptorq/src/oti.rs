@@ -21,6 +21,9 @@ pub struct ObjectTransmissionInformation {
     sub_blocks: u16,
     /// Symbol alignment in bytes.
     alignment: u8,
+    /// Optional end-to-end payload hash used to reject false-positive decodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload_hash: Option<[u8; 32]>,
 }
 
 impl ObjectTransmissionInformation {
@@ -39,7 +42,15 @@ impl ObjectTransmissionInformation {
             source_blocks,
             sub_blocks,
             alignment,
+            payload_hash: None,
         }
+    }
+
+    /// Attach an optional payload hash to the OTI.
+    #[must_use]
+    pub const fn with_payload_hash(mut self, payload_hash: [u8; 32]) -> Self {
+        self.payload_hash = Some(payload_hash);
+        self
     }
 
     /// Total length of the original object in bytes.
@@ -71,6 +82,12 @@ impl ObjectTransmissionInformation {
     pub const fn symbol_alignment(&self) -> u8 {
         self.alignment
     }
+
+    /// End-to-end payload hash for rejecting false-positive decodes.
+    #[must_use]
+    pub const fn payload_hash(&self) -> Option<[u8; 32]> {
+        self.payload_hash
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +102,7 @@ mod tests {
         assert_eq!(oti.source_blocks(), 1);
         assert_eq!(oti.sub_blocks(), 1);
         assert_eq!(oti.symbol_alignment(), 8);
+        assert_eq!(oti.payload_hash(), None);
     }
 
     #[test]
@@ -487,6 +505,7 @@ mod tests {
         assert!(json.contains("\"source_blocks\""));
         assert!(json.contains("\"sub_blocks\""));
         assert!(json.contains("\"alignment\""));
+        assert!(!json.contains("\"payload_hash\""));
     }
 
     #[test]
@@ -508,5 +527,15 @@ mod tests {
         let json = r#"{"transfer_length":null,"symbol_size":64,"source_blocks":1,"sub_blocks":1,"alignment":8}"#;
         let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_payload_hash_roundtrip() {
+        let payload_hash = [0xAB; 32];
+        let oti = ObjectTransmissionInformation::new(100, 64, 1, 1, 8).with_payload_hash(payload_hash);
+        let json = serde_json::to_string(&oti).unwrap();
+        let decoded: ObjectTransmissionInformation = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.payload_hash(), Some(payload_hash));
+        assert!(json.contains("\"payload_hash\""));
     }
 }

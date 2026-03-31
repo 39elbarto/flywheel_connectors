@@ -27,6 +27,8 @@ pub struct RaptorQDecoder {
     transfer_length: u64,
     /// Symbol size in bytes.
     symbol_size: u16,
+    /// Optional end-to-end payload hash carried by the encoder.
+    payload_hash: Option<[u8; 32]>,
     config: RaptorQConfig,
     started_at: Instant,
 }
@@ -45,6 +47,7 @@ impl RaptorQDecoder {
             k,
             transfer_length: oti.transfer_length(),
             symbol_size: oti.symbol_size(),
+            payload_hash: oti.payload_hash(),
             config: config.clone(),
             started_at: Instant::now(),
         }
@@ -63,6 +66,7 @@ impl RaptorQDecoder {
             k,
             transfer_length,
             symbol_size,
+            payload_hash: None,
             config: config.clone(),
             started_at: Instant::now(),
         }
@@ -185,6 +189,14 @@ impl RaptorQDecoder {
                     payload.extend_from_slice(source_sym);
                 }
                 payload.truncate(transfer_len);
+                if let Some(expected_hash) = self.payload_hash
+                    && *blake3::hash(&payload).as_bytes() != expected_hash
+                {
+                    return Err(DecodeError::InsufficientSymbols {
+                        received: self.received_count(),
+                        needed: self.needed(),
+                    });
+                }
                 Ok(payload)
             }
             Err(error) => Err(Self::map_decode_error(
@@ -259,7 +271,7 @@ impl RaptorQDecoder {
             for (&col, &coef) in columns.iter().zip(coefficients.iter()) {
                 matrix.set(row, col, coef);
             }
-            rhs[row].clone_from(&data);
+            rhs[row].clone_from(data);
         }
 
         // Solve: the system is now L×L with constraint + (received source identity) +
@@ -1776,6 +1788,21 @@ mod tests {
             }
         }
         panic!("Failed to decode multi-symbol payload");
+    }
+
+    #[test]
+    fn decoder_rejects_payload_hash_mismatch() {
+        let config = test_config();
+        let payload = vec![7u8; 64];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let source = encoder.encode_source();
+        let oti = encoder
+            .transmission_info()
+            .with_payload_hash([0xCD; 32]);
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let result = decoder.add_symbol(source[0].0, source[0].1.clone()).unwrap();
+        assert_eq!(result, None);
     }
 
     #[test]

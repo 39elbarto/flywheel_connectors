@@ -35,6 +35,7 @@ pub struct RaptorQEncoder {
     source_data: Vec<Vec<u8>>,
     config: RaptorQConfig,
     payload_len: usize,
+    payload_hash: [u8; 32],
 }
 
 impl RaptorQEncoder {
@@ -93,6 +94,7 @@ impl RaptorQEncoder {
             source_data: source_symbols,
             config: config.clone(),
             payload_len: payload.len(),
+            payload_hash: *blake3::hash(payload).as_bytes(),
         })
     }
 
@@ -198,6 +200,7 @@ impl RaptorQEncoder {
             1,
             8,
         )
+        .with_payload_hash(self.payload_hash)
     }
 
     /// Get the payload length.

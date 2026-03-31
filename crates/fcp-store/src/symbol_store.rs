@@ -53,6 +53,9 @@ pub struct ObjectTransmissionInfo {
     pub sub_blocks: u16,
     /// Symbol alignment.
     pub alignment: u8,
+    /// Optional end-to-end payload hash used to reject false-positive decodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_hash: Option<[u8; 32]>,
 }
 
 impl ObjectTransmissionInfo {
@@ -65,19 +68,24 @@ impl ObjectTransmissionInfo {
             source_blocks: oti.source_blocks(),
             sub_blocks: oti.sub_blocks(),
             alignment: oti.symbol_alignment(),
+            payload_hash: oti.payload_hash(),
         }
     }
 
     /// Convert to raptorq's `ObjectTransmissionInformation`.
     #[must_use]
     pub const fn to_oti(self) -> ObjectTransmissionInformation {
-        ObjectTransmissionInformation::new(
+        let oti = ObjectTransmissionInformation::new(
             self.transfer_length,
             self.symbol_size,
             self.source_blocks,
             self.sub_blocks,
             self.alignment,
-        )
+        );
+        match self.payload_hash {
+            Some(payload_hash) => oti.with_payload_hash(payload_hash),
+            None => oti,
+        }
     }
 }
 

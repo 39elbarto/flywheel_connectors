@@ -79,6 +79,16 @@ pub enum RepairError {
     Decode(String),
 }
 
+/// Errors for lifecycle snapshot collection.
+#[derive(Debug, Error)]
+pub enum LifecycleSnapshotError {
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] ObjectStoreError),
+
+    #[error("symbol store error: {0}")]
+    SymbolStore(#[from] SymbolStoreError),
+}
+
 /// Errors for garbage collection.
 #[derive(Debug, Error)]
 pub enum GcError {

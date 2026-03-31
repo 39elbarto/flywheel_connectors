@@ -474,11 +474,9 @@ mod tests {
     fn validate_e2e_log_entry(value: &serde_json::Value) -> Result<(), String> {
         let schema: serde_json::Value =
             serde_json::from_str(E2E_LOG_V1_SCHEMA).map_err(|err| err.to_string())?;
-        let validator = Validator::new(&schema)
-            .map_err(|err| format!("schema compile failed: {err}"))?;
-        validator
-            .validate(value)
-            .map_err(|err| err.to_string())
+        let validator =
+            Validator::new(&schema).map_err(|err| format!("schema compile failed: {err}"))?;
+        validator.validate(value).map_err(|err| err.to_string())
     }
 
     fn assert_valid_e2e_log_entry(value: &serde_json::Value) {

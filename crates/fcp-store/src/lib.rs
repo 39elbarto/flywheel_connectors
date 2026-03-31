@@ -40,12 +40,19 @@ mod repair;
 mod symbol_store;
 
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
-pub use error::{GcError, ObjectStoreError, QuarantineError, RepairError, SymbolStoreError};
+pub use error::{
+    GcError, LifecycleSnapshotError, ObjectStoreError, QuarantineError, RepairError,
+    SymbolStoreError,
+};
 pub use gc::{
     GarbageCollector, GcConfig, GcDecision, GcDecisionAction, GcReasonCode, GcResult, GcRoots,
     GcRunReport, GcTranscript,
 };
-pub use object_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
+pub use object_store::{
+    LifecycleRootObservation, LifecycleRootRole, LifecycleRootStatus, MemoryObjectStore,
+    MemoryObjectStoreConfig, ObjectLeaseState, ObjectLifecycleSnapshot, ObjectStore,
+    ZoneLifecycleSnapshot, snapshot_zone_lifecycle,
+};
 pub use quarantine::{
     ObjectAdmissionClass, ObjectAdmissionPolicy, PromotionReason, QuarantineStats, QuarantineStore,
     QuarantinedObject,

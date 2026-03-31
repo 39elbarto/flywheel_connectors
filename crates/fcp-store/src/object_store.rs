@@ -2,14 +2,289 @@
 //!
 //! Provides content-addressed storage for complete mesh objects.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+use crate::coverage::CoverageEvaluation;
+use crate::error::LifecycleSnapshotError;
+use crate::gc::GcRoots;
+use crate::symbol_store::SymbolStore;
 use fcp_core::{ObjectHeader, ObjectId, RetentionClass, StorageMeta, StoredObject, ZoneId};
 use parking_lot::RwLock;
 
 use crate::error::ObjectStoreError;
+
+/// Root role recorded in a lifecycle snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleRootRole {
+    Checkpoint,
+    Pin,
+}
+
+impl LifecycleRootRole {
+    const fn sort_key(self) -> u8 {
+        match self {
+            Self::Checkpoint => 0,
+            Self::Pin => 1,
+        }
+    }
+}
+
+/// Validation state for a configured lifecycle root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleRootStatus {
+    Valid,
+    Missing,
+    ForeignZone,
+}
+
+/// Deterministic observation of one configured root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleRootObservation {
+    /// Root object id.
+    pub object_id: ObjectId,
+    /// Why this object is part of the root set.
+    pub role: LifecycleRootRole,
+    /// Whether the root resolves inside the requested zone snapshot.
+    pub status: LifecycleRootStatus,
+}
+
+/// Lease state exposed in lifecycle snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectLeaseState {
+    NotLeased,
+    Active,
+    Expired,
+}
+
+/// Deterministic object-level lifecycle state for one zone snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectLifecycleSnapshot {
+    /// Object identifier.
+    pub object_id: ObjectId,
+    /// Root roles currently attached to this object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_roles: Vec<LifecycleRootRole>,
+    /// Whether the object is reachable from the valid root set.
+    pub reachable_from_roots: bool,
+    /// Current node-local retention class.
+    pub retention: RetentionClass,
+    /// Lease-state summary derived from retention and snapshot time.
+    pub lease_state: ObjectLeaseState,
+    /// Local schema-bound references in deterministic order.
+    pub refs: Vec<ObjectId>,
+    /// Cross-zone or foreign references in deterministic order.
+    pub foreign_refs: Vec<ObjectId>,
+    /// Optional TTL declared in the object header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+    /// Coverage evaluation when a symbol store was supplied and metadata exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageEvaluation>,
+    /// Whether current coverage satisfies the declared placement policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meets_placement_policy: Option<bool>,
+    /// Whether the object is currently reconstructable from available symbols.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconstructable: Option<bool>,
+}
+
+/// Deterministic zone-level lifecycle snapshot for durable object debugging.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneLifecycleSnapshot {
+    /// Zone represented by this snapshot.
+    pub zone_id: ZoneId,
+    /// Snapshot time used for lease-state derivation.
+    pub generated_at: u64,
+    /// Configured checkpoint root, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_root: Option<ObjectId>,
+    /// Validity of configured roots in deterministic order.
+    pub roots: Vec<LifecycleRootObservation>,
+    /// Total objects currently stored for the zone.
+    pub object_count: usize,
+    /// Objects reachable from the valid root set.
+    pub reachable_count: usize,
+    /// Objects currently unreachable from the valid root set.
+    pub unreachable_count: usize,
+    /// Reconstructable-object count when a symbol store was supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconstructable_count: Option<usize>,
+    /// Per-object lifecycle details in deterministic object-id order.
+    pub objects: Vec<ObjectLifecycleSnapshot>,
+}
+
+async fn classify_root(
+    object_id: ObjectId,
+    zone_id: &ZoneId,
+    store: &dyn ObjectStore,
+) -> Result<LifecycleRootStatus, LifecycleSnapshotError> {
+    match store.get_header(&object_id).await {
+        Ok(header) if &header.zone_id == zone_id => Ok(LifecycleRootStatus::Valid),
+        Ok(_) => Ok(LifecycleRootStatus::ForeignZone),
+        Err(ObjectStoreError::NotFound(_)) => Ok(LifecycleRootStatus::Missing),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Build a deterministic lifecycle snapshot for all objects in a zone.
+///
+/// The snapshot intentionally mirrors current durable-plane state rather than
+/// predicting future GC or repair actions. Root validity is reported
+/// explicitly so downstream tests can assert missing or foreign-zone roots
+/// without having to reverse-engineer GC behavior.
+///
+/// # Errors
+/// Returns an error if object or symbol metadata cannot be read.
+pub async fn snapshot_zone_lifecycle(
+    zone_id: &ZoneId,
+    roots: &GcRoots,
+    store: &dyn ObjectStore,
+    symbol_store: Option<&dyn SymbolStore>,
+    current_time: u64,
+) -> Result<ZoneLifecycleSnapshot, LifecycleSnapshotError> {
+    let mut root_observations = Vec::new();
+    if let Some(checkpoint_root) = roots.zone_checkpoint {
+        root_observations.push(LifecycleRootObservation {
+            object_id: checkpoint_root,
+            role: LifecycleRootRole::Checkpoint,
+            status: classify_root(checkpoint_root, zone_id, store).await?,
+        });
+    }
+
+    let mut pinned_roots: Vec<_> = roots.pinned.iter().copied().collect();
+    pinned_roots.sort_unstable();
+    for pinned_root in pinned_roots {
+        root_observations.push(LifecycleRootObservation {
+            object_id: pinned_root,
+            role: LifecycleRootRole::Pin,
+            status: classify_root(pinned_root, zone_id, store).await?,
+        });
+    }
+
+    root_observations.sort_by(|left, right| {
+        left.object_id
+            .cmp(&right.object_id)
+            .then(left.role.sort_key().cmp(&right.role.sort_key()))
+    });
+
+    let mut reachable = HashSet::new();
+    let mut queue: VecDeque<_> = root_observations
+        .iter()
+        .filter(|root| root.status == LifecycleRootStatus::Valid)
+        .map(|root| root.object_id)
+        .collect();
+    while let Some(object_id) = queue.pop_front() {
+        if !reachable.insert(object_id) {
+            continue;
+        }
+
+        let header = store.get_header(&object_id).await?;
+        if &header.zone_id != zone_id {
+            continue;
+        }
+
+        let mut refs = header.refs;
+        refs.sort_unstable();
+        queue.extend(refs);
+    }
+
+    let mut object_ids = store.list_zone(zone_id).await;
+    object_ids.sort_unstable();
+
+    let mut objects = Vec::with_capacity(object_ids.len());
+    for object_id in object_ids {
+        let object = store.get(&object_id).await?;
+
+        let mut root_roles = Vec::new();
+        if roots.zone_checkpoint == Some(object_id) {
+            root_roles.push(LifecycleRootRole::Checkpoint);
+        }
+        if roots.pinned.contains(&object_id) {
+            root_roles.push(LifecycleRootRole::Pin);
+        }
+
+        let lease_state = match object.storage.retention {
+            RetentionClass::Pinned => ObjectLeaseState::NotLeased,
+            RetentionClass::Lease { expires_at } if expires_at > current_time => {
+                ObjectLeaseState::Active
+            }
+            RetentionClass::Lease { .. } => ObjectLeaseState::Expired,
+            RetentionClass::Ephemeral => ObjectLeaseState::NotLeased,
+        };
+
+        let mut refs = object.header.refs.clone();
+        refs.sort_unstable();
+        let mut foreign_refs = object.header.foreign_refs.clone();
+        foreign_refs.sort_unstable();
+
+        let mut coverage = None;
+        let mut meets_placement_policy = None;
+        let mut reconstructable = None;
+        if let Some(symbol_store) = symbol_store {
+            if let Some(distribution) = symbol_store.get_distribution(&object_id).await {
+                let evaluation = CoverageEvaluation::from_distribution(object_id, &distribution);
+                if let Some(policy) = object.header.placement.as_ref() {
+                    meets_placement_policy = Some(evaluation.meets_policy(policy));
+                    reconstructable = Some(
+                        symbol_store
+                            .can_reconstruct_with_policy(&object_id, policy)
+                            .await,
+                    );
+                } else {
+                    reconstructable = Some(symbol_store.can_reconstruct(&object_id).await);
+                }
+                coverage = Some(evaluation);
+            } else {
+                reconstructable = Some(false);
+            }
+        }
+
+        objects.push(ObjectLifecycleSnapshot {
+            object_id,
+            root_roles,
+            reachable_from_roots: reachable.contains(&object_id),
+            retention: object.storage.retention,
+            lease_state,
+            refs,
+            foreign_refs,
+            ttl_secs: object.header.ttl_secs,
+            coverage,
+            meets_placement_policy,
+            reconstructable,
+        });
+    }
+
+    let reachable_count = objects
+        .iter()
+        .filter(|entry| entry.reachable_from_roots)
+        .count();
+    let object_count = objects.len();
+    let reconstructable_count = symbol_store.map(|_| {
+        objects
+            .iter()
+            .filter(|entry| entry.reconstructable == Some(true))
+            .count()
+    });
+
+    Ok(ZoneLifecycleSnapshot {
+        zone_id: zone_id.clone(),
+        generated_at: current_time,
+        checkpoint_root: roots.zone_checkpoint,
+        roots: root_observations,
+        object_count,
+        reachable_count,
+        unreachable_count: object_count.saturating_sub(reachable_count),
+        reconstructable_count,
+        objects,
+    })
+}
 
 /// Object store interface (NORMATIVE).
 ///
@@ -230,6 +505,7 @@ mod tests {
     use std::panic::{self, AssertUnwindSafe};
     use std::time::Instant;
 
+    use bytes::Bytes;
     use chrono::Utc;
     use fcp_cbor::SchemaId;
     use fcp_core::Provenance;
@@ -238,6 +514,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::symbol_store::{MemorySymbolStore, MemorySymbolStoreConfig, SymbolMeta};
 
     #[derive(Default)]
     struct StoreLogData {
@@ -315,6 +592,12 @@ mod tests {
                 retention: RetentionClass::Ephemeral,
             },
         }
+    }
+
+    fn test_foreign_zone_object(id_byte: u8, body: &[u8]) -> StoredObject {
+        let mut object = test_stored_object(id_byte, body);
+        object.header.zone_id = "z:foreign".parse().unwrap();
+        object
     }
 
     #[test]
@@ -1557,6 +1840,181 @@ mod tests {
 
                 StoreLogData {
                     details: Some(json!({"all_deleted": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn snapshot_zone_lifecycle_reports_root_validity_and_reachability() {
+        run_store_test(
+            "snapshot_zone_lifecycle_roots",
+            "verify",
+            "lifecycle",
+            10,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+
+                let mut root = test_stored_object(1, b"root");
+                root.header.refs = vec![ObjectId::from_bytes([2; 32])];
+                let mut child = test_stored_object(2, b"child");
+                child.header.refs = vec![ObjectId::from_bytes([3; 32])];
+                let leaf = test_stored_object(3, b"leaf");
+                let mut leased = test_stored_object(4, b"leased");
+                leased.storage.retention = RetentionClass::Lease { expires_at: 50 };
+                let foreign = test_foreign_zone_object(9, b"foreign");
+
+                root.header.refs.sort_unstable();
+                child.header.refs.sort_unstable();
+                store.put(root.clone()).await.unwrap();
+                store.put(child.clone()).await.unwrap();
+                store.put(leaf.clone()).await.unwrap();
+                store.put(leased.clone()).await.unwrap();
+                store.put(foreign.clone()).await.unwrap();
+
+                let mut roots = GcRoots::new();
+                roots.set_checkpoint(root.object_id);
+                roots.add_pin(ObjectId::from_bytes([8; 32]));
+                roots.add_pin(foreign.object_id);
+
+                let snapshot = snapshot_zone_lifecycle(&test_zone(), &roots, &store, None, 100)
+                    .await
+                    .unwrap();
+
+                assert_eq!(snapshot.object_count, 4);
+                assert_eq!(snapshot.reachable_count, 3);
+                assert_eq!(snapshot.unreachable_count, 1);
+                assert!(snapshot.reconstructable_count.is_none());
+                assert_eq!(snapshot.roots.len(), 3);
+                assert_eq!(snapshot.roots[0].object_id, root.object_id);
+                assert_eq!(snapshot.roots[0].status, LifecycleRootStatus::Valid);
+                assert_eq!(snapshot.roots[1].object_id, ObjectId::from_bytes([8; 32]));
+                assert_eq!(snapshot.roots[1].status, LifecycleRootStatus::Missing);
+                assert_eq!(snapshot.roots[2].object_id, foreign.object_id);
+                assert_eq!(snapshot.roots[2].status, LifecycleRootStatus::ForeignZone);
+
+                let leased_entry = snapshot
+                    .objects
+                    .iter()
+                    .find(|entry| entry.object_id == leased.object_id)
+                    .unwrap();
+                assert!(!leased_entry.reachable_from_roots);
+                assert_eq!(leased_entry.lease_state, ObjectLeaseState::Expired);
+
+                let child_entry = snapshot
+                    .objects
+                    .iter()
+                    .find(|entry| entry.object_id == child.object_id)
+                    .unwrap();
+                assert!(child_entry.reachable_from_roots);
+                assert_eq!(child_entry.refs, vec![leaf.object_id]);
+
+                StoreLogData {
+                    object_id: Some(root.object_id),
+                    details: Some(json!({
+                        "root_statuses": snapshot.roots.iter().map(|root| {
+                            json!({
+                                "object_id": root.object_id.to_string(),
+                                "role": root.role,
+                                "status": root.status,
+                            })
+                        }).collect::<Vec<_>>(),
+                        "reachable_count": snapshot.reachable_count,
+                        "unreachable_count": snapshot.unreachable_count,
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn snapshot_zone_lifecycle_includes_symbol_coverage_when_available() {
+        run_store_test(
+            "snapshot_zone_lifecycle_symbol_coverage",
+            "verify",
+            "lifecycle",
+            8,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+
+                let mut object = test_stored_object(6, b"symbol-backed");
+                object.header.placement = Some(fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10_000,
+                    preferred_devices: Vec::new(),
+                    excluded_devices: Vec::new(),
+                    target_coverage_bps: 10_000,
+                    min_source_diversity: 0,
+                });
+                let object_id = object.object_id;
+                store.put(object).await.unwrap();
+
+                symbol_store
+                    .put_object_meta(crate::symbol_store::ObjectSymbolMeta {
+                        object_id,
+                        zone_id: test_zone(),
+                        oti: crate::symbol_store::ObjectTransmissionInfo {
+                            transfer_length: 128,
+                            symbol_size: 64,
+                            source_blocks: 1,
+                            sub_blocks: 1,
+                            alignment: 1,
+                        },
+                        source_symbols: 2,
+                        first_symbol_at: 1,
+                    })
+                    .await
+                    .unwrap();
+                for esi in 0..2 {
+                    symbol_store
+                        .put_symbol(crate::symbol_store::StoredSymbol {
+                            meta: SymbolMeta {
+                                object_id,
+                                esi,
+                                zone_id: test_zone(),
+                                source_node: Some(u64::from(esi) + 1),
+                                stored_at: 10 + u64::from(esi),
+                            },
+                            data: Bytes::from(vec![u8::try_from(esi).unwrap(); 64]),
+                        })
+                        .await
+                        .unwrap();
+                }
+
+                let snapshot = snapshot_zone_lifecycle(
+                    &test_zone(),
+                    &GcRoots::new(),
+                    &store,
+                    Some(&symbol_store),
+                    10,
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(snapshot.reconstructable_count, Some(1));
+                let entry = snapshot
+                    .objects
+                    .iter()
+                    .find(|entry| entry.object_id == object_id)
+                    .unwrap();
+                assert_eq!(entry.reconstructable, Some(true));
+                assert_eq!(entry.meets_placement_policy, Some(true));
+                assert_eq!(entry.coverage.as_ref().unwrap().coverage_bps, 10_000);
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    coverage_bps: Some(entry.coverage.as_ref().unwrap().coverage_bps),
+                    details: Some(json!({
+                        "reconstructable": entry.reconstructable,
+                        "meets_policy": entry.meets_placement_policy,
+                        "reconstructable_count": snapshot.reconstructable_count,
+                    })),
                     ..StoreLogData::default()
                 }
             },

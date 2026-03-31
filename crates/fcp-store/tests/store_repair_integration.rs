@@ -25,6 +25,7 @@ use fcp_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
     ObjectTransmissionInfo, RepairController, RepairControllerConfig, RepairCycleBudget,
     RepairPlanningOptions, RepairReasonCode, RepairResult, StoredSymbol, SymbolMeta, SymbolStore,
+    snapshot_zone_lifecycle,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -1437,6 +1438,156 @@ fn oti_roundtrip_fidelity() {
                     "source_blocks": oti_ser.source_blocks,
                     "sub_blocks": oti_ser.sub_blocks,
                     "alignment": oti_ser.alignment,
+                })),
+                ..StoreLogData::default()
+            }
+        },
+    );
+}
+
+/// Zone lifecycle snapshots expose deterministic durable-state structure and
+/// current reconstruction posture without needing GC or repair internals.
+#[test]
+fn lifecycle_snapshot_reflects_reachability_and_symbol_state() {
+    run_store_test(
+        "lifecycle_snapshot_reflects_reachability_and_symbol_state",
+        "integration",
+        "lifecycle",
+        9,
+        || async {
+            let config = test_raptorq_config();
+            let payload = make_payload(512);
+            let object_id = test_object_id();
+
+            let (symbols, oti, source_k) = encode_payload(&payload, &config);
+
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig {
+                max_bytes: 1024 * 1024,
+            });
+            let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                max_bytes: 1024 * 1024,
+                local_node_id: 1,
+            });
+
+            let root_id = ObjectId::from_bytes([0xCD; 32]);
+            let mut root = StoredObject {
+                object_id: root_id,
+                header: fcp_core::ObjectHeader {
+                    schema: fcp_cbor::SchemaId::new(
+                        "fcp.test",
+                        "LifecycleRoot",
+                        semver::Version::new(1, 0, 0),
+                    ),
+                    zone_id: test_zone(),
+                    created_at: 1_000,
+                    provenance: Provenance::new(test_zone()),
+                    refs: vec![object_id],
+                    foreign_refs: vec![],
+                    ttl_secs: None,
+                    placement: None,
+                },
+                body: b"root".to_vec(),
+                storage: StorageMeta {
+                    retention: RetentionClass::Pinned,
+                },
+            };
+            root.header.refs.sort_unstable();
+            store.put(root).await.unwrap();
+
+            let mut payload_object = StoredObject {
+                object_id,
+                header: fcp_core::ObjectHeader {
+                    schema: fcp_cbor::SchemaId::new(
+                        "fcp.test",
+                        "LifecyclePayload",
+                        semver::Version::new(1, 0, 0),
+                    ),
+                    zone_id: test_zone(),
+                    created_at: 1_100,
+                    provenance: Provenance::new(test_zone()),
+                    refs: vec![],
+                    foreign_refs: vec![],
+                    ttl_secs: Some(600),
+                    placement: Some(ObjectPlacementPolicy {
+                        min_nodes: 2,
+                        max_node_fraction_bps: 10_000,
+                        preferred_devices: Vec::new(),
+                        excluded_devices: Vec::new(),
+                        target_coverage_bps: 10_000,
+                        min_source_diversity: 2,
+                    }),
+                },
+                body: payload.clone(),
+                storage: StorageMeta {
+                    retention: RetentionClass::Lease { expires_at: 5_000 },
+                },
+            };
+            payload_object.header.refs.sort_unstable();
+            store.put(payload_object).await.unwrap();
+
+            let last_index = symbols.len() - 1;
+            store_symbols(
+                &symbol_store,
+                object_id,
+                oti,
+                source_k,
+                &symbols[..last_index],
+                1,
+            )
+            .await;
+            let final_symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi: symbols[last_index].0,
+                    zone_id: test_zone(),
+                    source_node: Some(2),
+                    stored_at: 2_000,
+                },
+                data: Bytes::from(symbols[last_index].1.clone()),
+            };
+            symbol_store.put_symbol(final_symbol).await.unwrap();
+
+            let mut roots = fcp_store::GcRoots::new();
+            roots.set_checkpoint(root_id);
+
+            let snapshot =
+                snapshot_zone_lifecycle(&test_zone(), &roots, &store, Some(&symbol_store), 1_500)
+                    .await
+                    .unwrap();
+
+            assert_eq!(snapshot.object_count, 2);
+            assert_eq!(snapshot.reachable_count, 2);
+            assert_eq!(snapshot.reconstructable_count, Some(1));
+            assert_eq!(snapshot.roots.len(), 1);
+            assert!(matches!(
+                snapshot.roots[0].status,
+                fcp_store::LifecycleRootStatus::Valid
+            ));
+
+            let payload_entry = snapshot
+                .objects
+                .iter()
+                .find(|entry| entry.object_id == object_id)
+                .unwrap();
+            assert!(payload_entry.reachable_from_roots);
+            assert_eq!(payload_entry.reconstructable, Some(true));
+            assert_eq!(payload_entry.meets_placement_policy, Some(true));
+            assert_eq!(payload_entry.coverage.as_ref().unwrap().distinct_nodes, 2);
+            assert_eq!(
+                payload_entry.lease_state,
+                fcp_store::ObjectLeaseState::Active
+            );
+            assert_eq!(payload_entry.ttl_secs, Some(600));
+
+            StoreLogData {
+                object_id: Some(object_id),
+                object_size: Some(payload.len() as u64),
+                coverage_bps: Some(payload_entry.coverage.as_ref().unwrap().coverage_bps),
+                details: Some(json!({
+                    "reachable_count": snapshot.reachable_count,
+                    "reconstructable_count": snapshot.reconstructable_count,
+                    "root_status": snapshot.roots[0].status,
+                    "distinct_nodes": payload_entry.coverage.as_ref().unwrap().distinct_nodes,
                 })),
                 ..StoreLogData::default()
             }

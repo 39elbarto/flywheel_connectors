@@ -37,10 +37,11 @@
 //!             .with_execution_form(ConnectorRuntimeFormat::Native)
 //!             .with_archetype(ConnectorArchetype::Operational)
 //!             .with_state_model(ConnectorStateModel::Stateless)
-//!             .with_diagnostics(
-//!                 DiagnosticsSurface::connector_author_defaults()
-//!                     .with_fixture_scenario("my_connector.happy_path"),
-//!             )
+//!             .supports_usage_snapshots()
+//!             .publishes_operation_receipts()
+//!             .supports_self_check()
+//!             .with_fixture_scenario("my_connector.happy_path")
+//!             .with_local_repro_command("cargo test -p fcp-my-connector -- --nocapture")
 //!     }
 //! }
 //! ```
@@ -81,6 +82,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Re-exports from platform owner crates
 // ─────────────────────────────────────────────────────────────────────────────
+
+pub use async_trait::async_trait;
 
 /// Execution and lifecycle types owned by `fcp-kernel`.
 pub use fcp_kernel::{
@@ -177,7 +180,6 @@ pub use fcp_kernel::{
     UsageMetric,
     UsageMetricKind,
     Webhook,
-    async_trait,
 };
 
 /// Policy, provenance, and evidence-adjacent types still re-exported from

@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-core = { path = "../fcp-core" }
 fcp-kernel = { path = "../fcp-kernel" }
@@ -31,7 +32,6 @@ cursor-store-object-store = ["dep:fcp-store", "dep:fcp-cbor", "dep:semver"]
 connector-http = ["dep:reqwest"]
 
 [dev-dependencies]
-async-trait = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

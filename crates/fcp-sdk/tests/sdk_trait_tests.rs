@@ -143,24 +143,13 @@ impl ConnectorApp for MinimalConnector {
             .with_execution_form(ConnectorRuntimeFormat::Native)
             .with_archetype(ConnectorArchetype::Operational)
             .with_state_model(ConnectorStateModel::Stateless)
-            .with_budget(BudgetSurface {
-                declares_rate_limits: false,
-                supports_usage_snapshots: true,
-                supports_preflight_cost_estimates: true,
-            })
-            .with_evidence(EvidenceSurface {
-                trace_context: true,
-                decision_receipts: false,
-                operation_receipts: true,
-                audit_events: false,
-            })
-            .with_diagnostics(
-                DiagnosticsSurface::connector_author_defaults()
-                    .with_reason_code("self_check_unsupported")
-                    .with_fixture_scenario("minimal.happy_path")
-                    .with_local_repro_command(
-                        "cargo test -p fcp-sdk sdk_trait_tests::test_connector_app_contract -- --nocapture",
-                    ),
+            .supports_usage_snapshots()
+            .supports_preflight_cost_estimates()
+            .publishes_operation_receipts()
+            .with_diagnostic_reason_code("self_check_unsupported")
+            .with_fixture_scenario("minimal.happy_path")
+            .with_local_repro_command(
+                "cargo test -p fcp-sdk sdk_trait_tests::test_connector_app_contract -- --nocapture",
             )
     }
 
@@ -563,6 +552,20 @@ fn test_connector_app_contract() {
             .diagnostics
             .testkit_entry_points
             .contains(&"fcp_testkit::ConnectorTestHarness".to_string())
+    );
+    assert!(
+        contract
+            .description
+            .diagnostics
+            .testkit_entry_points
+            .contains(&"fcp_testkit::evidence_helpers::EvidenceCollector".to_string())
+    );
+    assert!(
+        contract
+            .description
+            .diagnostics
+            .testkit_entry_points
+            .contains(&"fcp_testkit::session_script::SessionScript".to_string())
     );
     assert_eq!(contract.capabilities.operations.len(), 1);
     assert_eq!(

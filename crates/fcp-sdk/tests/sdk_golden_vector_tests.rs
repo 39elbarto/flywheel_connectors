@@ -291,6 +291,70 @@ mod zone_id_vectors {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Connector App Contract Golden Vectors
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod connector_app_contract_vectors {
+    use super::*;
+
+    #[test]
+    fn connector_author_diagnostics_defaults_match_vector() {
+        let vectors = load_vector_file("connector_app_contracts");
+        let expected = &vectors["vectors"][0]["data"];
+
+        let actual = serde_json::to_value(DiagnosticsSurface::connector_author_defaults()).unwrap();
+
+        assert_eq!(actual, expected.clone());
+    }
+
+    #[test]
+    fn connector_app_descriptor_defaults_match_vector() {
+        let vectors = load_vector_file("connector_app_contracts");
+        let expected = &vectors["vectors"][1]["data"];
+
+        let actual = serde_json::to_value(ConnectorAppDescriptor::new(ConnectorId::from_static(
+            "fcp.test.contract:utility:1.0.0",
+        )))
+        .unwrap();
+
+        assert_eq!(actual, expected.clone());
+    }
+
+    #[test]
+    fn connector_app_descriptor_helper_surface_matches_vector() {
+        let vectors = load_vector_file("connector_app_contracts");
+        let expected = &vectors["vectors"][2]["data"];
+
+        let actual = serde_json::to_value(
+            ConnectorAppDescriptor::new(ConnectorId::from_static(
+                "fcp.test.contract:utility:1.0.0",
+            ))
+            .with_execution_form(ConnectorRuntimeFormat::Native)
+            .with_archetype(ConnectorArchetype::Streaming)
+            .with_state_model(ConnectorStateModel::SingletonWriter)
+            .supports_subscribe()
+            .supports_replay()
+            .supports_acknowledgement()
+            .supports_resume_tokens()
+            .supports_flow_control()
+            .declares_rate_limits()
+            .supports_usage_snapshots()
+            .supports_preflight_cost_estimates()
+            .publishes_decision_receipts()
+            .publishes_operation_receipts()
+            .emits_audit_events()
+            .supports_self_check()
+            .with_diagnostic_reason_code("contract_self_check")
+            .with_fixture_scenario("contract.happy_path")
+            .with_local_repro_command("cargo test -p fcp-sdk contract::tests"),
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected.clone());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Runtime Format Golden Vectors
 // ─────────────────────────────────────────────────────────────────────────────
 

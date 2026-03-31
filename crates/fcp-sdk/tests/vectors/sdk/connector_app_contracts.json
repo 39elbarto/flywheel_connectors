@@ -1,0 +1,138 @@
+{
+  "description": "Connector app contract serialization golden vectors",
+  "vectors": [
+    {
+      "name": "connector_author_diagnostics_defaults",
+      "data": {
+        "supports_self_check": false,
+        "testkit_entry_points": [
+          "fcp_testkit::AsyncTestContext",
+          "fcp_testkit::ConnectorTestHarness",
+          "fcp_testkit::HttpFixtureServer",
+          "fcp_testkit::streaming_fixture::StreamingFixtureServer",
+          "fcp_testkit::evidence_helpers::EvidenceCollector",
+          "fcp_testkit::session_script::SessionScript",
+          "fcp_testkit::readiness_helpers::DoctorCheckReport",
+          "fcp_testkit::live_suite::EnvironmentManifest"
+        ]
+      }
+    },
+    {
+      "name": "connector_app_descriptor_defaults",
+      "data": {
+        "connector_id": "fcp.test.contract:utility:1.0.0",
+        "state_model": {
+          "type": "stateless"
+        },
+        "invoke": {
+          "supports_simulate": true,
+          "supports_idempotency_keys": true,
+          "supports_correlation": true,
+          "supports_provenance": true
+        },
+        "streaming": {
+          "supports_subscribe": false,
+          "supports_replay": false,
+          "supports_acknowledgement": false,
+          "supports_resume_tokens": false,
+          "supports_flow_control": false
+        },
+        "drain": {
+          "cooperative_shutdown": true,
+          "reports_progress": false,
+          "checkpoints_before_exit": false
+        },
+        "budget": {
+          "declares_rate_limits": false,
+          "supports_usage_snapshots": false,
+          "supports_preflight_cost_estimates": false
+        },
+        "evidence": {
+          "trace_context": true,
+          "decision_receipts": false,
+          "operation_receipts": false,
+          "audit_events": false
+        },
+        "diagnostics": {
+          "supports_self_check": false,
+          "testkit_entry_points": [
+            "fcp_testkit::AsyncTestContext",
+            "fcp_testkit::ConnectorTestHarness",
+            "fcp_testkit::HttpFixtureServer",
+            "fcp_testkit::streaming_fixture::StreamingFixtureServer",
+            "fcp_testkit::evidence_helpers::EvidenceCollector",
+            "fcp_testkit::session_script::SessionScript",
+            "fcp_testkit::readiness_helpers::DoctorCheckReport",
+            "fcp_testkit::live_suite::EnvironmentManifest"
+          ]
+        }
+      }
+    },
+    {
+      "name": "connector_app_descriptor_helper_surface",
+      "data": {
+        "connector_id": "fcp.test.contract:utility:1.0.0",
+        "execution_forms": [
+          "native"
+        ],
+        "archetypes": [
+          "streaming"
+        ],
+        "state_model": {
+          "type": "singleton_writer"
+        },
+        "invoke": {
+          "supports_simulate": true,
+          "supports_idempotency_keys": true,
+          "supports_correlation": true,
+          "supports_provenance": true
+        },
+        "streaming": {
+          "supports_subscribe": true,
+          "supports_replay": true,
+          "supports_acknowledgement": true,
+          "supports_resume_tokens": true,
+          "supports_flow_control": true
+        },
+        "drain": {
+          "cooperative_shutdown": true,
+          "reports_progress": false,
+          "checkpoints_before_exit": false
+        },
+        "budget": {
+          "declares_rate_limits": true,
+          "supports_usage_snapshots": true,
+          "supports_preflight_cost_estimates": true
+        },
+        "evidence": {
+          "trace_context": true,
+          "decision_receipts": true,
+          "operation_receipts": true,
+          "audit_events": true
+        },
+        "diagnostics": {
+          "supports_self_check": true,
+          "reason_codes": [
+            "contract_self_check"
+          ],
+          "fixture_scenarios": [
+            "contract.happy_path"
+          ],
+          "local_repro_commands": [
+            "cargo test -p fcp-sdk contract::tests"
+          ],
+          "testkit_entry_points": [
+            "fcp_testkit::AsyncTestContext",
+            "fcp_testkit::ConnectorTestHarness",
+            "fcp_testkit::HttpFixtureServer",
+            "fcp_testkit::streaming_fixture::StreamingFixtureServer",
+            "fcp_testkit::evidence_helpers::EvidenceCollector",
+            "fcp_testkit::session_script::SessionScript",
+            "fcp_testkit::readiness_helpers::DoctorCheckReport",
+            "fcp_testkit::live_suite::EnvironmentManifest"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -24,8 +24,8 @@ use fcp_store::{
     CoverageEvaluation, CoverageHealth, MemoryObjectStore, MemoryObjectStoreConfig,
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
     ObjectTransmissionInfo, RepairController, RepairControllerConfig, RepairCycleBudget,
-    RepairPlanningOptions, RepairReasonCode, RepairResult, StoredSymbol, SymbolMeta, SymbolStore,
-    snapshot_zone_lifecycle,
+    RepairEvaluationReasonCode, RepairPlanningOptions, RepairQueueAction, RepairReasonCode,
+    RepairResult, StoredSymbol, SymbolMeta, SymbolStore, snapshot_zone_lifecycle,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -474,11 +474,19 @@ fn repair_controller_drives_convergence() {
             policies.insert(object_id, policy.clone());
 
             // Evaluate zone — should queue a repair
-            controller
-                .evaluate_zone(&test_zone(), &store, &policies)
+            let initial_report = controller
+                .evaluate_zone_with_report(&test_zone(), &store, &policies)
                 .await;
             let initial_depth = controller.queue_depth();
             assert!(initial_depth > 0, "repair should be queued");
+            assert_eq!(initial_report.queue_depth_before, 0);
+            assert_eq!(initial_report.queue_depth_after, 1);
+            assert_eq!(initial_report.decisions.len(), 1);
+            assert_eq!(initial_report.decisions[0].action, RepairQueueAction::Queue);
+            assert_eq!(
+                initial_report.decisions[0].reason_code,
+                RepairEvaluationReasonCode::PolicySloDeficit
+            );
 
             // Simulate repair: take from queue, add symbols
             if let Some(request) = controller.next_repair() {
@@ -525,8 +533,8 @@ fn repair_controller_drives_convergence() {
             }
 
             // Re-evaluate — queue should be empty now
-            controller
-                .evaluate_zone(&test_zone(), &store, &policies)
+            let final_report = controller
+                .evaluate_zone_with_report(&test_zone(), &store, &policies)
                 .await;
 
             let dist_final = store.get_distribution(&object_id).await.unwrap();
@@ -545,6 +553,15 @@ fn repair_controller_drives_convergence() {
                 stats.repairs_succeeded >= 1,
                 "at least one repair succeeded"
             );
+            assert_eq!(final_report.queue_depth_before, 0);
+            assert_eq!(final_report.queue_depth_after, 0);
+            assert_eq!(final_report.pruned_stale_requests, 0);
+            assert_eq!(final_report.decisions.len(), 1);
+            assert_eq!(final_report.decisions[0].action, RepairQueueAction::Skip);
+            assert_eq!(
+                final_report.decisions[0].reason_code,
+                RepairEvaluationReasonCode::Healthy
+            );
 
             StoreLogData {
                 object_id: Some(object_id),
@@ -556,6 +573,8 @@ fn repair_controller_drives_convergence() {
                     "repairs_attempted": stats.repairs_attempted,
                     "repairs_succeeded": stats.repairs_succeeded,
                     "symbols_added": stats.symbols_added,
+                    "initial_queue_action": initial_report.decisions[0].action,
+                    "final_queue_action": final_report.decisions[0].action,
                 })),
                 ..StoreLogData::default()
             }

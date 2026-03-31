@@ -385,6 +385,9 @@ impl GarbageCollector {
                     })?;
 
                 if header.zone_id != *zone_id {
+                    if roots.is_root(&object_id) {
+                        return Err(GcError::InvalidRoot(object_id));
+                    }
                     continue;
                 }
 
@@ -519,7 +522,10 @@ impl GarbageCollector {
         }
     }
 
-    /// Check if an object would be collected (for debugging/testing).
+    /// Check whether the current sweep plan would evict an object.
+    ///
+    /// Returns `false` when the object is outside the zone sweep, retained, or
+    /// merely eligible but deferred by the configured sweep budget.
     pub async fn would_collect(
         &self,
         object_id: &ObjectId,
@@ -528,46 +534,16 @@ impl GarbageCollector {
         store: &dyn ObjectStore,
         current_time: u64,
     ) -> bool {
-        // Check if object is a root
-        if roots.is_root(object_id) {
-            return false;
-        }
-
-        // Check if pinned
-        if let Ok(meta) = store.get_storage_meta(object_id).await {
-            if matches!(meta.retention, RetentionClass::Pinned) {
-                return false;
-            }
-
-            // Check lease
-            if let RetentionClass::Lease { expires_at } = meta.retention {
-                if self.config.enforce_lease_expiry && expires_at > current_time {
-                    // Valid lease blocks collection even if unreachable.
-                    return false;
-                }
-            }
-        }
-
-        // Check reachability from roots (zero-allocation root seeding)
-        let mut visited = HashSet::new();
-        let mut queue: VecDeque<ObjectId> = roots.root_iter().collect();
-
-        while let Some(id) = queue.pop_front() {
-            if &id == object_id {
-                return false; // Found path to object
-            }
-
-            if visited.insert(id) {
-                if let Ok(header) = store.get_header(&id).await {
-                    // Only check if in same zone
-                    if &header.zone_id == zone_id {
-                        queue.extend(header.refs.iter().copied());
-                    }
-                }
-            }
-        }
-
-        true // Not reachable, would be collected
+        self.collect_internal(zone_id, roots, store, current_time)
+            .await
+            .ok()
+            .and_then(|plan| {
+                plan.transcript
+                    .decisions
+                    .into_iter()
+                    .find(|decision| decision.object_id == *object_id)
+            })
+            .is_some_and(|decision| decision.action == GcDecisionAction::Evict)
     }
 }
 
@@ -1452,6 +1428,53 @@ mod tests {
                     object_id: Some(missing_root),
                     details: Some(json!({
                         "invalid_root": missing_root.to_string(),
+                        "sweep_aborted": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn gc_foreign_checkpoint_root_returns_invalid_root_without_sweeping() {
+        run_store_test(
+            "gc_foreign_checkpoint_root_returns_invalid_root_without_sweeping",
+            "adversarial",
+            "gc",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let gc = GarbageCollector::new(GcConfig::default());
+                let foreign_root = ObjectId::from_bytes([1; 32]);
+                let surviving_object = ObjectId::from_bytes([2; 32]);
+
+                store
+                    .put(test_object_in_zone(
+                        &foreign_zone(),
+                        1,
+                        vec![],
+                        RetentionClass::Ephemeral,
+                    ))
+                    .await
+                    .unwrap();
+                store
+                    .put(test_object(2, vec![], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+
+                let mut roots = GcRoots::new();
+                roots.set_checkpoint(foreign_root);
+
+                let result = gc.collect(&test_zone(), &roots, &store, 0).await;
+                assert!(matches!(result, Err(GcError::InvalidRoot(id)) if id == foreign_root));
+                assert!(store.exists(&surviving_object).await);
+
+                StoreLogData {
+                    object_id: Some(foreign_root),
+                    details: Some(json!({
+                        "invalid_root": foreign_root.to_string(),
+                        "reason": "foreign_zone",
                         "sweep_aborted": true
                     })),
                     ..StoreLogData::default()
@@ -2351,9 +2374,9 @@ mod tests {
                 .await
             );
 
-            // Object with unknown ID is not in store, would be collected
+            // Unknown objects are not part of the zone sweep plan.
             assert!(
-                gc.would_collect(
+                !gc.would_collect(
                     &ObjectId::from_bytes([99; 32]),
                     &test_zone(),
                     &roots,
@@ -3036,6 +3059,16 @@ mod tests {
             let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
 
             assert_eq!(result.evicted, 0);
+            assert!(
+                !gc.would_collect(
+                    &ObjectId::from_bytes([1; 32]),
+                    &test_zone(),
+                    &roots,
+                    &store,
+                    0
+                )
+                .await
+            );
             assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
             assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
 

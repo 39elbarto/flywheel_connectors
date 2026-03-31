@@ -15,9 +15,9 @@ use fcp_store::{
     GcDecisionAction, GcReasonCode, GcRoots, MemoryObjectStore, MemoryObjectStoreConfig,
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
     ObjectTransmissionInfo, OfflineAccess, OfflineCapability, OfflineStatus, RepairController,
-    RepairControllerConfig, RepairPlanningOptions, RepairReasonCode, RepairRequest, RepairResult,
-    RepairStats, StoredSymbol, SymbolDistribution, SymbolMeta, SymbolStore,
-    snapshot_zone_lifecycle,
+    RepairControllerConfig, RepairEvaluationReasonCode, RepairPlanningOptions, RepairQueueAction,
+    RepairReasonCode, RepairRequest, RepairResult, RepairStats, StoredSymbol, SymbolDistribution,
+    SymbolMeta, SymbolStore, snapshot_zone_lifecycle,
 };
 use serde_json::json;
 
@@ -1200,6 +1200,20 @@ async fn offline_repair_artifact_bundle_captures_lifecycle_and_gc_evidence() {
     roots.set_checkpoint(root_id);
 
     let policies = HashMap::from([(payload_id, placement.clone())]);
+    let repair_evaluation_before = controller
+        .evaluate_zone_with_report(&zone, &symbol_store, &policies)
+        .await;
+    assert_eq!(repair_evaluation_before.queue_depth_before, 0);
+    assert_eq!(repair_evaluation_before.queue_depth_after, 1);
+    assert_eq!(repair_evaluation_before.decisions.len(), 1);
+    assert_eq!(
+        repair_evaluation_before.decisions[0].action,
+        RepairQueueAction::Queue
+    );
+    assert_eq!(
+        repair_evaluation_before.decisions[0].reason_code,
+        RepairEvaluationReasonCode::PolicySloDeficit
+    );
     let plan_before = controller
         .plan_zone(
             &zone,
@@ -1258,6 +1272,20 @@ async fn offline_repair_artifact_bundle_captures_lifecycle_and_gc_evidence() {
         plan_after.actions.is_empty(),
         "recovered coverage should clear the repair plan"
     );
+    let repair_evaluation_after = controller
+        .evaluate_zone_with_report(&zone, &symbol_store, &policies)
+        .await;
+    assert_eq!(repair_evaluation_after.queue_depth_before, 1);
+    assert_eq!(repair_evaluation_after.queue_depth_after, 0);
+    assert_eq!(repair_evaluation_after.decisions.len(), 1);
+    assert_eq!(
+        repair_evaluation_after.decisions[0].action,
+        RepairQueueAction::Remove
+    );
+    assert_eq!(
+        repair_evaluation_after.decisions[0].reason_code,
+        RepairEvaluationReasonCode::Healthy
+    );
 
     let after_snapshot = snapshot_zone_lifecycle(&zone, &roots, &store, Some(&symbol_store), 2_000)
         .await
@@ -1306,12 +1334,22 @@ async fn offline_repair_artifact_bundle_captures_lifecycle_and_gc_evidence() {
 
     let artifact_bundle = json!({
         "before_repair": before_snapshot,
+        "repair_evaluation_before": repair_evaluation_before,
         "repair_plan_before": plan_before,
         "after_repair": after_snapshot,
+        "repair_evaluation_after": repair_evaluation_after,
         "repair_plan_after": plan_after,
         "gc_report": gc_report,
     });
     assert_eq!(artifact_bundle["before_repair"]["object_count"], 3);
+    assert_eq!(
+        artifact_bundle["repair_evaluation_before"]["queue_depth_after"],
+        1
+    );
+    assert_eq!(
+        artifact_bundle["repair_evaluation_after"]["queue_depth_after"],
+        0
+    );
     assert_eq!(artifact_bundle["after_repair"]["reconstructable_count"], 1);
     assert_eq!(artifact_bundle["gc_report"]["result"]["expired_leases"], 1);
     assert_eq!(artifact_bundle["gc_report"]["transcript"]["root_count"], 1);

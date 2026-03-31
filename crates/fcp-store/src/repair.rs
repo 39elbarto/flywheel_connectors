@@ -2,7 +2,7 @@
 //!
 //! Implements bounded, convergent repair from `FCP_Specification_V2.md`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -335,6 +335,95 @@ pub struct RepairPlan {
     pub deferred: Vec<RepairPlanAction>,
 }
 
+/// Queue mutation applied during zone evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairQueueAction {
+    /// A new repair request was queued.
+    Queue,
+    /// An existing queued request was refreshed with newer state.
+    Refresh,
+    /// A stale queued request was removed.
+    Remove,
+    /// No queue mutation was required.
+    Skip,
+}
+
+/// Stable reason code for a zone-evaluation decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepairEvaluationReasonCode {
+    /// Coverage or availability is below the policy SLO target.
+    #[serde(rename = "repair.policy_slo_deficit")]
+    PolicySloDeficit,
+    /// Coverage is reconstructable but violates source-diversity policy.
+    #[serde(rename = "repair.diversity_deficit")]
+    DiversityDeficit,
+    /// The object currently satisfies its repair policy.
+    #[serde(rename = "repair.healthy")]
+    Healthy,
+    /// The object exists in the zone but no longer has a placement policy.
+    #[serde(rename = "repair.missing_policy")]
+    MissingPolicy,
+    /// The object metadata exists but no current symbol distribution is available.
+    #[serde(rename = "repair.missing_distribution")]
+    MissingDistribution,
+}
+
+impl RepairEvaluationReasonCode {
+    /// Return the stable wire-format string for this reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicySloDeficit => "repair.policy_slo_deficit",
+            Self::DiversityDeficit => "repair.diversity_deficit",
+            Self::Healthy => "repair.healthy",
+            Self::MissingPolicy => "repair.missing_policy",
+            Self::MissingDistribution => "repair.missing_distribution",
+        }
+    }
+}
+
+impl fmt::Display for RepairEvaluationReasonCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Deterministic per-object decision emitted by zone evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairEvaluationDecision {
+    /// Object evaluated during the zone pass.
+    pub object_id: ObjectId,
+    /// Queue mutation applied for this object.
+    pub action: RepairQueueAction,
+    /// Stable reason explaining the decision.
+    pub reason_code: RepairEvaluationReasonCode,
+    /// Observed coverage in basis points when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_bps: Option<u32>,
+    /// Distinct source nodes observed when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distinct_nodes: Option<usize>,
+    /// Computed queue priority when the object requires repair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
+}
+
+/// Explainable report for one zone evaluation pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairEvaluationReport {
+    /// Zone that was evaluated.
+    pub zone_id: ZoneId,
+    /// Queue depth before pruning and per-object updates.
+    pub queue_depth_before: usize,
+    /// Queue depth after the evaluation completes.
+    pub queue_depth_after: usize,
+    /// Count of stale queued requests dropped because the object no longer exists.
+    pub pruned_stale_requests: usize,
+    /// Per-object decisions in deterministic object-id order.
+    pub decisions: Vec<RepairEvaluationDecision>,
+}
+
 #[derive(Debug)]
 struct ZonePlanInputs {
     policy_targets: RepairPolicyTargets,
@@ -456,6 +545,44 @@ pub struct RepairController {
 }
 
 impl RepairController {
+    fn sort_queue(queue: &mut [RepairRequest]) {
+        // Deterministic ordering: highest priority first, then stable object-id tie-break.
+        queue.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.object_id.cmp(&right.object_id))
+        });
+    }
+
+    fn sync_queue_depth(&self, queue_depth: usize) {
+        self.stats.write().queue_depth = queue_depth;
+    }
+
+    fn remove_queued_repair(&self, object_id: &ObjectId) -> bool {
+        let mut queue = self.queue.write();
+        let original_len = queue.len();
+        queue.retain(|request| request.object_id != *object_id);
+        let removed = queue.len() != original_len;
+        if removed {
+            self.sync_queue_depth(queue.len());
+        }
+        removed
+    }
+
+    fn prune_zone_repairs(&self, zone_id: &ZoneId, tracked_objects: &BTreeSet<ObjectId>) -> usize {
+        let mut queue = self.queue.write();
+        let original_len = queue.len();
+        queue.retain(|request| {
+            request.zone_id != *zone_id || tracked_objects.contains(&request.object_id)
+        });
+        let removed = original_len.saturating_sub(queue.len());
+        if removed > 0 {
+            self.sync_queue_depth(queue.len());
+        }
+        removed
+    }
+
     /// Create a new repair controller.
     #[must_use]
     pub fn new(config: RepairControllerConfig) -> Self {
@@ -471,26 +598,28 @@ impl RepairController {
         }
     }
 
-    /// Queue a repair request.
-    pub fn queue_repair(&self, request: RepairRequest) {
+    fn upsert_repair(&self, request: RepairRequest) -> RepairQueueAction {
         let mut queue = self.queue.write();
 
-        // Check if already queued
-        if queue.iter().any(|r| r.object_id == request.object_id) {
-            return;
-        }
+        let action = if let Some(existing) = queue
+            .iter_mut()
+            .find(|queued| queued.object_id == request.object_id)
+        {
+            *existing = request;
+            RepairQueueAction::Refresh
+        } else {
+            queue.push(request);
+            RepairQueueAction::Queue
+        };
 
-        queue.push(request);
+        Self::sort_queue(&mut queue);
+        self.sync_queue_depth(queue.len());
+        action
+    }
 
-        // Deterministic ordering: highest priority first, then stable object-id tie-break.
-        queue.sort_by(|left, right| {
-            right
-                .priority
-                .cmp(&left.priority)
-                .then_with(|| left.object_id.cmp(&right.object_id))
-        });
-
-        self.stats.write().queue_depth = queue.len();
+    /// Queue or refresh a repair request with the latest observed state.
+    pub fn queue_repair(&self, request: RepairRequest) {
+        let _ = self.upsert_repair(request);
     }
 
     /// Get the next repair request if rate limit allows.
@@ -549,28 +678,37 @@ impl RepairController {
         &self.config
     }
 
+    const fn evaluate_reason_code(
+        &self,
+        coverage: &CoverageEvaluation,
+        policy: &ObjectPlacementPolicy,
+    ) -> Option<RepairEvaluationReasonCode> {
+        if !coverage.is_available {
+            return Some(RepairEvaluationReasonCode::PolicySloDeficit);
+        }
+
+        if coverage.diversity_deficit(policy.min_source_diversity) > 0
+            || coverage.concentration_deficit_bps(policy.max_node_fraction_bps) > 0
+        {
+            return Some(RepairEvaluationReasonCode::DiversityDeficit);
+        }
+
+        if coverage.coverage_deficit_bps(policy.target_coverage_bps) >= self.config.min_deficit_bps
+        {
+            return Some(RepairEvaluationReasonCode::PolicySloDeficit);
+        }
+
+        None
+    }
+
     /// Check if an object needs repair based on coverage.
     #[must_use]
-    pub const fn needs_repair(
+    pub fn needs_repair(
         &self,
         coverage: &CoverageEvaluation,
         policy: &ObjectPlacementPolicy,
     ) -> bool {
-        let health = coverage.health(policy);
-        let diversity_deficit = coverage.diversity_deficit(policy.min_source_diversity);
-        let concentration_deficit =
-            coverage.concentration_deficit_bps(policy.max_node_fraction_bps);
-
-        match health {
-            CoverageHealth::Unavailable => true,
-            CoverageHealth::Degraded => {
-                diversity_deficit > 0
-                    || concentration_deficit > 0
-                    || coverage.coverage_deficit_bps(policy.target_coverage_bps)
-                        >= self.config.min_deficit_bps
-            }
-            CoverageHealth::Healthy => false,
-        }
+        self.evaluate_reason_code(coverage, policy).is_some()
     }
 
     /// Calculate repair priority for an object.
@@ -910,15 +1048,60 @@ impl RepairController {
         symbol_store: &dyn SymbolStore,
         policies: &HashMap<ObjectId, ObjectPlacementPolicy>,
     ) {
-        let object_ids = symbol_store.list_zone(zone_id).await;
+        let _ = self
+            .evaluate_zone_with_report(zone_id, symbol_store, policies)
+            .await;
+    }
+
+    /// Evaluate all objects in a zone and return an explainable queue transcript.
+    pub async fn evaluate_zone_with_report(
+        &self,
+        zone_id: &ZoneId,
+        symbol_store: &dyn SymbolStore,
+        policies: &HashMap<ObjectId, ObjectPlacementPolicy>,
+    ) -> RepairEvaluationReport {
+        let mut object_ids = symbol_store.list_zone(zone_id).await;
+        object_ids.sort();
+        let tracked_objects = object_ids.iter().copied().collect::<BTreeSet<_>>();
+        let queue_depth_before = self.queue_depth();
+        let pruned_stale_requests = self.prune_zone_repairs(zone_id, &tracked_objects);
+        let mut decisions = Vec::with_capacity(object_ids.len());
 
         for object_id in object_ids {
             let policy = match policies.get(&object_id) {
                 Some(p) => p.clone(),
-                None => continue, // No policy, skip
+                None => {
+                    let action = if self.remove_queued_repair(&object_id) {
+                        RepairQueueAction::Remove
+                    } else {
+                        RepairQueueAction::Skip
+                    };
+                    decisions.push(RepairEvaluationDecision {
+                        object_id,
+                        action,
+                        reason_code: RepairEvaluationReasonCode::MissingPolicy,
+                        coverage_bps: None,
+                        distinct_nodes: None,
+                        priority: None,
+                    });
+                    continue;
+                }
             };
 
             let Some(dist) = symbol_store.get_distribution(&object_id).await else {
+                let action = if self.remove_queued_repair(&object_id) {
+                    RepairQueueAction::Remove
+                } else {
+                    RepairQueueAction::Skip
+                };
+                decisions.push(RepairEvaluationDecision {
+                    object_id,
+                    action,
+                    reason_code: RepairEvaluationReasonCode::MissingDistribution,
+                    coverage_bps: None,
+                    distinct_nodes: None,
+                    priority: None,
+                });
                 continue;
             };
 
@@ -952,16 +1135,46 @@ impl RepairController {
                 );
             }
 
-            if self.needs_repair(&coverage, &policy) {
+            if let Some(reason_code) = self.evaluate_reason_code(&coverage, &policy) {
                 let priority = self.calculate_priority(&coverage, &policy);
-                self.queue_repair(RepairRequest {
+                let action = self.upsert_repair(RepairRequest {
                     object_id,
                     zone_id: zone_id.clone(),
-                    coverage,
+                    coverage: coverage.clone(),
                     policy,
                     priority,
                 });
+                decisions.push(RepairEvaluationDecision {
+                    object_id,
+                    action,
+                    reason_code,
+                    coverage_bps: Some(coverage.coverage_bps),
+                    distinct_nodes: Some(coverage.distinct_nodes),
+                    priority: Some(priority),
+                });
+            } else {
+                let action = if self.remove_queued_repair(&object_id) {
+                    RepairQueueAction::Remove
+                } else {
+                    RepairQueueAction::Skip
+                };
+                decisions.push(RepairEvaluationDecision {
+                    object_id,
+                    action,
+                    reason_code: RepairEvaluationReasonCode::Healthy,
+                    coverage_bps: Some(coverage.coverage_bps),
+                    distinct_nodes: Some(coverage.distinct_nodes),
+                    priority: None,
+                });
             }
+        }
+
+        RepairEvaluationReport {
+            zone_id: zone_id.clone(),
+            queue_depth_before,
+            queue_depth_after: self.queue_depth(),
+            pruned_stale_requests,
+            decisions,
         }
     }
 
@@ -3147,7 +3360,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_dedup_preserves_first_inserted() {
+    fn queue_dedup_refreshes_existing_request() {
         let controller = RepairController::new(RepairControllerConfig::default());
         let id = ObjectId::from_bytes([60; 32]);
 
@@ -3167,10 +3380,10 @@ mod tests {
         };
 
         controller.queue_repair(req1);
-        controller.queue_repair(req2); // should be ignored
+        controller.queue_repair(req2);
 
         let dequeued = controller.next_repair().unwrap();
-        assert_eq!(dequeued.priority, 100); // first one was kept
+        assert_eq!(dequeued.priority, 999);
         assert!(controller.next_repair().is_none());
     }
 
@@ -4100,6 +4313,54 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    #[test]
+    fn repair_evaluation_reason_code_serde_roundtrip() {
+        for code in [
+            RepairEvaluationReasonCode::PolicySloDeficit,
+            RepairEvaluationReasonCode::DiversityDeficit,
+            RepairEvaluationReasonCode::Healthy,
+            RepairEvaluationReasonCode::MissingPolicy,
+            RepairEvaluationReasonCode::MissingDistribution,
+        ] {
+            let json = serde_json::to_string(&code).unwrap();
+            let rt: RepairEvaluationReasonCode = serde_json::from_str(&json).unwrap();
+            assert_eq!(rt, code);
+            assert_eq!(rt.as_str(), code.as_str());
+        }
+    }
+
+    #[test]
+    fn repair_evaluation_report_serde_roundtrip() {
+        let report = RepairEvaluationReport {
+            zone_id: test_zone_id(),
+            queue_depth_before: 1,
+            queue_depth_after: 0,
+            pruned_stale_requests: 1,
+            decisions: vec![
+                RepairEvaluationDecision {
+                    object_id: ObjectId::from_bytes([0xA1; 32]),
+                    action: RepairQueueAction::Refresh,
+                    reason_code: RepairEvaluationReasonCode::PolicySloDeficit,
+                    coverage_bps: Some(7_500),
+                    distinct_nodes: Some(2),
+                    priority: Some(125),
+                },
+                RepairEvaluationDecision {
+                    object_id: ObjectId::from_bytes([0xA2; 32]),
+                    action: RepairQueueAction::Skip,
+                    reason_code: RepairEvaluationReasonCode::Healthy,
+                    coverage_bps: Some(10_000),
+                    distinct_nodes: Some(3),
+                    priority: None,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let rt: RepairEvaluationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, report);
+    }
+
     // --- RepairCycleBudget tests ---
 
     #[test]
@@ -4669,6 +4930,54 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn evaluate_zone_refresh_preserves_global_priority_order() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let current_zone = test_zone_id();
+        let other_zone: ZoneId = "z:other".parse().unwrap();
+        let current_object = ObjectId::from_bytes([12; 32]);
+        let other_object = ObjectId::from_bytes([13; 32]);
+
+        // 5 of 10 source symbols -> refreshed request should become unavailable/high priority.
+        seed_planner_object(&store, current_object, 10, 5, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        policies.insert(current_object, test_policy());
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        controller.queue_repair(RepairRequest {
+            object_id: other_object,
+            zone_id: other_zone.clone(),
+            coverage: test_coverage(9, 10),
+            policy: test_policy(),
+            priority: 10,
+        });
+        controller.queue_repair(RepairRequest {
+            object_id: current_object,
+            zone_id: current_zone.clone(),
+            coverage: test_coverage(9, 10),
+            policy: test_policy(),
+            priority: 10,
+        });
+
+        let report = controller
+            .evaluate_zone_with_report(&current_zone, &store, &policies)
+            .await;
+        assert_eq!(report.queue_depth_before, 2);
+        assert_eq!(report.queue_depth_after, 2);
+        assert_eq!(report.pruned_stale_requests, 0);
+        assert_eq!(report.decisions.len(), 1);
+        assert_eq!(report.decisions[0].action, RepairQueueAction::Refresh);
+
+        let first = controller.next_repair().expect("refreshed request first");
+        assert_eq!(first.object_id, current_object);
+        assert!(first.priority > 10);
+
+        let second = controller.next_repair().expect("other-zone request second");
+        assert_eq!(second.object_id, other_object);
+        assert_eq!(second.zone_id, other_zone);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn evaluate_zone_queues_multiple_deficit_objects_by_priority() {
         let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
         let zone = test_zone_id();
@@ -4699,6 +5008,100 @@ mod tests {
             first.priority >= second.priority,
             "worse deficit object should have higher or equal priority"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn evaluate_zone_with_report_exposes_queue_refresh_and_policy_removal() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid = ObjectId::from_bytes([24; 32]);
+        seed_planner_object(&store, oid, 10, 7, 64, &[1]).await;
+
+        let mut policies = HashMap::new();
+        policies.insert(oid, test_policy());
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+
+        let first = controller
+            .evaluate_zone_with_report(&zone, &store, &policies)
+            .await;
+        let first_decision = first
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == oid)
+            .expect("deficit object should be reported");
+        assert_eq!(first.queue_depth_before, 0);
+        assert_eq!(first.queue_depth_after, 1);
+        assert_eq!(first.pruned_stale_requests, 0);
+        assert_eq!(first_decision.action, RepairQueueAction::Queue);
+        assert_eq!(
+            first_decision.reason_code,
+            RepairEvaluationReasonCode::PolicySloDeficit
+        );
+        assert_eq!(first_decision.coverage_bps, Some(7000));
+        assert_eq!(first_decision.distinct_nodes, Some(1));
+        assert_eq!(first_decision.priority, Some(130));
+
+        let second = controller
+            .evaluate_zone_with_report(&zone, &store, &policies)
+            .await;
+        let second_decision = second
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == oid)
+            .expect("refreshed object should be reported");
+        assert_eq!(second.queue_depth_before, 1);
+        assert_eq!(second.queue_depth_after, 1);
+        assert_eq!(second_decision.action, RepairQueueAction::Refresh);
+        assert_eq!(
+            second_decision.reason_code,
+            RepairEvaluationReasonCode::PolicySloDeficit
+        );
+        assert_eq!(second_decision.priority, Some(130));
+
+        let third = controller
+            .evaluate_zone_with_report(&zone, &store, &HashMap::new())
+            .await;
+        let third_decision = third
+            .decisions
+            .iter()
+            .find(|decision| decision.object_id == oid)
+            .expect("policy removal should be reported");
+        assert_eq!(third.queue_depth_before, 1);
+        assert_eq!(third.queue_depth_after, 0);
+        assert_eq!(third_decision.action, RepairQueueAction::Remove);
+        assert_eq!(
+            third_decision.reason_code,
+            RepairEvaluationReasonCode::MissingPolicy
+        );
+        assert_eq!(third_decision.coverage_bps, None);
+        assert_eq!(third_decision.priority, None);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn evaluate_zone_with_report_prunes_missing_object_requests() {
+        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        let zone = test_zone_id();
+        let oid = ObjectId::from_bytes([0x93; 32]);
+        seed_planner_object(&store, oid, 10, 5, 64, &[1]).await;
+
+        let policies = HashMap::from([(oid, test_policy())]);
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let initial = controller
+            .evaluate_zone_with_report(&zone, &store, &policies)
+            .await;
+        assert_eq!(initial.queue_depth_after, 1);
+
+        store.delete_object(&oid).await.unwrap();
+
+        let removed = controller
+            .evaluate_zone_with_report(&zone, &store, &policies)
+            .await;
+        assert_eq!(removed.queue_depth_before, 1);
+        assert_eq!(removed.queue_depth_after, 0);
+        assert_eq!(removed.pruned_stale_requests, 1);
+        assert!(removed.decisions.is_empty());
+        assert_eq!(controller.queue_depth(), 0);
     }
 
     // --- Acceptance: plan_zone produces actionable plans ---

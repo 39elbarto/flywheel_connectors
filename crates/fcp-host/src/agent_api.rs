@@ -15,7 +15,7 @@ use std::fmt;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use fcp_core::{ConnectorId, OperationId};
+use fcp_kernel::{ConnectorId, OperationId};
 use serde::{Deserialize, Serialize};
 
 use crate::ToolDescriptor;

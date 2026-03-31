@@ -1,6 +1,6 @@
 //! Host-side rollout control for staged connector deployments.
 //!
-//! This module bridges the generic lifecycle primitives in `fcp-core` with
+//! This module bridges the generic lifecycle primitives in `fcp-kernel` with
 //! host-observed health signals:
 //! - registry self-check results
 //! - connector availability/degradation status
@@ -8,17 +8,17 @@
 //! - process uptime and crash-loop detection
 //!
 //! The controller persists lifecycle state through the provided
-//! [`fcp_core::LifecycleManager`] and emits deterministic evidence bundles for
+//! [`fcp_kernel::LifecycleManager`] and emits deterministic evidence bundles for
 //! each scheduling/evaluation decision.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use fcp_core::{
-    CanaryPolicy, ConnectorHealth, ConnectorId, CrashLoopDetector, LifecycleError,
-    LifecycleManager, LifecycleRecord, LifecycleState, RolloutPolicy, SelfCheckReport,
-    SelfCheckStatus, TransitionReason,
+use fcp_core::{ConnectorHealth, RolloutPolicy};
+use fcp_kernel::{
+    CanaryPolicy, ConnectorId, CrashLoopDetector, LifecycleError, LifecycleManager,
+    LifecycleRecord, LifecycleState, SelfCheckReport, SelfCheckStatus, TransitionReason,
 };
 pub use fcp_kernel::{
     RolloutAuditEvent, RolloutDecision, RolloutEvidence, RolloutObservation, RolloutOutcome,
@@ -846,9 +846,10 @@ mod tests {
 
     use async_trait::async_trait;
     use fcp_async_core::sync::RwLock;
-    use fcp_core::{
-        AgentHint, ApprovalMode, CapabilityId, IdempotencyClass, Introspection, LifecycleStatus,
-        OperationId, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier,
+    use fcp_core::{CapabilityId, RiskLevel, SafetyTier};
+    use fcp_kernel::{
+        AgentHint, ApprovalMode, ConnectorId, IdempotencyClass, Introspection, LifecycleStatus,
+        OperationId, OperationInfo, RateLimitDeclarations,
     };
 
     fn connector_id() -> ConnectorId {

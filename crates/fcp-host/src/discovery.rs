@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::RwLock;
 use fcp_core::{
-    AgentHint, ApprovalMode, ApprovalToken, CapabilityId, CapabilityToken, ConnectorHealth,
-    ConnectorId, IdempotencyClass, Introspection, OperationInfo, RateLimitDeclarations, RequestId,
-    RiskLevel, SafetyTier, SelfCheckReport, UsageBudgetSnapshot, ZoneId,
+    ApprovalToken, CapabilityId, CapabilityToken, ConnectorHealth, RiskLevel, SafetyTier, ZoneId,
+};
+use fcp_kernel::{
+    AgentHint, ApprovalMode, ConnectorId, IdempotencyClass, Introspection, OperationInfo,
+    RateLimitDeclarations, RequestId, SelfCheckReport, UsageBudgetSnapshot,
 };
 use serde::{Deserialize, Serialize};
 
@@ -521,7 +523,7 @@ impl From<&OperationInfo> for ToolDescriptor {
             ),
             idempotent: matches!(
                 op.idempotency,
-                fcp_core::IdempotencyClass::Strict | fcp_core::IdempotencyClass::BestEffort
+                IdempotencyClass::Strict | IdempotencyClass::BestEffort
             ),
             // OperationInfo alone does not prove live simulate support.
             supports_simulate: None,
@@ -1382,7 +1384,7 @@ impl DiscoveryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::SelfCheckStatus;
+    use fcp_kernel::SelfCheckStatus;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -2671,9 +2673,8 @@ mod tests {
 
     #[test]
     fn preflight_response_serialization_roundtrip() {
-        use fcp_core::{
-            BudgetEnforcement, BudgetStatus, UsageBudgetUsage, UsageMetricKind, ZoneId,
-        };
+        use fcp_core::ZoneId;
+        use fcp_kernel::{BudgetEnforcement, BudgetStatus, UsageBudgetUsage, UsageMetricKind};
 
         let mut resp = PreflightResponse::denied("rate limited");
         resp.missing_capabilities = vec!["cap.send".to_string()];
@@ -2827,7 +2828,8 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     fn make_operation(id: &str, description: Option<&str>) -> OperationInfo {
-        use fcp_core::{OperationId, RateLimit};
+        use fcp_core::RateLimit;
+        use fcp_kernel::OperationId;
         OperationInfo {
             id: OperationId::new(id).expect("valid operation id"),
             summary: format!("{id} summary"),
@@ -2976,7 +2978,7 @@ mod tests {
 
     #[test]
     fn tool_descriptor_from_operation_with_declarations_overrides_rate_limits() {
-        use fcp_core::RateLimitDeclarations;
+        use fcp_kernel::RateLimitDeclarations;
         let op = make_operation("send_msg", None);
         let mut decls = RateLimitDeclarations {
             limits: vec![],
@@ -2992,7 +2994,7 @@ mod tests {
 
     #[test]
     fn tool_descriptor_from_operation_with_declarations_no_match() {
-        use fcp_core::RateLimitDeclarations;
+        use fcp_kernel::RateLimitDeclarations;
         let op = make_operation("send_msg", None);
         let decls = RateLimitDeclarations {
             limits: vec![],

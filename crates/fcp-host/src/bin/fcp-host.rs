@@ -31,13 +31,11 @@ use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ApprovalMode, ApprovalToken, CapabilityVerifier, ConnectorHealth, ConnectorId,
-    CostEstimateConfidence, Decision, DecisionReceiptPolicy, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, LifecycleError,
-    LifecycleManager, LifecycleState, LifecycleStatus, ObjectHeader, PolicySimulationInput,
-    Provenance, RequestId, ResourceAvailability, RolloutPolicy, SafetyTier, SelfCheckReport,
-    SimulateRequest, SimulateResponse, SoftwareBillOfMaterials, SupplyChainAttestation,
-    TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy, simulate_policy_decision,
+    ApprovalMode, ApprovalToken, CapabilityVerifier, ConnectorHealth, CostEstimateConfidence,
+    Decision, DecisionReceiptPolicy, LifecycleStatus, ObjectHeader, PolicySimulationInput,
+    Provenance, ResourceAvailability, RolloutPolicy, SafetyTier, SoftwareBillOfMaterials,
+    SupplyChainAttestation, TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
+    simulate_policy_decision,
 };
 use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
@@ -72,6 +70,12 @@ use fcp_host::{
     diff_sanitized_config_values, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
+use fcp_kernel::{
+    ConnectorId, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
+    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError, LifecycleManager, LifecycleRecord,
+    LifecycleState, RequestId, SelfCheckReport, SelfCheckStatus, SimulateRequest, SimulateResponse,
+    TransitionReason, UsageMetric,
+};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -81,9 +85,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
-
-#[cfg(test)]
-use fcp_core::{LifecycleRecord, TransitionReason, UsageMetric};
 
 type ConnectorConfig = ManagedConnectorConfig;
 
@@ -3799,7 +3800,7 @@ async fn record_invoke_receipt_summary(
         receipt_id: receipt_id.to_string(),
         connector_id: connector_id.to_owned(),
         operation: operation.to_owned(),
-        success: matches!(response.status, fcp_core::InvokeStatus::Ok),
+        success: matches!(response.status, InvokeStatus::Ok),
         duration_ms,
         idempotency_key,
         executed_at: Utc::now(),
@@ -4837,8 +4838,9 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use fcp_core::{
-        BudgetEnforcement, OperationId, UsageBudgetLimit, UsageBudgetPolicy, UsageMetricKind,
+    use fcp_kernel::{
+        BudgetEnforcement, HealthState, OperationId, UsageBudgetLimit, UsageBudgetPolicy,
+        UsageMetricKind,
     };
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
@@ -4986,7 +4988,7 @@ mod tests {
             "subprocess exited".into(),
         ));
 
-        assert_eq!(report.status, fcp_core::SelfCheckStatus::Failed);
+        assert_eq!(report.status, SelfCheckStatus::Failed);
         assert_eq!(report.reason_code.as_deref(), Some("self_check_runtime"));
         assert!(
             report
@@ -5167,7 +5169,7 @@ mod tests {
             .await
             .expect("health should not hang")
             .expect("health should succeed");
-        assert!(matches!(health.status, fcp_core::HealthState::Ready));
+        assert!(matches!(health.status, HealthState::Ready));
 
         let introspection =
             fcp_async_core::time::timeout(Duration::from_secs(2), connector.introspect())
@@ -5226,7 +5228,7 @@ mod tests {
         .expect("invoke should not hang")
         .expect("invoke should succeed");
 
-        assert_eq!(response.status, fcp_core::InvokeStatus::Ok);
+        assert_eq!(response.status, InvokeStatus::Ok);
         assert_eq!(
             response.result.expect("result")["echo"]["message"],
             "hello from host test"
@@ -5394,7 +5396,7 @@ mod tests {
                 .await
                 .expect("health should not hang")
                 .expect("health should succeed");
-            assert!(matches!(health.status, fcp_core::HealthState::Ready));
+            assert!(matches!(health.status, HealthState::Ready));
 
             let introspection =
                 fcp_async_core::time::timeout(Duration::from_secs(2), connector.introspect())

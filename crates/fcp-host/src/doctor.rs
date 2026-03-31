@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::{AsyncError, ExecutionContext};
-use fcp_core::{ConnectorId, SelfCheckReport, SelfCheckStatus, ZoneId};
+use fcp_core::ZoneId;
+use fcp_kernel::{ConnectorId, SelfCheckReport, SelfCheckStatus};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 
@@ -525,10 +526,8 @@ fn recommended_actions_from_checks(checks: &[CheckResult]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    use fcp_core::{
-        ConnectorHealth, ConnectorId, Introspection, RateLimitDeclarations, SelfCheckReport,
-        SelfCheckStatus,
-    };
+    use fcp_core::{ConnectorHealth, RateLimitDeclarations};
+    use fcp_kernel::{ConnectorId, Introspection, SelfCheckReport, SelfCheckStatus};
 
     use crate::{ConnectorArchetype, ConnectorRegistry, ConnectorSummary};
 

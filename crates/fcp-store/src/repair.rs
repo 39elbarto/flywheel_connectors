@@ -103,6 +103,9 @@ pub enum RepairReasonCode {
     /// Object is hot and should be pre-staged beyond the base policy floor.
     #[serde(rename = "repair.hot_object_pre_stage")]
     HotObjectPreStage,
+    /// Repair was deferred because the current cycle budget was exhausted.
+    #[serde(rename = "repair.deferred_cycle_budget")]
+    DeferredCycleBudget,
     /// Repair was deferred because the planner is power constrained.
     #[serde(rename = "repair.deferred_power_budget")]
     DeferredPowerBudget,
@@ -116,6 +119,7 @@ impl RepairReasonCode {
             Self::PolicySloDeficit => "repair.policy_slo_deficit",
             Self::DiversityDeficit => "repair.diversity_deficit",
             Self::HotObjectPreStage => "repair.hot_object_pre_stage",
+            Self::DeferredCycleBudget => "repair.deferred_cycle_budget",
             Self::DeferredPowerBudget => "repair.deferred_power_budget",
         }
     }
@@ -793,7 +797,7 @@ impl RepairController {
             RepairReasonCode::PolicySloDeficit | RepairReasonCode::DiversityDeficit => {
                 self.calculate_priority(coverage, policy)
             }
-            RepairReasonCode::DeferredPowerBudget => 0,
+            RepairReasonCode::DeferredCycleBudget | RepairReasonCode::DeferredPowerBudget => 0,
         }
     }
 
@@ -981,9 +985,13 @@ impl RepairController {
             if plan.budget_used.can_fit(&plan.budget, &action) {
                 plan.budget_used.record(&action);
                 plan.actions.push(action);
-            } else if options.power_saver || options.metered_network {
+            } else {
                 let mut deferred = action;
-                deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
+                deferred.reason_code = if options.power_saver || options.metered_network {
+                    RepairReasonCode::DeferredPowerBudget
+                } else {
+                    RepairReasonCode::DeferredCycleBudget
+                };
                 plan.deferred.push(deferred);
             }
         }
@@ -4281,6 +4289,10 @@ mod tests {
             "repair.hot_object_pre_stage"
         );
         assert_eq!(
+            RepairReasonCode::DeferredCycleBudget.as_str(),
+            "repair.deferred_cycle_budget"
+        );
+        assert_eq!(
             RepairReasonCode::DeferredPowerBudget.as_str(),
             "repair.deferred_power_budget"
         );
@@ -4298,6 +4310,7 @@ mod tests {
             RepairReasonCode::PolicySloDeficit,
             RepairReasonCode::DiversityDeficit,
             RepairReasonCode::HotObjectPreStage,
+            RepairReasonCode::DeferredCycleBudget,
             RepairReasonCode::DeferredPowerBudget,
         ] {
             let json = serde_json::to_string(&code).unwrap();
@@ -4686,6 +4699,10 @@ mod tests {
             "repair.hot_object_pre_stage"
         );
         assert_eq!(
+            RepairReasonCode::DeferredCycleBudget.as_str(),
+            "repair.deferred_cycle_budget"
+        );
+        assert_eq!(
             RepairReasonCode::DeferredPowerBudget.as_str(),
             "repair.deferred_power_budget"
         );
@@ -4697,6 +4714,7 @@ mod tests {
             RepairReasonCode::PolicySloDeficit,
             RepairReasonCode::DiversityDeficit,
             RepairReasonCode::HotObjectPreStage,
+            RepairReasonCode::DeferredCycleBudget,
             RepairReasonCode::DeferredPowerBudget,
         ] {
             assert_eq!(code.to_string(), code.as_str());

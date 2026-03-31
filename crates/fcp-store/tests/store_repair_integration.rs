@@ -652,11 +652,27 @@ fn repair_planner_cycle_improves_zone_slo() {
                 .plan_zone(&test_zone(), &store, &policies, &options)
                 .await;
             assert_eq!(before_plan.actions.len(), 2, "budget should cap repairs");
+            assert_eq!(
+                before_plan.deferred.len(),
+                1,
+                "over-budget work should stay visible as deferred"
+            );
             assert!(
                 before_plan
                     .actions
                     .iter()
                     .all(|action| action.reason_code == RepairReasonCode::PolicySloDeficit)
+            );
+            assert!(
+                before_plan
+                    .deferred
+                    .iter()
+                    .all(|action| action.reason_code == RepairReasonCode::DeferredCycleBudget)
+            );
+            assert_eq!(
+                before_plan.object_count_below_target,
+                before_plan.actions.len() + before_plan.deferred.len(),
+                "planner should account for both selected and deferred below-target objects",
             );
 
             for action in &before_plan.actions {
@@ -753,6 +769,14 @@ fn repair_planner_cycle_improves_zone_slo() {
                         "decode_ms": before_plan.budget_used.decode_ms
                     },
                     "planned_actions": before_plan.actions.iter().map(|action| {
+                        json!({
+                            "object_id": action.object_id.to_string(),
+                            "reason_code": action.reason_code.as_str(),
+                            "estimated_symbols": action.estimated_symbols,
+                            "estimated_bytes": action.estimated_bytes
+                        })
+                    }).collect::<Vec<_>>(),
+                    "deferred_actions": before_plan.deferred.iter().map(|action| {
                         json!({
                             "object_id": action.object_id.to_string(),
                             "reason_code": action.reason_code.as_str(),

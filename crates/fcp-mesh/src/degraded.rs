@@ -291,18 +291,21 @@ struct PendingReconstructionKey {
     zone_key_id: ZoneKeyId,
     epoch_id: u64,
     symbol_size: u16,
+    source_symbols_k: u16,
 }
 
 impl PendingReconstructionKey {
     #[must_use]
-    fn from_frame(frame: &FcpsFrame) -> Self {
-        Self {
+    fn from_frame(frame: &FcpsFrame) -> Option<Self> {
+        let source_symbols_k = frame.symbols.first()?.k;
+        Some(Self {
             object_id: frame.header.object_id.clone(),
             zone_id_hash: frame.header.zone_id_hash,
             zone_key_id: frame.header.zone_key_id.clone(),
             epoch_id: frame.header.epoch_id,
             symbol_size: frame.header.symbol_size,
-        }
+            source_symbols_k,
+        })
     }
 
     #[must_use]
@@ -355,7 +358,8 @@ impl DegradedModeDecoder {
             "degraded_mode: processing CONTROL_PLANE frame"
         );
 
-        let pending_key = PendingReconstructionKey::from_frame(frame);
+        let pending_key = PendingReconstructionKey::from_frame(frame)
+            .ok_or(DegradedTransportError::EmptyControlPlaneFrame)?;
         let object_id = pending_key.object_id.clone();
         let completed_payload = {
             let pending = self.pending.entry(pending_key.clone()).or_insert_with(|| {
@@ -366,7 +370,6 @@ impl DegradedModeDecoder {
 
         completed_payload.map_or(Ok(None), |payload| {
             self.finish_reconstruction(&pending_key, &object_id, frame, &payload)
-                .map(Some)
         })
     }
 
@@ -477,6 +480,27 @@ impl DegradedModeDecoder {
             );
             return Err(DegradedTransportError::EmptyControlPlaneFrame);
         }
+        let expected_k = frame.symbols[0].k;
+        if let Some((index, actual_k)) = frame
+            .symbols
+            .iter()
+            .enumerate()
+            .find_map(|(index, symbol)| (symbol.k != expected_k).then_some((index, symbol.k)))
+        {
+            warn!(
+                object_id = %frame.header.object_id,
+                frame_seq = frame.header.frame_seq,
+                expected_k,
+                actual_k,
+                symbol_index = index,
+                "degraded_mode: inconsistent source symbol count within CONTROL_PLANE frame"
+            );
+            return Err(DegradedTransportError::Decode(DecodeError::InvalidSymbol {
+                reason: format!(
+                    "control-plane frame mixes source symbol counts: first k={expected_k}, symbol[{index}] k={actual_k}"
+                ),
+            }));
+        }
         Ok(())
     }
 
@@ -521,12 +545,21 @@ impl DegradedModeDecoder {
         object_id: &ObjectId,
         frame: &FcpsFrame,
         payload: &[u8],
-    ) -> Result<ControlPlaneEnvelope, DegradedTransportError> {
-        let pending = self
-            .pending
-            .remove(pending_key)
-            .expect("pending reconstruction missing during decode");
-        let (schema_hash, object_payload) = Self::parse_reconstructed_payload(object_id, payload)?;
+    ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
+        let Some((schema_hash, object_payload)) =
+            Self::parse_reconstructed_payload(object_id, payload)
+        else {
+            // Keep the pending decoder state so later repair symbols can recover
+            // from a false-positive early decode candidate.
+            return Ok(None);
+        };
+        let pending = self.pending.remove(pending_key).ok_or_else(|| {
+            DegradedTransportError::Decode(DecodeError::Runtime {
+                reason: format!(
+                    "pending reconstruction missing during decode for object {object_id}"
+                ),
+            })
+        })?;
 
         info!(
             object_id = %object_id,
@@ -536,7 +569,7 @@ impl DegradedModeDecoder {
             "degraded_mode: control-plane object reconstruction complete"
         );
 
-        Ok(ControlPlaneEnvelope {
+        Ok(Some(ControlPlaneEnvelope {
             payload: object_payload,
             schema_hash,
             object_id: object_id.clone(),
@@ -544,20 +577,20 @@ impl DegradedModeDecoder {
             zone_key_id: pending.zone_key_id,
             epoch_id: frame.header.epoch_id,
             retention: pending.retention,
-        })
+        }))
     }
 
     fn parse_reconstructed_payload(
         object_id: &ObjectId,
         payload: &[u8],
-    ) -> Result<([u8; 32], Vec<u8>), DegradedTransportError> {
+    ) -> Option<([u8; 32], Vec<u8>)> {
         if payload.len() < 36 {
             warn!(
                 object_id = %object_id,
                 payload_len = payload.len(),
                 "degraded_mode: reconstructed payload too short for header"
             );
-            return Err(DegradedTransportError::Decode(DecodeError::Timeout));
+            return None;
         }
 
         let payload_len =
@@ -572,10 +605,10 @@ impl DegradedModeDecoder {
                 actual_len = payload.len().saturating_sub(36),
                 "degraded_mode: payload length mismatch"
             );
-            return Err(DegradedTransportError::Decode(DecodeError::Timeout));
+            return None;
         }
 
-        Ok((schema_hash, payload[36..36 + payload_len].to_vec()))
+        Some((schema_hash, payload[36..36 + payload_len].to_vec()))
     }
 }
 
@@ -1102,6 +1135,210 @@ mod tests {
 
         // Nothing to clear initially
         assert!(!decoder.clear_pending(&object_id));
+        assert_eq!(decoder.pending_count(), 0);
+    }
+
+    #[test]
+    fn parse_reconstructed_payload_rejects_malformed_candidates_without_timeout() {
+        let object_id = ObjectId::from_bytes([0x44; 32]);
+
+        assert!(DegradedModeDecoder::parse_reconstructed_payload(&object_id, &[0u8; 12]).is_none());
+
+        let mut oversized_claim = vec![0u8; 64];
+        oversized_claim[..4].copy_from_slice(&512u32.to_be_bytes());
+        oversized_claim[4..36].copy_from_slice(&[0xAB; 32]);
+        assert!(
+            DegradedModeDecoder::parse_reconstructed_payload(&object_id, &oversized_claim)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn decoder_keeps_pending_state_for_invalid_reconstructed_payload_header() {
+        let config = test_config();
+        let mut decoder = DegradedModeDecoder::new(config);
+        let zone_id = test_zone_id();
+        let object_id = ObjectId::from_bytes([0x66; 32]);
+
+        let mut malformed_payload = vec![0u8; 64];
+        malformed_payload[..4].copy_from_slice(&512u32.to_be_bytes());
+        malformed_payload[4..36].copy_from_slice(&[0xCD; 32]);
+
+        let frame = FcpsFrame {
+            header: FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+                symbol_count: 1,
+                total_payload_len: u32::try_from(
+                    SymbolRecord {
+                        esi: 0,
+                        k: 1,
+                        data: malformed_payload.clone(),
+                        auth_tag: [0u8; 16],
+                    }
+                    .wire_size(),
+                )
+                .expect("symbol wire size should fit in u32"),
+                object_id: object_id.clone(),
+                symbol_size: 64,
+                zone_key_id: ZoneKeyId::from_bytes([0x11; 8]),
+                zone_id_hash: zone_id.hash(),
+                epoch_id: 9,
+                sender_instance_id: 1,
+                frame_seq: 0,
+            },
+            symbols: vec![SymbolRecord {
+                esi: 0,
+                k: 1,
+                data: malformed_payload,
+                auth_tag: [0u8; 16],
+            }],
+        };
+
+        let result = decoder
+            .process_frame(&frame, &zone_id, RetentionClass::Required)
+            .expect("malformed reconstructed candidate should be treated as incomplete");
+        assert!(result.is_none());
+        assert_eq!(decoder.pending_count(), 1);
+
+        let status = decoder
+            .get_status(&object_id)
+            .expect("pending decode status should be retained");
+        assert_eq!(status.received, 1);
+        assert!(status.needed >= 1);
+        assert!(!status.likely_complete);
+    }
+
+    #[test]
+    fn decoder_rejects_frame_with_mixed_source_symbol_counts() {
+        let config = test_config();
+        let mut decoder = DegradedModeDecoder::new(config);
+        let zone_id = test_zone_id();
+
+        let frame = FcpsFrame {
+            header: FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+                symbol_count: 2,
+                total_payload_len: u32::try_from(
+                    SymbolRecord {
+                        esi: 0,
+                        k: 2,
+                        data: vec![0x11; 64],
+                        auth_tag: [0u8; 16],
+                    }
+                    .wire_size()
+                        + SymbolRecord {
+                            esi: 1,
+                            k: 3,
+                            data: vec![0x22; 64],
+                            auth_tag: [0u8; 16],
+                        }
+                        .wire_size(),
+                )
+                .expect("symbol wire size should fit in u32"),
+                object_id: ObjectId::from_bytes([0x77; 32]),
+                symbol_size: 64,
+                zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
+                zone_id_hash: zone_id.hash(),
+                epoch_id: 10,
+                sender_instance_id: 2,
+                frame_seq: 7,
+            },
+            symbols: vec![
+                SymbolRecord {
+                    esi: 0,
+                    k: 2,
+                    data: vec![0x11; 64],
+                    auth_tag: [0u8; 16],
+                },
+                SymbolRecord {
+                    esi: 1,
+                    k: 3,
+                    data: vec![0x22; 64],
+                    auth_tag: [0u8; 16],
+                },
+            ],
+        };
+
+        let err = decoder
+            .process_frame(&frame, &zone_id, RetentionClass::Required)
+            .expect_err("mixed-k frame should be rejected");
+        assert!(matches!(
+            &err,
+            DegradedTransportError::Decode(DecodeError::InvalidSymbol { reason })
+                if reason.contains("mixes source symbol counts")
+                    && reason.contains("k=2")
+                    && reason.contains("k=3")
+        ));
+        assert_eq!(decoder.pending_count(), 0);
+    }
+
+    #[test]
+    fn decoder_separates_pending_reconstructions_by_source_symbol_count() {
+        let config = test_config();
+        let mut decoder = DegradedModeDecoder::new(config);
+        let zone_id = test_zone_id();
+        let object_id = ObjectId::from_bytes([0x88; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x44; 8]);
+
+        let frame_k2 = FcpsFrame {
+            header: FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+                symbol_count: 1,
+                total_payload_len: u32::try_from(
+                    SymbolRecord {
+                        esi: 0,
+                        k: 2,
+                        data: vec![0xAA; 64],
+                        auth_tag: [0u8; 16],
+                    }
+                    .wire_size(),
+                )
+                .expect("symbol wire size should fit in u32"),
+                object_id: object_id.clone(),
+                symbol_size: 64,
+                zone_key_id: zone_key_id.clone(),
+                zone_id_hash: zone_id.hash(),
+                epoch_id: 12,
+                sender_instance_id: 3,
+                frame_seq: 11,
+            },
+            symbols: vec![SymbolRecord {
+                esi: 0,
+                k: 2,
+                data: vec![0xAA; 64],
+                auth_tag: [0u8; 16],
+            }],
+        };
+        let frame_k3 = frame_with_symbols(
+            &FcpsFrame {
+                header: FcpsFrameHeader {
+                    frame_seq: 12,
+                    ..frame_k2.header.clone()
+                },
+                symbols: vec![],
+            },
+            vec![SymbolRecord {
+                esi: 0,
+                k: 3,
+                data: vec![0xBB; 64],
+                auth_tag: [0u8; 16],
+            }],
+        );
+
+        let result_k2 = decoder
+            .process_frame(&frame_k2, &zone_id, RetentionClass::Required)
+            .expect("first frame should start pending reconstruction");
+        let result_k3 = decoder
+            .process_frame(&frame_k3, &zone_id, RetentionClass::Required)
+            .expect("different-k frame should not alias existing pending reconstruction");
+
+        assert!(result_k2.is_none());
+        assert!(result_k3.is_none());
+        assert_eq!(decoder.pending_count(), 2);
+        assert!(decoder.clear_pending(&object_id));
         assert_eq!(decoder.pending_count(), 0);
     }
 

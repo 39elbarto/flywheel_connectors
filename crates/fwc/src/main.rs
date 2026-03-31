@@ -85,7 +85,7 @@
     clippy::only_used_in_recursion,
     clippy::needless_pass_by_ref_mut,
     clippy::map_identity,
-    clippy::question_mark_used,
+    clippy::question_mark_used
 )]
 
 #[allow(dead_code)] // Access-planning command family.
@@ -1996,6 +1996,10 @@ struct ExportToolsArgs {
     #[arg(long, default_value_t = false)]
     no_hints: bool,
 
+    /// Exclude examples from descriptions.
+    #[arg(long, default_value_t = false)]
+    no_examples: bool,
+
     /// Write output to a file instead of stdout.
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -2659,10 +2663,7 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
         catalog.connectors.clone()
     };
 
-    let mut config = serve_mcp::McpServerConfig::new();
-    if let Some(connector) = &args.connector {
-        config = config.with_connector_filter(connector.clone());
-    }
+    let config = serve_mcp_config(args.connector.as_ref().and(connectors.first()));
 
     let mut tools = Vec::new();
     for connector in &connectors {
@@ -2698,6 +2699,16 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
         text: String::new(),
         exit_code: ExitCode::SUCCESS,
     })
+}
+
+fn serve_mcp_config(
+    selected_connector: Option<&HostConnectorRecord>,
+) -> serve_mcp::McpServerConfig {
+    let mut config = serve_mcp::McpServerConfig::new();
+    if let Some(connector) = selected_connector {
+        config = config.with_connector_filter(connector.slug.clone());
+    }
+    config
 }
 
 fn mcp_tool_call_response(
@@ -13240,14 +13251,7 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
 
     let catalog = DiscoveryCatalog::load()?;
 
-    let options = export_tools::ExportOptions {
-        include_safety_metadata: !args.no_safety,
-        include_ai_hints: !args.no_hints,
-        include_examples: !args.no_hints,
-        strip_prefix: args.strip_prefix.clone(),
-        risk_max: args.risk_max.clone(),
-        capability_filter: args.capability.clone(),
-    };
+    let options = export_tools_options(args);
 
     // Collect connectors (one or all).
     let connectors: Vec<&DiscoveredConnector> = if let Some(selector) = &args.connector {
@@ -13358,14 +13362,7 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
 fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<DispatchOutcome> {
     let client = HostAdminClient::new(host)?;
     let (catalog, _) = client.catalog(None)?;
-    let options = export_tools::ExportOptions {
-        include_safety_metadata: !args.no_safety,
-        include_ai_hints: !args.no_hints,
-        include_examples: !args.no_hints,
-        strip_prefix: args.strip_prefix.clone(),
-        risk_max: args.risk_max.clone(),
-        capability_filter: args.capability.clone(),
-    };
+    let options = export_tools_options(args);
     let connectors = if let Some(selector) = &args.connector {
         match catalog.resolve_connector(selector) {
             Ok(connector) => vec![connector.clone()],
@@ -13486,6 +13483,17 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
         payload,
         exit_code: CliExitCode::Success,
     })
+}
+
+fn export_tools_options(args: &ExportToolsArgs) -> export_tools::ExportOptions {
+    export_tools::ExportOptions {
+        include_safety_metadata: !args.no_safety,
+        include_ai_hints: !args.no_hints,
+        include_examples: !args.no_examples,
+        strip_prefix: args.strip_prefix.clone(),
+        risk_max: args.risk_max.clone(),
+        capability_filter: args.capability.clone(),
+    }
 }
 
 #[allow(dead_code, clippy::too_many_lines)]
@@ -22860,6 +22868,7 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    use super::{ExportToolsArgs, export_tools};
     use std::collections::BTreeMap as StdBTreeMap;
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -25271,6 +25280,58 @@ deny_ptrace = true
             "offline_serving",
         );
         assert_eq!(payload["tool_provenance"][0]["availability"], "unknown");
+    }
+
+    #[test]
+    fn export_tools_options_do_not_disable_examples_when_only_hints_are_disabled() {
+        let args = ExportToolsArgs {
+            tool_format: export_tools::ToolSchemaFormat::Mcp,
+            connector: Some("github".to_owned()),
+            risk_max: Some("medium".to_owned()),
+            capability: Some("github.issue".to_owned()),
+            strip_prefix: Some("github.".to_owned()),
+            no_safety: true,
+            no_hints: true,
+            no_examples: false,
+            output: None,
+            offline: true,
+        };
+
+        let options = super::export_tools_options(&args);
+
+        assert!(!options.include_safety_metadata);
+        assert!(!options.include_ai_hints);
+        assert!(options.include_examples);
+        assert_eq!(options.strip_prefix.as_deref(), Some("github."));
+        assert_eq!(options.risk_max.as_deref(), Some("medium"));
+        assert_eq!(options.capability_filter.as_deref(), Some("github.issue"));
+    }
+
+    #[test]
+    fn prepare_cli_parses_export_tools_no_examples_flag() {
+        let prepared = prepare_cli(
+            &[
+                "fwc",
+                "export-tools",
+                "--offline",
+                "--format",
+                "mcp",
+                "--no-examples",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        )
+        .expect("export-tools --no-examples should parse");
+
+        match prepared.cli.command {
+            Commands::ExportTools(args) => {
+                assert!(args.offline);
+                assert!(args.no_examples);
+                assert!(!args.no_hints);
+            }
+            command => panic!("expected export-tools command, got {command:?}"),
+        }
     }
 
     #[test]
@@ -30916,6 +30977,39 @@ depends_on = ["missing"]
         assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "serve-mcp");
         assert_eq!(payload["error"]["type"], "unsupported-live-zone-filter");
+    }
+
+    #[test]
+    fn serve_mcp_config_uses_resolved_slug_for_canonical_connector_selector() {
+        let response: HostDiscoveryResponse =
+            serde_json::from_value(mock_discovery_response_json())
+                .expect("mock discovery response should deserialize");
+        let catalog = HostConnectorCatalog::from_response(&response);
+        let connector = catalog
+            .resolve_connector("fcp.github:enterprise:v1")
+            .expect("canonical connector id should resolve");
+        let introspection: HostIntrospectionResponse =
+            serde_json::from_value(mock_introspection_response_json())
+                .expect("mock introspection response should deserialize");
+        let tools = try_host_mcp_tool_definitions(connector, &introspection)
+            .expect("live MCP tool definitions should build");
+        let state = serve_mcp::state_from_tools(tools, super::serve_mcp_config(Some(connector)));
+        let response = serve_mcp::handle_request(
+            &state,
+            &serve_mcp::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: Some(json!(1)),
+                method: "tools/list".to_owned(),
+                params: None,
+            },
+        );
+        let tools = response.result().expect("tools/list should succeed")["tools"]
+            .as_array()
+            .expect("tools/list should return an array");
+
+        assert_eq!(state.config.connector_filter.as_deref(), Some("github"));
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "github.create_issue");
     }
 
     #[test]

@@ -750,9 +750,7 @@ fn tool_matches_server_filters(tool: &McpToolDefinition, config: &McpServerConfi
     connector_ok && zone_ok
 }
 
-fn filtered_tools(
-    state: &McpServerState,
-) -> impl Iterator<Item = &McpToolDefinition> + '_ {
+fn filtered_tools(state: &McpServerState) -> impl Iterator<Item = &McpToolDefinition> + '_ {
     state
         .tools
         .iter()
@@ -841,6 +839,10 @@ fn zone_violation_error(
     violation: ZoneViolation,
     token: Option<&CapabilityToken>,
 ) -> JsonRpcError {
+    let required_capability = tool
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.capability.as_deref());
     let available_zones = violation
         .available_in
         .iter()
@@ -863,7 +865,7 @@ fn zone_violation_error(
         "operation_id": tool.operation_id(),
         "zone_id": violation.zone.as_str(),
         "reason": violation.reason,
-        "required_capability": tool.name(),
+        "required_capability": required_capability,
         "available_capabilities": available_capabilities,
         "available_zones": available_zones,
     }))
@@ -2995,6 +2997,43 @@ mod tests {
         assert_eq!(data["zone_id"], "z:work");
         assert_eq!(data["reason"], "connector_not_in_zone");
         assert_eq!(data["available_zones"][0], "z:private");
+    }
+
+    #[test]
+    fn handle_tools_call_zone_violation_reports_annotated_required_capability() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_zone_filter("z:work"))
+            .with_tool(sample_private_tool().with_annotations(Some(
+                export_tools::McpToolAnnotations {
+                    risk_level: Some("low".to_owned()),
+                    safety_tier: Some("safe".to_owned()),
+                    idempotency: Some("strict".to_owned()),
+                    capability: Some("vault.secret_read".to_owned()),
+                    read_only: Some(true),
+                    destructive: Some(false),
+                },
+            )))
+            .build();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "vault.get_secret",
+                "arguments": {"path": "prod/api"},
+                "capabilityToken": sample_token("z:work"),
+            })),
+        );
+        let resp = handle_request(&state, &req);
+        let error = resp
+            .error
+            .as_ref()
+            .expect("zone violation should return an error");
+        let data = error
+            .data
+            .as_ref()
+            .expect("zone violation should include structured data");
+
+        assert_eq!(data["type"], "zone-violation");
+        assert_eq!(data["required_capability"], "vault.secret_read");
     }
 
     // ── handle_request: resources/list ──────────────────────────────

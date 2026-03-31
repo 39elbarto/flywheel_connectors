@@ -60,6 +60,7 @@ fn populate_fixture(
                         source_blocks: 1,
                         sub_blocks: 1,
                         alignment: 8,
+                        payload_hash: None,
                     },
                     source_symbols: 4,
                     first_symbol_at: 1_000_000,

@@ -995,6 +995,7 @@ async fn mirror_bundle_symbols_stores_descriptor_and_symbols() {
         .expect("symbol meta");
     assert_eq!(meta.object_id, mirror.binary_object_id);
     assert_eq!(meta.source_symbols, result.source_symbols);
+    assert_eq!(descriptor.oti.payload_hash, meta.oti.payload_hash);
     assert_eq!(
         symbol_store.symbol_count(&mirror.binary_object_id).await,
         result.total_symbols
@@ -1111,6 +1112,7 @@ async fn reconstruct_binary_from_symbol_subset_uses_repairs() {
                 source_blocks: descriptor.oti.source_blocks,
                 sub_blocks: descriptor.oti.sub_blocks,
                 alignment: descriptor.oti.alignment,
+                payload_hash: descriptor.oti.payload_hash,
             },
             source_symbols: descriptor.source_symbols,
             first_symbol_at: descriptor.mirrored_at,

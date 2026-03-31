@@ -1968,6 +1968,7 @@ mod tests {
                             source_blocks: 1,
                             sub_blocks: 1,
                             alignment: 1,
+                            payload_hash: None,
                         },
                         source_symbols: 2,
                         first_symbol_at: 1,

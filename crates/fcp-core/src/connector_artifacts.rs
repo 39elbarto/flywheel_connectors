@@ -53,6 +53,9 @@ pub struct ConnectorBinaryTransmissionInfo {
     pub sub_blocks: u16,
     /// Symbol alignment.
     pub alignment: u8,
+    /// Optional end-to-end payload hash used to reject false-positive decodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_hash: Option<[u8; 32]>,
 }
 
 impl ConnectorBinaryTransmissionInfo {
@@ -70,7 +73,14 @@ impl ConnectorBinaryTransmissionInfo {
             source_blocks,
             sub_blocks,
             alignment,
+            payload_hash: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_payload_hash(mut self, payload_hash: [u8; 32]) -> Self {
+        self.payload_hash = Some(payload_hash);
+        self
     }
 }
 
@@ -174,7 +184,8 @@ mod tests {
             },
             binary_hash: "sha256:abc".into(),
             encoded_body_hash: "sha256:def".into(),
-            oti: ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8),
+            oti: ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8)
+                .with_payload_hash([0xAB; 32]),
             source_symbols: 32,
             total_symbols: 48,
             mirrored_at: 1_700_000_000,
@@ -183,5 +194,22 @@ mod tests {
         let json = serde_json::to_string(&descriptor).expect("serialize");
         let roundtrip: ConnectorBinarySymbolSet = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(roundtrip, descriptor);
+    }
+
+    #[test]
+    fn connector_binary_transmission_info_defaults_missing_payload_hash() {
+        let json = r#"{
+            "transfer_length": 4096,
+            "symbol_size": 128,
+            "source_blocks": 1,
+            "sub_blocks": 1,
+            "alignment": 8
+        }"#;
+        let info: ConnectorBinaryTransmissionInfo =
+            serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            info,
+            ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8)
+        );
     }
 }

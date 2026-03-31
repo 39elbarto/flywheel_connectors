@@ -103,6 +103,7 @@ fn test_object_meta(n: u8) -> ObjectSymbolMeta {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         },
         source_symbols: 10,
         first_symbol_at: 1000,

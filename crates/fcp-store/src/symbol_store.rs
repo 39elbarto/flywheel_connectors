@@ -569,6 +569,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 8,
+                payload_hash: None,
             },
             source_symbols: 16,
             first_symbol_at: 1_000_000,
@@ -1059,6 +1060,7 @@ mod tests {
                 source_blocks: 2,
                 sub_blocks: 4,
                 alignment: 16,
+                payload_hash: None,
             };
             let json = serde_json::to_string(&oti).unwrap();
             let deserialized: ObjectTransmissionInfo = serde_json::from_str(&json).unwrap();
@@ -1080,6 +1082,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 8,
+                payload_hash: None,
             };
             let copied = oti;
             let cloned = oti;
@@ -1668,6 +1671,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 4,
+                payload_hash: None,
             };
             let b = ObjectTransmissionInfo {
                 transfer_length: 512,
@@ -1675,6 +1679,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 4,
+                payload_hash: None,
             };
             assert_eq!(a, b);
 
@@ -1700,6 +1705,7 @@ mod tests {
                 source_blocks: 2,
                 sub_blocks: 1,
                 alignment: 8,
+                payload_hash: None,
             };
             let dbg = format!("{oti:?}");
             assert!(dbg.contains("ObjectTransmissionInfo"));
@@ -2255,6 +2261,7 @@ mod tests {
                 source_blocks: 2,
                 sub_blocks: 4,
                 alignment: 16,
+                payload_hash: None,
             };
             let json_str = serde_json::to_string(&oti).unwrap();
             assert!(json_str.contains("transfer_length"));
@@ -2305,6 +2312,7 @@ mod tests {
                     source_blocks: 3,
                     sub_blocks: 2,
                     alignment: 4,
+                    payload_hash: None,
                 },
                 source_symbols: 50,
                 first_symbol_at: 999_888_777,
@@ -2333,6 +2341,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         };
         let dbg = format!("{oti:?}");
         assert!(dbg.contains("ObjectTransmissionInfo"));
@@ -2347,6 +2356,7 @@ mod tests {
             source_blocks: 2,
             sub_blocks: 1,
             alignment: 4,
+            payload_hash: None,
         };
         let copied = oti;
         assert_eq!(oti, copied);
@@ -2360,6 +2370,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         };
         let b = ObjectTransmissionInfo {
             transfer_length: 512,
@@ -2367,6 +2378,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         };
         assert_eq!(a, b);
     }
@@ -2379,6 +2391,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         };
         let b = ObjectTransmissionInfo {
             transfer_length: 1024,
@@ -2386,6 +2399,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         };
         assert_ne!(a, b);
     }
@@ -2398,6 +2412,7 @@ mod tests {
             source_blocks: 4,
             sub_blocks: 2,
             alignment: 16,
+            payload_hash: None,
         };
         let json = serde_json::to_string(&oti).unwrap();
         let rt: ObjectTransmissionInfo = serde_json::from_str(&json).unwrap();
@@ -2528,6 +2543,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let rt: ObjectTransmissionInfo = serde_json::from_str(&json).unwrap();
@@ -2542,6 +2558,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 1,
+            payload_hash: None,
         };
         let b = a;
         assert_eq!(a, b);
@@ -2555,6 +2572,7 @@ mod tests {
             source_blocks: 2,
             sub_blocks: 1,
             alignment: 4,
+            payload_hash: None,
         };
         let dbg = format!("{info:?}");
         assert!(dbg.contains("ObjectTransmissionInfo"));
@@ -2585,6 +2603,7 @@ mod tests {
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 1,
+            payload_hash: None,
         };
         let oti: ObjectTransmissionInformation = info.into();
         assert_eq!(oti.transfer_length(), 2048);
@@ -2635,6 +2654,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 1,
+                payload_hash: None,
             },
             source_symbols: 16,
             first_symbol_at: 12345,
@@ -2655,6 +2675,7 @@ mod tests {
                 source_blocks: 1,
                 sub_blocks: 1,
                 alignment: 1,
+                payload_hash: None,
             },
             source_symbols: 16,
             first_symbol_at: 100,

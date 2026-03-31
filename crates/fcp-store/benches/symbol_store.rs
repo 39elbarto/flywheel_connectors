@@ -33,6 +33,7 @@ fn test_object_meta(object_id: ObjectId, source_symbols: u32) -> ObjectSymbolMet
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
+            payload_hash: None,
         },
         source_symbols,
         first_symbol_at: 1_000_000,

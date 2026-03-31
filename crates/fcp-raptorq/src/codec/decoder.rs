@@ -1071,8 +1071,27 @@ fn pivot_nonzero_columns(pivot_row: &[Gf256], n_cols: usize) -> Vec<usize> {
 }
 
 fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Option<Vec<usize>> {
+    let mut cols = Vec::new();
+    if sparse_update_columns_into(pivot_row, n_cols, &mut cols) {
+        Some(cols)
+    } else {
+        None
+    }
+}
+
+/// Check if sparse column update is beneficial and collect nonzero columns
+/// into a caller-provided buffer. Returns true if sparse mode should be used.
+///
+/// This variant reuses the `cols` Vec across calls in the Gaussian elimination
+/// inner loop to avoid per-pivot heap allocation.
+fn sparse_update_columns_into(
+    pivot_row: &[Gf256],
+    n_cols: usize,
+    cols: &mut Vec<usize>,
+) -> bool {
+    cols.clear();
     if n_cols == 0 {
-        return None;
+        return false;
     }
 
     // Equivalent threshold to should_use_sparse_row_update(pivot_nnz, n_cols).
@@ -1080,42 +1099,36 @@ fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Op
         n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
 
     if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
-        // Very small rows are sensitive to per-pivot heap allocation overhead.
-        // Use an allocation-free density pass; collect columns only if sparse.
+        // Very small rows: two-pass — first count, then collect.
         let mut sparse_nnz = 0usize;
         for coef in pivot_row.iter().take(n_cols) {
-            if coef.is_zero() {
-                continue;
-            }
-            sparse_nnz += 1;
-            if sparse_nnz > threshold {
-                return None;
+            if !coef.is_zero() {
+                sparse_nnz += 1;
+                if sparse_nnz > threshold {
+                    return false;
+                }
             }
         }
 
-        let mut cols = Vec::with_capacity(sparse_nnz.max(1));
         for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
             if !coef.is_zero() {
                 cols.push(idx);
             }
         }
-        return Some(cols);
+        return true;
     }
 
     // For larger rows, one-pass collection avoids an extra scan on sparse pivots.
-    let mut seen = 0usize;
-    let mut cols = Vec::with_capacity((threshold + 1).min(n_cols).max(1));
     for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
         if coef.is_zero() {
             continue;
         }
-        seen += 1;
-        if seen > threshold {
-            return None;
+        if cols.len() >= threshold {
+            return false;
         }
         cols.push(idx);
     }
-    Some(cols)
+    true
 }
 
 fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
@@ -1930,6 +1943,8 @@ impl InactivationDecoder {
             let mut row_used = vec![false; n_rows];
             let mut pivot_buf = vec![Gf256::ZERO; n_cols];
             let mut pivot_rhs = vec![0u8; symbol_size];
+            // Reusable buffer for sparse column indices — avoids per-pivot Vec allocation.
+            let mut sparse_col_buf = Vec::with_capacity(n_cols);
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -1962,7 +1977,8 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
+                let use_sparse =
+                    sparse_update_columns_into(&pivot_buf[..n_cols], n_cols, &mut sparse_col_buf);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -1974,8 +1990,8 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    if let Some(cols) = sparse_cols.as_ref() {
-                        for &c in cols {
+                    if use_sparse {
+                        for &c in &sparse_col_buf {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
                     } else {

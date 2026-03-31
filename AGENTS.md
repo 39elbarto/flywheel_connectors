@@ -707,6 +707,12 @@ rch queue                     # See active/waiting builds
 
 If rch or its workers are unavailable, it fails open — builds run locally as normal.
 
+Treat these `rch` outcomes as different failure classes:
+
+- **Remote command succeeded, artifact retrieval failed later**: if `rch` prints `Remote command finished: exit=0` and only then fails during artifact retrieval, the remote Cargo step already succeeded. Treat that as `rch` retrieval or stale-worker state, not a repo build failure.
+- **Remote command failed because the worker runtime drifted**: if remote stderr says the worker is missing the repo-pinned nightly from `rust-toolchain.toml` or otherwise cannot satisfy the requested toolchain, treat that as worker-image or worker-selection drift, not as a repo metadata-cycle regression.
+- **Local fail-open after remote failure**: in shared multi-agent sessions, do **not** let the unexpected local Cargo fallback continue. Preserve the remote stderr, inspect `rch status --json` or `rch workers capabilities --refresh --command 'cargo +<toolchain> check --lib'`, and route the fix toward worker maintenance, worker selection, or repo guidance rather than starting an unplanned local compilation storm.
+
 **Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
 
 ---

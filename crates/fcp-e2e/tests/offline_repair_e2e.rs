@@ -3,14 +3,23 @@
 //! Exercises the offline availability tracking, coverage evaluation,
 //! repair controller, and access pattern prediction subsystems end-to-end.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use fcp_core::{ObjectId, ObjectPlacementPolicy, ZoneId};
-use fcp_store::{
-    AccessPatternTracker, CoverageEvaluation, CoverageHealth, OfflineAccess, OfflineCapability,
-    OfflineStatus, RepairController, RepairControllerConfig, RepairRequest, RepairResult,
-    RepairStats, SymbolDistribution,
+use fcp_core::{
+    ObjectHeader, ObjectId, ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta,
+    StoredObject, ZoneId,
 };
+use fcp_store::{
+    AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig,
+    GcDecisionAction, GcReasonCode, GcRoots, MemoryObjectStore, MemoryObjectStoreConfig,
+    MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
+    ObjectTransmissionInfo, OfflineAccess, OfflineCapability, OfflineStatus, RepairController,
+    RepairControllerConfig, RepairPlanningOptions, RepairReasonCode, RepairRequest, RepairResult,
+    RepairStats, StoredSymbol, SymbolDistribution, SymbolMeta, SymbolStore,
+    snapshot_zone_lifecycle,
+};
+use serde_json::json;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1073,6 +1082,239 @@ fn offline_repair_full_flow() {
     assert_eq!(stats.repairs_attempted, 2);
     assert_eq!(stats.repairs_succeeded, 2);
     assert_eq!(stats.repairs_failed, 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn offline_repair_artifact_bundle_captures_lifecycle_and_gc_evidence() {
+    let zone = ZoneId::work();
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let controller = RepairController::new(default_repair_config());
+    let gc = GarbageCollector::new(GcConfig {
+        max_evictions_per_run: 4,
+        ..GcConfig::default()
+    });
+
+    let root_id = obj(b"artifact-root");
+    let payload_id = obj(b"artifact-payload");
+    let expired_id = obj(b"artifact-expired");
+    let placement = ObjectPlacementPolicy {
+        min_nodes: 2,
+        max_node_fraction_bps: 10_000,
+        preferred_devices: Vec::new(),
+        excluded_devices: Vec::new(),
+        target_coverage_bps: 10_000,
+        min_source_diversity: 2,
+    };
+
+    let object = |object_id: ObjectId,
+                  refs: Vec<ObjectId>,
+                  retention: RetentionClass,
+                  ttl_secs: Option<u64>,
+                  placement: Option<ObjectPlacementPolicy>,
+                  fill: u8| {
+        StoredObject {
+            object_id,
+            header: ObjectHeader {
+                schema: fcp_core::ConnectorBinarySymbolSet::schema(),
+                zone_id: zone.clone(),
+                created_at: 1_700_000_000,
+                provenance: Provenance::new(zone.clone()),
+                refs,
+                foreign_refs: vec![],
+                ttl_secs,
+                placement,
+            },
+            body: vec![fill; 64],
+            storage: StorageMeta { retention },
+        }
+    };
+
+    store
+        .put(object(
+            root_id,
+            vec![payload_id],
+            RetentionClass::Ephemeral,
+            None,
+            None,
+            0x11,
+        ))
+        .await
+        .expect("put root");
+    store
+        .put(object(
+            payload_id,
+            vec![],
+            RetentionClass::Lease { expires_at: 5_000 },
+            Some(600),
+            Some(placement.clone()),
+            0x22,
+        ))
+        .await
+        .expect("put payload");
+    store
+        .put(object(
+            expired_id,
+            vec![],
+            RetentionClass::Lease { expires_at: 500 },
+            None,
+            None,
+            0x33,
+        ))
+        .await
+        .expect("put expired lease");
+
+    symbol_store
+        .put_object_meta(ObjectSymbolMeta {
+            object_id: payload_id,
+            zone_id: zone.clone(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 1024,
+                symbol_size: 256,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 1,
+            },
+            source_symbols: 3,
+            first_symbol_at: 1_000,
+        })
+        .await
+        .expect("put payload meta");
+    for esi in 0..2 {
+        symbol_store
+            .put_symbol(StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: payload_id,
+                    esi,
+                    zone_id: zone.clone(),
+                    source_node: Some(1),
+                    stored_at: 1_000 + u64::from(esi),
+                },
+                data: vec![u8::try_from(esi).expect("esi fits in u8"); 256].into(),
+            })
+            .await
+            .expect("put degraded repair symbol");
+    }
+
+    let mut roots = GcRoots::new();
+    roots.set_checkpoint(root_id);
+
+    let policies = HashMap::from([(payload_id, placement.clone())]);
+    let plan_before = controller
+        .plan_zone(
+            &zone,
+            &symbol_store,
+            &policies,
+            &RepairPlanningOptions::default(),
+        )
+        .await;
+    assert_eq!(plan_before.actions.len(), 1);
+    assert_eq!(plan_before.actions[0].object_id, payload_id);
+    assert_eq!(
+        plan_before.actions[0].reason_code,
+        RepairReasonCode::PolicySloDeficit
+    );
+
+    let before_snapshot =
+        snapshot_zone_lifecycle(&zone, &roots, &store, Some(&symbol_store), 1_500)
+            .await
+            .expect("snapshot before repair");
+    assert_eq!(before_snapshot.object_count, 3);
+    assert_eq!(before_snapshot.reachable_count, 2);
+    assert_eq!(before_snapshot.unreachable_count, 1);
+    assert_eq!(before_snapshot.reconstructable_count, Some(0));
+    let payload_before = before_snapshot
+        .objects
+        .iter()
+        .find(|object| object.object_id == payload_id)
+        .expect("payload before snapshot");
+    assert!(payload_before.reachable_from_roots);
+    assert_eq!(payload_before.reconstructable, Some(false));
+    assert_eq!(payload_before.meets_placement_policy, Some(false));
+
+    symbol_store
+        .put_symbol(StoredSymbol {
+            meta: SymbolMeta {
+                object_id: payload_id,
+                esi: 2,
+                zone_id: zone.clone(),
+                source_node: Some(2),
+                stored_at: 1_600,
+            },
+            data: vec![0x7F; 256].into(),
+        })
+        .await
+        .expect("put repaired symbol");
+
+    let plan_after = controller
+        .plan_zone(
+            &zone,
+            &symbol_store,
+            &policies,
+            &RepairPlanningOptions::default(),
+        )
+        .await;
+    assert!(
+        plan_after.actions.is_empty(),
+        "recovered coverage should clear the repair plan"
+    );
+
+    let after_snapshot = snapshot_zone_lifecycle(&zone, &roots, &store, Some(&symbol_store), 2_000)
+        .await
+        .expect("snapshot after repair");
+    assert_eq!(after_snapshot.reconstructable_count, Some(1));
+    let payload_after = after_snapshot
+        .objects
+        .iter()
+        .find(|object| object.object_id == payload_id)
+        .expect("payload after snapshot");
+    assert_eq!(payload_after.reconstructable, Some(true));
+    assert_eq!(payload_after.meets_placement_policy, Some(true));
+
+    let gc_report = gc
+        .collect_with_transcript(&zone, &roots, &store, 1_500)
+        .await
+        .expect("gc with transcript");
+    assert_eq!(gc_report.result.evicted, 1);
+    assert_eq!(gc_report.result.expired_leases, 1);
+    assert!(
+        gc_report
+            .transcript
+            .decisions
+            .iter()
+            .any(|decision| decision.object_id == root_id
+                && decision.reason_code == GcReasonCode::RootCheckpoint)
+    );
+    assert!(
+        gc_report
+            .transcript
+            .decisions
+            .iter()
+            .any(|decision| decision.object_id == payload_id
+                && decision.reason_code == GcReasonCode::ReachableRef)
+    );
+    assert!(
+        gc_report
+            .transcript
+            .decisions
+            .iter()
+            .any(|decision| decision.object_id == expired_id
+                && decision.reason_code == GcReasonCode::LeaseExpired
+                && decision.action == GcDecisionAction::Evict)
+    );
+    assert!(!store.exists(&expired_id).await);
+
+    let artifact_bundle = json!({
+        "before_repair": before_snapshot,
+        "repair_plan_before": plan_before,
+        "after_repair": after_snapshot,
+        "repair_plan_after": plan_after,
+        "gc_report": gc_report,
+    });
+    assert_eq!(artifact_bundle["before_repair"]["object_count"], 3);
+    assert_eq!(artifact_bundle["after_repair"]["reconstructable_count"], 1);
+    assert_eq!(artifact_bundle["gc_report"]["result"]["expired_leases"], 1);
+    assert_eq!(artifact_bundle["gc_report"]["transcript"]["root_count"], 1);
 }
 
 #[test]

@@ -2222,8 +2222,7 @@ impl DiscoveredOperation {
         let rate_limits = summarize_operation_rate_limits(operation_id, operation, rate_limits);
         let search_actual_id_lower = operation_id.to_lowercase();
         let search_local_id_lower = local_id.to_lowercase();
-        let search_aliases_lower: Vec<String> =
-            aliases.iter().map(|a| a.to_lowercase()).collect();
+        let search_aliases_lower: Vec<String> = aliases.iter().map(|a| a.to_lowercase()).collect();
         let search_summary_lower = operation.description.to_lowercase();
         let search_when_to_use_lower = operation.ai_hints.when_to_use.to_lowercase();
         let search_capability_lower = operation.capability.as_str().to_lowercase();

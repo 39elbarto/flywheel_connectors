@@ -292,9 +292,7 @@ fn parse_chain(s: &str) -> Result<Vec<ChainSegment>, ExtractError> {
             }
         } else {
             // Field name — read until `.` or `[`
-            let end = remaining
-                .find(['.', '['])
-                .unwrap_or(remaining.len());
+            let end = remaining.find(['.', '[']).unwrap_or(remaining.len());
             let field = &remaining[..end];
             if field.is_empty() {
                 return Err(ExtractError::ParseError("empty field name in chain".into()));

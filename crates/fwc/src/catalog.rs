@@ -6315,7 +6315,8 @@ mod tests {
                 && cls.command != "unpin"
                 && cls.command != "rollout"
                 && cls.command != "config"
-                && cls.command != "lifecycle" // lifecycle inspects/mutates host state without per-call auth
+                && cls.command != "lifecycle"
+            // lifecycle inspects/mutates host state without per-call auth
             {
                 assert!(
                     cls.requires_capability_token || cls.may_need_approval,
@@ -7894,10 +7895,7 @@ mod tests {
         // is present but degrade gracefully without one.
         let hybrid_auth: Vec<&str> = COMMAND_CLASSIFICATIONS
             .iter()
-            .filter(|c| {
-                c.requires_capability_token
-                    && c.truth_source == CommandTruthSource::Hybrid
-            })
+            .filter(|c| c.requires_capability_token && c.truth_source == CommandTruthSource::Hybrid)
             .map(|c| c.command)
             .collect();
         for cmd in &auth {

@@ -416,11 +416,7 @@ pub fn format_results_toon(results: &[OpResult]) -> String {
     out.push('\n');
 
     out.push('\n');
-    let _ = writeln!(
-        out,
-        "{:<20}{:<24}{:<10}Status",
-        "ID", "Operation", "Wave"
-    );
+    let _ = writeln!(out, "{:<20}{:<24}{:<10}Status", "ID", "Operation", "Wave");
     out.push_str(&"-".repeat(64));
     out.push('\n');
 

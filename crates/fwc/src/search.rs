@@ -358,7 +358,7 @@ fn score_operation(
                 best_alias_match = Some(WEIGHT_OP_ID_EXACT);
                 break; // Can't do better than exact
             } else if alias.contains(token.as_str()) {
-                if best_alias_match.map_or(true, |b| b < WEIGHT_OP_ID_PARTIAL) {
+                if best_alias_match.is_none_or(|b| b < WEIGHT_OP_ID_PARTIAL) {
                     best_alias_match = Some(WEIGHT_OP_ID_PARTIAL);
                 }
             } else if best_alias_match.is_none() && identifier_has_fuzzy_match(alias, token) {

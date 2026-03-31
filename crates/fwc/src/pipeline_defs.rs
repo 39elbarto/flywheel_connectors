@@ -611,11 +611,7 @@ pub fn format_pipeline_result_toon(result: &PipelineResult) -> String {
     out.push('\n');
 
     out.push('\n');
-    let _ = writeln!(
-        out,
-        "{:<20}{:<12}{:<10}Details",
-        "Step", "Status", "Time"
-    );
+    let _ = writeln!(out, "{:<20}{:<12}{:<10}Details", "Step", "Status", "Time");
     out.push_str(&"-".repeat(60));
     out.push('\n');
 

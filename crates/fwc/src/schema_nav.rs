@@ -302,7 +302,10 @@ fn validate_type(schema: &Value, value: &Value, path: &str, errors: &mut Vec<Val
     // Check enum constraints
     if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
         if !enum_values.contains(value) {
-            let allowed: Vec<String> = enum_values.iter().map(std::string::ToString::to_string).collect();
+            let allowed: Vec<String> = enum_values
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
             errors.push(ValidationError {
                 path: path.to_owned(),
                 expected: format!("one of: {}", allowed.join(", ")),
@@ -815,9 +818,10 @@ fn describe_schema_inline(schema: &Value) -> String {
     }
     if let Some(type_str) = normalized.get("type").and_then(Value::as_str) {
         return match type_str {
-            "array" => normalized
-                .get("items")
-                .map_or_else(|| "[any]".to_owned(), |items| format!("[{}]", describe_schema_inline(items))),
+            "array" => normalized.get("items").map_or_else(
+                || "[any]".to_owned(),
+                |items| format!("[{}]", describe_schema_inline(items)),
+            ),
             "object" => describe_object_shape(&normalized),
             _ => type_str.to_owned(),
         };
@@ -926,9 +930,10 @@ fn summarize_object_member(schema: &Value) -> String {
     }
     if let Some(type_str) = preferred_types.first().map(String::as_str) {
         return match type_str {
-            "array" => normalized
-                .get("items")
-                .map_or_else(|| "[any]".to_owned(), |items| format!("[{}]", summarize_object_member(items))),
+            "array" => normalized.get("items").map_or_else(
+                || "[any]".to_owned(),
+                |items| format!("[{}]", summarize_object_member(items)),
+            ),
             "object" => "object".to_owned(),
             _ => type_str.to_owned(),
         };
@@ -1065,11 +1070,10 @@ fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
                     (Some(existing), Some(additional)) => {
                         let mut props = existing.clone();
                         for (name, prop_schema) in additional {
-                            let merged_prop = props
-                                .get(name)
-                                .map_or_else(|| prop_schema.clone(), |existing_prop| {
-                                    merge_schema_values(existing_prop, prop_schema)
-                                });
+                            let merged_prop = props.get(name).map_or_else(
+                                || prop_schema.clone(),
+                                |existing_prop| merge_schema_values(existing_prop, prop_schema),
+                            );
                             props.insert(name.clone(), merged_prop);
                         }
                         Value::Object(props)
@@ -1098,9 +1102,10 @@ fn merge_schema_values(base: &Value, overlay: &Value) -> Value {
                 );
             }
             "items" => {
-                let combined = merged
-                    .get("items")
-                    .map_or_else(|| overlay_value.clone(), |existing| merge_schema_values(existing, overlay_value));
+                let combined = merged.get("items").map_or_else(
+                    || overlay_value.clone(),
+                    |existing| merge_schema_values(existing, overlay_value),
+                );
                 merged.insert(key.clone(), combined);
             }
             _ => {

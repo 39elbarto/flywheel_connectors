@@ -77,14 +77,15 @@ impl SchemaId {
     pub fn hash(&self) -> SchemaHash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(SCHEMA_HASH_DOMAIN_SEPARATOR);
-        // Feed canonical representation directly: "{namespace}:{name}@{version}"
         hasher.update(self.namespace.as_bytes());
         hasher.update(b":");
         hasher.update(self.name.as_bytes());
         hasher.update(b"@");
-        // Version::to_string() is unavoidable but typically short (e.g., "1.0.0")
-        let version_str = self.version.to_string();
-        hasher.update(version_str.as_bytes());
+        // Write version directly into the hasher via std::io::Write to avoid
+        // the String allocation from version.to_string(). The Display impl of
+        // semver::Version writes "{major}.{minor}.{patch}[-pre][+build]".
+        use std::io::Write;
+        let _ = write!(hasher, "{}", self.version);
         SchemaHash(*hasher.finalize().as_bytes())
     }
 }

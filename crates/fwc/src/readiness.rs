@@ -1916,6 +1916,10 @@ impl DiscoveredConnector {
             "note": "This connector-level schema comes from the manifest. Config schema remains under `fwc config schema` once host-backed config introspection is wired.",
         });
 
+        let search_slug_lower = slug.to_lowercase();
+        let search_name_lower = summary.description.to_lowercase();
+        let search_cohort_lower = cohort.to_lowercase();
+
         Ok(Self {
             slug: slug.to_owned(),
             manifest_path: relative_to_workspace(manifest_path),
@@ -1934,6 +1938,9 @@ impl DiscoveredConnector {
             capabilities,
             connector_schema,
             operations,
+            search_slug_lower,
+            search_name_lower,
+            search_cohort_lower,
         })
     }
 
@@ -2213,6 +2220,25 @@ impl DiscoveredOperation {
         let preferred_selector = preferred_operation_selector(&local_id);
         let aliases = operation_aliases(namespace, operation_id, &local_id);
         let rate_limits = summarize_operation_rate_limits(operation_id, operation, rate_limits);
+        let search_actual_id_lower = operation_id.to_lowercase();
+        let search_local_id_lower = local_id.to_lowercase();
+        let search_aliases_lower: Vec<String> =
+            aliases.iter().map(|a| a.to_lowercase()).collect();
+        let search_summary_lower = operation.description.to_lowercase();
+        let search_when_to_use_lower = operation.ai_hints.when_to_use.to_lowercase();
+        let search_capability_lower = operation.capability.as_str().to_lowercase();
+        let search_common_mistakes_lower: Vec<String> = operation
+            .ai_hints
+            .common_mistakes
+            .iter()
+            .map(|m| m.to_lowercase())
+            .collect();
+        let search_related_lower: Vec<String> = operation
+            .ai_hints
+            .related
+            .iter()
+            .map(|r| r.as_str().to_lowercase())
+            .collect();
 
         Ok(Self {
             actual_id: operation_id.to_owned(),
@@ -2252,24 +2278,14 @@ impl DiscoveredOperation {
                 .map(serde_json::to_value)
                 .transpose()?,
             rate_limits: Some(rate_limits),
-            search_actual_id_lower: operation_id.to_lowercase(),
-            search_local_id_lower: local_id.to_lowercase(),
-            search_aliases_lower: aliases.iter().map(|a| a.to_lowercase()).collect(),
-            search_summary_lower: operation.description.to_lowercase(),
-            search_when_to_use_lower: operation.ai_hints.when_to_use.to_lowercase(),
-            search_capability_lower: operation.capability.as_str().to_lowercase(),
-            search_common_mistakes_lower: operation
-                .ai_hints
-                .common_mistakes
-                .iter()
-                .map(|m| m.to_lowercase())
-                .collect(),
-            search_related_lower: operation
-                .ai_hints
-                .related
-                .iter()
-                .map(|r| r.to_lowercase())
-                .collect(),
+            search_actual_id_lower,
+            search_local_id_lower,
+            search_aliases_lower,
+            search_summary_lower,
+            search_when_to_use_lower,
+            search_capability_lower,
+            search_common_mistakes_lower,
+            search_related_lower,
         })
     }
 
@@ -2681,6 +2697,9 @@ fn discovered_operation_from_toml(
     let search_summary_lower = description.to_lowercase();
     let search_when_to_use_lower = when_to_use.to_lowercase();
     let search_capability_lower = capability.to_lowercase();
+    let search_common_mistakes_lower: Vec<String> =
+        common_mistakes.iter().map(|m| m.to_lowercase()).collect();
+    let search_related_lower: Vec<String> = related.iter().map(|r| r.to_lowercase()).collect();
 
     Ok(DiscoveredOperation {
         actual_id: operation_id.to_owned(),
@@ -2715,6 +2734,8 @@ fn discovered_operation_from_toml(
         search_summary_lower,
         search_when_to_use_lower,
         search_capability_lower,
+        search_common_mistakes_lower,
+        search_related_lower,
     })
 }
 
@@ -7951,6 +7972,8 @@ output_schema = { type = "object" }
             search_summary_lower: "list issues".to_owned(),
             search_when_to_use_lower: String::new(),
             search_capability_lower: "fcp.github.issue.read".to_owned(),
+            search_common_mistakes_lower: Vec::new(),
+            search_related_lower: Vec::new(),
         }
     }
 

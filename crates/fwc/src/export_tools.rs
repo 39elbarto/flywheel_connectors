@@ -387,6 +387,14 @@ mod tests {
             related: vec!["github.get_issue".to_string()],
             network_constraints: None,
             rate_limits: Some(vec![]),
+            search_actual_id_lower: String::new(),
+            search_local_id_lower: String::new(),
+            search_aliases_lower: Vec::new(),
+            search_summary_lower: String::new(),
+            search_when_to_use_lower: String::new(),
+            search_capability_lower: String::new(),
+            search_common_mistakes_lower: Vec::new(),
+            search_related_lower: Vec::new(),
         }
     }
 
@@ -416,6 +424,14 @@ mod tests {
             related: vec![],
             network_constraints: None,
             rate_limits: Some(vec![]),
+            search_actual_id_lower: String::new(),
+            search_local_id_lower: String::new(),
+            search_aliases_lower: Vec::new(),
+            search_summary_lower: String::new(),
+            search_when_to_use_lower: String::new(),
+            search_capability_lower: String::new(),
+            search_common_mistakes_lower: Vec::new(),
+            search_related_lower: Vec::new(),
         }
     }
 
@@ -983,6 +999,14 @@ mod tests {
             related: vec![],
             network_constraints: None,
             rate_limits: Some(vec![]),
+            search_actual_id_lower: String::new(),
+            search_local_id_lower: String::new(),
+            search_aliases_lower: Vec::new(),
+            search_summary_lower: String::new(),
+            search_when_to_use_lower: String::new(),
+            search_capability_lower: String::new(),
+            search_common_mistakes_lower: Vec::new(),
+            search_related_lower: Vec::new(),
         }
     }
 
@@ -1027,6 +1051,14 @@ mod tests {
             related: vec!["slack.update_message".to_string()],
             network_constraints: Some(json!({"allowed_hosts": ["slack.com"]})),
             rate_limits: Some(vec![]),
+            search_actual_id_lower: String::new(),
+            search_local_id_lower: String::new(),
+            search_aliases_lower: Vec::new(),
+            search_summary_lower: String::new(),
+            search_when_to_use_lower: String::new(),
+            search_capability_lower: String::new(),
+            search_common_mistakes_lower: Vec::new(),
+            search_related_lower: Vec::new(),
         }
     }
 

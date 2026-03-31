@@ -4926,6 +4926,12 @@ fn host_discovered_connector(
     let categories = connector.summary.categories.clone();
     let slug = connector.slug.clone();
 
+    let search_slug_lower = slug.to_lowercase();
+    let search_name_lower = connector.summary.name.to_lowercase();
+    let search_cohort_lower = categories
+        .first()
+        .map_or_else(|| "other".to_owned(), |c| c.to_lowercase());
+
     DiscoveredConnector {
         slug,
         manifest_path: String::new(),
@@ -4962,11 +4968,9 @@ fn host_discovered_connector(
         capabilities: Value::Null,
         connector_schema: Value::Null,
         operations,
-        search_slug_lower: slug.to_lowercase(),
-        search_name_lower: connector.summary.name.to_lowercase(),
-        search_cohort_lower: categories
-            .first()
-            .map_or_else(|| "other".to_owned(), |c| c.to_lowercase()),
+        search_slug_lower,
+        search_name_lower,
+        search_cohort_lower,
     }
 }
 

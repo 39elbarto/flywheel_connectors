@@ -154,6 +154,14 @@ mod tests {
             related: vec![],
             network_constraints: None,
             rate_limits: None,
+            search_actual_id_lower: String::new(),
+            search_local_id_lower: String::new(),
+            search_aliases_lower: Vec::new(),
+            search_summary_lower: String::new(),
+            search_when_to_use_lower: String::new(),
+            search_capability_lower: String::new(),
+            search_common_mistakes_lower: Vec::new(),
+            search_related_lower: Vec::new(),
         }
     }
 
@@ -195,6 +203,9 @@ mod tests {
             capabilities: json!({}),
             connector_schema: json!({}),
             operations: ops,
+            search_slug_lower: String::new(),
+            search_name_lower: String::new(),
+            search_cohort_lower: String::new(),
         }
     }
 

@@ -855,6 +855,7 @@ mod tests {
     fn fuzzy_typo_in_alias_recovers_result() {
         let mut connectors = sample_connectors();
         connectors[0].operations[0].aliases = vec!["open_ticket".to_owned()];
+        connectors[0].operations[0].search_aliases_lower = vec!["open_ticket".to_owned()];
         let results = search_operations(&connectors, "open_tiket", &SearchFilters::default());
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "github.create_issue");
@@ -1024,6 +1025,8 @@ mod tests {
         let mut connectors = sample_connectors();
         connectors[0].operations[0].common_mistakes =
             vec!["Forgetting to set labels for triage".to_owned()];
+        connectors[0].operations[0].search_common_mistakes_lower =
+            vec!["forgetting to set labels for triage".to_owned()];
         let results = search_operations(&connectors, "triage", &SearchFilters::default());
         assert!(!results.is_empty());
         assert!(
@@ -1037,6 +1040,7 @@ mod tests {
     fn related_operations_boost_score() {
         let mut connectors = sample_connectors();
         connectors[0].operations[0].related = vec!["github.list_issues".to_owned()];
+        connectors[0].operations[0].search_related_lower = vec!["github.list_issues".to_owned()];
         let results = search_operations(&connectors, "list_issues", &SearchFilters::default());
         // Both the actual list_issues and the related reference should match
         assert!(results.len() >= 2);
@@ -1208,6 +1212,7 @@ mod tests {
             "Track bugs",
         );
         op.aliases = vec!["new_issue".to_owned()];
+        op.search_aliases_lower = vec!["new_issue".to_owned()];
         let connectors = vec![stub_connector("github", vec![op])];
         let results = search_operations(&connectors, "new_issue", &SearchFilters::default());
         assert!(!results.is_empty());
@@ -1225,6 +1230,7 @@ mod tests {
             "Track bugs",
         );
         op.aliases = vec!["new_github_issue".to_owned()];
+        op.search_aliases_lower = vec!["new_github_issue".to_owned()];
         let connectors = vec![stub_connector("github", vec![op])];
         let results = search_operations(&connectors, "github_issue", &SearchFilters::default());
         assert!(!results.is_empty());
@@ -1997,6 +2003,7 @@ mod tests {
     fn score_operation_common_mistakes_match() {
         let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
         op.common_mistakes = vec!["Remember to set the timeout".to_owned()];
+        op.search_common_mistakes_lower = vec!["remember to set the timeout".to_owned()];
         let connector = stub_connector("t", vec![op.clone()]);
         let tokens = vec!["timeout".to_owned()];
         let (score, reasons) = score_operation(&connector, &op, &tokens);
@@ -2008,6 +2015,7 @@ mod tests {
     fn score_operation_related_match() {
         let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
         op.related = vec!["t.other_op".to_owned()];
+        op.search_related_lower = vec!["t.other_op".to_owned()];
         let connector = stub_connector("t", vec![op.clone()]);
         let tokens = vec!["other_op".to_owned()];
         let (score, reasons) = score_operation(&connector, &op, &tokens);
@@ -2058,6 +2066,7 @@ mod tests {
     fn alias_exact_match_gives_high_score() {
         let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
         op.aliases = vec!["quick_lookup".to_owned()];
+        op.search_aliases_lower = vec!["quick_lookup".to_owned()];
         let connectors = vec![stub_connector("t", vec![op])];
         let results = search_operations(&connectors, "quick_lookup", &SearchFilters::default());
         assert!(!results.is_empty());
@@ -2068,6 +2077,7 @@ mod tests {
     fn alias_partial_match_gives_partial_score() {
         let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
         op.aliases = vec!["quick_lookup_all".to_owned()];
+        op.search_aliases_lower = vec!["quick_lookup_all".to_owned()];
         let connectors = vec![stub_connector("t", vec![op])];
         let results = search_operations(&connectors, "lookup", &SearchFilters::default());
         assert!(!results.is_empty());
@@ -2082,6 +2092,7 @@ mod tests {
     fn alias_fuzzy_match_on_typo() {
         let mut op = stub_operation("t.op", "T", "t.w", "low", "safe", "T");
         op.aliases = vec!["quick_lookup".to_owned()];
+        op.search_aliases_lower = vec!["quick_lookup".to_owned()];
         let connectors = vec![stub_connector("t", vec![op])];
         let results = search_operations(&connectors, "quick_lokup", &SearchFilters::default());
         assert!(!results.is_empty());

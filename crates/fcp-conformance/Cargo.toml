@@ -33,6 +33,7 @@ fcp-manifest = { path = "../fcp-manifest" }
 fcp-mesh = { path = "../fcp-mesh" }
 fcp-store = { path = "../fcp-store" }
 fcp-tailscale = { path = "../fcp-tailscale" }
+fcp-webhook = { path = "../fcp-webhook" }
 
 [[bin]]
 name = "fcp-vecgen"

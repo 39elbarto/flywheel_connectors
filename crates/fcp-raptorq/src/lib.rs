@@ -2,7 +2,7 @@
 //!
 //! This module implements the `RaptorQ` fountain code encoding/decoding and chunked object
 //! manifest functionality from `FCP_Specification_V3.md` §9.8 (FCPS Object and Symbol Plane)
-//! and Appendix B (RaptorQ and Symbol Transport Notes).
+//! and Appendix B (`RaptorQ` and Symbol Transport Notes).
 //!
 //! # Overview
 //!

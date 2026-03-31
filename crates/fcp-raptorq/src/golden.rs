@@ -1751,7 +1751,7 @@ mod tests {
     #[test]
     fn encoder_decoder_intermediate_consistency_with_erasure() {
         use crate::codec::decoder::{InactivationDecoder, ReceivedSymbol};
-        use crate::codec::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
+        use crate::codec::systematic::SystematicEncoder;
 
         let symbol_size = 1024;
         let k = 100usize;
@@ -1853,4 +1853,5 @@ mod tests {
             Err(e) => panic!("decode failed: {e:?}"),
         }
     }
+
 }

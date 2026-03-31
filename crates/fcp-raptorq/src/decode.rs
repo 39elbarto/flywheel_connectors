@@ -145,6 +145,16 @@ impl RaptorQDecoder {
         })?;
         let params = decoder.params();
         let k_prime = params.k_prime;
+        let k_prime_u32 = u32::try_from(k_prime).unwrap_or(u32::MAX);
+
+        if let Some((&esi, _)) = self.received.range(self.k..k_prime_u32).next() {
+            return Err(DecodeError::InvalidSymbol {
+                reason: format!(
+                    "symbol ESI {esi} is in virtual padding range [{}..{k_prime_u32})",
+                    self.k
+                ),
+            });
+        }
 
         // Build received symbols with proper equations.
         // The decoder needs at least L = K' + S + H symbols total.
@@ -181,9 +191,14 @@ impl RaptorQDecoder {
             symbols.push(ReceivedSymbol::source(esi as u32, vec![0u8; symbol_size]));
         }
 
+        let dense_fallback = |decoder: &InactivationDecoder| {
+            self.try_reconstruct_dense(decoder, &[], k, symbol_size, transfer_len)
+                .and_then(|payload| self.verify_payload_hash(&payload).map(|()| payload))
+        };
+
         match decoder.decode(symbols) {
             Ok(result) => {
-                // Reconstruct payload from first K source symbols
+                // Reconstruct payload from first K source symbols.
                 let mut payload = Vec::with_capacity(transfer_len);
                 for source_sym in &result.source[..k] {
                     payload.extend_from_slice(source_sym);
@@ -192,28 +207,35 @@ impl RaptorQDecoder {
                 if let Some(expected_hash) = self.payload_hash
                     && *blake3::hash(&payload).as_bytes() != expected_hash
                 {
-                    return Err(DecodeError::InsufficientSymbols {
-                        received: self.received_count(),
-                        needed: self.needed(),
-                    });
+                    return dense_fallback(&decoder);
                 }
                 Ok(payload)
             }
-            Err(error) => Err(Self::map_decode_error(
-                error,
-                self.received_count(),
-                self.needed(),
-            )),
+            Err(error) => match error.failure_class() {
+                crate::codec::decoder::DecodeFailureClass::Recoverable => dense_fallback(&decoder),
+                crate::codec::decoder::DecodeFailureClass::Unrecoverable => Err(
+                    Self::map_decode_error(error, self.received_count(), self.needed()),
+                ),
+            },
         }
     }
 
-    /// Dense fallback: rebuild the encoder's constraint matrix with received data
-    /// substituted into the RHS. Missing source rows use zero data (the identity equation
-    /// intermediate[i]=0 is a valid constraint when combined with repair + LDPC + HDPC).
+    /// Dense fallback: build an overdetermined system from ALL available equations
+    /// and solve via Gaussian elimination over GF(256).
     ///
-    /// This works because the S+H constraint rows + repair equations + padding provide
-    /// enough independent equations to determine all L intermediate symbols.
-    #[allow(dead_code)]
+    /// The `InactivationDecoder` can find wrong-but-equation-consistent solutions
+    /// for certain K/erasure combinations because the peeling heuristic may
+    /// converge on a non-unique solution when the dense core is rank-deficient
+    /// at exactly L rows. By building an overdetermined system with MORE rows
+    /// than columns (constraint + all received + padding), the extra equations
+    /// eliminate the spurious degrees of freedom.
+    ///
+    /// Row structure:
+    ///   - S + H constraint rows (LDPC + HDPC, zero RHS)
+    ///   - One identity row per received source symbol (RHS = received data)
+    ///   - K' - K padding identity rows (zero RHS)
+    ///   - One LT equation row per received repair symbol (RHS = received data)
+    #[allow(clippy::too_many_lines)]
     fn try_reconstruct_dense(
         &self,
         decoder: &crate::codec::decoder::InactivationDecoder,
@@ -222,64 +244,132 @@ impl RaptorQDecoder {
         symbol_size: usize,
         transfer_len: usize,
     ) -> Result<Vec<u8>, DecodeError> {
+        use crate::codec::gf256::Gf256;
         use crate::codec::systematic::ConstraintMatrix;
 
         let params = decoder.params();
+        let k_prime = params.k_prime;
+        let l = params.l;
 
-        // Build the encoder's constraint matrix (S+H+K' rows × L cols).
-        let mut matrix = ConstraintMatrix::build(params, 0);
-        let total_rows = params.s + params.h + params.k_prime;
-        let mut rhs: Vec<Vec<u8>> = (0..total_rows).map(|_| vec![0u8; symbol_size]).collect();
-
-        // Fill received source data into the RHS.
-        for (&esi, data) in &self.received {
-            let idx = esi as usize;
-            if idx < params.k_prime {
-                rhs[params.s + params.h + idx].clone_from(data);
-            }
-        }
-        // Padding rows (K..K') remain zero — correct.
-        // Missing source rows have zero RHS with identity equation: intermediate[i] = 0.
-        // This is WRONG — missing source data is UNKNOWN, not zero.
-        // We need to replace missing source identity rows with repair LT equations.
-
-        // Replace missing source rows with repair equations.
-        let mut repair_iter = self
+        // Partition received symbols into source and repair.
+        let received_source: Vec<_> = self
             .received
             .iter()
-            .filter(|&(&esi, _)| (esi as usize) >= k);
-        for i in 0..k {
-            if self.received.contains_key(&(i as u32)) {
-                continue; // Source present, identity row + RHS is correct
+            .filter(|&(&esi, _)| (esi as usize) < k)
+            .collect();
+        let received_repair: Vec<_> = self
+            .received
+            .iter()
+            .filter(|&(&esi, _)| (esi as usize) >= k)
+            .collect();
+
+        let constraint_rows = params.s + params.h;
+        let padding_rows = k_prime - k;
+        let total_rows =
+            constraint_rows + received_source.len() + padding_rows + received_repair.len();
+
+        if total_rows < l {
+            return Err(DecodeError::InsufficientSymbols {
+                received: self.received_count(),
+                needed: self.needed(),
+            });
+        }
+
+        // Build the overdetermined matrix (total_rows x L).
+        let mut matrix = ConstraintMatrix::zeros(total_rows, l);
+        let mut rhs: Vec<Vec<u8>> = Vec::with_capacity(total_rows);
+
+        // 1. S + H constraint rows from the encoder's LDPC + HDPC.
+        let constraints = ConstraintMatrix::build(params, 0);
+        for r in 0..constraint_rows {
+            for c in 0..l {
+                matrix.set(r, c, constraints.get(r, c));
             }
-            // Missing source: replace identity row with a repair equation
-            let Some((&esi, data)) = repair_iter.next() else {
-                // Not enough repair symbols — need more
-                return Err(DecodeError::InsufficientSymbols {
-                    received: self.received_count(),
-                    needed: self.needed(),
-                });
-            };
-            let row = params.s + params.h + i;
-            // Clear the identity entry
-            let l = params.l;
-            for col in 0..l {
-                matrix.set(row, col, crate::codec::gf256::Gf256::ZERO);
-            }
-            // Set the repair LT equation
+            rhs.push(vec![0u8; symbol_size]);
+        }
+
+        let mut row = constraint_rows;
+
+        // 2. Received source identity rows: intermediate[esi] = data.
+        for &(&esi, data) in &received_source {
+            matrix.set(row, esi as usize, Gf256::ONE);
+            rhs.push(data.clone());
+            row += 1;
+        }
+
+        // 3. Padding identity rows for virtual ESIs K..K'-1 (zero data).
+        for esi in k..k_prime {
+            matrix.set(row, esi, Gf256::ONE);
+            rhs.push(vec![0u8; symbol_size]);
+            row += 1;
+        }
+
+        // 4. Received repair LT equation rows.
+        for &(&esi, data) in &received_repair {
             let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
             for (&col, &coef) in columns.iter().zip(coefficients.iter()) {
                 matrix.set(row, col, coef);
             }
-            rhs[row].clone_from(data);
+            rhs.push(data.clone());
+            row += 1;
         }
 
-        // Solve: the system is now L×L with constraint + (received source identity) +
-        // (repair substitutions for missing sources) + (padding identity).
-        let intermediate = matrix.solve(&rhs).ok_or_else(|| DecodeError::InsufficientSymbols {
+        debug_assert_eq!(row, total_rows);
+
+        // Solve the overdetermined system. Returns None only if a column
+        // has no pivot, meaning the system is rank-deficient even with the
+        // extra rows.
+        let intermediate = matrix
+            .solve(&rhs)
+            .ok_or_else(|| DecodeError::InsufficientSymbols {
+                received: self.received_count(),
+                needed: self.needed(),
+            })?;
+
+        let verify_failure = || DecodeError::InsufficientSymbols {
             received: self.received_count(),
             needed: self.needed(),
-        })?;
+        };
+
+        for &(&esi, data) in &received_source {
+            let idx = esi as usize;
+            if intermediate[idx] != *data {
+                return Err(verify_failure());
+            }
+        }
+
+        let mut reconstructed = vec![0u8; symbol_size];
+        for &(&esi, data) in &received_repair {
+            reconstructed.fill(0);
+            let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
+            for (&col, &coef) in columns.iter().zip(coefficients.iter()) {
+                if coef.is_zero() {
+                    continue;
+                }
+                crate::codec::gf256::gf256_addmul_slice(
+                    &mut reconstructed,
+                    &intermediate[col],
+                    coef,
+                );
+            }
+            if reconstructed != *data {
+                return Err(verify_failure());
+            }
+        }
+
+        for r in 0..constraint_rows {
+            reconstructed.fill(0);
+            for (c, intermed) in intermediate.iter().enumerate().take(l) {
+                let coef = constraints.get(r, c);
+                if coef.is_zero() {
+                    continue;
+                }
+                crate::codec::gf256::gf256_addmul_slice(&mut reconstructed, intermed, coef);
+            }
+            if reconstructed.iter().any(|&byte| byte != 0) {
+                return Err(verify_failure());
+            }
+        }
 
         let mut payload = Vec::with_capacity(transfer_len);
         for sym in &intermediate[..k] {
@@ -338,6 +428,19 @@ impl RaptorQDecoder {
                 DecodeError::InsufficientSymbols { received, needed }
             }
         }
+    }
+
+    /// Verify that the reconstructed payload matches the expected hash (if present).
+    fn verify_payload_hash(&self, payload: &[u8]) -> Result<(), DecodeError> {
+        if let Some(expected_hash) = self.payload_hash {
+            if *blake3::hash(payload).as_bytes() != expected_hash {
+                return Err(DecodeError::InsufficientSymbols {
+                    received: self.received_count(),
+                    needed: self.needed(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Number of unique symbols received.
@@ -1791,17 +1894,103 @@ mod tests {
     }
 
     #[test]
+    fn decoder_rejects_malformed_symbol_size_without_dense_panic() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(128, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        let first = decoder.add_symbol(0, vec![0xAA; 64]).unwrap();
+        assert_eq!(first, None);
+
+        let err = decoder
+            .add_symbol(1, vec![0xBB; 63])
+            .expect_err("malformed symbol should be rejected");
+        assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+        match err {
+            DecodeError::InvalidSymbol { reason } => {
+                assert!(reason.contains("expected 64 bytes"));
+                assert!(reason.contains("got 63 bytes"));
+            }
+            other => panic!("expected InvalidSymbol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decoder_rejects_virtual_padding_esi() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(6400, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        for esi in 0..99 {
+            let result = decoder.add_symbol(esi, vec![0xAA; 64]).unwrap();
+            assert_eq!(result, None);
+        }
+
+        let err = decoder
+            .add_symbol(100, vec![0xBB; 64])
+            .expect_err("virtual padding ESI should be rejected");
+        assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+        match err {
+            DecodeError::InvalidSymbol { reason } => {
+                assert!(reason.contains("virtual padding range"));
+                assert!(reason.contains("100"));
+            }
+            other => panic!("expected InvalidSymbol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dense_reconstruction_rejects_inconsistent_repair_row() {
+        let config = RaptorQConfig {
+            repair_ratio_bps: 5000,
+            ..test_config()
+        };
+        let payload: Vec<u8> = (0..(20 * 64)).map(|idx| (idx % 251) as u8).collect();
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let oti = encoder.transmission_info();
+        let k = usize::try_from(encoder.source_symbols()).unwrap();
+        let k_prime = encoder.inner_k_prime();
+        let mut symbols = encoder.encode_all();
+        let corrupted = symbols
+            .iter_mut()
+            .find(|(esi, _)| *esi >= k_prime)
+            .expect("repair symbol");
+        corrupted.1[0] ^= 0xFF;
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for (esi, data) in symbols
+            .into_iter()
+            .filter(|(esi, _)| (*esi as usize) < k || *esi >= k_prime)
+            .take(k + 1)
+        {
+            decoder.received.insert(esi, data);
+        }
+
+        let inactivation = InactivationDecoder::new(k, usize::from(config.symbol_size), 0).unwrap();
+        let err = decoder
+            .try_reconstruct_dense(
+                &inactivation,
+                &[],
+                k,
+                usize::from(config.symbol_size),
+                payload.len(),
+            )
+            .expect_err("corrupted repair row should invalidate dense reconstruction");
+        assert!(matches!(err, DecodeError::InsufficientSymbols { .. }));
+    }
+
+    #[test]
     fn decoder_rejects_payload_hash_mismatch() {
         let config = test_config();
         let payload = vec![7u8; 64];
         let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
         let source = encoder.encode_source();
-        let oti = encoder
-            .transmission_info()
-            .with_payload_hash([0xCD; 32]);
+        let oti = encoder.transmission_info().with_payload_hash([0xCD; 32]);
 
         let mut decoder = RaptorQDecoder::new(oti, &config);
-        let result = decoder.add_symbol(source[0].0, source[0].1.clone()).unwrap();
+        let result = decoder
+            .add_symbol(source[0].0, source[0].1.clone())
+            .unwrap();
         assert_eq!(result, None);
     }
 

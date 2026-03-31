@@ -532,7 +532,8 @@ mod tests {
     #[test]
     fn oti_payload_hash_roundtrip() {
         let payload_hash = [0xAB; 32];
-        let oti = ObjectTransmissionInformation::new(100, 64, 1, 1, 8).with_payload_hash(payload_hash);
+        let oti =
+            ObjectTransmissionInformation::new(100, 64, 1, 1, 8).with_payload_hash(payload_hash);
         let json = serde_json::to_string(&oti).unwrap();
         let decoded: ObjectTransmissionInformation = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.payload_hash(), Some(payload_hash));

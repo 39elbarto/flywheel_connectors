@@ -52,7 +52,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -755,6 +755,63 @@ impl HostMonotonicClock for FixedMonotonicClock {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawSocketHostPolicy {
+    Disabled,
+    Wildcard,
+    ExactIpOnly,
+}
+
+fn raw_socket_host_policy(constraints: &NetworkConstraints) -> RawSocketHostPolicy {
+    // Preview2 `socket_addr_check` only receives a resolved socket address, so
+    // hostname-bound policy (host allowlists, SNI, SPKI pins) cannot be
+    // enforced there. Only wildcard or exact-IP policy can be represented
+    // safely at this layer.
+    if constraints.require_sni || !constraints.spki_pins.is_empty() || constraints.deny_ip_literals
+    {
+        return RawSocketHostPolicy::Disabled;
+    }
+
+    if constraints.host_allow.iter().any(|pattern| pattern == "*") {
+        return RawSocketHostPolicy::Wildcard;
+    }
+
+    if constraints
+        .host_allow
+        .iter()
+        .all(|pattern| pattern.parse::<IpAddr>().is_ok())
+    {
+        if constraints.host_allow.is_empty() && constraints.ip_allow.is_empty() {
+            return RawSocketHostPolicy::Disabled;
+        }
+        return RawSocketHostPolicy::ExactIpOnly;
+    }
+
+    RawSocketHostPolicy::Disabled
+}
+
+fn raw_socket_ip_allowed(constraints: &NetworkConstraints, ip: IpAddr) -> bool {
+    match raw_socket_host_policy(constraints) {
+        RawSocketHostPolicy::Disabled => false,
+        RawSocketHostPolicy::Wildcard => true,
+        RawSocketHostPolicy::ExactIpOnly => {
+            constraints.ip_allow.contains(&ip)
+                || constraints
+                    .host_allow
+                    .iter()
+                    .filter_map(|pattern| pattern.parse::<IpAddr>().ok())
+                    .any(|allowed_ip| allowed_ip == ip)
+        }
+    }
+}
+
+fn raw_socket_dns_lookup_allowed(constraints: &NetworkConstraints) -> bool {
+    matches!(
+        raw_socket_host_policy(constraints),
+        RawSocketHostPolicy::Wildcard
+    )
+}
+
 fn socket_addr_allowed(
     constraints: &NetworkConstraints,
     addr: SocketAddr,
@@ -765,6 +822,10 @@ fn socket_addr_allowed(
     }
 
     if !constraints.port_allow.contains(&addr.port()) {
+        return false;
+    }
+
+    if !raw_socket_ip_allowed(constraints, addr.ip()) {
         return false;
     }
 
@@ -882,13 +943,25 @@ impl WasiRuntime {
             }
             (false, Some(constraints)) => {
                 let constraints = Arc::new(constraints.clone());
-                wasi_builder.allow_ip_name_lookup(true);
-                wasi_builder.allow_tcp(true);
                 wasi_builder.allow_udp(false);
-                wasi_builder.socket_addr_check(move |addr, reason| {
-                    let constraints = Arc::clone(&constraints);
-                    Box::pin(async move { socket_addr_allowed(constraints.as_ref(), addr, reason) })
-                });
+                match raw_socket_host_policy(constraints.as_ref()) {
+                    RawSocketHostPolicy::Disabled => {
+                        wasi_builder.allow_ip_name_lookup(false);
+                        wasi_builder.allow_tcp(false);
+                    }
+                    RawSocketHostPolicy::Wildcard | RawSocketHostPolicy::ExactIpOnly => {
+                        wasi_builder.allow_ip_name_lookup(raw_socket_dns_lookup_allowed(
+                            constraints.as_ref(),
+                        ));
+                        wasi_builder.allow_tcp(true);
+                        wasi_builder.socket_addr_check(move |addr, reason| {
+                            let constraints = Arc::clone(&constraints);
+                            Box::pin(async move {
+                                socket_addr_allowed(constraints.as_ref(), addr, reason)
+                            })
+                        });
+                    }
+                }
             }
             (false, None) => {
                 wasi_builder.inherit_network();
@@ -3009,6 +3082,133 @@ mod tests {
             &constraints,
             addr,
             SocketAddrUse::TcpBind
+        ));
+    }
+
+    #[test]
+    fn test_socket_addr_allowed_rejects_hostname_bound_policy() {
+        let constraints = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let addr: SocketAddr = "93.184.216.34:443".parse().unwrap();
+
+        assert!(!socket_addr_allowed(
+            &constraints,
+            addr,
+            SocketAddrUse::TcpConnect
+        ));
+    }
+
+    #[test]
+    fn test_raw_socket_dns_lookup_allowed_only_for_wildcard_policy() {
+        let wildcard = NetworkConstraints {
+            host_allow: vec!["*".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(raw_socket_dns_lookup_allowed(&wildcard));
+
+        let exact_ip = NetworkConstraints {
+            host_allow: vec!["1.2.3.4".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(!raw_socket_dns_lookup_allowed(&exact_ip));
+
+        let hostname_bound = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(!raw_socket_dns_lookup_allowed(&hostname_bound));
+    }
+
+    #[test]
+    fn test_socket_addr_allowed_exact_ip_literal_policy() {
+        let constraints = NetworkConstraints {
+            host_allow: vec!["1.2.3.4".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let allowed_addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
+        let denied_addr: SocketAddr = "5.6.7.8:443".parse().unwrap();
+
+        assert!(socket_addr_allowed(
+            &constraints,
+            allowed_addr,
+            SocketAddrUse::TcpConnect
+        ));
+        assert!(!socket_addr_allowed(
+            &constraints,
+            denied_addr,
+            SocketAddrUse::TcpConnect
         ));
     }
 

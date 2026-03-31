@@ -47,6 +47,8 @@ pub enum RegistryError {
     SignatureInvalid { kid: String },
     #[error("publisher signature threshold unmet (required {required}, valid {valid})")]
     PublisherThresholdUnmet { required: u8, valid: u8 },
+    #[error("no trusted publisher or registry signature verified")]
+    NoTrustedSignature,
     #[error("registry signature required but missing or invalid")]
     RegistrySignatureRequired,
     #[error("target mismatch (expected {expected}, got {found})")]
@@ -697,7 +699,7 @@ impl RegistryVerifier {
         }
 
         if !publisher_ok && !registry_ok {
-            return Err(RegistryError::RegistrySignatureRequired);
+            return Err(RegistryError::NoTrustedSignature);
         }
 
         enforce_capability_ceiling(zone_policy, &manifest)?;
@@ -1104,21 +1106,34 @@ fn verify_publishers(
     signing_bytes: &[u8],
     binary_hash: &str,
 ) -> Result<bool, RegistryError> {
+    let required = sigs.publisher_threshold.map_or(0, |t| t.k);
     if sigs.publisher_signatures.is_empty() {
+        if required > 0 {
+            return Err(RegistryError::PublisherThresholdUnmet { required, valid: 0 });
+        }
         return Ok(false);
     }
-
-    let required = sigs.publisher_threshold.map_or(0, |t| t.k);
     let mut valid = 0u8;
+    let mut first_error = None;
 
     for entry in &sigs.publisher_signatures {
-        // We ignore individual signature verification errors (like UnknownKid or SignatureInvalid)
-        // because a manifest may be signed by multiple publishers, and the local node
-        // might only trust a subset of them. We only care if the threshold of *trusted*
-        // signatures is met.
+        // Tolerate individual publisher failures while a trusted subset can still
+        // satisfy the declared threshold, but preserve the first concrete error if
+        // nothing verifies successfully.
         match verify_signature_entry(trust, entry, signing_bytes, binary_hash, true) {
             Ok(true) => valid = valid.saturating_add(1),
-            _ => continue,
+            Ok(false) => {} // signature did not match — skip without counting
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+    }
+
+    if valid == 0 {
+        if let Some(err) = first_error {
+            return Err(err);
         }
     }
 
@@ -4368,6 +4383,68 @@ sig = "base64:{sig_b64}"
     }
 
     #[test]
+    fn verify_publishers_empty_signatures_with_threshold_errors() {
+        run_registry_test(
+            "verify_publishers_empty_signatures_with_threshold_errors",
+            "unit",
+            "signature",
+            1,
+            || async {
+                let sigs = SignaturesSection {
+                    publisher_signatures: vec![],
+                    publisher_threshold: Some(fcp_manifest::SignatureThreshold { k: 1, n: 1 }),
+                    registry_signature: None,
+                    transparency_log_entry: None,
+                };
+                let trust = RegistryTrustPolicy::default();
+                let signing_bytes = b"data";
+                let err = verify_publishers(&trust, &sigs, signing_bytes, "sha256:hash")
+                    .expect_err("empty signatures should fail threshold");
+                assert!(matches!(
+                    err,
+                    RegistryError::PublisherThresholdUnmet {
+                        required: 1,
+                        valid: 0,
+                    }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("empty_publishers_threshold_unmet".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_empty_signature_section_rejects_no_trusted_signature() {
+        run_registry_test(
+            "verify_bundle_empty_signature_section_rejects_no_trusted_signature",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let bundle = ConnectorBundle {
+                    manifest_toml: with_signatures(&unsigned_manifest_toml(""), "[signatures]"),
+                    binary: b"registry-binary".to_vec(),
+                    target: test_target(),
+                };
+
+                let verifier = RegistryVerifier::new(RegistryTrustPolicy::default());
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("empty signature section should fail");
+                assert!(matches!(err, RegistryError::NoTrustedSignature));
+
+                RegistryLogData {
+                    reason_code: Some("no_trusted_signature".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
     fn verify_registry_no_registry_signature_returns_false() {
         run_registry_test(
             "verify_registry_no_registry_signature_returns_false",
@@ -4768,6 +4845,7 @@ sig = "base64:{sig_b64}"
             || async {
                 let cases: Vec<RegistryError> = vec![
                     RegistryError::MissingSignatures,
+                    RegistryError::NoTrustedSignature,
                     RegistryError::RegistrySignatureRequired,
                     RegistryError::TransparencyLogMissing,
                     RegistryError::TransparencyEvidenceMissing,
@@ -4927,6 +5005,7 @@ sig = "base64:{sig_b64}"
                             valid: 1,
                         },
                     ),
+                    ("NoTrustedSignature", RegistryError::NoTrustedSignature),
                     (
                         "RegistrySignatureRequired",
                         RegistryError::RegistrySignatureRequired,
@@ -6755,6 +6834,10 @@ sig = "base64:{sig_b64}"
                     required: 3,
                     valid: 1,
                 },
+            ),
+            (
+                "no trusted publisher or registry signature verified",
+                RegistryError::NoTrustedSignature,
             ),
             (
                 "registry signature required",
@@ -9709,6 +9792,7 @@ trusted_builders = ["trusted-ci"]
                 required: 1,
                 valid: 0,
             },
+            RegistryError::NoTrustedSignature,
             RegistryError::RegistrySignatureRequired,
             RegistryError::TargetMismatch {
                 expected: "a".into(),

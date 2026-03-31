@@ -245,6 +245,49 @@ fn verify_bundle_missing_signatures_fails() {
 }
 
 #[test]
+fn verify_bundle_empty_publisher_list_with_threshold_fails_threshold_check() {
+    let manifest_toml = format!(
+        "{}\n[signatures]\npublisher_threshold = \"1-of-1\"\n",
+        unsigned_manifest_toml("")
+    );
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary: test_binary(),
+        target: test_target(),
+    };
+    let verifier = RegistryVerifier::new(RegistryTrustPolicy::default());
+
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(
+        matches!(
+            result,
+            Err(RegistryError::PublisherThresholdUnmet {
+                required: 1,
+                valid: 0
+            })
+        ),
+        "expected publisher threshold failure, got {result:?}"
+    );
+}
+
+#[test]
+fn verify_bundle_empty_signature_section_fails_no_trusted_signature() {
+    let manifest_toml = format!("{}\n[signatures]\n", unsigned_manifest_toml(""));
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary: test_binary(),
+        target: test_target(),
+    };
+    let verifier = RegistryVerifier::new(RegistryTrustPolicy::default());
+
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(
+        matches!(result, Err(RegistryError::NoTrustedSignature)),
+        "expected no trusted signature failure, got {result:?}"
+    );
+}
+
+#[test]
 fn verify_bundle_tampered_binary_fails() {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
@@ -1301,6 +1344,15 @@ fn registry_error_display_threshold_unmet() {
     let msg = err.to_string();
     assert!(msg.contains("3"));
     assert!(msg.contains("1"));
+}
+
+#[test]
+fn registry_error_display_no_trusted_signature() {
+    let err = RegistryError::NoTrustedSignature;
+    assert_eq!(
+        err.to_string(),
+        "no trusted publisher or registry signature verified"
+    );
 }
 
 #[test]

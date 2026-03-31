@@ -950,12 +950,14 @@ impl FcpsDatagram {
             });
         }
 
+        // Direct byte access — bounds guaranteed by length check above.
         let mut session_id = [0u8; SESSION_ID_SIZE];
         session_id.copy_from_slice(&bytes[0..16]);
 
-        let mut seq_bytes = [0u8; 8];
-        seq_bytes.copy_from_slice(&bytes[16..24]);
-        let seq = u64::from_le_bytes(seq_bytes);
+        let seq = u64::from_le_bytes([
+            bytes[16], bytes[17], bytes[18], bytes[19],
+            bytes[20], bytes[21], bytes[22], bytes[23],
+        ]);
 
         let mut mac = [0u8; SESSION_MAC_SIZE];
         mac.copy_from_slice(&bytes[24..40]);
@@ -977,6 +979,7 @@ fn append_cbor<T: Serialize>(buf: &mut Vec<u8>, value: &T) -> Result<(), Session
     Ok(())
 }
 
+#[inline]
 fn mac_input(
     session_id: &MeshSessionId,
     direction: SessionDirection,

@@ -299,7 +299,7 @@ mod tests {
         let output = ProvisioningStartOutput {
             session_id: Some(ProvisioningSessionId::new("prov-1")),
             state: ProvisioningState {
-                status: ProvisioningStatus::AwaitingHuman,
+                status: ProvisioningStatus::AwaitingUser,
                 current_step: Some(StepId::new("collect-token")),
                 completed_steps: Vec::new(),
                 remaining_steps: vec![StepId::new("collect-token")],
@@ -328,7 +328,7 @@ mod tests {
             }),
             details: None,
         };
-        assert_eq!(output.state.status, ProvisioningStatus::AwaitingHuman);
+        assert_eq!(output.state.status, ProvisioningStatus::AwaitingUser);
         assert!(output.session_id.is_some());
         assert!(output.recipe.is_some());
         assert!(output.setup.is_some());

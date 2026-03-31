@@ -81,11 +81,9 @@ impl SchemaId {
         hasher.update(b":");
         hasher.update(self.name.as_bytes());
         hasher.update(b"@");
-        // Write version directly into the hasher via std::io::Write to avoid
-        // the String allocation from version.to_string(). The Display impl of
-        // semver::Version writes "{major}.{minor}.{patch}[-pre][+build]".
-        use std::io::Write;
-        let _ = write!(hasher, "{}", self.version);
+        // Write version directly into the hasher via io::Write to avoid
+        // the String allocation from version.to_string().
+        let _ = std::io::Write::write_fmt(&mut hasher, format_args!("{}", self.version));
         SchemaHash(*hasher.finalize().as_bytes())
     }
 }

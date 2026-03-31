@@ -201,6 +201,7 @@ impl RaptorQDecoder {
     ///
     /// This works because the S+H constraint rows + repair equations + padding provide
     /// enough independent equations to determine all L intermediate symbols.
+    #[allow(dead_code)]
     fn try_reconstruct_dense(
         &self,
         decoder: &crate::codec::decoder::InactivationDecoder,
@@ -258,7 +259,7 @@ impl RaptorQDecoder {
             for (&col, &coef) in columns.iter().zip(coefficients.iter()) {
                 matrix.set(row, col, coef);
             }
-            rhs[row] = data.clone();
+            rhs[row].clone_from(&data);
         }
 
         // Solve: the system is now L×L with constraint + (received source identity) +

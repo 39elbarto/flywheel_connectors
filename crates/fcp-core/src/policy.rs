@@ -2725,6 +2725,7 @@ fn matches_any(patterns: &[PolicyPattern], value: &str) -> bool {
     patterns.iter().any(|pattern| pattern.matches(value))
 }
 
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn pattern_matches(pattern: &str, value: &str) -> bool {
     let pattern = pattern.as_bytes();
     let value = value.as_bytes();

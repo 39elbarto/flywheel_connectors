@@ -522,6 +522,7 @@ impl<'a> FcpsFrameRefs<'a> {
 ///
 /// # Errors
 /// Returns `FrameError` if computed lengths do not match declared values.
+#[inline]
 pub fn validate_frame_lengths(bytes: &[u8], header: &FcpsFrameHeader) -> Result<(), FrameError> {
     // Check for overflow when computing expected payload
     let record_size = SYMBOL_RECORD_OVERHEAD

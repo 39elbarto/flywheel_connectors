@@ -242,6 +242,9 @@ pub async fn snapshot_zone_lifecycle(
                 }
                 coverage = Some(evaluation);
             } else {
+                if object.header.placement.is_some() {
+                    meets_placement_policy = Some(false);
+                }
                 reconstructable = Some(false);
             }
         }
@@ -2014,6 +2017,65 @@ mod tests {
                         "reconstructable": entry.reconstructable,
                         "meets_policy": entry.meets_placement_policy,
                         "reconstructable_count": snapshot.reconstructable_count,
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn snapshot_zone_lifecycle_marks_missing_symbol_distribution_as_not_meeting_policy() {
+        run_store_test(
+            "snapshot_zone_lifecycle_missing_symbol_distribution",
+            "verify",
+            "lifecycle",
+            5,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+
+                let mut object = test_stored_object(7, b"policy-without-symbols");
+                object.header.placement = Some(fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10_000,
+                    preferred_devices: Vec::new(),
+                    excluded_devices: Vec::new(),
+                    target_coverage_bps: 10_000,
+                    min_source_diversity: 0,
+                });
+                let object_id = object.object_id;
+                store.put(object).await.unwrap();
+
+                let snapshot = snapshot_zone_lifecycle(
+                    &test_zone(),
+                    &GcRoots::new(),
+                    &store,
+                    Some(&symbol_store),
+                    10,
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(snapshot.reconstructable_count, Some(0));
+                let entry = snapshot
+                    .objects
+                    .iter()
+                    .find(|entry| entry.object_id == object_id)
+                    .unwrap();
+                assert_eq!(entry.coverage, None);
+                assert_eq!(entry.reconstructable, Some(false));
+                assert_eq!(entry.meets_placement_policy, Some(false));
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    details: Some(json!({
+                        "coverage": entry.coverage,
+                        "reconstructable": entry.reconstructable,
+                        "meets_policy": entry.meets_placement_policy,
                     })),
                     ..StoreLogData::default()
                 }

@@ -4857,16 +4857,33 @@ fn host_discovered_operation(
         tool.description.clone()
     };
 
+    let aliases = host_tool_aliases(tool);
+    let when_to_use = host_tool_when_to_use(tool);
+    let capability_str = tool.capability.to_string();
     DiscoveredOperation {
+        search_actual_id_lower: tool.name.to_lowercase(),
+        search_local_id_lower: local_id.to_lowercase(),
+        search_aliases_lower: aliases.iter().map(|a| a.to_lowercase()).collect(),
+        search_summary_lower: summary.to_lowercase(),
+        search_when_to_use_lower: when_to_use.to_lowercase(),
+        search_capability_lower: capability_str.to_lowercase(),
+        search_common_mistakes_lower: host_tool_common_mistakes(tool)
+            .iter()
+            .map(|m| m.to_lowercase())
+            .collect(),
+        search_related_lower: host_tool_related(tool)
+            .iter()
+            .map(|r| r.to_lowercase())
+            .collect(),
         actual_id: tool.name.clone(),
         local_id: local_id.to_owned(),
         preferred_selector: tool.name.clone(),
-        aliases: host_tool_aliases(tool),
+        aliases,
         description: summary.clone(),
         summary: OperationSummary {
             id: tool.name.clone(),
             summary,
-            capability: tool.capability.to_string(),
+            capability: capability_str,
             risk_level: risk_level_label(tool.risk_level).to_owned(),
             safety_tier: safety_tier_label(tool.safety_tier).to_owned(),
             idempotency: idempotency_label(tool.idempotency).to_owned(),
@@ -4878,7 +4895,7 @@ fn host_discovered_operation(
         approval_mode: tool.approval_mode.map_or_else(String::new, |mode| {
             host_approval_mode_label(mode).to_owned()
         }),
-        when_to_use: host_tool_when_to_use(tool),
+        when_to_use,
         common_mistakes: host_tool_common_mistakes(tool),
         examples: host_tool_example_strings(tool),
         related: host_tool_related(tool),
@@ -4945,6 +4962,11 @@ fn host_discovered_connector(
         capabilities: Value::Null,
         connector_schema: Value::Null,
         operations,
+        search_slug_lower: slug.to_lowercase(),
+        search_name_lower: connector.summary.name.to_lowercase(),
+        search_cohort_lower: categories
+            .first()
+            .map_or_else(|| "other".to_owned(), |c| c.to_lowercase()),
     }
 }
 

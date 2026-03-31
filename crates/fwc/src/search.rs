@@ -238,7 +238,7 @@ pub fn results_to_json(results: &[SearchResult], limit: usize) -> Vec<Value> {
 fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFilters) -> bool {
     if let Some(ref slug) = filters.connector {
         let slug_lower = slug.to_lowercase();
-        if connector.slug.to_lowercase() != slug_lower
+        if connector.search_slug_lower != slug_lower
             && !connector
                 .detail
                 .summary
@@ -269,7 +269,7 @@ fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFil
         }
     }
     if let Some(ref category) = filters.category {
-        if connector.cohort.to_lowercase() != category.to_lowercase() {
+        if connector.search_cohort_lower != category.to_lowercase() {
             return false;
         }
     }
@@ -279,12 +279,7 @@ fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFil
 fn operation_passes_filters(operation: &DiscoveredOperation, filters: &SearchFilters) -> bool {
     if let Some(ref cap) = filters.capability {
         let cap_lower = cap.to_lowercase();
-        if !operation
-            .summary
-            .capability
-            .to_lowercase()
-            .contains(&cap_lower)
-        {
+        if !operation.search_capability_lower.contains(&cap_lower) {
             return false;
         }
     }
@@ -311,13 +306,14 @@ fn operation_passes_filters(operation: &DiscoveredOperation, filters: &SearchFil
 
 fn connector_relevance(connector: &DiscoveredConnector, tokens: &[String]) -> i64 {
     let mut bonus = 0_i64;
-    let slug = connector.slug.to_lowercase();
-    let name = connector.detail.summary.name.to_lowercase();
+    // Use pre-cached lowercase fields (computed once at construction).
+    let slug = &connector.search_slug_lower;
+    let name = &connector.search_name_lower;
 
     for token in tokens {
-        if slug == *token || slug.contains(token) {
+        if slug == token || slug.contains(token.as_str()) {
             bonus += WEIGHT_CONNECTOR_NAME;
-        } else if name.contains(token) {
+        } else if name.contains(token.as_str()) {
             bonus += WEIGHT_CONNECTOR_NAME / 2;
         }
     }
@@ -332,80 +328,86 @@ fn score_operation(
     let mut score = 0_i64;
     let mut reasons = BTreeSet::new();
 
-    let op_id_lower = operation.actual_id.to_lowercase();
-    let local_id_lower = operation.local_id.to_lowercase();
-    let aliases_lower: Vec<String> = operation
-        .aliases
-        .iter()
-        .map(|alias| alias.to_lowercase())
-        .collect();
-    let summary_lower = operation.summary.summary.to_lowercase();
-    let when_to_use_lower = operation.when_to_use.to_lowercase();
-    let capability_lower = operation.summary.capability.to_lowercase();
+    // Use pre-cached lowercase fields (computed once at construction, not per-search).
+    let op_id_lower = &operation.search_actual_id_lower;
+    let local_id_lower = &operation.search_local_id_lower;
+    let aliases_lower = &operation.search_aliases_lower;
+    let summary_lower = &operation.search_summary_lower;
+    let when_to_use_lower = &operation.search_when_to_use_lower;
+    let capability_lower = &operation.search_capability_lower;
 
     for token in tokens {
         // Exact operation ID match (highest priority).
-        if op_id_lower == *token || local_id_lower == *token {
+        if op_id_lower == token || local_id_lower == token {
             score += WEIGHT_OP_ID_EXACT;
             reasons.insert("exact_id_match".to_owned());
-        } else if op_id_lower.contains(token) || local_id_lower.contains(token) {
+        } else if op_id_lower.contains(token.as_str()) || local_id_lower.contains(token.as_str()) {
             score += WEIGHT_OP_ID_PARTIAL;
             reasons.insert("partial_id_match".to_owned());
-        } else if identifier_has_fuzzy_match(&op_id_lower, token)
-            || identifier_has_fuzzy_match(&local_id_lower, token)
+        } else if identifier_has_fuzzy_match(op_id_lower, token)
+            || identifier_has_fuzzy_match(local_id_lower, token)
         {
             score += WEIGHT_OP_ID_FUZZY;
             reasons.insert("fuzzy_id_match".to_owned());
         }
 
-        // Alias match.
-        if aliases_lower.iter().any(|alias| alias == token) {
-            score += WEIGHT_OP_ID_EXACT;
-            reasons.insert("alias_match".to_owned());
-        } else if aliases_lower.iter().any(|alias| alias.contains(token)) {
-            score += WEIGHT_OP_ID_PARTIAL;
-            reasons.insert("partial_alias_match".to_owned());
-        } else if aliases_lower
-            .iter()
-            .any(|alias| identifier_has_fuzzy_match(alias, token))
-        {
-            score += WEIGHT_OP_ID_FUZZY;
-            reasons.insert("fuzzy_alias_match".to_owned());
+        // Alias match — single pass with early exit (was 3× sequential scans).
+        let mut best_alias_match = None;
+        for alias in aliases_lower {
+            if alias == token {
+                best_alias_match = Some(WEIGHT_OP_ID_EXACT);
+                break; // Can't do better than exact
+            } else if alias.contains(token.as_str()) {
+                if best_alias_match.map_or(true, |b| b < WEIGHT_OP_ID_PARTIAL) {
+                    best_alias_match = Some(WEIGHT_OP_ID_PARTIAL);
+                }
+            } else if best_alias_match.is_none() && identifier_has_fuzzy_match(alias, token) {
+                best_alias_match = Some(WEIGHT_OP_ID_FUZZY);
+            }
+        }
+        if let Some(weight) = best_alias_match {
+            score += weight;
+            let reason = match weight {
+                w if w == WEIGHT_OP_ID_EXACT => "alias_match",
+                w if w == WEIGHT_OP_ID_PARTIAL => "partial_alias_match",
+                _ => "fuzzy_alias_match",
+            };
+            reasons.insert(reason.to_owned());
         }
 
         // when_to_use (3x effective — highest value for agent search).
-        if when_to_use_lower.contains(token) {
+        if when_to_use_lower.contains(token.as_str()) {
             score += WEIGHT_WHEN_TO_USE;
             reasons.insert("when_to_use_match".to_owned());
         }
 
         // Summary/description.
-        if summary_lower.contains(token) {
+        if summary_lower.contains(token.as_str()) {
             score += WEIGHT_SUMMARY;
             reasons.insert("summary_match".to_owned());
         }
 
         // Capability.
-        if capability_lower.contains(token) {
+        if capability_lower.contains(token.as_str()) {
             score += WEIGHT_CAPABILITY;
             reasons.insert("capability_match".to_owned());
         }
 
-        // Common mistakes.
+        // Common mistakes (uses pre-cached lowercase).
         if operation
-            .common_mistakes
+            .search_common_mistakes_lower
             .iter()
-            .any(|m| m.to_lowercase().contains(token))
+            .any(|m| m.contains(token.as_str()))
         {
             score += WEIGHT_COMMON_MISTAKES;
             reasons.insert("common_mistakes_match".to_owned());
         }
 
-        // Related operations.
+        // Related operations (uses pre-cached lowercase).
         if operation
-            .related
+            .search_related_lower
             .iter()
-            .any(|r| r.to_lowercase().contains(token))
+            .any(|r| r.contains(token.as_str()))
         {
             score += WEIGHT_RELATED;
             reasons.insert("related_match".to_owned());
@@ -499,6 +501,9 @@ mod tests {
             capabilities: json!({}),
             connector_schema: json!({}),
             operations: ops,
+            search_slug_lower: slug.to_lowercase(),
+            search_name_lower: format!("{} connector", slug).to_lowercase(),
+            search_cohort_lower: "dev-tools".to_owned(),
         }
     }
 
@@ -535,6 +540,14 @@ mod tests {
             related: vec![],
             network_constraints: None,
             rate_limits: None,
+            search_actual_id_lower: id.to_lowercase(),
+            search_local_id_lower: id.rsplit('.').next().unwrap_or(id).to_lowercase(),
+            search_aliases_lower: vec![],
+            search_summary_lower: summary.to_lowercase(),
+            search_when_to_use_lower: when_to_use.to_lowercase(),
+            search_capability_lower: capability.to_lowercase(),
+            search_common_mistakes_lower: vec![],
+            search_related_lower: vec![],
         }
     }
 

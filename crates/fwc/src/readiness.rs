@@ -1730,6 +1730,10 @@ pub struct DiscoveredConnector {
     pub capabilities: Value,
     pub connector_schema: Value,
     pub operations: Vec<DiscoveredOperation>,
+    // Cached lowercase fields for search filtering — computed once at construction.
+    pub search_slug_lower: String,
+    pub search_name_lower: String,
+    pub search_cohort_lower: String,
 }
 
 impl DiscoveredConnector {
@@ -2183,6 +2187,16 @@ pub struct DiscoveredOperation {
     pub related: Vec<String>,
     pub network_constraints: Option<Value>,
     pub rate_limits: Option<Vec<RateLimitSummary>>,
+    // Cached lowercase fields for search scoring — computed once at construction,
+    // not per-search. Eliminates ~7 allocations per operation per search query.
+    pub search_actual_id_lower: String,
+    pub search_local_id_lower: String,
+    pub search_aliases_lower: Vec<String>,
+    pub search_summary_lower: String,
+    pub search_when_to_use_lower: String,
+    pub search_capability_lower: String,
+    pub search_common_mistakes_lower: Vec<String>,
+    pub search_related_lower: Vec<String>,
 }
 
 impl DiscoveredOperation {
@@ -2238,6 +2252,24 @@ impl DiscoveredOperation {
                 .map(serde_json::to_value)
                 .transpose()?,
             rate_limits: Some(rate_limits),
+            search_actual_id_lower: operation_id.to_lowercase(),
+            search_local_id_lower: local_id.to_lowercase(),
+            search_aliases_lower: aliases.iter().map(|a| a.to_lowercase()).collect(),
+            search_summary_lower: operation.description.to_lowercase(),
+            search_when_to_use_lower: operation.ai_hints.when_to_use.to_lowercase(),
+            search_capability_lower: operation.capability.as_str().to_lowercase(),
+            search_common_mistakes_lower: operation
+                .ai_hints
+                .common_mistakes
+                .iter()
+                .map(|m| m.to_lowercase())
+                .collect(),
+            search_related_lower: operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|r| r.to_lowercase())
+                .collect(),
         })
     }
 
@@ -2520,6 +2552,9 @@ fn discovered_connector_from_toml(
         "manifest_parse_warning": parse_warning,
     });
 
+    let search_slug_lower = slug.to_lowercase();
+    let search_name_lower = summary.name.to_lowercase();
+    let search_cohort_lower = cohort.to_lowercase();
     Ok(DiscoveredConnector {
         slug: slug.to_owned(),
         manifest_path: relative_to_workspace(manifest_path),
@@ -2539,6 +2574,9 @@ fn discovered_connector_from_toml(
         capabilities,
         connector_schema,
         operations,
+        search_slug_lower,
+        search_name_lower,
+        search_cohort_lower,
     })
 }
 
@@ -2637,6 +2675,12 @@ fn discovered_operation_from_toml(
         .or_else(|| operation.get("network"))
         .map(toml_value_to_json)
         .transpose()?;
+    let search_actual_id_lower = operation_id.to_lowercase();
+    let search_local_id_lower = local_id.to_lowercase();
+    let search_aliases_lower = aliases.iter().map(|alias| alias.to_lowercase()).collect();
+    let search_summary_lower = description.to_lowercase();
+    let search_when_to_use_lower = when_to_use.to_lowercase();
+    let search_capability_lower = capability.to_lowercase();
 
     Ok(DiscoveredOperation {
         actual_id: operation_id.to_owned(),
@@ -2665,6 +2709,12 @@ fn discovered_operation_from_toml(
         network_constraints,
         // Raw TOML fallback cannot prove structured rate-limit declarations.
         rate_limits: None,
+        search_actual_id_lower,
+        search_local_id_lower,
+        search_aliases_lower,
+        search_summary_lower,
+        search_when_to_use_lower,
+        search_capability_lower,
     })
 }
 
@@ -7895,6 +7945,12 @@ output_schema = { type = "object" }
             related: Vec::new(),
             network_constraints: None,
             rate_limits: None,
+            search_actual_id_lower: "fcp.github.list_issues".to_owned(),
+            search_local_id_lower: "list_issues".to_owned(),
+            search_aliases_lower: vec!["list_issues".to_owned()],
+            search_summary_lower: "list issues".to_owned(),
+            search_when_to_use_lower: String::new(),
+            search_capability_lower: "fcp.github.issue.read".to_owned(),
         }
     }
 

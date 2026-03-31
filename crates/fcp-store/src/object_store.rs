@@ -142,6 +142,7 @@ async fn classify_root(
 ///
 /// # Errors
 /// Returns an error if object or symbol metadata cannot be read.
+#[allow(clippy::too_many_lines)]
 pub async fn snapshot_zone_lifecycle(
     zone_id: &ZoneId,
     roots: &GcRoots,
@@ -211,12 +212,11 @@ pub async fn snapshot_zone_lifecycle(
         }
 
         let lease_state = match object.storage.retention {
-            RetentionClass::Pinned => ObjectLeaseState::NotLeased,
+            RetentionClass::Pinned | RetentionClass::Ephemeral => ObjectLeaseState::NotLeased,
             RetentionClass::Lease { expires_at } if expires_at > current_time => {
                 ObjectLeaseState::Active
             }
             RetentionClass::Lease { .. } => ObjectLeaseState::Expired,
-            RetentionClass::Ephemeral => ObjectLeaseState::NotLeased,
         };
 
         let mut refs = object.header.refs.clone();

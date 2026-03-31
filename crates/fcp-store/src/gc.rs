@@ -359,6 +359,7 @@ impl GarbageCollector {
         Ok(self.build_run_report(&plan, evicted, expired_leases))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn collect_internal(
         &self,
         zone_id: &ZoneId,

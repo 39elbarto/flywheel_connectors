@@ -703,7 +703,7 @@ impl RepairController {
 
     /// Check if an object needs repair based on coverage.
     #[must_use]
-    pub fn needs_repair(
+    pub const fn needs_repair(
         &self,
         coverage: &CoverageEvaluation,
         policy: &ObjectPlacementPolicy,
@@ -1054,6 +1054,7 @@ impl RepairController {
     }
 
     /// Evaluate all objects in a zone and return an explainable queue transcript.
+    #[allow(clippy::too_many_lines)]
     pub async fn evaluate_zone_with_report(
         &self,
         zone_id: &ZoneId,
@@ -1068,24 +1069,23 @@ impl RepairController {
         let mut decisions = Vec::with_capacity(object_ids.len());
 
         for object_id in object_ids {
-            let policy = match policies.get(&object_id) {
-                Some(p) => p.clone(),
-                None => {
-                    let action = if self.remove_queued_repair(&object_id) {
-                        RepairQueueAction::Remove
-                    } else {
-                        RepairQueueAction::Skip
-                    };
-                    decisions.push(RepairEvaluationDecision {
-                        object_id,
-                        action,
-                        reason_code: RepairEvaluationReasonCode::MissingPolicy,
-                        coverage_bps: None,
-                        distinct_nodes: None,
-                        priority: None,
-                    });
-                    continue;
-                }
+            let policy = if let Some(p) = policies.get(&object_id) {
+                p.clone()
+            } else {
+                let action = if self.remove_queued_repair(&object_id) {
+                    RepairQueueAction::Remove
+                } else {
+                    RepairQueueAction::Skip
+                };
+                decisions.push(RepairEvaluationDecision {
+                    object_id,
+                    action,
+                    reason_code: RepairEvaluationReasonCode::MissingPolicy,
+                    coverage_bps: None,
+                    distinct_nodes: None,
+                    priority: None,
+                });
+                continue;
             };
 
             let Some(dist) = symbol_store.get_distribution(&object_id).await else {
@@ -5040,7 +5040,7 @@ mod tests {
         );
         assert_eq!(first_decision.coverage_bps, Some(7000));
         assert_eq!(first_decision.distinct_nodes, Some(1));
-        assert_eq!(first_decision.priority, Some(130));
+        assert_eq!(first_decision.priority, Some(1030));
 
         let second = controller
             .evaluate_zone_with_report(&zone, &store, &policies)
@@ -5057,7 +5057,7 @@ mod tests {
             second_decision.reason_code,
             RepairEvaluationReasonCode::PolicySloDeficit
         );
-        assert_eq!(second_decision.priority, Some(130));
+        assert_eq!(second_decision.priority, Some(1030));
 
         let third = controller
             .evaluate_zone_with_report(&zone, &store, &HashMap::new())

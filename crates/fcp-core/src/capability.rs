@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::object::ObjectId;
+use crate::policy::pattern_matches;
 use crate::{CredentialId, CredentialValidationError, FcpError, FcpResult};
 use fcp_crypto::cose::{CoseToken, CwtClaims, fcp2_claims};
 
@@ -1195,7 +1196,7 @@ impl CapabilityVerifier {
                 let is_allowed = constraints
                     .resource_allow
                     .iter()
-                    .any(|pattern| uri.starts_with(pattern));
+                    .any(|pattern| pattern_matches(pattern, uri));
                 if !is_allowed {
                     return Err(FcpError::ResourceNotAllowed {
                         resource: uri.clone(),
@@ -1209,7 +1210,7 @@ impl CapabilityVerifier {
             if constraints
                 .resource_deny
                 .iter()
-                .any(|pattern| uri.starts_with(pattern))
+                .any(|pattern| pattern_matches(pattern, uri))
             {
                 return Err(FcpError::ResourceNotAllowed {
                     resource: uri.clone(),
@@ -1825,7 +1826,7 @@ mod tests {
         let cred_id = CredentialId::new();
         let constraints = CapabilityConstraints {
             credential_allow: vec![cred_id],
-            resource_allow: vec!["/api/v1/".into()],
+            resource_allow: vec!["/api/v1/*".into()],
             ..Default::default()
         };
 
@@ -1841,7 +1842,7 @@ mod tests {
     #[test]
     fn credential_constraints_empty_credential_allow_omitted_in_json() {
         let constraints = CapabilityConstraints {
-            resource_allow: vec!["/api/".into()],
+            resource_allow: vec!["/api/*".into()],
             ..Default::default()
         };
 
@@ -3045,8 +3046,8 @@ mod tests {
     fn capability_constraints_full_serde_roundtrip() {
         let cred = CredentialId::new();
         let c = CapabilityConstraints {
-            resource_allow: vec!["/api/v1/".into(), "/api/v2/".into()],
-            resource_deny: vec!["/admin/".into()],
+            resource_allow: vec!["/api/v1/*".into(), "/api/v2/*".into()],
+            resource_deny: vec!["/admin/*".into()],
             max_calls: Some(100),
             max_bytes: Some(1_000_000),
             idempotency_key: Some("idem-key-123".into()),

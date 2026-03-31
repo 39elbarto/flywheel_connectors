@@ -305,7 +305,8 @@ fn split_schema_prefix(data: &[u8]) -> Result<(SchemaHash, &[u8]), Serialization
 /// canonicalization fails (e.g., duplicate map keys), if CBOR serialization fails, or if the
 /// encoded bytes exceed `MAX_CANONICAL_OBJECT_BYTES`.
 pub fn to_canonical_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, SerializationError> {
-    let mut out = Vec::new();
+    // Pre-allocate for typical canonical CBOR payloads (~256 bytes).
+    let mut out = Vec::with_capacity(256);
     write_canonical_cbor(value, &mut out)?;
     if out.len() > MAX_CANONICAL_OBJECT_BYTES {
         return Err(SerializationError::PayloadTooLarge {

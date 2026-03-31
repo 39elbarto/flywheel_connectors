@@ -2725,59 +2725,47 @@ fn matches_any(patterns: &[PolicyPattern], value: &str) -> bool {
     patterns.iter().any(|pattern| pattern.matches(value))
 }
 
-fn pattern_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    if !pattern.contains('*') {
-        return pattern == value;
-    }
+pub(crate) fn pattern_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
 
-    let mut parts = pattern.split('*');
-    let mut index = 0usize;
+    let mut pattern_index = 0usize;
+    let mut value_index = 0usize;
+    let mut last_star = None;
+    let mut last_star_match = 0usize;
 
-    // Handle first part (prefix match)
-    if let Some(first) = parts.next() {
-        if !first.is_empty() {
-            if !value.starts_with(first) {
-                return false;
-            }
-            index += first.len();
-        }
-    }
-
-    // Handle middle parts
-    let mut last_part = "";
-    for part in parts {
-        last_part = part;
-        if part.is_empty() {
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == value[value_index]
+                || (pattern[pattern_index] == b'?' && value[value_index].is_ascii()))
+        {
+            pattern_index += 1;
+            value_index += 1;
             continue;
         }
 
-        match value[index..].find(part) {
-            Some(pos) => {
-                index += pos + part.len();
-            }
-            None => return false,
+        if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            last_star = Some(pattern_index);
+            pattern_index += 1;
+            last_star_match = value_index;
+            continue;
         }
+
+        if let Some(star_index) = last_star {
+            pattern_index = star_index + 1;
+            last_star_match += 1;
+            value_index = last_star_match;
+            continue;
+        }
+
+        return false;
     }
 
-    // Handle last part (suffix match) - if pattern doesn't end with *, the last part must match the end
-    if !pattern.ends_with('*') {
-        // If we consumed everything, we are good if the last part matched the end.
-        // But the loop logic above greedily matches the *first* occurrence.
-        // We need to ensure the *end* of the string matches the last part.
-        // Actually, split iterator gives us the last part.
-        // If pattern is "a*b", parts are "a", "b".
-        // Loop handled "a".
-        // Loop handled "b" (found it).
-        // But "b" must be at the END.
-        // A simpler logic without allocation:
-
-        return value.ends_with(last_part);
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
     }
 
-    true
+    pattern_index == pattern.len()
 }
 
 fn check_posture(
@@ -4006,6 +3994,26 @@ mod tests {
         assert!(pat.matches("abcz"));
         assert!(!pat.matches("bz"));
         assert!(!pat.matches("ay"));
+    }
+
+    #[test]
+    fn policy_pattern_single_char_wildcard() {
+        let pat = PolicyPattern {
+            pattern: "user:?lice".into(),
+        };
+        assert!(pat.matches("user:alice"));
+        assert!(pat.matches("user:1lice"));
+        assert!(!pat.matches("user:malice"));
+        assert!(!pat.matches("user:lice"));
+    }
+
+    #[test]
+    fn policy_pattern_single_char_wildcard_does_not_match_non_ascii() {
+        let pat = PolicyPattern {
+            pattern: "*?*".into(),
+        };
+        assert!(!pat.matches("é"));
+        assert!(pat.matches("a"));
     }
 
     #[test]

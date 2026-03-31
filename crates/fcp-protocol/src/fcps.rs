@@ -116,6 +116,9 @@ pub enum FrameError {
 
     #[error("invalid utf-8 string")]
     InvalidUtf8,
+
+    #[error("source_id too long (len {len}, max {max})")]
+    InvalidSourceIdLength { len: usize, max: usize },
 }
 
 /// Parsed FCPS frame header (114 bytes).
@@ -206,18 +209,11 @@ impl FcpsFrameHeader {
             });
         }
 
-        let symbol_count_bytes: [u8; 4] =
-            bytes[8..12].try_into().map_err(|_| FrameError::TooShort {
-                len: bytes.len(),
-                min: FCPS_HEADER_LEN,
-            })?;
-        let symbol_count = u32::from_le_bytes(symbol_count_bytes);
-        let total_payload_len_bytes: [u8; 4] =
-            bytes[12..16].try_into().map_err(|_| FrameError::TooShort {
-                len: bytes.len(),
-                min: FCPS_HEADER_LEN,
-            })?;
-        let total_payload_len = u32::from_le_bytes(total_payload_len_bytes);
+        // All slice accesses below are within 0..114 which is guaranteed
+        // by the length check above. Use direct from_le_bytes to avoid
+        // redundant try_into().map_err() error paths.
+        let symbol_count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let total_payload_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
 
         let mut object_id_bytes = [0u8; 32];
         object_id_bytes.copy_from_slice(&bytes[16..48]);
@@ -236,28 +232,17 @@ impl FcpsFrameHeader {
         zone_id_hash_bytes.copy_from_slice(&bytes[58..90]);
         let zone_id_hash = ZoneIdHash::from_bytes(zone_id_hash_bytes);
 
-        let epoch_id_bytes: [u8; 8] =
-            bytes[90..98].try_into().map_err(|_| FrameError::TooShort {
-                len: bytes.len(),
-                min: FCPS_HEADER_LEN,
-            })?;
-        let sender_instance_id_bytes: [u8; 8] =
-            bytes[98..106]
-                .try_into()
-                .map_err(|_| FrameError::TooShort {
-                    len: bytes.len(),
-                    min: FCPS_HEADER_LEN,
-                })?;
-        let frame_seq_bytes: [u8; 8] =
-            bytes[106..114]
-                .try_into()
-                .map_err(|_| FrameError::TooShort {
-                    len: bytes.len(),
-                    min: FCPS_HEADER_LEN,
-                })?;
-        let epoch_id = u64::from_le_bytes(epoch_id_bytes);
-        let sender_instance_id = u64::from_le_bytes(sender_instance_id_bytes);
-        let frame_seq = u64::from_le_bytes(frame_seq_bytes);
+        let epoch_id = u64::from_le_bytes([
+            bytes[90], bytes[91], bytes[92], bytes[93], bytes[94], bytes[95], bytes[96], bytes[97],
+        ]);
+        let sender_instance_id = u64::from_le_bytes([
+            bytes[98], bytes[99], bytes[100], bytes[101], bytes[102], bytes[103], bytes[104],
+            bytes[105],
+        ]);
+        let frame_seq = u64::from_le_bytes([
+            bytes[106], bytes[107], bytes[108], bytes[109], bytes[110], bytes[111], bytes[112],
+            bytes[113],
+        ]);
 
         Ok(Self {
             version,
@@ -353,6 +338,66 @@ impl SymbolRecord {
     }
 }
 
+/// Borrowed view of a symbol record — zero allocation, borrows data from frame buffer.
+///
+/// Use this when decoding symbols for immediate processing (MAC verification,
+/// forwarding) without needing to store the symbol data persistently.
+#[derive(Debug, Clone)]
+pub struct SymbolRecordRef<'a> {
+    /// Encoding Symbol Identifier.
+    pub esi: u32,
+    /// Source block length K.
+    pub k: u16,
+    /// Symbol data (borrowed from frame buffer).
+    pub data: &'a [u8],
+    /// Per-symbol authentication tag.
+    pub auth_tag: [u8; 16],
+}
+
+impl<'a> SymbolRecordRef<'a> {
+    /// Decode a symbol record borrowing data from the frame buffer (zero allocation).
+    ///
+    /// # Errors
+    /// Returns `FrameError::TooShort` if buffer is insufficient.
+    #[inline]
+    pub fn decode(bytes: &'a [u8], symbol_size: u16) -> Result<Self, FrameError> {
+        let expected_len = SYMBOL_RECORD_OVERHEAD + symbol_size as usize;
+        if bytes.len() < expected_len {
+            return Err(FrameError::TooShort {
+                len: bytes.len(),
+                min: expected_len,
+            });
+        }
+
+        let esi = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let k = u16::from_le_bytes([bytes[4], bytes[5]]);
+
+        let data_end = 6 + symbol_size as usize;
+        let data = &bytes[6..data_end];
+
+        let mut auth_tag = [0u8; 16];
+        auth_tag.copy_from_slice(&bytes[data_end..data_end + 16]);
+
+        Ok(Self {
+            esi,
+            k,
+            data,
+            auth_tag,
+        })
+    }
+
+    /// Convert to owned `SymbolRecord` (allocates).
+    #[must_use]
+    pub fn to_owned(&self) -> SymbolRecord {
+        SymbolRecord {
+            esi: self.esi,
+            k: self.k,
+            data: self.data.to_vec(),
+            auth_tag: self.auth_tag,
+        }
+    }
+}
+
 /// Complete FCPS frame (header + symbol records).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FcpsFrame {
@@ -415,6 +460,56 @@ impl FcpsFrame {
 
         for _ in 0..header.symbol_count {
             let record = SymbolRecord::decode(&bytes[offset..], header.symbol_size)?;
+            symbols.push(record);
+            offset += record_size;
+        }
+
+        Ok(Self { header, symbols })
+    }
+}
+
+/// Result of zero-copy frame decode — header is owned, symbols borrow from frame buffer.
+#[derive(Debug)]
+pub struct FcpsFrameRefs<'a> {
+    /// Frame header (decoded, owned — 114 bytes, no heap allocation).
+    pub header: FcpsFrameHeader,
+    /// Symbol records borrowing data from the frame buffer.
+    pub symbols: Vec<SymbolRecordRef<'a>>,
+}
+
+impl<'a> FcpsFrameRefs<'a> {
+    /// Zero-copy frame decode — symbol data borrows from the frame buffer.
+    ///
+    /// Use this for decode-and-forward, MAC verification, or any path where
+    /// symbol data is read but not stored. Eliminates one `Vec<u8>` heap
+    /// allocation per symbol record.
+    ///
+    /// # Errors
+    /// Returns `FrameError` if the frame is malformed or exceeds MTU.
+    pub fn decode(bytes: &'a [u8], max_datagram_bytes: usize) -> Result<Self, FrameError> {
+        if bytes.len() > max_datagram_bytes {
+            return Err(FrameError::ExceedsMtu {
+                len: bytes.len(),
+                max: max_datagram_bytes,
+            });
+        }
+
+        if bytes.len() < FCPS_HEADER_LEN {
+            return Err(FrameError::TooShort {
+                len: bytes.len(),
+                min: FCPS_HEADER_LEN,
+            });
+        }
+
+        let header = FcpsFrameHeader::decode(bytes)?;
+        validate_frame_lengths(bytes, &header)?;
+
+        let mut symbols = Vec::with_capacity(header.symbol_count as usize);
+        let record_size = SYMBOL_RECORD_OVERHEAD + header.symbol_size as usize;
+        let mut offset = FCPS_HEADER_LEN;
+
+        for _ in 0..header.symbol_count {
+            let record = SymbolRecordRef::decode(&bytes[offset..], header.symbol_size)?;
             symbols.push(record);
             offset += record_size;
         }
@@ -871,6 +966,18 @@ impl SignedFcpsFrame {
     /// Domain separator for frame signatures.
     pub const SIGNATURE_DOMAIN: &'static [u8] = b"FCP2-FRAME-SIG-V1";
 
+    fn validate_source_id(source_id: &TailscaleNodeId) -> Result<(), FrameError> {
+        let source_id_len = source_id.as_str().len();
+        if source_id_len > usize::from(u16::MAX) {
+            return Err(FrameError::InvalidSourceIdLength {
+                len: source_id_len,
+                max: usize::from(u16::MAX),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Create a new signed frame.
     ///
     /// # Arguments
@@ -887,6 +994,7 @@ impl SignedFcpsFrame {
         timestamp: u64,
         signing_key: &Ed25519SigningKey,
     ) -> Result<Self, FrameError> {
+        Self::validate_source_id(&source_id)?;
         let frame_bytes = frame.encode()?;
         let transcript = Self::build_transcript(&source_id, timestamp, &frame_bytes);
         let signature = signing_key.sign(&transcript);
@@ -925,17 +1033,15 @@ impl SignedFcpsFrame {
     /// Verify the frame signature.
     ///
     /// # Errors
-    /// Returns `CryptoError` if signature verification fails.
-    ///
-    /// # Panics
-    /// Panics if the internal frame cannot be re-encoded, which should
-    /// never happen for frames validated at construction.
+    /// Returns `CryptoError` if signature verification fails or the signed
+    /// frame has been mutated into an invalid state.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
-        // encode() validated at construction time in new(); infallible for well-formed frames
-        let frame_bytes = self
-            .frame
-            .encode()
-            .expect("frame was validated at construction");
+        Self::validate_source_id(&self.source_id).map_err(|err| {
+            CryptoError::SerializationError(format!("invalid signed FCPS frame: {err}"))
+        })?;
+        let frame_bytes = self.frame.encode().map_err(|err| {
+            CryptoError::SerializationError(format!("invalid signed FCPS frame: {err}"))
+        })?;
         let transcript = Self::build_transcript(&self.source_id, self.timestamp, &frame_bytes);
         verifying_key.verify(&transcript, &self.signature)
     }
@@ -949,35 +1055,28 @@ impl SignedFcpsFrame {
     /// - signature (64 bytes)
     /// - frame bytes
     ///
-    /// # Panics
-    ///
-    /// Panics if `source_id` exceeds `u16::MAX` bytes.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        // encode() validated at construction time in new(); infallible for well-formed frames
-        let frame_bytes = self
-            .frame
-            .encode()
-            .expect("frame was validated at construction");
-        let source_id_bytes = self.source_id.as_str().as_bytes();
+    /// # Errors
+    /// Returns `FrameError` if the signed frame has been mutated into an
+    /// invalid state after construction.
+    pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
+        self.try_encode()
+    }
 
-        assert!(
-            u16::try_from(source_id_bytes.len()).is_ok(),
-            "source_id too long: {} bytes (max {})",
-            source_id_bytes.len(),
-            u16::MAX
-        );
+    fn try_encode(&self) -> Result<Vec<u8>, FrameError> {
+        let frame_bytes = self.frame.encode()?;
+        Self::validate_source_id(&self.source_id)?;
+        let source_id_bytes = self.source_id.as_str().as_bytes();
 
         let mut out = Vec::with_capacity(2 + source_id_bytes.len() + 8 + 64 + frame_bytes.len());
 
-        let source_id_len = u16::try_from(source_id_bytes.len()).unwrap();
+        let source_id_len = u16::try_from(source_id_bytes.len()).expect("validated source_id");
         out.extend_from_slice(&source_id_len.to_le_bytes());
         out.extend_from_slice(source_id_bytes);
         out.extend_from_slice(&self.timestamp.to_le_bytes());
         out.extend_from_slice(&self.signature.to_bytes());
         out.extend_from_slice(&frame_bytes);
 
-        out
+        Ok(out)
     }
 
     /// Decode a signed frame from bytes.
@@ -1257,7 +1356,7 @@ mod tests {
 
         let signed =
             SignedFcpsFrame::new(frame, source_id.clone(), timestamp, &signing_key).expect("sign");
-        let encoded = signed.encode();
+        let encoded = signed.encode().expect("encode");
 
         let decoded = SignedFcpsFrame::decode(&encoded, 2000).expect("decode ok");
 
@@ -1273,10 +1372,81 @@ mod tests {
     }
 
     #[test]
+    fn signed_frame_rejects_oversized_source_id() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let oversized = "n".repeat(usize::from(u16::MAX) + 1);
+
+        let err = SignedFcpsFrame::new(
+            frame,
+            TailscaleNodeId::new(oversized),
+            1_704_067_200,
+            &signing_key,
+        )
+        .expect_err("oversized source_id should fail");
+
+        assert!(matches!(
+            err,
+            FrameError::InvalidSourceIdLength { len, max }
+                if len == usize::from(u16::MAX) + 1 && max == usize::from(u16::MAX)
+        ));
+    }
+
+    #[test]
+    fn signed_frame_encode_rejects_mutated_oversized_source_id() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let mut signed = SignedFcpsFrame::new(
+            frame,
+            TailscaleNodeId::new("node-mutable"),
+            1_704_067_200,
+            &signing_key,
+        )
+        .expect("sign");
+
+        signed.source_id = TailscaleNodeId::new("n".repeat(usize::from(u16::MAX) + 1));
+
+        let err = signed
+            .encode()
+            .expect_err("mutated oversized source_id should fail");
+        assert!(matches!(
+            err,
+            FrameError::InvalidSourceIdLength { len, max }
+                if len == usize::from(u16::MAX) + 1 && max == usize::from(u16::MAX)
+        ));
+    }
+
+    #[test]
     fn signed_frame_decode_rejects_short_input() {
         let too_short = vec![0u8; 50];
         let err = SignedFcpsFrame::decode(&too_short, 2000).expect_err("should fail");
         assert!(matches!(err, FrameError::TooShort { .. }));
+    }
+
+    #[test]
+    fn signed_frame_verify_rejects_mutated_invalid_frame_without_panic() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let mut signed = SignedFcpsFrame::new(
+            frame,
+            TailscaleNodeId::new("node-invalid-frame"),
+            1_704_067_200,
+            &signing_key,
+        )
+        .expect("sign");
+
+        signed.frame.header.symbol_count += 1;
+
+        let err = signed
+            .verify(&signing_key.verifying_key())
+            .expect_err("mutated invalid frame should fail verification");
+        assert!(matches!(err, CryptoError::SerializationError(_)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2886,6 +3056,10 @@ mod tests {
             FrameError::SymbolCountOverflow,
             FrameError::InvalidSymbolSize,
             FrameError::InvalidUtf8,
+            FrameError::InvalidSourceIdLength {
+                len: usize::from(u16::MAX) + 1,
+                max: usize::from(u16::MAX),
+            },
         ];
         for err in &variants {
             let dbg = format!("{err:?}");

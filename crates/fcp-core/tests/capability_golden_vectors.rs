@@ -366,7 +366,7 @@ mod resource_constraints {
         let pub_bytes = sk.verifying_key().to_bytes();
 
         let constraints = CapabilityConstraints {
-            resource_allow: vec!["/api/v1/".into(), "/public/".into()],
+            resource_allow: vec!["/api/v1/*".into(), "/public/*".into()],
             resource_deny: vec![],
             max_calls: None,
             max_bytes: None,
@@ -398,7 +398,7 @@ mod resource_constraints {
 
         let constraints = CapabilityConstraints {
             resource_allow: vec![], // Allow all by default
-            resource_deny: vec!["/admin/".into(), "/internal/".into()],
+            resource_deny: vec!["/admin/*".into(), "/internal/*".into()],
             max_calls: None,
             max_bytes: None,
             idempotency_key: None,
@@ -428,7 +428,7 @@ mod resource_constraints {
         let pub_bytes = sk.verifying_key().to_bytes();
 
         let constraints = CapabilityConstraints {
-            resource_allow: vec!["/api/".into()],
+            resource_allow: vec!["/api/*".into()],
             resource_deny: vec![],
             max_calls: None,
             max_bytes: None,

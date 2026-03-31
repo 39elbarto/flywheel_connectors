@@ -8,8 +8,8 @@ use std::hint::black_box;
 
 use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
 use fcp_protocol::{
-    FCPS_HEADER_LEN, FcpsDatagram, FcpsFrame, FcpsFrameHeader, FrameFlags, MeshSessionId,
-    SYMBOL_RECORD_OVERHEAD, SymbolRecord,
+    FCPS_HEADER_LEN, FcpsDatagram, FcpsFrame, FcpsFrameHeader, FcpsFrameRefs, FrameFlags,
+    MeshSessionId, SYMBOL_RECORD_OVERHEAD, SymbolRecord,
 };
 
 /// Build a test header for benchmarking.
@@ -165,6 +165,26 @@ fn bench_frame_decode(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_frame_decode_refs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fcps_frame_decode_refs");
+
+    for (symbol_count, symbol_size) in [(1, 1024), (10, 1024), (64, 256)] {
+        let frame = test_frame(symbol_count, symbol_size);
+        let encoded = frame.encode().expect("encode");
+        let frame_size = encoded.len();
+        group.throughput(Throughput::Bytes(frame_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("symbols_x_size", format!("{symbol_count}x{symbol_size}")),
+            &(symbol_count, symbol_size),
+            |b, _| {
+                b.iter(|| black_box(FcpsFrameRefs::decode(&encoded, 65536)));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_datagram_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("fcps_datagram_encode");
 
@@ -211,6 +231,7 @@ criterion_group!(
     bench_symbol_record_decode,
     bench_frame_encode,
     bench_frame_decode,
+    bench_frame_decode_refs,
     bench_datagram_encode,
     bench_datagram_decode,
 );

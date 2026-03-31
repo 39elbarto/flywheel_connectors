@@ -11,14 +11,14 @@ use std::io::{BufRead, Write};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fcp_core::{
-    AgentHint, ApprovalMode, AuthCaps, CapabilityId, ConnectorId, EventCaps, FcpError,
-    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass,
-    Introspection, InvokeRequest, InvokeResponse, OAuthConfig, ObjectId, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
+use fcp_core::{CapabilityId, OAuthConfig, ObjectId, RiskLevel, SafetyTier};
+use fcp_host::ConnectorArchetype;
+use fcp_kernel::{
+    AgentHint, ApprovalMode, AuthCaps, ConnectorId, EventCaps, FcpError, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
+    InvokeResponse, OperationId, OperationInfo, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
-use fcp_host::ConnectorArchetype;
 use serde_json::json;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -759,7 +759,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_core::{CapabilityToken, ZoneId};
+    use fcp_kernel::RequestId;
 
     fn test_profile(require_handshake: bool) -> TestConnectorProfile {
         TestConnectorProfile {

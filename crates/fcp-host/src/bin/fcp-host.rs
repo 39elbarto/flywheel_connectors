@@ -72,9 +72,8 @@ use fcp_host::{
 use fcp_host::{HostError, HostResult};
 use fcp_kernel::{
     ConnectorId, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
-    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError, LifecycleManager, LifecycleRecord,
-    LifecycleState, RequestId, SelfCheckReport, SelfCheckStatus, SimulateRequest, SimulateResponse,
-    TransitionReason, UsageMetric,
+    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError, LifecycleManager,
+    LifecycleState, RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
 use futures_util::future::join_all;
 use hyper::body::Incoming;
@@ -4839,8 +4838,8 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use fcp_kernel::{
-        BudgetEnforcement, HealthState, OperationId, UsageBudgetLimit, UsageBudgetPolicy,
-        UsageMetricKind,
+        BudgetEnforcement, HealthState, LifecycleRecord, OperationId, SelfCheckStatus,
+        TransitionReason, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric, UsageMetricKind,
     };
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {

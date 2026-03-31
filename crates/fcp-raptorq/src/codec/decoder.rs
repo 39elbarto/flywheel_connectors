@@ -1084,11 +1084,7 @@ fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Op
 ///
 /// This variant reuses the `cols` Vec across calls in the Gaussian elimination
 /// inner loop to avoid per-pivot heap allocation.
-fn sparse_update_columns_into(
-    pivot_row: &[Gf256],
-    n_cols: usize,
-    cols: &mut Vec<usize>,
-) -> bool {
+fn sparse_update_columns_into(pivot_row: &[Gf256], n_cols: usize, cols: &mut Vec<usize>) -> bool {
     cols.clear();
     if n_cols == 0 {
         return false;
@@ -1441,12 +1437,13 @@ impl InactivationDecoder {
         };
 
         // Initialize state with empty equations; we'll add them in batches.
-        let active_cols: BTreeSet<usize> = (0..k).collect();
+        let l = self.params.l;
+        let active_cols: BTreeSet<usize> = (0..l).collect();
         let mut state = DecoderState {
             params: self.params.clone(),
             equations: Vec::with_capacity(symbols.len()),
             rhs: Vec::with_capacity(symbols.len()),
-            solved: vec![None; k],
+            solved: vec![None; l],
             active_cols,
             inactive_cols: BTreeSet::new(),
             stats: DecodeStats::default(),
@@ -2586,6 +2583,63 @@ mod tests {
         assert_eq!(sym.esi, 10);
         assert_eq!(sym.columns, vec![0, 2, 5]);
         assert_eq!(sym.data.len(), 8);
+    }
+
+    #[test]
+    fn decode_wavefront_matches_sequential_for_intermediate_symbol_recovery() {
+        use crate::codec::systematic::SystematicEncoder;
+
+        let symbol_size = 128;
+        let k = 24usize;
+        let repair_ratio_bps = 2500u32;
+
+        let source_data: Vec<Vec<u8>> = (0..k)
+            .map(|i| {
+                (0..symbol_size)
+                    .map(|j| u8::try_from((i * 31 + j * 17) % 256).unwrap())
+                    .collect()
+            })
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source_data, symbol_size, 0).unwrap();
+        let params = encoder.params();
+        let k_prime = params.k_prime;
+
+        let mut transmitted: Vec<(u32, Vec<u8>)> =
+            (0..k).map(|i| (i as u32, source_data[i].clone())).collect();
+        let repair_count = (k as u32 * repair_ratio_bps / 10_000).max(1);
+        for i in 0..repair_count {
+            let esi = k_prime as u32 + i;
+            transmitted.push((esi, encoder.repair_symbol(esi)));
+        }
+
+        let received: Vec<(u32, Vec<u8>)> = transmitted
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| idx % 7 != 0)
+            .map(|(_, symbol)| symbol.clone())
+            .collect();
+
+        let decoder = InactivationDecoder::new(k, symbol_size, 0).unwrap();
+        let mut symbols = decoder.constraint_symbols();
+        for &(esi, ref data) in &received {
+            let symbol = if (esi as usize) < k {
+                ReceivedSymbol::source(esi, data.clone())
+            } else {
+                let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
+                ReceivedSymbol::repair(esi, columns, coefficients, data.clone())
+            };
+            symbols.push(symbol);
+        }
+        for esi in k..k_prime {
+            symbols.push(ReceivedSymbol::source(esi as u32, vec![0u8; symbol_size]));
+        }
+
+        let sequential = decoder.decode(symbols.clone()).unwrap();
+        let wavefront = decoder.decode_wavefront(symbols, 5).unwrap();
+
+        assert_eq!(wavefront.source, sequential.source);
+        assert_eq!(wavefront.intermediate, sequential.intermediate);
     }
 
     #[test]

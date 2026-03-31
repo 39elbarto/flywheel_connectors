@@ -16,23 +16,27 @@
 //! 7. GC decisions preserve FCPS-compatible objects with active retention
 //! 8. Lifecycle snapshot captures FCPS-durability-relevant state
 
+use std::collections::HashMap;
+use std::time::Duration;
+
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    ObjectId, ObjectPlacementPolicy, Provenance, StorageMeta, StoredObject, ZoneId, ZoneKeyId,
+    ObjectId, ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
+    ZoneKeyId,
 };
-use semver::Version;
 use fcp_protocol::{
-    FcpsFrameHeader, FrameFlags, FCPS_HEADER_LEN, FCPS_MAGIC, FCPS_VERSION,
-    SYMBOL_RECORD_OVERHEAD,
+    FCPS_HEADER_LEN, FCPS_MAGIC, FCPS_VERSION, FcpsFrameHeader, FrameFlags, SYMBOL_RECORD_OVERHEAD,
 };
 use fcp_raptorq::{RaptorQConfig, RaptorQEncoder};
 use fcp_store::{
-    GarbageCollector, GcConfig, GcRoots, MemoryObjectStore, MemoryObjectStoreConfig,
-    MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
-    ObjectTransmissionInfo, StoredSymbol, SymbolMeta, SymbolStore, snapshot_zone_lifecycle,
+    GarbageCollector, GcConfig, GcDecisionAction, GcReasonCode, GcRoots, MemoryObjectStore,
+    MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore,
+    ObjectSymbolMeta, ObjectTransmissionInfo, RepairController, RepairControllerConfig,
+    RepairEvaluationReasonCode, RepairPlanningOptions, RepairQueueAction, RepairReasonCode,
+    StoredSymbol, SymbolMeta, SymbolStore, snapshot_zone_lifecycle,
 };
-
-use std::time::Duration;
+use semver::Version;
+use serde_json::{Value, json};
 
 // ─── Test helpers ───────────────────────────────────────────────────────────
 
@@ -78,8 +82,8 @@ fn make_fcps_header(
     symbol_size: u16,
     frame_seq: u64,
 ) -> FcpsFrameHeader {
-    let payload_len = symbol_count
-        * (u32::from(symbol_size) + u32::try_from(SYMBOL_RECORD_OVERHEAD).unwrap());
+    let payload_len =
+        symbol_count * (u32::from(symbol_size) + u32::try_from(SYMBOL_RECORD_OVERHEAD).unwrap());
     FcpsFrameHeader {
         version: FCPS_VERSION,
         flags: FrameFlags::default(),
@@ -93,6 +97,207 @@ fn make_fcps_header(
         sender_instance_id: 0xDEAD_BEEF,
         frame_seq,
     }
+}
+
+fn durability_policy() -> ObjectPlacementPolicy {
+    ObjectPlacementPolicy {
+        min_nodes: 2,
+        max_node_fraction_bps: 10_000,
+        preferred_devices: Vec::new(),
+        excluded_devices: Vec::new(),
+        target_coverage_bps: 10_000,
+        min_source_diversity: 2,
+    }
+}
+
+fn default_repair_config() -> RepairControllerConfig {
+    RepairControllerConfig {
+        max_concurrent_repairs: 10,
+        max_repairs_per_minute: 100,
+        repair_interval: Duration::from_secs(60),
+        min_deficit_bps: 500,
+        max_symbols_per_repair: 100,
+    }
+}
+
+async fn build_recovery_artifact_bundle() -> Value {
+    let zone = test_zone();
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+        max_bytes: 1024 * 1024,
+        local_node_id: 1,
+    });
+    let controller = RepairController::new(default_repair_config());
+    let gc = GarbageCollector::new(GcConfig {
+        max_evictions_per_run: 4,
+        ..GcConfig::default()
+    });
+
+    let root_id = ObjectId::from_unscoped_bytes(b"durability-artifact-root");
+    let payload_id = ObjectId::from_unscoped_bytes(b"durability-artifact-payload");
+    let expired_id = ObjectId::from_unscoped_bytes(b"durability-artifact-expired");
+    let placement = durability_policy();
+
+    let object = |object_id: ObjectId,
+                  refs: Vec<ObjectId>,
+                  retention: RetentionClass,
+                  ttl_secs: Option<u64>,
+                  placement: Option<ObjectPlacementPolicy>,
+                  fill: u8| {
+        StoredObject {
+            object_id,
+            header: fcp_core::ObjectHeader {
+                schema: SchemaId::new("fcp.test", "DurabilityPayload", Version::new(0, 1, 0)),
+                zone_id: zone.clone(),
+                created_at: 1_700_000_000,
+                provenance: Provenance::new(zone.clone()),
+                refs,
+                foreign_refs: vec![],
+                ttl_secs,
+                placement,
+            },
+            body: vec![fill; 64],
+            storage: StorageMeta { retention },
+        }
+    };
+
+    store
+        .put(object(
+            root_id,
+            vec![payload_id],
+            RetentionClass::Pinned,
+            None,
+            None,
+            0x11,
+        ))
+        .await
+        .unwrap();
+    store
+        .put(object(
+            payload_id,
+            vec![],
+            RetentionClass::Lease { expires_at: 5_000 },
+            Some(600),
+            Some(placement.clone()),
+            0x22,
+        ))
+        .await
+        .unwrap();
+    store
+        .put(object(
+            expired_id,
+            vec![],
+            RetentionClass::Lease { expires_at: 500 },
+            None,
+            None,
+            0x33,
+        ))
+        .await
+        .unwrap();
+
+    symbol_store
+        .put_object_meta(ObjectSymbolMeta {
+            object_id: payload_id,
+            zone_id: zone.clone(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 1024,
+                symbol_size: 256,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 1,
+                payload_hash: None,
+            },
+            source_symbols: 3,
+            first_symbol_at: 1_000,
+        })
+        .await
+        .unwrap();
+
+    for esi in 0..2 {
+        symbol_store
+            .put_symbol(StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: payload_id,
+                    esi,
+                    zone_id: zone.clone(),
+                    source_node: Some(1),
+                    stored_at: 1_000 + u64::from(esi),
+                },
+                data: vec![u8::try_from(esi).unwrap(); 256].into(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let mut roots = GcRoots::new();
+    roots.set_checkpoint(root_id);
+
+    let policies = HashMap::from([(payload_id, placement)]);
+    let repair_evaluation_before = controller
+        .evaluate_zone_with_report(&zone, &symbol_store, &policies)
+        .await;
+    let plan_before = controller
+        .plan_zone(
+            &zone,
+            &symbol_store,
+            &policies,
+            &RepairPlanningOptions::default(),
+        )
+        .await;
+    let before_snapshot =
+        snapshot_zone_lifecycle(&zone, &roots, &store, Some(&symbol_store), 1_500)
+            .await
+            .unwrap();
+
+    symbol_store
+        .put_symbol(StoredSymbol {
+            meta: SymbolMeta {
+                object_id: payload_id,
+                esi: 2,
+                zone_id: zone.clone(),
+                source_node: Some(2),
+                stored_at: 1_600,
+            },
+            data: vec![0x7F; 256].into(),
+        })
+        .await
+        .unwrap();
+
+    let repair_evaluation_after = controller
+        .evaluate_zone_with_report(&zone, &symbol_store, &policies)
+        .await;
+    let plan_after = controller
+        .plan_zone(
+            &zone,
+            &symbol_store,
+            &policies,
+            &RepairPlanningOptions::default(),
+        )
+        .await;
+    let after_snapshot = snapshot_zone_lifecycle(&zone, &roots, &store, Some(&symbol_store), 2_000)
+        .await
+        .unwrap();
+    let gc_report = gc
+        .collect_with_transcript(&zone, &roots, &store, 1_500)
+        .await
+        .unwrap();
+
+    json!({
+        "scenario": "fcps_durability_recovery",
+        "zone_id": zone,
+        "replay": {
+            "checkpoint_root": root_id,
+            "recovery_object": payload_id,
+            "expired_object": expired_id,
+        },
+        "before_repair": before_snapshot,
+        "repair_evaluation_before": repair_evaluation_before,
+        "repair_plan_before": plan_before,
+        "after_repair": after_snapshot,
+        "repair_evaluation_after": repair_evaluation_after,
+        "repair_plan_after": plan_after,
+        "gc_report": gc_report,
+    })
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -215,7 +420,10 @@ fn symbol_size_consistency_between_raptorq_and_fcps() {
     let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
 
     let oti = encoder.transmission_info();
-    assert_eq!(u16::try_from(oti.symbol_size()).unwrap(), config.symbol_size);
+    assert_eq!(
+        u16::try_from(oti.symbol_size()).unwrap(),
+        config.symbol_size
+    );
 
     let header = make_fcps_header(
         ObjectId::from_bytes([1; 32]),
@@ -387,15 +595,10 @@ fn lifecycle_snapshot_captures_fcps_durability_state() {
                 .unwrap();
         }
 
-        let snapshot = snapshot_zone_lifecycle(
-            &zone,
-            &GcRoots::new(),
-            &store,
-            Some(&symbol_store),
-            10,
-        )
-        .await
-        .unwrap();
+        let snapshot =
+            snapshot_zone_lifecycle(&zone, &GcRoots::new(), &store, Some(&symbol_store), 10)
+                .await
+                .unwrap();
 
         assert_eq!(snapshot.objects.len(), 1);
 
@@ -423,6 +626,82 @@ fn lifecycle_snapshot_captures_fcps_durability_state() {
         let decoded = FcpsFrameHeader::decode(&header.encode()).unwrap();
         assert_eq!(decoded.object_id, object_id);
         assert_eq!(decoded.zone_id_hash, zone.hash());
+    })
+    .unwrap();
+}
+
+/// Repair/recovery evidence bundles remain deterministic and retrieval-friendly.
+#[test]
+fn repair_recovery_artifact_bundle_is_deterministic_and_serializable() {
+    fcp_async_core::runtime::block_on_sync(async {
+        let first = build_recovery_artifact_bundle().await;
+        let second = build_recovery_artifact_bundle().await;
+
+        assert_eq!(
+            first, second,
+            "recovery artifact bundle should be deterministic"
+        );
+
+        assert_eq!(first["scenario"], json!("fcps_durability_recovery"));
+        assert_eq!(first["before_repair"]["object_count"], json!(3));
+        assert_eq!(first["before_repair"]["reconstructable_count"], json!(0));
+        assert_eq!(
+            first["repair_evaluation_before"]["queue_depth_after"],
+            json!(1)
+        );
+        assert_eq!(
+            first["repair_evaluation_before"]["decisions"][0]["action"],
+            json!("queue")
+        );
+        assert_eq!(
+            first["repair_evaluation_before"]["decisions"][0]["reason_code"],
+            json!(RepairEvaluationReasonCode::PolicySloDeficit)
+        );
+        assert_eq!(
+            first["repair_plan_before"]["actions"][0]["reason_code"],
+            json!(RepairReasonCode::PolicySloDeficit)
+        );
+        assert_eq!(first["after_repair"]["reconstructable_count"], json!(1));
+        assert_eq!(
+            first["repair_evaluation_after"]["queue_depth_after"],
+            json!(0)
+        );
+        assert_eq!(
+            first["repair_evaluation_after"]["decisions"][0]["action"],
+            json!(RepairQueueAction::Remove)
+        );
+        assert_eq!(
+            first["repair_evaluation_after"]["decisions"][0]["reason_code"],
+            json!(RepairEvaluationReasonCode::Healthy)
+        );
+        assert_eq!(
+            first["repair_plan_after"]["actions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(first["gc_report"]["result"]["expired_leases"], json!(1));
+        assert_eq!(first["gc_report"]["result"]["evicted"], json!(1));
+        assert_eq!(first["gc_report"]["transcript"]["root_count"], json!(1));
+        assert!(
+            first["gc_report"]["transcript"]["decisions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |decision| decision["object_id"] == first["replay"]["expired_object"]
+                        && decision["reason_code"] == json!(GcReasonCode::LeaseExpired)
+                        && decision["action"] == json!(GcDecisionAction::Evict)
+                )
+        );
+
+        let roundtrip: Value =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        assert_eq!(
+            roundtrip, first,
+            "artifact bundle should survive retrieval roundtrip"
+        );
     })
     .unwrap();
 }

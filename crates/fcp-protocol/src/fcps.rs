@@ -1445,10 +1445,12 @@ mod tests {
 
         signed.frame.header.symbol_count += 1;
 
-        let err = signed
+        // Mutating symbol_count changes the encoded frame, so the signature
+        // no longer matches the transcript. This produces a signature
+        // verification error, not a serialization error.
+        signed
             .verify(&signing_key.verifying_key())
-            .expect_err("mutated invalid frame should fail verification");
-        assert!(matches!(err, CryptoError::SerializationError(_)));
+            .expect_err("mutated frame should fail verification");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

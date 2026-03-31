@@ -3722,6 +3722,7 @@ dependencies = [
 name = "fcp-kernel"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "fcp-async-core",
  "fcp-core",
@@ -5229,6 +5230,7 @@ dependencies = [
  "fcp-core",
  "fcp-raptorq",
  "fcp-telemetry",
+ "fcp-testkit",
  "jsonschema",
  "parking_lot",
  "rand 0.8.5",

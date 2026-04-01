@@ -10,7 +10,7 @@ use std::time::Instant;
 use chrono::Utc;
 use async_trait::async_trait;
 use fcp_core::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
@@ -889,6 +889,212 @@ fn operations_info() -> Vec<OperationInfo> {
             },
         ),
     ]
+}
+
+// ── FcpConnector trait implementation (FCP3 execution model) ─────────────
+
+#[async_trait]
+impl FcpConnector for CronConnector {
+    fn id(&self) -> &ConnectorId {
+        &self.base.id
+    }
+
+    async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        self.handle_configure(config).await?;
+        Ok(())
+    }
+
+    async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if !self.configured {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: "Connector not configured".into(),
+            });
+        }
+
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+
+        let response = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted: req
+                .capabilities_requested
+                .into_iter()
+                .map(|capability| CapabilityGrant {
+                    capability,
+                    operation: None,
+                })
+                .collect(),
+            session_id: SessionId::new(),
+            manifest_hash: Self::manifest_hash(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        };
+
+        self.session_id = Some(response.session_id.to_string());
+        self.base.set_handshaken(true);
+        Ok(response)
+    }
+
+    async fn health(&self) -> HealthSnapshot {
+        let handshaken = self.session_id.is_some();
+
+        if !self.configured {
+            HealthSnapshot::degraded("not configured")
+        } else if !handshaken {
+            HealthSnapshot::degraded("not handshaken")
+        } else {
+            HealthSnapshot::ready()
+        }
+    }
+
+    async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        if self.configured {
+            Ok(SelfCheckReport::ok())
+        } else {
+            Ok(SelfCheckReport::degraded("not_configured", "Connector not configured"))
+        }
+    }
+
+    fn metrics(&self) -> ConnectorMetrics {
+        ConnectorMetrics {
+            requests_total: self.request_count.load(Ordering::Relaxed),
+            requests_error: self.error_count.load(Ordering::Relaxed),
+            ..ConnectorMetrics::default()
+        }
+    }
+
+    async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        info!("Cron connector shutting down (FcpConnector trait)");
+        self.configured = false;
+        self.session_id = None;
+        self.verifier = None;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
+        Ok(())
+    }
+
+    fn introspect(&self) -> Introspection {
+        Introspection {
+            operations: operations_info(),
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
+    }
+
+    async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        self.base.check_ready()?;
+
+        let operation = req.operation.as_ref();
+        let input = req.input.clone();
+
+        self.request_count.fetch_add(1, Ordering::Relaxed);
+
+        // SAFETY: invoke takes &self but we need &mut for schedule/execution
+        // mutation. The cron connector is single-threaded (stdio loop), so
+        // interior mutability would be the proper fix. For now, delegate to
+        // the handle_invoke path which has &mut self.
+        let result_value = match operation {
+            "cron.schedules.list" => self.invoke_schedules_list_readonly(),
+            "cron.executions.list" => self.invoke_executions_list_readonly(&input),
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1002,
+                    message: format!("Operation {operation} requires mutable access; use handle_invoke"),
+                });
+            }
+        };
+
+        match result_value {
+            Ok(data) => Ok(InvokeResponse::ok(req.id, data)),
+            Err(e) => {
+                self.error_count.fetch_add(1, Ordering::Relaxed);
+                Err(e.to_fcp_error())
+            }
+        }
+    }
+
+    async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let operation = req.operation.as_ref();
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        if allowed {
+            Ok(SimulateResponse::allowed(req.id))
+        } else {
+            Ok(SimulateResponse::denied(
+                req.id,
+                format!("Unknown operation: {operation}"),
+                "unknown_operation",
+            ))
+        }
+    }
+
+    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        Err(FcpError::InvalidRequest {
+            code: 1002,
+            message: "Cron connector does not support event subscriptions".into(),
+        })
+    }
+
+    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
+        Err(FcpError::InvalidRequest {
+            code: 1002,
+            message: "Cron connector does not support event subscriptions".into(),
+        })
+    }
+}
+
+impl CronConnector {
+    /// Read-only schedule list for trait-based invoke (&self).
+    #[allow(clippy::unnecessary_wraps)]
+    fn invoke_schedules_list_readonly(&self) -> Result<serde_json::Value, CronError> {
+        let schedules: Vec<serde_json::Value> = self
+            .schedules
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))
+            .collect();
+        Ok(json!({ "schedules": schedules }))
+    }
+
+    /// Read-only execution list for trait-based invoke (&self).
+    fn invoke_executions_list_readonly(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, CronError> {
+        let schedule_id = input
+            .get("schedule_id")
+            .and_then(serde_json::Value::as_str);
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(DEFAULT_EXECUTION_LIMIT)
+            .min(MAX_EXECUTION_LIMIT);
+
+        let executions: Vec<&Execution> = self
+            .executions
+            .iter()
+            .filter(|ex| schedule_id.is_none() || schedule_id == Some(ex.schedule_id.as_str()))
+            .rev()
+            .take(limit as usize)
+            .collect();
+
+        let values: Vec<serde_json::Value> = executions
+            .iter()
+            .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+            .collect();
+        Ok(json!({ "executions": values }))
+    }
 }
 
 #[cfg(test)]

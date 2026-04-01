@@ -2,6 +2,8 @@
 //!
 //! A local meta-connector for scheduling and triggering timed jobs on the FCP mesh.
 //! Manages schedules and execution history in memory.
+//!
+//! Uses the FCP3 execution model: `FcpConnector` trait dispatch over JSON-RPC stdio.
 
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
@@ -26,7 +28,8 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
-use fcp_async_core::runtime::Builder;
+use fcp_core::{FcpConnector, FcpError, FcpResult, SimulateRequest};
+use fcp_sdk::prelude::*;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use fcp_cron::connector::CronConnector;
@@ -47,15 +50,23 @@ fn run_fcp_loop() -> Result<()> {
     let mut stdout = std::io::stdout();
     let mut connector = CronConnector::new();
 
-    let runtime = Builder::new_multi_thread().enable_all().build()?;
-
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         if line.is_empty() {
             continue;
         }
 
-        let response = runtime.block_on(async { handle_message(&mut connector, &line).await });
+        let response =
+            fcp_async_core::runtime::block_on_sync(handle_message(&mut connector, &line))
+                .unwrap_or_else(|e| {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": "FCP-9001",
+                            "message": format!("Runtime error: {e}")
+                        }
+                    })
+                });
 
         let response_json = serde_json::to_string(&response)?;
         writeln!(stdout, "{response_json}")?;
@@ -65,11 +76,18 @@ fn run_fcp_loop() -> Result<()> {
     Ok(())
 }
 
+fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| FcpError::Internal {
+        message: format!("Failed to serialize response: {e}"),
+    })
+}
+
 async fn handle_message(connector: &mut CronConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
         Err(e) => {
             return serde_json::json!({
+                "jsonrpc": "2.0",
                 "error": {
                     "code": "FCP-1001",
                     "message": format!("Invalid JSON: {e}")
@@ -88,21 +106,51 @@ async fn handle_message(connector: &mut CronConnector, message: &str) -> serde_j
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let result = match method {
-        "configure" => connector.handle_configure(params).await,
-        "handshake" => connector.handle_handshake(params).await,
-        "health" => connector.handle_health().await,
-        "doctor" => connector.handle_doctor().await,
-        "self_check" => connector.handle_self_check().await,
-        "introspect" => connector.handle_introspect().await,
-        "invoke" => connector.handle_invoke(params).await,
-        "simulate" => connector.handle_simulate(params).await,
-        "shutdown" => connector.handle_shutdown(params).await,
-        _ => Err(fcp_core::FcpError::InvalidRequest {
-            code: 1002,
-            message: format!("Unknown method: {method}"),
-        }),
-    };
+    // Dispatch via FcpConnector trait methods where possible, falling back
+    // to handle_* methods for operations that require &mut self (create/delete/trigger).
+    let result: FcpResult<serde_json::Value> = async {
+        match method {
+            "configure" => {
+                connector.configure(params).await?;
+                Ok(serde_json::json!({ "status": "configured" }))
+            }
+            "handshake" => {
+                let req: HandshakeRequest =
+                    serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid handshake request: {e}"),
+                    })?;
+                encode(&connector.handshake(req).await?)
+            }
+            "health" => encode(&connector.health().await),
+            "doctor" => connector.handle_doctor().await,
+            "self_check" => encode(&connector.self_check().await?),
+            "introspect" => encode(&connector.introspect()),
+            "invoke" => connector.handle_invoke(params).await,
+            "simulate" => {
+                let req: SimulateRequest =
+                    serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid simulate request: {e}"),
+                    })?;
+                encode(&connector.simulate(req).await?)
+            }
+            "shutdown" => {
+                let req: ShutdownRequest =
+                    serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid shutdown request: {e}"),
+                    })?;
+                connector.shutdown(req).await?;
+                Ok(serde_json::json!({ "status": "shutdown_accepted" }))
+            }
+            _ => Err(FcpError::InvalidRequest {
+                code: 1002,
+                message: format!("Unknown method: {method}"),
+            }),
+        }
+    }
+    .await;
 
     match result {
         Ok(value) => {

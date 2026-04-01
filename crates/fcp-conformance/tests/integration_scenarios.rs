@@ -54,6 +54,14 @@ const PARTITION_HEAL_SCENARIO: &str = "partition-heal";
 const PARTITION_HEAL_CONTRACT_ID: &str = "contract.partition_heal_convergence";
 const SPLIT_BRAIN_SCENARIO: &str = "split-brain";
 const SPLIT_BRAIN_CONTRACT_ID: &str = "contract.split_brain_prevention";
+const STATE_FORK_SCENARIO: &str = "state-fork";
+const STATE_FORK_CONTRACT_ID: &str = "contract.state_fork_detection_resolution";
+const ISSUER_REVOCATION_SCENARIO: &str = "issuer-revocation";
+const ISSUER_REVOCATION_CONTRACT_ID: &str = "contract.issuer_key_revocation_enforced";
+const CAPABILITY_REVOCATION_SCENARIO: &str = "capability-revocation";
+const CAPABILITY_REVOCATION_CONTRACT_ID: &str = "contract.capability_revocation_enforced";
+const NODE_REMOVAL_SCENARIO: &str = "node-removal";
+const NODE_REMOVAL_CONTRACT_ID: &str = "contract.node_removal_isolation";
 const STALE_REJOIN_SCENARIO: &str = "stale-rejoin";
 const STALE_REJOIN_CONTRACT_ID: &str = "contract.stale_node_rejoin_sync";
 const GRACEFUL_SHUTDOWN_SCENARIO: &str = "graceful-shutdown";
@@ -429,6 +437,262 @@ fn build_split_brain_artifact_bundle(
             converged_after_heal,
         },
         assertions: scenario_assertions(logs, SPLIT_BRAIN_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StateForkReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    node_a_id: String,
+    node_b_id: String,
+    object_a_id: String,
+    object_b_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StateForkStateEvidence {
+    a_has_b_before_gossip: bool,
+    b_has_a_before_gossip: bool,
+    divergent_before_gossip: bool,
+    a_has_b_after_gossip: bool,
+    b_has_a_after_gossip: bool,
+    resolved_after_gossip: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StateForkArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: StateForkReplayEvidence,
+    state: StateForkStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_state_fork_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    node_a_id: &NodeId,
+    node_b_id: &NodeId,
+    object_a_id: &ObjectId,
+    object_b_id: &ObjectId,
+    a_has_b_before_gossip: bool,
+    b_has_a_before_gossip: bool,
+    divergent_before_gossip: bool,
+    a_has_b_after_gossip: bool,
+    b_has_a_after_gossip: bool,
+    resolved_after_gossip: bool,
+    log_jsonl_valid: bool,
+) -> StateForkArtifactBundle {
+    StateForkArtifactBundle {
+        scenario_key: "state_fork".to_string(),
+        contract_id: STATE_FORK_CONTRACT_ID.to_string(),
+        replay: StateForkReplayEvidence {
+            seed: 0xF0F0_F0F0,
+            zone_id: zone.to_string(),
+            node_a_id: node_a_id.as_str().to_string(),
+            node_b_id: node_b_id.as_str().to_string(),
+            object_a_id: object_a_id.to_string(),
+            object_b_id: object_b_id.to_string(),
+        },
+        state: StateForkStateEvidence {
+            a_has_b_before_gossip,
+            b_has_a_before_gossip,
+            divergent_before_gossip,
+            a_has_b_after_gossip,
+            b_has_a_after_gossip,
+            resolved_after_gossip,
+        },
+        assertions: scenario_assertions(logs, STATE_FORK_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IssuerRevocationReplayEvidence {
+    seed: u64,
+    revoked_issuer_id: String,
+    observer_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IssuerRevocationStateEvidence {
+    peer_count_before_revocation: u8,
+    peer_count_after_revocation: u8,
+    pruned_entries: u64,
+    revocation_enforced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct IssuerRevocationArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: IssuerRevocationReplayEvidence,
+    state: IssuerRevocationStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_issuer_revocation_artifact_bundle(
+    logs: &[LogEntry],
+    revoked_issuer_id: &NodeId,
+    observer_node_id: &NodeId,
+    peer_count_before_revocation: usize,
+    peer_count_after_revocation: usize,
+    pruned_entries: usize,
+    revocation_enforced: bool,
+    log_jsonl_valid: bool,
+) -> IssuerRevocationArtifactBundle {
+    IssuerRevocationArtifactBundle {
+        scenario_key: "issuer_revocation".to_string(),
+        contract_id: ISSUER_REVOCATION_CONTRACT_ID.to_string(),
+        replay: IssuerRevocationReplayEvidence {
+            seed: 0xBAD_0E11,
+            revoked_issuer_id: revoked_issuer_id.as_str().to_string(),
+            observer_node_id: observer_node_id.as_str().to_string(),
+        },
+        state: IssuerRevocationStateEvidence {
+            peer_count_before_revocation: u8::try_from(peer_count_before_revocation)
+                .expect("peer count fits in u8"),
+            peer_count_after_revocation: u8::try_from(peer_count_after_revocation)
+                .expect("peer count fits in u8"),
+            pruned_entries: u64::try_from(pruned_entries).expect("pruned entry count fits in u64"),
+            revocation_enforced,
+        },
+        assertions: scenario_assertions(logs, ISSUER_REVOCATION_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CapabilityRevocationReplayEvidence {
+    seed: u64,
+    peer_id: String,
+    observer_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CapabilityRevocationStateEvidence {
+    authenticated_before: bool,
+    authenticated_after: bool,
+    admission_before_allowed: bool,
+    admission_after_allowed: bool,
+    revocation_enforced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CapabilityRevocationArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: CapabilityRevocationReplayEvidence,
+    state: CapabilityRevocationStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_capability_revocation_artifact_bundle(
+    logs: &[LogEntry],
+    peer_id: &NodeId,
+    observer_node_id: &NodeId,
+    authenticated_before: bool,
+    authenticated_after: bool,
+    admission_before_allowed: bool,
+    admission_after_allowed: bool,
+    revocation_enforced: bool,
+    log_jsonl_valid: bool,
+) -> CapabilityRevocationArtifactBundle {
+    CapabilityRevocationArtifactBundle {
+        scenario_key: "capability_revocation".to_string(),
+        contract_id: CAPABILITY_REVOCATION_CONTRACT_ID.to_string(),
+        replay: CapabilityRevocationReplayEvidence {
+            seed: 0xCA9_EE0CE,
+            peer_id: peer_id.as_str().to_string(),
+            observer_node_id: observer_node_id.as_str().to_string(),
+        },
+        state: CapabilityRevocationStateEvidence {
+            authenticated_before,
+            authenticated_after,
+            admission_before_allowed,
+            admission_after_allowed,
+            revocation_enforced,
+        },
+        assertions: scenario_assertions(logs, CAPABILITY_REVOCATION_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NodeRemovalReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    removed_node_id: String,
+    remaining_node_ids: Vec<String>,
+    object_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NodeRemovalStateEvidence {
+    removed_node_stopped: bool,
+    peer_count_before: u8,
+    peer_count_after: u8,
+    peer_count_decreased: bool,
+    gossip_between_remaining: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NodeRemovalArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: NodeRemovalReplayEvidence,
+    state: NodeRemovalStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_node_removal_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    removed_node_id: &NodeId,
+    remaining_node_ids: &[NodeId],
+    object_id: &ObjectId,
+    removed_node_stopped: bool,
+    peer_count_before: usize,
+    peer_count_after: usize,
+    peer_count_decreased: bool,
+    gossip_between_remaining: bool,
+    log_jsonl_valid: bool,
+) -> NodeRemovalArtifactBundle {
+    NodeRemovalArtifactBundle {
+        scenario_key: "node_removal".to_string(),
+        contract_id: NODE_REMOVAL_CONTRACT_ID.to_string(),
+        replay: NodeRemovalReplayEvidence {
+            seed: 0x0FF_B0A8D,
+            zone_id: zone.to_string(),
+            removed_node_id: removed_node_id.as_str().to_string(),
+            remaining_node_ids: remaining_node_ids
+                .iter()
+                .map(|node_id| node_id.as_str().to_string())
+                .collect(),
+            object_id: object_id.to_string(),
+        },
+        state: NodeRemovalStateEvidence {
+            removed_node_stopped,
+            peer_count_before: u8::try_from(peer_count_before).expect("peer count fits in u8"),
+            peer_count_after: u8::try_from(peer_count_after).expect("peer count fits in u8"),
+            peer_count_decreased,
+            gossip_between_remaining,
+        },
+        assertions: scenario_assertions(logs, NODE_REMOVAL_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
     }
@@ -2108,7 +2372,7 @@ async fn scenario_state_fork_detection() {
 
     emit_scenario_log(
         &harness.logs,
-        "state-fork",
+        STATE_FORK_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "fork_scenario",
@@ -2120,6 +2384,8 @@ async fn scenario_state_fork_detection() {
     harness.register_all_peers();
     let zone = test_zone();
     let now_ms = harness.now_ms();
+    let node_a_id = harness.nodes[0].node_id.clone();
+    let node_b_id = harness.nodes[1].node_id.clone();
 
     // Node A announces one set of objects
     let obj_a_only = test_object_id("state-fork-obj-a");
@@ -2150,10 +2416,11 @@ async fn scenario_state_fork_detection() {
         .unwrap()
         .gossip_mut()
         .has_object(&zone, &obj_a_only);
+    let divergent_before_gossip = !a_has_b_obj && !b_has_a_obj;
 
     emit_scenario_log(
         &harness.logs,
-        "state-fork",
+        STATE_FORK_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "fork_detected",
@@ -2161,7 +2428,7 @@ async fn scenario_state_fork_detection() {
         json!({
             "a_has_b_obj_before_sync": a_has_b_obj,
             "b_has_a_obj_before_sync": b_has_a_obj,
-            "divergent_before_gossip": !a_has_b_obj && !b_has_a_obj,
+            "divergent_before_gossip": divergent_before_gossip,
         }),
     );
 
@@ -2188,14 +2455,15 @@ async fn scenario_state_fork_detection() {
         .unwrap()
         .gossip_mut()
         .has_object(&zone, &obj_a_only);
+    let resolved_after_gossip = a_has_b_after && b_has_a_after;
 
     emit_scenario_log(
         &harness.logs,
-        "state-fork",
+        STATE_FORK_SCENARIO,
         "post-gossip",
         &["A", "B", "C"],
         "fork_resolved",
-        if a_has_b_after && b_has_a_after {
+        if resolved_after_gossip {
             "pass"
         } else {
             "fail"
@@ -2204,6 +2472,90 @@ async fn scenario_state_fork_detection() {
             "a_has_b_obj_after_sync": a_has_b_after,
             "b_has_a_obj_after_sync": b_has_a_after,
         }),
+    );
+
+    let state_fork_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == STATE_FORK_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        state_fork_logs.len(),
+        3,
+        "expected 3 state-fork log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "state-fork logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_state_fork_artifact_bundle(
+        &state_fork_logs,
+        &zone,
+        &node_a_id,
+        &node_b_id,
+        &obj_a_only,
+        &obj_only_b,
+        a_has_b_obj,
+        b_has_a_obj,
+        divergent_before_gossip,
+        a_has_b_after,
+        b_has_a_after,
+        resolved_after_gossip,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, STATE_FORK_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify", "post-gossip"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "pass",
+            "pass",
+            if resolved_after_gossip {
+                "pass"
+            } else {
+                "fail"
+            }
+        ]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, state_fork_logs.len());
+    assert!(!artifact_bundle.state.a_has_b_before_gossip);
+    assert!(!artifact_bundle.state.b_has_a_before_gossip);
+    assert!(artifact_bundle.state.divergent_before_gossip);
+    assert_eq!(artifact_bundle.state.a_has_b_after_gossip, a_has_b_after);
+    assert_eq!(artifact_bundle.state.b_has_a_after_gossip, b_has_a_after);
+    assert_eq!(
+        artifact_bundle.state.resolved_after_gossip,
+        resolved_after_gossip
+    );
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize state-fork artifact bundle");
+    let roundtrip: StateForkArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize state-fork artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
+
+    assert!(
+        a_has_b_after,
+        "node A should learn node B's object after gossip resolves the fork"
+    );
+    assert!(
+        b_has_a_after,
+        "node B should learn node A's object after gossip resolves the fork"
     );
 
     harness.stop_all().expect("stop all nodes");
@@ -2225,7 +2577,7 @@ async fn scenario_issuer_key_revocation() {
 
     emit_scenario_log(
         &harness.logs,
-        "issuer-revocation",
+        ISSUER_REVOCATION_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "revocation_scenario",
@@ -2236,6 +2588,7 @@ async fn scenario_issuer_key_revocation() {
     // Register peer signing keys to simulate key-based authentication
     harness.register_all_peers();
     let node_a_id = harness.nodes[0].node_id.clone();
+    let observer_node_id = harness.nodes[1].node_id.clone();
     let now_ms = harness.now_ms();
 
     // Verify node A is initially a recognized peer on node B
@@ -2254,18 +2607,15 @@ async fn scenario_issuer_key_revocation() {
         .mesh_mut()
         .unwrap()
         .prune_stale_state(now_ms);
+    let revocation_enforced = peer_count_after < peer_count_before;
 
     emit_scenario_log(
         &harness.logs,
-        "issuer-revocation",
+        ISSUER_REVOCATION_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "revocation_enforced",
-        if peer_count_after < peer_count_before {
-            "pass"
-        } else {
-            "fail"
-        },
+        if revocation_enforced { "pass" } else { "fail" },
         json!({
             "peer_count_before_revocation": peer_count_before,
             "peer_count_after_revocation": peer_count_after,
@@ -2273,8 +2623,85 @@ async fn scenario_issuer_key_revocation() {
         }),
     );
 
+    let issuer_revocation_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == ISSUER_REVOCATION_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        issuer_revocation_logs.len(),
+        2,
+        "expected 2 issuer-revocation log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
     assert!(
-        peer_count_after < peer_count_before,
+        log_jsonl_valid,
+        "issuer-revocation logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_issuer_revocation_artifact_bundle(
+        &issuer_revocation_logs,
+        &node_a_id,
+        &observer_node_id,
+        peer_count_before,
+        peer_count_after,
+        pruned,
+        revocation_enforced,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, ISSUER_REVOCATION_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", if revocation_enforced { "pass" } else { "fail" }]
+    );
+    assert_eq!(
+        artifact_bundle.log_entry_count,
+        issuer_revocation_logs.len()
+    );
+    assert_eq!(artifact_bundle.replay.revoked_issuer_id, node_a_id.as_str());
+    assert_eq!(
+        artifact_bundle.replay.observer_node_id,
+        observer_node_id.as_str()
+    );
+    assert_eq!(
+        artifact_bundle.state.peer_count_before_revocation,
+        u8::try_from(peer_count_before).expect("peer count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.peer_count_after_revocation,
+        u8::try_from(peer_count_after).expect("peer count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.pruned_entries,
+        u64::try_from(pruned).expect("pruned entry count fits in u64")
+    );
+    assert_eq!(
+        artifact_bundle.state.revocation_enforced,
+        revocation_enforced
+    );
+
+    let artifact_json = serde_json::to_value(&artifact_bundle)
+        .expect("serialize issuer-revocation artifact bundle");
+    let roundtrip: IssuerRevocationArtifactBundle = serde_json::from_value(artifact_json)
+        .expect("deserialize issuer-revocation artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
+
+    assert!(
+        revocation_enforced,
         "removing a peer should decrease peer count"
     );
 
@@ -2292,7 +2719,7 @@ async fn scenario_capability_revocation() {
 
     emit_scenario_log(
         &harness.logs,
-        "capability-revocation",
+        CAPABILITY_REVOCATION_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "revocation_scenario",
@@ -2303,6 +2730,7 @@ async fn scenario_capability_revocation() {
     // Test admission control revocation: authenticate then de-authenticate a peer
     harness.register_all_peers();
     let peer_id = harness.nodes[0].node_id.clone();
+    let observer_node_id = harness.nodes[1].node_id.clone();
     let now_ms = harness.now_ms();
 
     // Authenticate the peer on node B's admission controller
@@ -2345,14 +2773,15 @@ async fn scenario_capability_revocation() {
         .unwrap()
         .admission_mut()
         .check_admission(&peer_id, 1, 1, false, now_ms);
+    let revocation_enforced = !is_authed_after;
 
     emit_scenario_log(
         &harness.logs,
-        "capability-revocation",
+        CAPABILITY_REVOCATION_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "revocation_enforced",
-        if is_authed_after { "fail" } else { "pass" },
+        if revocation_enforced { "pass" } else { "fail" },
         json!({
             "authenticated_before": is_authed_before,
             "authenticated_after": is_authed_after,
@@ -2361,8 +2790,87 @@ async fn scenario_capability_revocation() {
         }),
     );
 
+    let capability_revocation_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == CAPABILITY_REVOCATION_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        capability_revocation_logs.len(),
+        2,
+        "expected 2 capability-revocation log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
     assert!(
-        !is_authed_after,
+        log_jsonl_valid,
+        "capability-revocation logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_capability_revocation_artifact_bundle(
+        &capability_revocation_logs,
+        &peer_id,
+        &observer_node_id,
+        is_authed_before,
+        is_authed_after,
+        admission_before.is_ok(),
+        admission_after.is_ok(),
+        revocation_enforced,
+        log_jsonl_valid,
+    );
+    assert_eq!(
+        artifact_bundle.contract_id,
+        CAPABILITY_REVOCATION_CONTRACT_ID
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", if revocation_enforced { "pass" } else { "fail" }]
+    );
+    assert_eq!(
+        artifact_bundle.log_entry_count,
+        capability_revocation_logs.len()
+    );
+    assert_eq!(artifact_bundle.replay.peer_id, peer_id.as_str());
+    assert_eq!(
+        artifact_bundle.replay.observer_node_id,
+        observer_node_id.as_str()
+    );
+    assert!(artifact_bundle.state.authenticated_before);
+    assert!(!artifact_bundle.state.authenticated_after);
+    assert_eq!(
+        artifact_bundle.state.admission_before_allowed,
+        admission_before.is_ok()
+    );
+    assert_eq!(
+        artifact_bundle.state.admission_after_allowed,
+        admission_after.is_ok()
+    );
+    assert_eq!(
+        artifact_bundle.state.revocation_enforced,
+        revocation_enforced
+    );
+
+    let artifact_json = serde_json::to_value(&artifact_bundle)
+        .expect("serialize capability-revocation artifact bundle");
+    let roundtrip: CapabilityRevocationArtifactBundle = serde_json::from_value(artifact_json)
+        .expect("deserialize capability-revocation artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
+
+    assert!(
+        revocation_enforced,
         "peer should be de-authenticated after revocation"
     );
 
@@ -2381,6 +2889,10 @@ async fn scenario_node_removal() {
 
     let removed_node_idx = 2;
     let removed_node_id = harness.nodes[removed_node_idx].node_id.clone();
+    let remaining_node_ids = vec![
+        harness.nodes[0].node_id.clone(),
+        harness.nodes[1].node_id.clone(),
+    ];
 
     // Register peers while all nodes are still running so peer counts are accurate.
     harness.register_all_peers();
@@ -2388,7 +2900,7 @@ async fn scenario_node_removal() {
 
     emit_scenario_log(
         &harness.logs,
-        "node-removal",
+        NODE_REMOVAL_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "removal_initiated",
@@ -2398,6 +2910,7 @@ async fn scenario_node_removal() {
 
     // Stop the node (simulating removal)
     harness.nodes[removed_node_idx].stop().expect("stop node");
+    let removed_node_stopped = !harness.nodes[removed_node_idx].is_running();
 
     // Partition it to prevent any communication
     harness.partition(std::slice::from_ref(&removed_node_id));
@@ -2435,21 +2948,107 @@ async fn scenario_node_removal() {
 
     emit_scenario_log(
         &harness.logs,
-        "node-removal",
+        NODE_REMOVAL_SCENARIO,
         "verify",
         &["A", "B"],
         "node_isolated",
-        "pass",
+        if peer_count_after < peer_count_before && node_b_has_obj {
+            "pass"
+        } else {
+            "fail"
+        },
         json!({
             "removed_node": removed_node_id.as_str(),
+            "removed_node_stopped": removed_node_stopped,
             "peer_count_before": peer_count_before,
             "peer_count_after": peer_count_after,
             "gossip_between_remaining": node_b_has_obj,
         }),
     );
 
+    let node_removal_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == NODE_REMOVAL_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        node_removal_logs.len(),
+        2,
+        "expected 2 node-removal log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
     assert!(
-        peer_count_after < peer_count_before,
+        log_jsonl_valid,
+        "node-removal logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let peer_count_decreased = peer_count_after < peer_count_before;
+    let artifact_bundle = build_node_removal_artifact_bundle(
+        &node_removal_logs,
+        &zone,
+        &removed_node_id,
+        &remaining_node_ids,
+        &obj_post_removal,
+        removed_node_stopped,
+        peer_count_before,
+        peer_count_after,
+        peer_count_decreased,
+        node_b_has_obj,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, NODE_REMOVAL_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "pass",
+            if peer_count_decreased && node_b_has_obj {
+                "pass"
+            } else {
+                "fail"
+            }
+        ]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, node_removal_logs.len());
+    assert!(artifact_bundle.state.removed_node_stopped);
+    assert_eq!(
+        artifact_bundle.state.peer_count_before,
+        u8::try_from(peer_count_before).expect("peer count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.peer_count_after,
+        u8::try_from(peer_count_after).expect("peer count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.peer_count_decreased,
+        peer_count_decreased
+    );
+    assert_eq!(
+        artifact_bundle.state.gossip_between_remaining,
+        node_b_has_obj
+    );
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize node-removal artifact bundle");
+    let roundtrip: NodeRemovalArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize node-removal artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
+
+    assert!(
+        peer_count_decreased,
         "peer count should decrease after removal"
     );
     assert!(

@@ -2578,6 +2578,7 @@ name = "fcp-cron"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "fcp-async-core",
  "fcp-core",

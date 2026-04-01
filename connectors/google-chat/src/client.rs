@@ -17,6 +17,27 @@ use crate::types::{
 
 const DEFAULT_BASE_URL: &str = "https://chat.googleapis.com/v1";
 
+/// Validate a Google Chat resource name (e.g. `spaces/ABC` or `spaces/ABC/messages/XYZ`).
+///
+/// Rejects path traversal (`..`), query strings (`?`), fragments (`#`),
+/// and percent-encoded separators that could escape the intended API path.
+fn validate_resource_name(name: &str, field: &str) -> ChatResult<()> {
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('?')
+        || name.contains('#')
+        || name.to_ascii_lowercase().contains("%2f")
+        || name.to_ascii_lowercase().contains("%5c")
+        || name.starts_with('/')
+    {
+        return Err(ChatError::Api {
+            status_code: 0,
+            message: format!("{field} contains invalid characters: {name:?}"),
+        });
+    }
+    Ok(())
+}
+
 /// Google Chat API client.
 pub struct ChatClient {
     client: Client,
@@ -89,6 +110,7 @@ impl ChatClient {
     /// Get a specific space by resource name.
     #[instrument(skip(self), fields(space_name))]
     pub async fn get_space(&self, space_name: &str) -> ChatResult<Space> {
+        validate_resource_name(space_name, "space_name")?;
         let url = format!("{}/{space_name}", self.base_url);
         self.get_json(&url).await
     }
@@ -96,6 +118,7 @@ impl ChatClient {
     /// Create (send) a message in a space.
     #[instrument(skip(self), fields(space_name))]
     pub async fn create_message(&self, space_name: &str, text: &str) -> ChatResult<Message> {
+        validate_resource_name(space_name, "space_name")?;
         let url = format!("{}/{space_name}/messages", self.base_url);
         let body = serde_json::json!({ "text": text });
         self.post_json(&url, &body).await
@@ -104,6 +127,7 @@ impl ChatClient {
     /// List messages in a space.
     #[instrument(skip(self), fields(space_name))]
     pub async fn list_messages(&self, space_name: &str) -> ChatResult<Vec<Message>> {
+        validate_resource_name(space_name, "space_name")?;
         let url = format!("{}/{space_name}/messages", self.base_url);
         let resp: ListMessagesResponse = self.get_json(&url).await?;
         Ok(resp.messages)
@@ -112,6 +136,7 @@ impl ChatClient {
     /// Get a specific message by resource name.
     #[instrument(skip(self), fields(message_name))]
     pub async fn get_message(&self, message_name: &str) -> ChatResult<Message> {
+        validate_resource_name(message_name, "message_name")?;
         let url = format!("{}/{message_name}", self.base_url);
         self.get_json(&url).await
     }
@@ -119,6 +144,7 @@ impl ChatClient {
     /// List members of a space.
     #[instrument(skip(self), fields(space_name))]
     pub async fn list_members(&self, space_name: &str) -> ChatResult<Vec<Membership>> {
+        validate_resource_name(space_name, "space_name")?;
         let url = format!("{}/{space_name}/members", self.base_url);
         let resp: ListMembershipsResponse = self.get_json(&url).await?;
         Ok(resp.memberships)

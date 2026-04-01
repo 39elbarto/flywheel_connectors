@@ -31,7 +31,7 @@ pub struct DoctorRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConnectorSelfCheck {
     /// Connector identifier.
-    pub connector_id: String,
+    pub connector_id: ConnectorId,
 
     /// Self-check report from connector.
     pub report: SelfCheckReport,
@@ -117,7 +117,7 @@ pub struct CheckResult {
     pub name: String,
     /// Connector this check applies to, when the result is connector-specific.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connector_id: Option<String>,
+    pub connector_id: Option<ConnectorId>,
     /// Stable reason code for machine-readable triage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -160,7 +160,7 @@ pub struct DoctorReport {
     pub generated_at: DateTime<Utc>,
 
     /// Zone being diagnosed.
-    pub zone_id: String,
+    pub zone_id: ZoneId,
 
     /// Overall status summary.
     pub overall_status: OverallStatus,
@@ -201,10 +201,18 @@ impl DoctorReport {
 
     #[must_use]
     pub fn baseline(zone_id: &str) -> Self {
+        let zone_id: ZoneId = zone_id
+            .parse()
+            .expect("doctor report baseline zone ids must be canonical");
+        Self::baseline_for_zone(zone_id)
+    }
+
+    #[must_use]
+    fn baseline_for_zone(zone_id: ZoneId) -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION.to_string(),
             generated_at: Utc::now(),
-            zone_id: zone_id.to_string(),
+            zone_id,
             overall_status: OverallStatus::Ok,
             checkpoint: CheckpointStatus::default(),
             revocation: RevocationStatus::default(),
@@ -273,7 +281,7 @@ where
     /// # Errors
     /// Returns a `HostError` when inputs are invalid or connectors are missing.
     pub async fn handle(&self, request: DoctorRequest) -> HostResult<DoctorReport> {
-        let _zone: ZoneId = request.zone_id.parse().map_err(|err| {
+        let zone: ZoneId = request.zone_id.parse().map_err(|err| {
             HostError::InvalidFilter(format!("invalid zone_id '{}': {err}", request.zone_id))
         })?;
 
@@ -311,7 +319,7 @@ where
                         ),
                     };
                     Ok(ConnectorSelfCheck {
-                        connector_id: connector_id.to_string(),
+                        connector_id,
                         report,
                     })
                 });
@@ -322,7 +330,7 @@ where
             }
         }
 
-        Ok(DoctorReport::baseline(&request.zone_id).with_self_checks(self_checks))
+        Ok(DoctorReport::baseline_for_zone(zone).with_self_checks(self_checks))
     }
 }
 
@@ -533,6 +541,16 @@ mod tests {
 
     use crate::{ConnectorArchetype, ConnectorRegistry, ConnectorSummary};
 
+    fn test_zone_id(raw: &str) -> ZoneId {
+        raw.parse()
+            .expect("doctor tests must use canonical zone identifiers")
+    }
+
+    fn test_connector_id(raw: &str) -> ConnectorId {
+        raw.parse()
+            .expect("doctor tests must use canonical connector identifiers")
+    }
+
     // ── Mock Registry ──
     type SelfCheckFn = dyn Fn(&ConnectorId) -> Option<SelfCheckReport> + Send + Sync;
 
@@ -621,11 +639,11 @@ mod tests {
     fn overall_ok_when_all_ok() {
         let checks = vec![
             ConnectorSelfCheck {
-                connector_id: "a".to_string(),
+                connector_id: test_connector_id("test.a:utility:1.0.0"),
                 report: SelfCheckReport::ok(),
             },
             ConnectorSelfCheck {
-                connector_id: "b".to_string(),
+                connector_id: test_connector_id("test.b:utility:1.0.0"),
                 report: SelfCheckReport::ok(),
             },
         ];
@@ -636,11 +654,11 @@ mod tests {
     fn overall_fail_when_any_failed() {
         let checks = vec![
             ConnectorSelfCheck {
-                connector_id: "a".to_string(),
+                connector_id: test_connector_id("test.a:utility:1.0.0"),
                 report: SelfCheckReport::ok(),
             },
             ConnectorSelfCheck {
-                connector_id: "b".to_string(),
+                connector_id: test_connector_id("test.b:utility:1.0.0"),
                 report: SelfCheckReport::failed("test", "failed"),
             },
         ];
@@ -653,7 +671,7 @@ mod tests {
     #[test]
     fn overall_warn_when_degraded() {
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "a".to_string(),
+            connector_id: test_connector_id("test.a:utility:1.0.0"),
             report: SelfCheckReport::degraded("test", "degraded"),
         }];
         assert_eq!(
@@ -666,11 +684,11 @@ mod tests {
     fn overall_fail_beats_warn() {
         let checks = vec![
             ConnectorSelfCheck {
-                connector_id: "a".to_string(),
+                connector_id: test_connector_id("test.a:utility:1.0.0"),
                 report: SelfCheckReport::degraded("test", "degraded"),
             },
             ConnectorSelfCheck {
-                connector_id: "b".to_string(),
+                connector_id: test_connector_id("test.b:utility:1.0.0"),
                 report: SelfCheckReport::failed("test", "failed"),
             },
         ];
@@ -689,8 +707,8 @@ mod tests {
 
     #[test]
     fn baseline_report_has_correct_defaults() {
-        let report = DoctorReport::baseline("test-zone");
-        assert_eq!(report.zone_id, "test-zone");
+        let report = DoctorReport::baseline("z:test-zone");
+        assert_eq!(report.zone_id.as_str(), "z:test-zone");
         assert_eq!(report.overall_status, OverallStatus::Ok);
         assert_eq!(report.checkpoint.freshness, FreshnessLevel::Fresh);
         assert_eq!(report.revocation.freshness, FreshnessLevel::Fresh);
@@ -707,9 +725,9 @@ mod tests {
 
     #[test]
     fn report_json_serializable() {
-        let report = DoctorReport::baseline("test-zone");
+        let report = DoctorReport::baseline("z:test-zone");
         let json = serde_json::to_string(&report).unwrap();
-        assert!(json.contains("test-zone"));
+        assert!(json.contains("z:test-zone"));
         assert!(json.contains("OK"));
     }
 
@@ -822,11 +840,7 @@ mod tests {
         };
 
         let result = service.handle(request).await;
-        // Empty zone_id may or may not be rejected depending on ZoneId::parse
-        // but we exercise the code path
-        if let Ok(report) = result {
-            assert_eq!(report.zone_id, "");
-        }
+        assert!(matches!(result, Err(HostError::InvalidFilter(_))));
     }
 
     #[fcp_async_core::runtime::test]
@@ -893,7 +907,7 @@ mod tests {
     fn check_result_serialization_includes_optional_triage_fields() {
         let result = CheckResult {
             name: "auth".to_string(),
-            connector_id: Some("test.auth:utility:1.0.0".to_string()),
+            connector_id: Some(test_connector_id("test.auth:utility:1.0.0")),
             code: Some("token_expired".to_string()),
             status: CheckStatus::Fail,
             severity: CheckSeverity::Critical,
@@ -1059,7 +1073,7 @@ mod tests {
     #[test]
     fn with_self_checks_sets_overall_status() {
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "a".to_string(),
+            connector_id: test_connector_id("test.connector:utility:1.0.0"),
             report: SelfCheckReport::failed("test", "fail"),
         }];
         let report = DoctorReport::baseline("z:test").with_self_checks(checks);
@@ -1099,7 +1113,7 @@ mod tests {
     #[test]
     fn connector_self_check_serialization() {
         let check = ConnectorSelfCheck {
-            connector_id: "test.check:utility:1.0.0".to_string(),
+            connector_id: test_connector_id("test.check:utility:1.0.0"),
             report: SelfCheckReport::ok(),
         };
         let json = serde_json::to_value(&check).unwrap();
@@ -1118,7 +1132,7 @@ mod tests {
     #[test]
     fn doctor_report_includes_nonempty_self_checks() {
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "a".to_string(),
+            connector_id: test_connector_id("test.a:utility:1.0.0"),
             report: SelfCheckReport::ok(),
         }];
         let report = DoctorReport::baseline("z:test").with_self_checks(checks);
@@ -1277,15 +1291,15 @@ mod tests {
     fn with_self_checks_mixed_ok_warn_fail_returns_fail() {
         let checks = vec![
             ConnectorSelfCheck {
-                connector_id: "a".to_string(),
+                connector_id: test_connector_id("test.a:utility:1.0.0"),
                 report: SelfCheckReport::ok(),
             },
             ConnectorSelfCheck {
-                connector_id: "b".to_string(),
+                connector_id: test_connector_id("test.b:utility:1.0.0"),
                 report: SelfCheckReport::degraded("slow", "slow response"),
             },
             ConnectorSelfCheck {
-                connector_id: "c".to_string(),
+                connector_id: test_connector_id("test.c:utility:1.0.0"),
                 report: SelfCheckReport::failed("test", "down"),
             },
         ];
@@ -1297,11 +1311,11 @@ mod tests {
     fn with_self_checks_warn_only_returns_warn() {
         let checks = vec![
             ConnectorSelfCheck {
-                connector_id: "a".to_string(),
+                connector_id: test_connector_id("test.a:utility:1.0.0"),
                 report: SelfCheckReport::ok(),
             },
             ConnectorSelfCheck {
-                connector_id: "b".to_string(),
+                connector_id: test_connector_id("test.b:utility:1.0.0"),
                 report: SelfCheckReport::degraded("slow", "slow response"),
             },
         ];
@@ -1320,7 +1334,7 @@ mod tests {
     #[test]
     fn baseline_report_zone_id_preserved() {
         let report = DoctorReport::baseline("z:custom");
-        assert_eq!(report.zone_id, "z:custom");
+        assert_eq!(report.zone_id.as_str(), "z:custom");
     }
 
     #[test]
@@ -1348,7 +1362,7 @@ mod tests {
     #[test]
     fn connector_self_check_roundtrip() {
         let check = ConnectorSelfCheck {
-            connector_id: "test:conn:1.0.0".to_string(),
+            connector_id: test_connector_id("test:conn:1.0.0"),
             report: SelfCheckReport::ok(),
         };
         let json = serde_json::to_string(&check).unwrap();
@@ -1359,7 +1373,7 @@ mod tests {
     #[test]
     fn connector_self_check_failed_report() {
         let check = ConnectorSelfCheck {
-            connector_id: "test:fail:1.0.0".to_string(),
+            connector_id: test_connector_id("test:fail:1.0.0"),
             report: SelfCheckReport::failed("auth", "token expired"),
         };
         let json = serde_json::to_string(&check).unwrap();

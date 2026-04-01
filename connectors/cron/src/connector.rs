@@ -8,10 +8,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use chrono::Utc;
+use async_trait::async_trait;
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, ConnectorId, EventCaps, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SessionId,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
+    ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -223,6 +227,7 @@ pub struct CronConnector {
     base: Arc<BaseConnector>,
     configured: bool,
     session_id: Option<String>,
+    verifier: Option<CapabilityVerifier>,
     started_at: Instant,
     provisioning: ProvisioningPolicy,
     schedules: Vec<Schedule>,
@@ -238,6 +243,7 @@ impl CronConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("cron"))),
             configured: false,
             session_id: None,
+            verifier: None,
             started_at: Instant::now(),
             provisioning: ProvisioningPolicy::default(),
             schedules: Vec::new(),

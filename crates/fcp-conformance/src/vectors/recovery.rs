@@ -8,12 +8,12 @@
 //!
 //! # Coverage
 //!
-//! 1. ReplayWindow accepts fresh frames and rejects replays
-//! 2. ReplayWindow handles out-of-order delivery within the window
-//! 3. ReplayWindow rejects frames outside the window
-//! 4. SessionReplayPolicy normative defaults
+//! 1. `ReplayWindow` accepts fresh frames and rejects replays
+//! 2. `ReplayWindow` handles out-of-order delivery within the window
+//! 3. `ReplayWindow` rejects frames outside the window
+//! 4. `SessionReplayPolicy` normative defaults
 //! 5. Rekey trigger threshold computation
-//! 6. ZoneCheckpoint freshness comparison
+//! 6. `ZoneCheckpoint` freshness comparison
 //! 7. Checkpoint-based recovery state roundtrip
 
 #[cfg(test)]

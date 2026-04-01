@@ -17,8 +17,8 @@
 
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use fcp_kernel::ConnectorId;
+use serde::{Deserialize, Serialize};
 
 use crate::supervisor::ProcessState;
 
@@ -212,7 +212,7 @@ pub enum ConnectorProcessState {
 
 impl ConnectorProcessState {
     #[must_use]
-    pub const fn is_running(&self) -> bool {
+    pub const fn is_running(self) -> bool {
         matches!(self, Self::Running)
     }
 }
@@ -1186,7 +1186,10 @@ mod tests {
     #[test]
     fn aggregator_with_running_connector() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
+        agg.report_connector(ConnectorProcessHealth::running(
+            test_connector_id("discord"),
+            100,
+        ));
         let status = agg.evaluate();
         assert!(status.is_healthy());
         assert_eq!(status.running_connector_count(), 1);
@@ -1196,7 +1199,10 @@ mod tests {
     #[test]
     fn aggregator_crash_loop_makes_unhealthy() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::failed(test_connector_id("discord"), 5));
+        agg.report_connector(ConnectorProcessHealth::failed(
+            test_connector_id("discord"),
+            5,
+        ));
         let status = agg.evaluate();
         assert!(status.status.is_unhealthy());
         assert!(!status.is_ready());
@@ -1259,8 +1265,14 @@ mod tests {
     #[test]
     fn aggregator_update_existing_connector() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::failed(test_connector_id("discord"), 5));
-        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
+        agg.report_connector(ConnectorProcessHealth::failed(
+            test_connector_id("discord"),
+            5,
+        ));
+        agg.report_connector(ConnectorProcessHealth::running(
+            test_connector_id("discord"),
+            100,
+        ));
         let status = agg.evaluate();
         assert!(status.is_healthy());
         assert_eq!(agg.connector_count(), 1);
@@ -1269,9 +1281,17 @@ mod tests {
     #[test]
     fn aggregator_multiple_connectors() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
-        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("slack"), 200));
-        agg.report_connector(ConnectorProcessHealth::stopped(test_connector_id("telegram")));
+        agg.report_connector(ConnectorProcessHealth::running(
+            test_connector_id("discord"),
+            100,
+        ));
+        agg.report_connector(ConnectorProcessHealth::running(
+            test_connector_id("slack"),
+            200,
+        ));
+        agg.report_connector(ConnectorProcessHealth::stopped(test_connector_id(
+            "telegram",
+        )));
         let status = agg.evaluate();
         assert_eq!(status.running_connector_count(), 2);
         assert_eq!(agg.connector_count(), 3);
@@ -1280,7 +1300,10 @@ mod tests {
     #[test]
     fn aggregator_worst_case_rollup() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
+        agg.report_connector(ConnectorProcessHealth::running(
+            test_connector_id("discord"),
+            100,
+        ));
         agg.report_mesh(MeshHealth::connected(3));
         agg.report_resources(ResourceHealth::new(256, 30.0, 100, 1024));
         agg.report_component(ComponentHealth::degraded("enforcement", "slow"));
@@ -1312,7 +1335,10 @@ mod tests {
             status: HealthState::Healthy,
             version: "1.0.0".into(),
             uptime_seconds: 3600,
-            connectors: vec![ConnectorProcessHealth::running(test_connector_id("discord"), 100)],
+            connectors: vec![ConnectorProcessHealth::running(
+                test_connector_id("discord"),
+                100,
+            )],
             mesh: MeshHealth::connected(3),
             resources: ResourceHealth::new(256, 30.0, 100, 1024),
             components: vec![],
@@ -1383,7 +1409,10 @@ mod tests {
         let c = ConnectorProcessHealth::running(test_connector_id("discord"), 100).with_restarts(3);
         let json = serde_json::to_string(&c).unwrap();
         let restored: ConnectorProcessHealth = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.connector_id.to_string(), test_connector_id("discord"));
+        assert_eq!(
+            restored.connector_id.to_string(),
+            test_connector_id("discord")
+        );
         assert_eq!(restored.process_state, ConnectorProcessState::Running);
         assert_eq!(restored.restart_count, 3);
     }
@@ -2096,7 +2125,10 @@ mod tests {
     fn aggregator_many_connectors() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
         for i in 0..5 {
-            agg.report_connector(ConnectorProcessHealth::running(test_connector_id(format!("c{i}")), 100));
+            agg.report_connector(ConnectorProcessHealth::running(
+                test_connector_id(format!("c{i}")),
+                100,
+            ));
         }
         assert_eq!(agg.connector_count(), 5);
         let status = agg.evaluate();
@@ -2264,7 +2296,8 @@ mod tests {
 
     #[test]
     fn connector_health_clone_independence() {
-        let original = ConnectorProcessHealth::running(test_connector_id("x"), 100).with_restarts(5);
+        let original =
+            ConnectorProcessHealth::running(test_connector_id("x"), 100).with_restarts(5);
         let cloned = original.clone();
         assert_eq!(original.connector_id, cloned.connector_id);
         assert_eq!(original.restart_count, cloned.restart_count);

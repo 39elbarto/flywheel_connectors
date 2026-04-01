@@ -3540,9 +3540,9 @@ dependencies = [
  "ciborium",
  "fcp-async-core",
  "fcp-cbor",
- "fcp-conformance",
  "fcp-core",
  "fcp-crypto",
+ "fcp-evidence",
  "fcp-kernel",
  "fcp-sandbox",
  "fcp-testkit",
@@ -4021,10 +4021,10 @@ dependencies = [
  "fcp-store",
  "fcp-tailscale",
  "fcp-telemetry",
- "fcp-testkit",
  "hex",
  "hkdf",
  "hmac",
+ "jsonschema",
  "proptest",
  "rand 0.8.5",
  "semver",
@@ -4033,6 +4033,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
  "zeroize",
 ]
 
@@ -4714,7 +4715,6 @@ dependencies = [
 name = "fcp-raptorq"
 version = "0.1.0"
 dependencies = [
- "asupersync",
  "blake3",
  "bytes",
  "chrono",
@@ -5231,7 +5231,6 @@ dependencies = [
  "fcp-core",
  "fcp-raptorq",
  "fcp-telemetry",
- "fcp-testkit",
  "jsonschema",
  "parking_lot",
  "rand 0.8.5",

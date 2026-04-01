@@ -144,6 +144,16 @@ rch exec -- cargo clippy --workspace --all-targets -- -D warnings
 rch exec -- cargo fmt --check
 ```
 
+For a narrow `fcp-core` compiler smoke check, use the tracked probe package:
+
+```bash
+(cd .rch/probes/fcp-core && rch exec -- cargo check)
+```
+
+This keeps `rch` from syncing the full connector workspace when you only need the
+`fcp-core` library closure. It is a targeted optimization, not a substitute for
+workspace-wide verification after broad or cross-crate changes.
+
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 
 ---
@@ -710,6 +720,7 @@ If rch or its workers are unavailable, it fails open — builds run locally as n
 Treat these `rch` outcomes as different failure classes:
 
 - **Remote command succeeded, artifact retrieval failed later**: if `rch` prints `Remote command finished: exit=0` and only then fails during artifact retrieval, the remote Cargo step already succeeded. Treat that as `rch` retrieval or stale-worker state, not a repo build failure.
+- **Remote dependency planning or git-state failure**: if `rch` surfaces `RCH-E326`, or the selected worker's canonical clone reports `fatal: bad object HEAD` / `git cat-file: could not get object info`, treat that as worker clone metadata drift. Inspect `/data/projects/flywheel_connectors` on the worker, verify `git cat-file -t HEAD`, and repair the clone state before blaming Cargo. In this repo, keep `.git/` excluded from both `.rchignore` and `.rch/config.toml` so worker refs and shallow metadata cannot sync without matching objects.
 - **Remote command failed because the worker runtime drifted**: if remote stderr says the worker is missing the repo-pinned nightly from `rust-toolchain.toml` or otherwise cannot satisfy the requested toolchain, treat that as worker-image or worker-selection drift, not as a repo metadata-cycle regression.
 - **Local fail-open after remote failure**: in shared multi-agent sessions, do **not** let the unexpected local Cargo fallback continue. Preserve the remote stderr, inspect `rch status --json` or `rch workers capabilities --refresh --command 'cargo +<toolchain> check --lib'`, and route the fix toward worker maintenance, worker selection, or repo guidance rather than starting an unplanned local compilation storm.
 

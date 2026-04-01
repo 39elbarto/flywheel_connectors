@@ -153,7 +153,11 @@ parse_test.rs
 .codex-tmp/
 
 # Remote compilation helper cache
-.rch/
+.rch/*
+!.rch/
+!.rch/config.toml
+!.rch/probes/
+!.rch/probes/**
 
 # Beads recovery and snapshot directories
 .beads/.br_recovery/

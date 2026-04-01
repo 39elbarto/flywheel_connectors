@@ -29,7 +29,6 @@ fcp-telemetry = { path = "../fcp-telemetry" }
 jsonschema.workspace = true
 semver.workspace = true
 fcp-cbor = { path = "../fcp-cbor" }
-fcp-testkit = { path = "../fcp-testkit" }
 serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true

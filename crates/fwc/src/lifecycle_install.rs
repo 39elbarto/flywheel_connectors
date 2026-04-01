@@ -171,7 +171,7 @@ pub struct SupplyChainEvidence {
     pub build_timestamp: String,
     /// Cryptographic signature (hex-encoded).
     pub signature: String,
-    /// Optional attestation document reference.
+    /// Attestation document reference.
     pub attestation: String,
 }
 
@@ -201,6 +201,7 @@ impl SupplyChainEvidence {
             && !self.commit_hash.is_empty()
             && !self.build_timestamp.is_empty()
             && !self.signature.is_empty()
+            && !self.attestation.is_empty()
     }
 }
 
@@ -981,6 +982,14 @@ mod tests {
     }
 
     #[test]
+    fn verify_missing_attestation_not_compliant() {
+        let mut evidence = sample_evidence();
+        evidence.attestation = String::new();
+        let report = verify_supply_chain("github", "1.0.0", &evidence);
+        assert!(!report.policy_compliant);
+    }
+
+    #[test]
     fn verify_preserves_connector_and_version() {
         let evidence = sample_evidence();
         let report = verify_supply_chain("slack", "2.3.4", &evidence);
@@ -1031,6 +1040,13 @@ mod tests {
     fn evidence_incomplete_missing_signature() {
         let mut e = sample_evidence();
         e.signature = String::new();
+        assert!(!e.is_complete());
+    }
+
+    #[test]
+    fn evidence_incomplete_missing_attestation() {
+        let mut e = sample_evidence();
+        e.attestation = String::new();
         assert!(!e.is_complete());
     }
 
@@ -1324,6 +1340,7 @@ mod tests {
         let json = serde_json::to_string(&evidence).unwrap();
         let decoded: SupplyChainEvidence = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.commit_hash, evidence.commit_hash);
+        assert_eq!(decoded.attestation, evidence.attestation);
     }
 
     #[test]

@@ -254,11 +254,14 @@ impl CalendlyClient {
         runtime: &ConnectorRuntime,
         user_uri: &str,
     ) -> CalendlyResult<AvailabilityScheduleListResponse> {
-        let url = format!(
-            "{}/user_availability_schedules?user={}",
-            self.base_url, user_uri
-        );
-        self.get_json(runtime, &url).await
+        let base = format!("{}/user_availability_schedules", self.base_url);
+        let mut url = Url::parse(&base).map_err(|e| CalendlyError::Api {
+            status: 0,
+            message: format!("invalid base URL: {e}"),
+            title: None,
+        })?;
+        url.query_pairs_mut().append_pair("user", user_uri);
+        self.get_json(runtime, url.as_str()).await
     }
 
     /// Health check: validate API reachability with GET /users/me.

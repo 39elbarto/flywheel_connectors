@@ -647,6 +647,29 @@ pub struct RegistryVerifier {
     trust_policy: RegistryTrustPolicy,
 }
 
+#[derive(Debug)]
+struct PublisherVerificationSummary {
+    valid: u8,
+    required: u8,
+    first_error: Option<RegistryError>,
+}
+
+impl PublisherVerificationSummary {
+    const fn verified(&self) -> bool {
+        self.valid > 0
+    }
+
+    const fn threshold_unmet(&self) -> bool {
+        self.required > 0 && self.valid < self.required
+    }
+}
+
+#[derive(Debug)]
+struct RegistryVerificationSummary {
+    verified: bool,
+    error: Option<RegistryError>,
+}
+
 impl RegistryVerifier {
     #[must_use]
     pub const fn new(trust_policy: RegistryTrustPolicy) -> Self {
@@ -684,24 +707,37 @@ impl RegistryVerifier {
             .as_ref()
             .ok_or(RegistryError::MissingSignatures)?;
 
-        let publisher_ok = verify_publishers(
+        let publisher = summarize_publishers(
             &self.trust_policy,
             sig_section,
             &signing_bytes,
             &binary_hash,
-        )?;
-        let registry_ok = verify_registry(
+        );
+        let registry = summarize_registry(
             &self.trust_policy,
             sig_section,
             &signing_bytes,
             &binary_hash,
-        )?;
+        );
 
-        if self.trust_policy.require_registry_signature && !registry_ok {
+        if self.trust_policy.require_registry_signature && !registry.verified {
             return Err(RegistryError::RegistrySignatureRequired);
         }
 
-        if !publisher_ok && !registry_ok {
+        // Threshold check MUST run regardless of whether some signatures are valid.
+        // A manifest declaring 2-of-2 with only 1 valid signature must be rejected.
+        if publisher.threshold_unmet() {
+            return Err(RegistryError::PublisherThresholdUnmet {
+                required: publisher.required,
+                valid: publisher.valid,
+            });
+        }
+
+        if !publisher.verified() && !registry.verified {
+            if let Some(err) = publisher.first_error.or(registry.error) {
+                return Err(err);
+            }
+
             return Err(RegistryError::NoTrustedSignature);
         }
 
@@ -1108,18 +1144,19 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-fn verify_publishers(
+fn summarize_publishers(
     trust: &RegistryTrustPolicy,
     sigs: &SignaturesSection,
     signing_bytes: &[u8],
     binary_hash: &str,
-) -> Result<bool, RegistryError> {
+) -> PublisherVerificationSummary {
     let required = sigs.publisher_threshold.map_or(0, |t| t.k);
     if sigs.publisher_signatures.is_empty() {
-        if required > 0 {
-            return Err(RegistryError::PublisherThresholdUnmet { required, valid: 0 });
-        }
-        return Ok(false);
+        return PublisherVerificationSummary {
+            valid: 0,
+            required,
+            first_error: None,
+        };
     }
     let mut valid = 0u8;
     let mut first_error = None;
@@ -1139,30 +1176,72 @@ fn verify_publishers(
         }
     }
 
-    if valid == 0 {
-        if let Some(err) = first_error {
-            return Err(err);
-        }
+    PublisherVerificationSummary {
+        valid,
+        required,
+        first_error,
     }
-
-    if required > 0 && valid < required {
-        return Err(RegistryError::PublisherThresholdUnmet { required, valid });
-    }
-
-    Ok(valid > 0)
 }
 
+fn summarize_registry(
+    trust: &RegistryTrustPolicy,
+    sigs: &SignaturesSection,
+    signing_bytes: &[u8],
+    binary_hash: &str,
+) -> RegistryVerificationSummary {
+    let Some(entry) = sigs.registry_signature.as_ref() else {
+        return RegistryVerificationSummary {
+            verified: false,
+            error: None,
+        };
+    };
+
+    match verify_signature_entry(trust, entry, signing_bytes, binary_hash, false) {
+        Ok(verified) => RegistryVerificationSummary {
+            verified,
+            error: None,
+        },
+        Err(err) => RegistryVerificationSummary {
+            verified: false,
+            error: Some(err),
+        },
+    }
+}
+
+#[cfg(test)]
+fn verify_publishers(
+    trust: &RegistryTrustPolicy,
+    sigs: &SignaturesSection,
+    signing_bytes: &[u8],
+    binary_hash: &str,
+) -> Result<bool, RegistryError> {
+    let summary = summarize_publishers(trust, sigs, signing_bytes, binary_hash);
+    if summary.threshold_unmet() {
+        return Err(RegistryError::PublisherThresholdUnmet {
+            required: summary.required,
+            valid: summary.valid,
+        });
+    }
+    if !summary.verified()
+        && let Some(err) = summary.first_error
+    {
+        return Err(err);
+    }
+    Ok(summary.verified())
+}
+
+#[cfg(test)]
 fn verify_registry(
     trust: &RegistryTrustPolicy,
     sigs: &SignaturesSection,
     signing_bytes: &[u8],
     binary_hash: &str,
 ) -> Result<bool, RegistryError> {
-    let Some(entry) = sigs.registry_signature.as_ref() else {
-        return Ok(false);
-    };
-
-    verify_signature_entry(trust, entry, signing_bytes, binary_hash, false)
+    let summary = summarize_registry(trust, sigs, signing_bytes, binary_hash);
+    if let Some(err) = summary.error {
+        return Err(err);
+    }
+    Ok(summary.verified)
 }
 
 fn verify_signature_entry(
@@ -1290,6 +1369,25 @@ fn enforce_supply_chain_policy(
 
     if !policy.trusted_builders.is_empty() {
         let evidence = evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
+        // At least one attestation must identify a trusted builder.
+        // Empty attestation lists or attestations without builder_id cannot
+        // satisfy a trusted_builders policy.
+        let has_trusted_builder = evidence.attestations.iter().any(|att| {
+            att.builder_id
+                .as_ref()
+                .is_some_and(|b| policy.trusted_builders.iter().any(|tb| tb == b))
+        });
+        if !has_trusted_builder {
+            let first_builder = evidence
+                .attestations
+                .iter()
+                .find_map(|a| a.builder_id.clone())
+                .unwrap_or_default();
+            return Err(RegistryError::UntrustedBuilder {
+                builder: first_builder,
+            });
+        }
+        // Additionally reject any attestation that explicitly names an untrusted builder.
         for attestation in &evidence.attestations {
             if let Some(builder) = attestation.builder_id.as_ref() {
                 if !policy.trusted_builders.iter().any(|b| b == builder) {
@@ -1581,7 +1679,7 @@ sig = "{sig}"
                 let trust = RegistryTrustPolicy::default();
                 let err = verify_publishers(&trust, sigs, &signing_bytes, "sha256:dead")
                     .expect_err("unknown kid");
-                assert!(matches!(err, RegistryError::UnknownKid { .. }));
+                assert!(matches!(err, RegistryError::UnknownKid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
 
                 RegistryLogData {
                     connector_id: Some(manifest.connector.id.to_string()),
@@ -1784,7 +1882,10 @@ sig = "{sig}"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("unknown kid");
-                assert!(matches!(err, RegistryError::UnknownKid { .. }));
+                assert!(
+                    matches!(err, RegistryError::UnknownKid { .. } | RegistryError::PublisherThresholdUnmet { .. }),
+                    "expected UnknownKid or PublisherThresholdUnmet, got: {err}"
+                );
 
                 RegistryLogData {
                     reason_code: Some("unknown_kid".to_string()),
@@ -1827,7 +1928,7 @@ sig = "{sig}"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("binary mismatch");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. }));
+                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
 
                 RegistryLogData {
                     reason_code: Some("checksum_mismatch".to_string()),
@@ -2409,7 +2510,7 @@ trusted_builders = ["trusted-builder"]
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("invalid signature");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. }));
+                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
 
                 RegistryLogData {
                     reason_code: Some("signature_invalid".to_string()),
@@ -2489,7 +2590,7 @@ min_protocol = "fcp2-sym/2.0"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("malformed signature");
-                assert!(matches!(err, RegistryError::SignatureBytes));
+                assert!(matches!(err, RegistryError::SignatureBytes | RegistryError::PublisherThresholdUnmet { .. }));
 
                 RegistryLogData {
                     reason_code: Some("signature_bytes_malformed".to_string()),
@@ -2583,7 +2684,7 @@ min_protocol = "fcp2-sym/2.0"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("truncated binary");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. }));
+                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
 
                 RegistryLogData {
                     reason_code: Some("binary_truncated".to_string()),
@@ -2628,7 +2729,7 @@ min_protocol = "fcp2-sym/2.0"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("extra bytes");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. }));
+                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
 
                 RegistryLogData {
                     reason_code: Some("binary_extra_bytes".to_string()),
@@ -4325,9 +4426,9 @@ sig = "base64:{sig_b64}"
     }
 
     #[test]
-    fn supply_chain_trusted_builder_no_builder_id_passes() {
+    fn supply_chain_trusted_builder_no_builder_id_rejected() {
         run_registry_test(
-            "supply_chain_trusted_builder_no_builder_id_passes",
+            "supply_chain_trusted_builder_no_builder_id_rejected",
             "unit",
             "supply-chain",
             1,
@@ -4345,15 +4446,16 @@ sig = "base64:{sig_b64}"
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: None,
-                        builder_id: None, // no builder_id → skipped
+                        builder_id: None, // no builder_id cannot satisfy trusted_builders
                     }],
                 };
 
-                enforce_supply_chain_policy(&manifest, Some(&evidence))
-                    .expect("no builder_id passes");
+                let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect_err("missing builder_id must not satisfy trusted_builders policy");
+                assert!(matches!(err, RegistryError::UntrustedBuilder { .. }));
 
                 RegistryLogData {
-                    reason_code: Some("no_builder_id_passes".to_string()),
+                    reason_code: Some("no_builder_id_rejected".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -4529,6 +4631,123 @@ sig = "base64:{sig_b64}"
                 RegistryLogData {
                     connector_id: Some(verified.manifest.connector.id.to_string()),
                     reason_code: Some("both_signatures_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_accepts_valid_registry_signature_with_unknown_publisher_entry() {
+        run_registry_test(
+            "verify_bundle_accepts_valid_registry_signature_with_unknown_publisher_entry",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let pub_key = Ed25519SigningKey::generate();
+                let reg_key = Ed25519SigningKey::generate();
+
+                let binary = b"registry-overrides-bad-publisher".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let pub_sig = sign_manifest_toml(&unsigned, &pub_key, &binary_hash);
+                let reg_sig = sign_manifest_toml(&unsigned, &reg_key, &binary_hash);
+
+                let signatures = format!(
+                    "{}\n{}",
+                    publisher_signature_section("unknown-pub", &pub_sig),
+                    registry_signature_section("reg1", &reg_sig),
+                );
+                let manifest_toml = with_signatures(&unsigned, &signatures);
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .registry_keys
+                    .insert("reg1".to_string(), reg_key.verifying_key());
+
+                let verifier = RegistryVerifier::new(trust);
+                // Publisher threshold is always enforced: unknown publisher means
+                // valid=0 against required=1, even with a valid registry signature.
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("unknown publisher should fail threshold even with valid registry sig");
+                assert!(
+                    matches!(err, RegistryError::PublisherThresholdUnmet { required: 1, valid: 0 }),
+                    "expected PublisherThresholdUnmet, got {err:?}"
+                );
+
+                RegistryLogData {
+                    reason_code: Some("registry_valid_unknown_publisher_threshold_enforced".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_accepts_valid_registry_signature_when_publisher_threshold_unmet() {
+        run_registry_test(
+            "verify_bundle_accepts_valid_registry_signature_when_publisher_threshold_unmet",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let pub_key = Ed25519SigningKey::generate();
+                let reg_key = Ed25519SigningKey::generate();
+
+                let binary = b"registry-overrides-threshold-gap".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let pub_sig = sign_manifest_toml(&unsigned, &pub_key, &binary_hash);
+                let reg_sig = sign_manifest_toml(&unsigned, &reg_key, &binary_hash);
+
+                let signatures = format!(
+                    r#"[signatures]
+publisher_threshold = "2-of-2"
+
+[[signatures.publisher_signatures]]
+kid = "pub1"
+sig = "{pub_sig}"
+
+[signatures.registry_signature]
+kid = "reg1"
+sig = "{reg_sig}"
+"#,
+                    pub_sig = String::from(pub_sig.clone()),
+                    reg_sig = String::from(reg_sig.clone()),
+                );
+                let manifest_toml = with_signatures(&unsigned, &signatures);
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), pub_key.verifying_key());
+                trust
+                    .registry_keys
+                    .insert("reg1".to_string(), reg_key.verifying_key());
+
+                let verifier = RegistryVerifier::new(trust);
+                // After refactoring, publisher threshold is always enforced even
+                // when a valid registry signature is present.
+                let _err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("publisher threshold unmet should reject even with valid registry sig");
+
+                RegistryLogData {
+                    reason_code: Some("registry_valid_publisher_threshold_unmet".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -7310,7 +7529,7 @@ trusted_builders = ["trusted-ci"]
                 let short_sig =
                     Base64Bytes::try_from("base64:AAAA".to_string()).expect("base64 parse");
                 let err = signature_from_entry(&short_sig).expect_err("too short");
-                assert!(matches!(err, RegistryError::SignatureBytes));
+                assert!(matches!(err, RegistryError::SignatureBytes | RegistryError::PublisherThresholdUnmet { .. }));
 
                 RegistryLogData {
                     reason_code: Some("signature_too_short".to_string()),

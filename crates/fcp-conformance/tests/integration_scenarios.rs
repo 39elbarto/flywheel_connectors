@@ -52,6 +52,8 @@ const DEGRADED_AVAILABILITY_SCENARIO: &str = "degraded-availability";
 const DEGRADED_AVAILABILITY_CONTRACT_ID: &str = "contract.degraded_symbol_availability";
 const PARTITION_HEAL_SCENARIO: &str = "partition-heal";
 const PARTITION_HEAL_CONTRACT_ID: &str = "contract.partition_heal_convergence";
+const SPLIT_BRAIN_SCENARIO: &str = "split-brain";
+const SPLIT_BRAIN_CONTRACT_ID: &str = "contract.split_brain_prevention";
 const STALE_REJOIN_SCENARIO: &str = "stale-rejoin";
 const STALE_REJOIN_CONTRACT_ID: &str = "contract.stale_node_rejoin_sync";
 const GRACEFUL_SHUTDOWN_SCENARIO: &str = "graceful-shutdown";
@@ -345,6 +347,88 @@ fn build_partition_heal_artifact_bundle(
             nodes,
         },
         assertions: scenario_assertions(logs, PARTITION_HEAL_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SplitBrainReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    minority_node_ids: Vec<String>,
+    majority_node_ids: Vec<String>,
+    minority_object_id: String,
+    majority_object_id: String,
+    partition_duration_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SplitBrainStateEvidence {
+    minority_peer_count: u8,
+    majority_peer_count: u8,
+    majority_has_more_peers: bool,
+    cross_partition_isolated: bool,
+    node0_has_majority_after_heal: bool,
+    node2_has_minority_after_heal: bool,
+    converged_after_heal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SplitBrainArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: SplitBrainReplayEvidence,
+    state: SplitBrainStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_split_brain_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    minority_node_ids: &[NodeId],
+    majority_node_ids: &[NodeId],
+    minority_object_id: &ObjectId,
+    majority_object_id: &ObjectId,
+    partition_duration_secs: u64,
+    minority_peer_count: usize,
+    majority_peer_count: usize,
+    cross_partition_isolated: bool,
+    node0_has_majority_after_heal: bool,
+    node2_has_minority_after_heal: bool,
+    converged_after_heal: bool,
+    log_jsonl_valid: bool,
+) -> SplitBrainArtifactBundle {
+    SplitBrainArtifactBundle {
+        scenario_key: "split_brain".to_string(),
+        contract_id: SPLIT_BRAIN_CONTRACT_ID.to_string(),
+        replay: SplitBrainReplayEvidence {
+            seed: 0xCAFE_BABE,
+            zone_id: zone.to_string(),
+            minority_node_ids: minority_node_ids
+                .iter()
+                .map(|node_id| node_id.as_str().to_string())
+                .collect(),
+            majority_node_ids: majority_node_ids
+                .iter()
+                .map(|node_id| node_id.as_str().to_string())
+                .collect(),
+            minority_object_id: minority_object_id.to_string(),
+            majority_object_id: majority_object_id.to_string(),
+            partition_duration_secs,
+        },
+        state: SplitBrainStateEvidence {
+            minority_peer_count: u8::try_from(minority_peer_count).expect("peer count fits in u8"),
+            majority_peer_count: u8::try_from(majority_peer_count).expect("peer count fits in u8"),
+            majority_has_more_peers: majority_peer_count > minority_peer_count,
+            cross_partition_isolated,
+            node0_has_majority_after_heal,
+            node2_has_minority_after_heal,
+            converged_after_heal,
+        },
+        assertions: scenario_assertions(logs, SPLIT_BRAIN_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
     }
@@ -865,16 +949,22 @@ async fn scenario_partition_heal_convergence() {
 async fn scenario_split_brain_prevention() {
     let mut harness = TestHarness::new(5, 0xCAFE_BABE);
     harness.start_all().expect("start all nodes");
+    let partition_duration_secs = 10;
 
     // Create a 2-3 split (nodes 0,1 vs 2,3,4)
     let minority = vec![
         harness.nodes[0].node_id.clone(),
         harness.nodes[1].node_id.clone(),
     ];
+    let majority = vec![
+        harness.nodes[2].node_id.clone(),
+        harness.nodes[3].node_id.clone(),
+        harness.nodes[4].node_id.clone(),
+    ];
 
     emit_scenario_log(
         &harness.logs,
-        "split-brain",
+        SPLIT_BRAIN_SCENARIO,
         "partition",
         &["0", "1", "2", "3", "4"],
         "partition_created",
@@ -883,7 +973,7 @@ async fn scenario_split_brain_prevention() {
     );
 
     harness.partition(&minority);
-    harness.advance_time(Duration::from_secs(10));
+    harness.advance_time(Duration::from_secs(partition_duration_secs));
 
     // Register peers and announce objects in each partition
     harness.register_all_peers();
@@ -929,7 +1019,7 @@ async fn scenario_split_brain_prevention() {
 
     emit_scenario_log(
         &harness.logs,
-        "split-brain",
+        SPLIT_BRAIN_SCENARIO,
         "verify",
         &["0", "1", "2", "3", "4"],
         "quorum_semantics",
@@ -953,6 +1043,7 @@ async fn scenario_split_brain_prevention() {
         !majority_has_minority_obj,
         "majority partition should not see minority-side objects"
     );
+    let cross_partition_isolated = !minority_has_majority_obj && !majority_has_minority_obj;
 
     // Heal and verify convergence
     harness.heal_partition();
@@ -973,7 +1064,7 @@ async fn scenario_split_brain_prevention() {
 
     emit_scenario_log(
         &harness.logs,
-        "split-brain",
+        SPLIT_BRAIN_SCENARIO,
         "post-heal",
         &["0", "1", "2", "3", "4"],
         "convergence_after_heal",
@@ -986,6 +1077,110 @@ async fn scenario_split_brain_prevention() {
             "node0_sees_majority_obj": node0_has_majority,
             "node2_sees_minority_obj": node2_has_minority,
         }),
+    );
+
+    let split_brain_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == SPLIT_BRAIN_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        split_brain_logs.len(),
+        3,
+        "expected 3 split-brain log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "split-brain logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let converged_after_heal = node0_has_majority && node2_has_minority;
+    let artifact_bundle = build_split_brain_artifact_bundle(
+        &split_brain_logs,
+        &zone,
+        &minority,
+        &majority,
+        &obj_minority,
+        &obj_majority,
+        partition_duration_secs,
+        minority_peers,
+        majority_peers,
+        cross_partition_isolated,
+        node0_has_majority,
+        node2_has_minority,
+        converged_after_heal,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, SPLIT_BRAIN_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["partition", "verify", "post-heal"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "pass",
+            "pass",
+            if converged_after_heal { "pass" } else { "fail" }
+        ]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, split_brain_logs.len());
+    assert_eq!(artifact_bundle.replay.minority_node_ids.len(), 2);
+    assert_eq!(artifact_bundle.replay.majority_node_ids.len(), 3);
+    assert_eq!(
+        artifact_bundle.replay.partition_duration_secs,
+        partition_duration_secs
+    );
+    assert_eq!(
+        artifact_bundle.state.minority_peer_count,
+        u8::try_from(minority_peers).expect("peer count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.majority_peer_count,
+        u8::try_from(majority_peers).expect("peer count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.majority_has_more_peers,
+        majority_peers > minority_peers
+    );
+    assert!(artifact_bundle.state.cross_partition_isolated);
+    assert_eq!(
+        artifact_bundle.state.node0_has_majority_after_heal,
+        node0_has_majority
+    );
+    assert_eq!(
+        artifact_bundle.state.node2_has_minority_after_heal,
+        node2_has_minority
+    );
+    assert_eq!(
+        artifact_bundle.state.converged_after_heal,
+        converged_after_heal
+    );
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize split-brain artifact bundle");
+    let roundtrip: SplitBrainArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize split-brain artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
+
+    assert!(
+        node0_has_majority,
+        "minority partition should learn majority-side object after heal"
+    );
+    assert!(
+        node2_has_minority,
+        "majority partition should learn minority-side object after heal"
     );
 
     harness.stop_all().expect("stop all nodes");

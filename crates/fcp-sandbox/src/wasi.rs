@@ -3024,10 +3024,13 @@ mod tests {
 
     #[test]
     fn test_socket_addr_allowed_tcp_connect() {
+        // Must have explicit IP allowlist for raw socket access per
+        // raw_socket_host_policy security tightening (empty host_allow +
+        // empty ip_allow → Disabled).
         let constraints = NetworkConstraints {
             host_allow: vec![],
             port_allow: vec![443, 8080],
-            ip_allow: vec![],
+            ip_allow: vec!["1.2.3.4".parse().unwrap()],
             cidr_deny: vec![],
             deny_localhost: false,
             deny_private_ranges: false,

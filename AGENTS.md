@@ -159,7 +159,9 @@ For a narrow `fcp-host` library smoke check, use:
 This keeps `rch` from syncing the full connector workspace when you only need the
 `fcp-core` or `fcp-host` library closure. These probe packages also pin their
 `target-dir` under `/tmp` so `rch` does not spend minutes syncing probe-local
-build artifacts back into the repo. It is a targeted optimization, not a
+build artifacts back into the repo, and probe-local `target/` trees remain
+excluded from git and `rch` sync rules so stale worker artifacts do not leak
+back into the workspace. It is a targeted optimization, not a
 substitute for workspace-wide verification after broad or cross-crate changes.
 
 Do not point one probe at a different crate with `cargo check --manifest-path ...`.

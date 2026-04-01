@@ -1477,7 +1477,8 @@ bash scripts/ci/asupersync_tokio_guard.sh
 The tracked `rch` probes pin their `target-dir` under `/tmp`, outside the synced
 project tree. That keeps `rch` from spending most of the run syncing probe-local
 `target/` artifacts back into the repo after the remote check has already
-finished.
+finished. Probe-local `target/` directories also stay excluded from git and
+`rch` sync rules so stale worker artifacts cannot leak back into the workspace.
 
 ### Creating a New Connector
 

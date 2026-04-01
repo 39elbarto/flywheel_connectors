@@ -158,6 +158,7 @@ parse_test.rs
 !.rch/config.toml
 !.rch/probes/
 !.rch/probes/**
+.rch/probes/*/target/
 
 # Beads recovery and snapshot directories
 .beads/.br_recovery/

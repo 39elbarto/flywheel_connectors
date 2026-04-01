@@ -267,6 +267,7 @@ dependencies = [
 name = "asupersync"
 version = "0.2.9"
 dependencies = [
+ "asupersync-macros",
  "base64 0.22.1",
  "bincode-next",
  "crossbeam-deque",
@@ -308,6 +309,15 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "x509-parser",
+]
+
+[[package]]
+name = "asupersync-macros"
+version = "0.2.9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

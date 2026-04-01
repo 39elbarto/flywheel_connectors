@@ -2338,4 +2338,98 @@ deny_ptrace = true
             matches!(self, Self::Transient(_))
         }
     }
+
+    // ── Canonical HTTP → FCP mapping tests ──────────────────────────────────
+
+    #[test]
+    fn map_http_400_to_invalid_request() {
+        let err = map_http_status(400, "test", "bad input".into());
+        assert!(matches!(err, FcpError::InvalidRequest { code: 1001, .. }));
+    }
+
+    #[test]
+    fn map_http_401_to_unauthorized() {
+        let err = map_http_status(401, "test", "invalid token".into());
+        assert!(matches!(err, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn map_http_403_to_capability_denied() {
+        let err = map_http_status(403, "test", "forbidden".into());
+        assert!(matches!(err, FcpError::CapabilityDenied { .. }));
+    }
+
+    #[test]
+    fn map_http_404_to_resource_not_found() {
+        let err = map_http_status(404, "test", "not found".into());
+        assert!(matches!(err, FcpError::ResourceNotFound { .. }));
+    }
+
+    #[test]
+    fn map_http_408_to_upstream_timeout() {
+        let err = map_http_status(408, "api.example.com", "timeout".into());
+        assert!(matches!(err, FcpError::UpstreamTimeout { .. }));
+    }
+
+    #[test]
+    fn map_http_429_to_rate_limited() {
+        let err = map_http_status(429, "test", "too many".into());
+        assert!(matches!(err, FcpError::RateLimited { .. }));
+    }
+
+    #[test]
+    fn map_http_500_to_external_retryable() {
+        let err = map_http_status(500, "svc", "internal".into());
+        assert!(matches!(
+            err,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn map_http_502_to_external_retryable() {
+        let err = map_http_status(502, "svc", "bad gateway".into());
+        assert!(matches!(
+            err,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn map_http_501_to_external_not_retryable() {
+        let err = map_http_status(501, "svc", "not implemented".into());
+        assert!(matches!(
+            err,
+            FcpError::External {
+                retryable: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn map_http_unknown_to_external() {
+        let err = map_http_status(418, "svc", "teapot".into());
+        assert!(matches!(err, FcpError::External { .. }));
+    }
+
+    #[test]
+    fn is_http_retryable_standard_codes() {
+        assert!(is_http_status_retryable(408));
+        assert!(is_http_status_retryable(429));
+        assert!(is_http_status_retryable(500));
+        assert!(is_http_status_retryable(502));
+        assert!(is_http_status_retryable(503));
+        assert!(is_http_status_retryable(504));
+        assert!(!is_http_status_retryable(400));
+        assert!(!is_http_status_retryable(401));
+        assert!(!is_http_status_retryable(404));
+        assert!(!is_http_status_retryable(501));
+    }
 }

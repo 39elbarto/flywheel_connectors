@@ -1,4 +1,5 @@
 .git/
+.rch/probes/*/target/
 .claude/
 .codex/
 .codex-targets/

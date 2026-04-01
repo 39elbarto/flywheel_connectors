@@ -18,6 +18,9 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use fcp_kernel::ConnectorId;
+
+use crate::supervisor::ProcessState;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Health state
@@ -196,13 +199,47 @@ impl ComponentHealth {
 // Connector health
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Stable process-state labels for host health reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorProcessState {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+impl ConnectorProcessState {
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
+}
+
+impl From<&ProcessState> for ConnectorProcessState {
+    fn from(value: &ProcessState) -> Self {
+        match value {
+            ProcessState::Starting { .. } => Self::Starting,
+            ProcessState::Running { .. } => Self::Running,
+            ProcessState::Stopping { .. } => Self::Stopping,
+            ProcessState::Stopped { .. } => Self::Stopped,
+            ProcessState::Failed { .. } => Self::Failed,
+        }
+    }
+}
+
+fn parse_connector_id(raw: impl Into<String>) -> ConnectorId {
+    ConnectorId::try_from(raw.into()).expect("connector process health ids must be canonical")
+}
+
 /// Host-local health details for a single connector process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorProcessHealth {
     /// Connector identifier.
-    pub connector_id: String,
-    /// Current process state label.
-    pub process_state: String,
+    pub connector_id: ConnectorId,
+    /// Current process state.
+    pub process_state: ConnectorProcessState,
     /// Whether the last health check passed.
     pub last_check_passed: Option<bool>,
     /// Number of restarts since host boot.
@@ -218,8 +255,8 @@ impl ConnectorProcessHealth {
     #[must_use]
     pub fn running(connector_id: impl Into<String>, uptime_seconds: u64) -> Self {
         Self {
-            connector_id: connector_id.into(),
-            process_state: "running".into(),
+            connector_id: parse_connector_id(connector_id),
+            process_state: ConnectorProcessState::Running,
             last_check_passed: Some(true),
             restart_count: 0,
             uptime_seconds: Some(uptime_seconds),
@@ -231,8 +268,8 @@ impl ConnectorProcessHealth {
     #[must_use]
     pub fn stopped(connector_id: impl Into<String>) -> Self {
         Self {
-            connector_id: connector_id.into(),
-            process_state: "stopped".into(),
+            connector_id: parse_connector_id(connector_id),
+            process_state: ConnectorProcessState::Stopped,
             last_check_passed: None,
             restart_count: 0,
             uptime_seconds: None,
@@ -244,8 +281,8 @@ impl ConnectorProcessHealth {
     #[must_use]
     pub fn failed(connector_id: impl Into<String>, restarts: u32) -> Self {
         Self {
-            connector_id: connector_id.into(),
-            process_state: "failed".into(),
+            connector_id: parse_connector_id(connector_id),
+            process_state: ConnectorProcessState::Failed,
             last_check_passed: Some(false),
             restart_count: restarts,
             uptime_seconds: None,
@@ -499,7 +536,7 @@ impl CompositeHealthStatus {
     pub fn running_connector_count(&self) -> usize {
         self.connectors
             .iter()
-            .filter(|c| c.process_state == "running")
+            .filter(|c| c.process_state.is_running())
             .count()
     }
 
@@ -749,6 +786,10 @@ impl HealthAggregator {
 mod tests {
     use super::*;
 
+    fn test_connector_id(name: impl AsRef<str>) -> String {
+        format!("{}:utility:v1", name.as_ref())
+    }
+
     // ────────── HealthState ──────────
 
     #[test]
@@ -926,53 +967,53 @@ mod tests {
 
     #[test]
     fn connector_running() {
-        let c = ConnectorProcessHealth::running("fcp.discord", 3600);
-        assert_eq!(c.process_state, "running");
+        let c = ConnectorProcessHealth::running(test_connector_id("discord"), 3600);
+        assert_eq!(c.process_state, ConnectorProcessState::Running);
         assert_eq!(c.uptime_seconds, Some(3600));
         assert!(!c.crash_loop);
     }
 
     #[test]
     fn connector_stopped() {
-        let c = ConnectorProcessHealth::stopped("fcp.discord");
-        assert_eq!(c.process_state, "stopped");
+        let c = ConnectorProcessHealth::stopped(test_connector_id("discord"));
+        assert_eq!(c.process_state, ConnectorProcessState::Stopped);
         assert!(c.uptime_seconds.is_none());
     }
 
     #[test]
     fn connector_failed_crash_loop() {
-        let c = ConnectorProcessHealth::failed("fcp.discord", 5);
+        let c = ConnectorProcessHealth::failed(test_connector_id("discord"), 5);
         assert!(c.crash_loop);
         assert_eq!(c.restart_count, 5);
     }
 
     #[test]
     fn connector_failed_no_crash_loop() {
-        let c = ConnectorProcessHealth::failed("fcp.discord", 2);
+        let c = ConnectorProcessHealth::failed(test_connector_id("discord"), 2);
         assert!(!c.crash_loop);
     }
 
     #[test]
     fn connector_with_restarts() {
-        let c = ConnectorProcessHealth::running("fcp.discord", 100).with_restarts(3);
+        let c = ConnectorProcessHealth::running(test_connector_id("discord"), 100).with_restarts(3);
         assert_eq!(c.restart_count, 3);
     }
 
     #[test]
     fn connector_health_state_running() {
-        let c = ConnectorProcessHealth::running("fcp.discord", 100);
+        let c = ConnectorProcessHealth::running(test_connector_id("discord"), 100);
         assert!(c.to_health_state().is_healthy());
     }
 
     #[test]
     fn connector_health_state_crash_loop() {
-        let c = ConnectorProcessHealth::failed("fcp.discord", 5);
+        let c = ConnectorProcessHealth::failed(test_connector_id("discord"), 5);
         assert!(c.to_health_state().is_unhealthy());
     }
 
     #[test]
     fn connector_health_state_check_failing() {
-        let mut c = ConnectorProcessHealth::running("fcp.discord", 100);
+        let mut c = ConnectorProcessHealth::running(test_connector_id("discord"), 100);
         c.last_check_passed = Some(false);
         assert!(c.to_health_state().is_degraded());
     }
@@ -1145,7 +1186,7 @@ mod tests {
     #[test]
     fn aggregator_with_running_connector() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
         let status = agg.evaluate();
         assert!(status.is_healthy());
         assert_eq!(status.running_connector_count(), 1);
@@ -1155,7 +1196,7 @@ mod tests {
     #[test]
     fn aggregator_crash_loop_makes_unhealthy() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::failed("fcp.discord", 5));
+        agg.report_connector(ConnectorProcessHealth::failed(test_connector_id("discord"), 5));
         let status = agg.evaluate();
         assert!(status.status.is_unhealthy());
         assert!(!status.is_ready());
@@ -1218,8 +1259,8 @@ mod tests {
     #[test]
     fn aggregator_update_existing_connector() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::failed("fcp.discord", 5));
-        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
+        agg.report_connector(ConnectorProcessHealth::failed(test_connector_id("discord"), 5));
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
         let status = agg.evaluate();
         assert!(status.is_healthy());
         assert_eq!(agg.connector_count(), 1);
@@ -1228,9 +1269,9 @@ mod tests {
     #[test]
     fn aggregator_multiple_connectors() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
-        agg.report_connector(ConnectorProcessHealth::running("fcp.slack", 200));
-        agg.report_connector(ConnectorProcessHealth::stopped("fcp.telegram"));
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("slack"), 200));
+        agg.report_connector(ConnectorProcessHealth::stopped(test_connector_id("telegram")));
         let status = agg.evaluate();
         assert_eq!(status.running_connector_count(), 2);
         assert_eq!(agg.connector_count(), 3);
@@ -1239,7 +1280,7 @@ mod tests {
     #[test]
     fn aggregator_worst_case_rollup() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("discord"), 100));
         agg.report_mesh(MeshHealth::connected(3));
         agg.report_resources(ResourceHealth::new(256, 30.0, 100, 1024));
         agg.report_component(ComponentHealth::degraded("enforcement", "slow"));
@@ -1271,14 +1312,14 @@ mod tests {
             status: HealthState::Healthy,
             version: "1.0.0".into(),
             uptime_seconds: 3600,
-            connectors: vec![ConnectorProcessHealth::running("fcp.discord", 100)],
+            connectors: vec![ConnectorProcessHealth::running(test_connector_id("discord"), 100)],
             mesh: MeshHealth::connected(3),
             resources: ResourceHealth::new(256, 30.0, 100, 1024),
             components: vec![],
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("healthy"));
-        assert!(json.contains("fcp.discord"));
+        assert!(json.contains(&test_connector_id("discord")));
         assert!(json.contains("1.0.0"));
     }
 
@@ -1339,10 +1380,11 @@ mod tests {
 
     #[test]
     fn connector_health_serde_roundtrip() {
-        let c = ConnectorProcessHealth::running("fcp.discord", 100).with_restarts(3);
+        let c = ConnectorProcessHealth::running(test_connector_id("discord"), 100).with_restarts(3);
         let json = serde_json::to_string(&c).unwrap();
         let restored: ConnectorProcessHealth = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.connector_id, "fcp.discord");
+        assert_eq!(restored.connector_id.to_string(), test_connector_id("discord"));
+        assert_eq!(restored.process_state, ConnectorProcessState::Running);
         assert_eq!(restored.restart_count, 3);
     }
 
@@ -1418,9 +1460,9 @@ mod tests {
     #[test]
     fn mixed_connector_states() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::running("a", 100));
-        agg.report_connector(ConnectorProcessHealth::stopped("b"));
-        let mut failing = ConnectorProcessHealth::running("c", 50);
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("a"), 100));
+        agg.report_connector(ConnectorProcessHealth::stopped(test_connector_id("b")));
+        let mut failing = ConnectorProcessHealth::running(test_connector_id("c"), 50);
         failing.last_check_passed = Some(false);
         agg.report_connector(failing);
         let status = agg.evaluate();
@@ -1668,45 +1710,46 @@ mod tests {
     #[test]
     fn connector_failed_exact_threshold() {
         // 3 restarts is the exact crash_loop threshold
-        let c = ConnectorProcessHealth::failed("x", 3);
+        let c = ConnectorProcessHealth::failed(test_connector_id("x"), 3);
         assert!(c.crash_loop);
         assert_eq!(c.restart_count, 3);
     }
 
     #[test]
     fn connector_failed_below_threshold() {
-        let c = ConnectorProcessHealth::failed("x", 2);
+        let c = ConnectorProcessHealth::failed(test_connector_id("x"), 2);
         assert!(!c.crash_loop);
     }
 
     #[test]
     fn connector_failed_zero_restarts() {
-        let c = ConnectorProcessHealth::failed("x", 0);
+        let c = ConnectorProcessHealth::failed(test_connector_id("x"), 0);
         assert!(!c.crash_loop);
-        assert_eq!(c.process_state, "failed");
+        assert_eq!(c.process_state, ConnectorProcessState::Failed);
         assert_eq!(c.last_check_passed, Some(false));
     }
 
     #[test]
     fn connector_stopped_health_state_is_healthy() {
         // Stopped connector has last_check_passed=None, not in crash loop → healthy
-        let c = ConnectorProcessHealth::stopped("x");
+        let c = ConnectorProcessHealth::stopped(test_connector_id("x"));
         assert!(c.to_health_state().is_healthy());
     }
 
     #[test]
     fn connector_running_check_passed_none_is_healthy() {
-        let mut c = ConnectorProcessHealth::running("x", 100);
+        let mut c = ConnectorProcessHealth::running(test_connector_id("x"), 100);
         c.last_check_passed = None;
         assert!(c.to_health_state().is_healthy());
     }
 
     #[test]
     fn connector_health_state_crash_loop_message_format() {
-        let c = ConnectorProcessHealth::failed("fcp.test", 5);
+        let connector_id = test_connector_id("test");
+        let c = ConnectorProcessHealth::failed(connector_id.clone(), 5);
         if let HealthState::Unhealthy { reasons } = c.to_health_state() {
             assert_eq!(reasons.len(), 1);
-            assert!(reasons[0].contains("fcp.test"));
+            assert!(reasons[0].contains(&connector_id));
             assert!(reasons[0].contains("crash loop"));
             assert!(reasons[0].contains('5'));
         } else {
@@ -1716,10 +1759,11 @@ mod tests {
 
     #[test]
     fn connector_health_state_failing_message_format() {
-        let mut c = ConnectorProcessHealth::running("fcp.test", 50);
+        let connector_id = test_connector_id("test");
+        let mut c = ConnectorProcessHealth::running(connector_id.clone(), 50);
         c.last_check_passed = Some(false);
         if let HealthState::Degraded { reasons } = c.to_health_state() {
-            assert!(reasons[0].contains("fcp.test"));
+            assert!(reasons[0].contains(&connector_id));
             assert!(reasons[0].contains("health check failing"));
         } else {
             panic!("expected degraded");
@@ -2052,7 +2096,7 @@ mod tests {
     fn aggregator_many_connectors() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
         for i in 0..5 {
-            agg.report_connector(ConnectorProcessHealth::running(format!("fcp.c{i}"), 100));
+            agg.report_connector(ConnectorProcessHealth::running(test_connector_id(format!("c{i}")), 100));
         }
         assert_eq!(agg.connector_count(), 5);
         let status = agg.evaluate();
@@ -2074,8 +2118,8 @@ mod tests {
     #[test]
     fn aggregator_update_connector_replaces_fully() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::failed("x", 10));
-        agg.report_connector(ConnectorProcessHealth::running("x", 500));
+        agg.report_connector(ConnectorProcessHealth::failed(test_connector_id("x"), 10));
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("x"), 500));
         assert_eq!(agg.connector_count(), 1);
         let status = agg.evaluate();
         assert!(status.is_healthy());
@@ -2086,7 +2130,7 @@ mod tests {
     #[test]
     fn aggregator_all_subsystems_healthy() {
         let mut agg = HealthAggregator::with_defaults("2.0.0");
-        agg.report_connector(ConnectorProcessHealth::running("fcp.a", 100));
+        agg.report_connector(ConnectorProcessHealth::running(test_connector_id("a"), 100));
         agg.report_mesh(MeshHealth::connected(5));
         agg.report_resources(ResourceHealth::new(256, 30.0, 100, 1024));
         agg.report_component(ComponentHealth::healthy("enforcement"));
@@ -2099,7 +2143,7 @@ mod tests {
     #[test]
     fn aggregator_all_subsystems_unhealthy() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorProcessHealth::failed("x", 10));
+        agg.report_connector(ConnectorProcessHealth::failed(test_connector_id("x"), 10));
         agg.report_mesh(MeshHealth::disconnected());
         agg.report_resources(ResourceHealth::new(990, 99.0, 990, 1024).with_memory_limit_mb(1000));
         agg.report_component(ComponentHealth::unhealthy("e", "down"));
@@ -2141,11 +2185,11 @@ mod tests {
             version: "1.0.0".into(),
             uptime_seconds: 0,
             connectors: vec![
-                ConnectorProcessHealth::running("a", 100),
-                ConnectorProcessHealth::failed("b", 5),
-                ConnectorProcessHealth::failed("c", 3),
-                ConnectorProcessHealth::stopped("d"),
-                ConnectorProcessHealth::failed("e", 1), // not crash loop
+                ConnectorProcessHealth::running(test_connector_id("a"), 100),
+                ConnectorProcessHealth::failed(test_connector_id("b"), 5),
+                ConnectorProcessHealth::failed(test_connector_id("c"), 3),
+                ConnectorProcessHealth::stopped(test_connector_id("d")),
+                ConnectorProcessHealth::failed(test_connector_id("e"), 1), // not crash loop
             ],
             mesh: MeshHealth::connected(1),
             resources: ResourceHealth::new(0, 0.0, 0, 1024),
@@ -2178,7 +2222,7 @@ mod tests {
             },
             version: "1.0.0".into(),
             uptime_seconds: 42,
-            connectors: vec![ConnectorProcessHealth::running("a", 10)],
+            connectors: vec![ConnectorProcessHealth::running(test_connector_id("a"), 10)],
             mesh: MeshHealth::connected(2),
             resources: ResourceHealth::new(100, 50.0, 50, 1024),
             components: vec![
@@ -2220,7 +2264,7 @@ mod tests {
 
     #[test]
     fn connector_health_clone_independence() {
-        let original = ConnectorProcessHealth::running("x", 100).with_restarts(5);
+        let original = ConnectorProcessHealth::running(test_connector_id("x"), 100).with_restarts(5);
         let cloned = original.clone();
         assert_eq!(original.connector_id, cloned.connector_id);
         assert_eq!(original.restart_count, cloned.restart_count);

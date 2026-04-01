@@ -13,7 +13,7 @@
 //! - **Unhealthy** — critical failure, service should be restarted
 //!
 //! Each subsystem contributes a [`ComponentHealth`] entry, and the
-//! composite [`HealthStatus`] is the worst-case rollup.
+//! composite [`CompositeHealthStatus`] is the worst-case rollup.
 
 use std::time::{Duration, Instant};
 
@@ -196,9 +196,9 @@ impl ComponentHealth {
 // Connector health
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Health details for a single connector process.
+/// Host-local health details for a single connector process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorHealth {
+pub struct ConnectorProcessHealth {
     /// Connector identifier.
     pub connector_id: String,
     /// Current process state label.
@@ -213,7 +213,7 @@ pub struct ConnectorHealth {
     pub crash_loop: bool,
 }
 
-impl ConnectorHealth {
+impl ConnectorProcessHealth {
     /// Create connector health for a running connector.
     #[must_use]
     pub fn running(connector_id: impl Into<String>, uptime_seconds: u64) -> Self {
@@ -464,7 +464,7 @@ impl ResourceHealth {
 
 /// Full composite health status of the FCP host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthStatus {
+pub struct CompositeHealthStatus {
     /// Overall health state (worst-case rollup).
     pub status: HealthState,
     /// Host version string.
@@ -472,7 +472,7 @@ pub struct HealthStatus {
     /// Host uptime in seconds.
     pub uptime_seconds: u64,
     /// Per-connector health details.
-    pub connectors: Vec<ConnectorHealth>,
+    pub connectors: Vec<ConnectorProcessHealth>,
     /// Mesh connectivity health.
     pub mesh: MeshHealth,
     /// System resource health.
@@ -481,7 +481,7 @@ pub struct HealthStatus {
     pub components: Vec<ComponentHealth>,
 }
 
-impl HealthStatus {
+impl CompositeHealthStatus {
     /// Whether the host is healthy.
     #[must_use]
     pub const fn is_healthy(&self) -> bool {
@@ -602,7 +602,7 @@ pub struct HealthAggregator {
     version: String,
     started_at: Instant,
     components: Vec<ComponentHealth>,
-    connectors: Vec<ConnectorHealth>,
+    connectors: Vec<ConnectorProcessHealth>,
     mesh: Option<MeshHealth>,
     resources: Option<ResourceHealth>,
 }
@@ -639,7 +639,7 @@ impl HealthAggregator {
     }
 
     /// Report health for a connector.
-    pub fn report_connector(&mut self, health: ConnectorHealth) {
+    pub fn report_connector(&mut self, health: ConnectorProcessHealth) {
         if let Some(existing) = self
             .connectors
             .iter_mut()
@@ -680,7 +680,7 @@ impl HealthAggregator {
     /// Compute the composite health status.
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
-    pub fn evaluate(&self) -> HealthStatus {
+    pub fn evaluate(&self) -> CompositeHealthStatus {
         let mut overall = HealthState::Healthy;
 
         // Roll up connector health.
@@ -724,7 +724,7 @@ impl HealthAggregator {
 
         let uptime_seconds = self.started_at.elapsed().as_secs();
 
-        HealthStatus {
+        CompositeHealthStatus {
             status: overall,
             version: self.version.clone(),
             uptime_seconds,
@@ -922,11 +922,11 @@ mod tests {
         assert_eq!(c.message.as_deref(), Some("ok"));
     }
 
-    // ────────── ConnectorHealth ──────────
+    // ────────── ConnectorProcessHealth ──────────
 
     #[test]
     fn connector_running() {
-        let c = ConnectorHealth::running("fcp.discord", 3600);
+        let c = ConnectorProcessHealth::running("fcp.discord", 3600);
         assert_eq!(c.process_state, "running");
         assert_eq!(c.uptime_seconds, Some(3600));
         assert!(!c.crash_loop);
@@ -934,45 +934,45 @@ mod tests {
 
     #[test]
     fn connector_stopped() {
-        let c = ConnectorHealth::stopped("fcp.discord");
+        let c = ConnectorProcessHealth::stopped("fcp.discord");
         assert_eq!(c.process_state, "stopped");
         assert!(c.uptime_seconds.is_none());
     }
 
     #[test]
     fn connector_failed_crash_loop() {
-        let c = ConnectorHealth::failed("fcp.discord", 5);
+        let c = ConnectorProcessHealth::failed("fcp.discord", 5);
         assert!(c.crash_loop);
         assert_eq!(c.restart_count, 5);
     }
 
     #[test]
     fn connector_failed_no_crash_loop() {
-        let c = ConnectorHealth::failed("fcp.discord", 2);
+        let c = ConnectorProcessHealth::failed("fcp.discord", 2);
         assert!(!c.crash_loop);
     }
 
     #[test]
     fn connector_with_restarts() {
-        let c = ConnectorHealth::running("fcp.discord", 100).with_restarts(3);
+        let c = ConnectorProcessHealth::running("fcp.discord", 100).with_restarts(3);
         assert_eq!(c.restart_count, 3);
     }
 
     #[test]
     fn connector_health_state_running() {
-        let c = ConnectorHealth::running("fcp.discord", 100);
+        let c = ConnectorProcessHealth::running("fcp.discord", 100);
         assert!(c.to_health_state().is_healthy());
     }
 
     #[test]
     fn connector_health_state_crash_loop() {
-        let c = ConnectorHealth::failed("fcp.discord", 5);
+        let c = ConnectorProcessHealth::failed("fcp.discord", 5);
         assert!(c.to_health_state().is_unhealthy());
     }
 
     #[test]
     fn connector_health_state_check_failing() {
-        let mut c = ConnectorHealth::running("fcp.discord", 100);
+        let mut c = ConnectorProcessHealth::running("fcp.discord", 100);
         c.last_check_passed = Some(false);
         assert!(c.to_health_state().is_degraded());
     }
@@ -1145,7 +1145,7 @@ mod tests {
     #[test]
     fn aggregator_with_running_connector() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::running("fcp.discord", 100));
+        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
         let status = agg.evaluate();
         assert!(status.is_healthy());
         assert_eq!(status.running_connector_count(), 1);
@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn aggregator_crash_loop_makes_unhealthy() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::failed("fcp.discord", 5));
+        agg.report_connector(ConnectorProcessHealth::failed("fcp.discord", 5));
         let status = agg.evaluate();
         assert!(status.status.is_unhealthy());
         assert!(!status.is_ready());
@@ -1218,8 +1218,8 @@ mod tests {
     #[test]
     fn aggregator_update_existing_connector() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::failed("fcp.discord", 5));
-        agg.report_connector(ConnectorHealth::running("fcp.discord", 100));
+        agg.report_connector(ConnectorProcessHealth::failed("fcp.discord", 5));
+        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
         let status = agg.evaluate();
         assert!(status.is_healthy());
         assert_eq!(agg.connector_count(), 1);
@@ -1228,9 +1228,9 @@ mod tests {
     #[test]
     fn aggregator_multiple_connectors() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::running("fcp.discord", 100));
-        agg.report_connector(ConnectorHealth::running("fcp.slack", 200));
-        agg.report_connector(ConnectorHealth::stopped("fcp.telegram"));
+        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
+        agg.report_connector(ConnectorProcessHealth::running("fcp.slack", 200));
+        agg.report_connector(ConnectorProcessHealth::stopped("fcp.telegram"));
         let status = agg.evaluate();
         assert_eq!(status.running_connector_count(), 2);
         assert_eq!(agg.connector_count(), 3);
@@ -1239,7 +1239,7 @@ mod tests {
     #[test]
     fn aggregator_worst_case_rollup() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::running("fcp.discord", 100));
+        agg.report_connector(ConnectorProcessHealth::running("fcp.discord", 100));
         agg.report_mesh(MeshHealth::connected(3));
         agg.report_resources(ResourceHealth::new(256, 30.0, 100, 1024));
         agg.report_component(ComponentHealth::degraded("enforcement", "slow"));
@@ -1263,15 +1263,15 @@ mod tests {
         assert_eq!(agg.config().check_interval_ms, 10_000);
     }
 
-    // ────────── HealthStatus ──────────
+    // ────────── CompositeHealthStatus ──────────
 
     #[test]
     fn health_status_serialization() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Healthy,
             version: "1.0.0".into(),
             uptime_seconds: 3600,
-            connectors: vec![ConnectorHealth::running("fcp.discord", 100)],
+            connectors: vec![ConnectorProcessHealth::running("fcp.discord", 100)],
             mesh: MeshHealth::connected(3),
             resources: ResourceHealth::new(256, 30.0, 100, 1024),
             components: vec![],
@@ -1284,7 +1284,7 @@ mod tests {
 
     #[test]
     fn health_status_deserialization() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Degraded {
                 reasons: vec!["test".into()],
             },
@@ -1296,14 +1296,14 @@ mod tests {
             components: vec![],
         };
         let json = serde_json::to_string(&status).unwrap();
-        let restored: HealthStatus = serde_json::from_str(&json).unwrap();
+        let restored: CompositeHealthStatus = serde_json::from_str(&json).unwrap();
         assert!(restored.status.is_degraded());
         assert_eq!(restored.version, "2.0.0");
     }
 
     #[test]
     fn health_status_ready_when_degraded() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Degraded {
                 reasons: vec!["test".into()],
             },
@@ -1320,7 +1320,7 @@ mod tests {
 
     #[test]
     fn health_status_not_ready_when_unhealthy() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Unhealthy {
                 reasons: vec!["down".into()],
             },
@@ -1339,9 +1339,9 @@ mod tests {
 
     #[test]
     fn connector_health_serde_roundtrip() {
-        let c = ConnectorHealth::running("fcp.discord", 100).with_restarts(3);
+        let c = ConnectorProcessHealth::running("fcp.discord", 100).with_restarts(3);
         let json = serde_json::to_string(&c).unwrap();
-        let restored: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        let restored: ConnectorProcessHealth = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.connector_id, "fcp.discord");
         assert_eq!(restored.restart_count, 3);
     }
@@ -1418,9 +1418,9 @@ mod tests {
     #[test]
     fn mixed_connector_states() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::running("a", 100));
-        agg.report_connector(ConnectorHealth::stopped("b"));
-        let mut failing = ConnectorHealth::running("c", 50);
+        agg.report_connector(ConnectorProcessHealth::running("a", 100));
+        agg.report_connector(ConnectorProcessHealth::stopped("b"));
+        let mut failing = ConnectorProcessHealth::running("c", 50);
         failing.last_check_passed = Some(false);
         agg.report_connector(failing);
         let status = agg.evaluate();
@@ -1663,25 +1663,25 @@ mod tests {
         assert!(json.contains("info"));
     }
 
-    // ────────── ConnectorHealth edge cases ──────────
+    // ────────── ConnectorProcessHealth edge cases ──────────
 
     #[test]
     fn connector_failed_exact_threshold() {
         // 3 restarts is the exact crash_loop threshold
-        let c = ConnectorHealth::failed("x", 3);
+        let c = ConnectorProcessHealth::failed("x", 3);
         assert!(c.crash_loop);
         assert_eq!(c.restart_count, 3);
     }
 
     #[test]
     fn connector_failed_below_threshold() {
-        let c = ConnectorHealth::failed("x", 2);
+        let c = ConnectorProcessHealth::failed("x", 2);
         assert!(!c.crash_loop);
     }
 
     #[test]
     fn connector_failed_zero_restarts() {
-        let c = ConnectorHealth::failed("x", 0);
+        let c = ConnectorProcessHealth::failed("x", 0);
         assert!(!c.crash_loop);
         assert_eq!(c.process_state, "failed");
         assert_eq!(c.last_check_passed, Some(false));
@@ -1690,20 +1690,20 @@ mod tests {
     #[test]
     fn connector_stopped_health_state_is_healthy() {
         // Stopped connector has last_check_passed=None, not in crash loop → healthy
-        let c = ConnectorHealth::stopped("x");
+        let c = ConnectorProcessHealth::stopped("x");
         assert!(c.to_health_state().is_healthy());
     }
 
     #[test]
     fn connector_running_check_passed_none_is_healthy() {
-        let mut c = ConnectorHealth::running("x", 100);
+        let mut c = ConnectorProcessHealth::running("x", 100);
         c.last_check_passed = None;
         assert!(c.to_health_state().is_healthy());
     }
 
     #[test]
     fn connector_health_state_crash_loop_message_format() {
-        let c = ConnectorHealth::failed("fcp.test", 5);
+        let c = ConnectorProcessHealth::failed("fcp.test", 5);
         if let HealthState::Unhealthy { reasons } = c.to_health_state() {
             assert_eq!(reasons.len(), 1);
             assert!(reasons[0].contains("fcp.test"));
@@ -1716,7 +1716,7 @@ mod tests {
 
     #[test]
     fn connector_health_state_failing_message_format() {
-        let mut c = ConnectorHealth::running("fcp.test", 50);
+        let mut c = ConnectorProcessHealth::running("fcp.test", 50);
         c.last_check_passed = Some(false);
         if let HealthState::Degraded { reasons } = c.to_health_state() {
             assert!(reasons[0].contains("fcp.test"));
@@ -2052,7 +2052,7 @@ mod tests {
     fn aggregator_many_connectors() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
         for i in 0..5 {
-            agg.report_connector(ConnectorHealth::running(format!("fcp.c{i}"), 100));
+            agg.report_connector(ConnectorProcessHealth::running(format!("fcp.c{i}"), 100));
         }
         assert_eq!(agg.connector_count(), 5);
         let status = agg.evaluate();
@@ -2074,8 +2074,8 @@ mod tests {
     #[test]
     fn aggregator_update_connector_replaces_fully() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::failed("x", 10));
-        agg.report_connector(ConnectorHealth::running("x", 500));
+        agg.report_connector(ConnectorProcessHealth::failed("x", 10));
+        agg.report_connector(ConnectorProcessHealth::running("x", 500));
         assert_eq!(agg.connector_count(), 1);
         let status = agg.evaluate();
         assert!(status.is_healthy());
@@ -2086,7 +2086,7 @@ mod tests {
     #[test]
     fn aggregator_all_subsystems_healthy() {
         let mut agg = HealthAggregator::with_defaults("2.0.0");
-        agg.report_connector(ConnectorHealth::running("fcp.a", 100));
+        agg.report_connector(ConnectorProcessHealth::running("fcp.a", 100));
         agg.report_mesh(MeshHealth::connected(5));
         agg.report_resources(ResourceHealth::new(256, 30.0, 100, 1024));
         agg.report_component(ComponentHealth::healthy("enforcement"));
@@ -2099,7 +2099,7 @@ mod tests {
     #[test]
     fn aggregator_all_subsystems_unhealthy() {
         let mut agg = HealthAggregator::with_defaults("1.0.0");
-        agg.report_connector(ConnectorHealth::failed("x", 10));
+        agg.report_connector(ConnectorProcessHealth::failed("x", 10));
         agg.report_mesh(MeshHealth::disconnected());
         agg.report_resources(ResourceHealth::new(990, 99.0, 990, 1024).with_memory_limit_mb(1000));
         agg.report_component(ComponentHealth::unhealthy("e", "down"));
@@ -2115,11 +2115,11 @@ mod tests {
         assert_eq!(status.version, "3.14.159");
     }
 
-    // ────────── HealthStatus edge cases ──────────
+    // ────────── CompositeHealthStatus edge cases ──────────
 
     #[test]
     fn health_status_running_connector_count_empty() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Healthy,
             version: "1.0.0".into(),
             uptime_seconds: 0,
@@ -2134,18 +2134,18 @@ mod tests {
 
     #[test]
     fn health_status_crash_loop_count_mixed() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Unhealthy {
                 reasons: vec!["test".into()],
             },
             version: "1.0.0".into(),
             uptime_seconds: 0,
             connectors: vec![
-                ConnectorHealth::running("a", 100),
-                ConnectorHealth::failed("b", 5),
-                ConnectorHealth::failed("c", 3),
-                ConnectorHealth::stopped("d"),
-                ConnectorHealth::failed("e", 1), // not crash loop
+                ConnectorProcessHealth::running("a", 100),
+                ConnectorProcessHealth::failed("b", 5),
+                ConnectorProcessHealth::failed("c", 3),
+                ConnectorProcessHealth::stopped("d"),
+                ConnectorProcessHealth::failed("e", 1), // not crash loop
             ],
             mesh: MeshHealth::connected(1),
             resources: ResourceHealth::new(0, 0.0, 0, 1024),
@@ -2157,7 +2157,7 @@ mod tests {
 
     #[test]
     fn health_status_healthy_is_ready() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Healthy,
             version: "1.0.0".into(),
             uptime_seconds: 0,
@@ -2172,13 +2172,13 @@ mod tests {
 
     #[test]
     fn health_status_serde_with_components() {
-        let status = HealthStatus {
+        let status = CompositeHealthStatus {
             status: HealthState::Degraded {
                 reasons: vec!["slow".into()],
             },
             version: "1.0.0".into(),
             uptime_seconds: 42,
-            connectors: vec![ConnectorHealth::running("a", 10)],
+            connectors: vec![ConnectorProcessHealth::running("a", 10)],
             mesh: MeshHealth::connected(2),
             resources: ResourceHealth::new(100, 50.0, 50, 1024),
             components: vec![
@@ -2187,7 +2187,7 @@ mod tests {
             ],
         };
         let json = serde_json::to_string(&status).unwrap();
-        let restored: HealthStatus = serde_json::from_str(&json).unwrap();
+        let restored: CompositeHealthStatus = serde_json::from_str(&json).unwrap();
         assert!(restored.status.is_degraded());
         assert_eq!(restored.connectors.len(), 1);
         assert_eq!(restored.components.len(), 2);
@@ -2220,7 +2220,7 @@ mod tests {
 
     #[test]
     fn connector_health_clone_independence() {
-        let original = ConnectorHealth::running("x", 100).with_restarts(5);
+        let original = ConnectorProcessHealth::running("x", 100).with_restarts(5);
         let cloned = original.clone();
         assert_eq!(original.connector_id, cloned.connector_id);
         assert_eq!(original.restart_count, cloned.restart_count);

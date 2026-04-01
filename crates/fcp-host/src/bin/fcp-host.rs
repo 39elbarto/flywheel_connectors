@@ -1355,7 +1355,7 @@ impl HttpBatchInvokeRequest {
                     ),
                     input: serde_json::Value::Null,
                     depends_on: operation.depends_on.clone(),
-                    zone: Some(operation.request.zone_id.to_string()),
+                    zone: Some(operation.request.zone_id.clone()),
                 })
                 .collect(),
             options: self.options.clone(),

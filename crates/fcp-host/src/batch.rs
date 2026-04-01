@@ -44,7 +44,7 @@ pub struct BatchOperation {
     pub depends_on: Vec<String>,
     /// Optional zone override for this operation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub zone: Option<String>,
+    pub zone: Option<ZoneId>,
 }
 
 /// Options controlling batch execution behavior.
@@ -239,6 +239,14 @@ impl BatchZoneValidator {
         }
     }
 
+    fn effective_zone<'a>(&'a self, operation: &'a BatchOperation) -> &'a ZoneId {
+        operation
+            .zone
+            .as_ref()
+            .or_else(|| self.registry.get_zone(&operation.tool))
+            .unwrap_or(&self.agent_zone)
+    }
+
     /// Validate all operations are zone-accessible.
     ///
     /// Returns the IDs of operations that violate zone constraints.
@@ -249,13 +257,9 @@ impl BatchZoneValidator {
     pub fn validate(&self, operations: &[BatchOperation]) -> HostResult<()> {
         let mut violations = Vec::new();
         for op in operations {
-            if let Some(connector_zone) = self.registry.get_zone(&op.tool)
-                && !zone_accessible(&self.agent_zone, connector_zone)
-            {
+            if !zone_accessible(&self.agent_zone, self.effective_zone(op)) {
                 violations.push(op.id.clone());
             }
-            // Unknown tools are allowed through — the executor will handle
-            // tool resolution failures separately.
         }
         if violations.is_empty() {
             Ok(())
@@ -272,10 +276,7 @@ impl BatchZoneValidator {
     pub fn group_by_zone(&self, operations: &[BatchOperation]) -> BTreeMap<String, Vec<String>> {
         let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for op in operations {
-            let zone_str = self.registry.get_zone(&op.tool).map_or_else(
-                || self.agent_zone.as_str().to_string(),
-                |z| z.as_str().to_string(),
-            );
+            let zone_str = self.effective_zone(op).as_str().to_string();
             groups.entry(zone_str).or_default().push(op.id.clone());
         }
         groups
@@ -1302,6 +1303,17 @@ mod tests {
     }
 
     #[test]
+    fn zone_validator_operation_zone_override_takes_precedence() {
+        let mut reg = ZoneRegistry::new();
+        reg.register("pub.tool", ZoneId::public());
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        let mut operation = op("a", "pub.tool", &[]);
+        operation.zone = Some(ZoneId::owner());
+        let err = validator.validate(&[operation]).unwrap_err();
+        assert!(err.to_string().contains('a'));
+    }
+
+    #[test]
     fn zone_validator_multiple_violations() {
         let mut reg = ZoneRegistry::new();
         reg.register("secret1", ZoneId::owner());
@@ -1331,6 +1343,18 @@ mod tests {
         assert!(groups.contains_key("z:work"));
         // work group should contain both the work.tool op and the unknown.tool op
         assert_eq!(groups["z:work"].len(), 2);
+    }
+
+    #[test]
+    fn zone_group_by_zone_uses_operation_override() {
+        let mut reg = ZoneRegistry::new();
+        reg.register("pub.tool", ZoneId::public());
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        let mut operation = op("a", "pub.tool", &[]);
+        operation.zone = Some(ZoneId::private());
+        let groups = validator.group_by_zone(&[operation]);
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key("z:private"));
     }
 
     #[test]
@@ -1618,8 +1642,8 @@ mod tests {
     #[test]
     fn batch_operation_with_zone_field_set() {
         let mut operation = op("a", "fcp.discord.send", &[]);
-        operation.zone = Some("z:work".to_string());
-        assert_eq!(operation.zone.as_deref(), Some("z:work"));
+        operation.zone = Some(ZoneId::work());
+        assert_eq!(operation.zone.as_ref().map(ZoneId::as_str), Some("z:work"));
         assert_eq!(operation.id, "a");
     }
 
@@ -2619,7 +2643,7 @@ mod tests {
     #[test]
     fn batch_operation_with_zone_serializes_zone() {
         let mut operation = op("a", "tool", &[]);
-        operation.zone = Some("z:private".to_string());
+        operation.zone = Some(ZoneId::private());
         let json = serde_json::to_string(&operation).unwrap();
         assert!(json.contains("\"zone\":\"z:private\""));
     }
@@ -2627,7 +2651,7 @@ mod tests {
     #[test]
     fn batch_operation_clone_preserves_all_fields() {
         let mut original = op("a", "fcp.tool", &["b", "c"]);
-        original.zone = Some("z:work".to_string());
+        original.zone = Some(ZoneId::work());
         original.input = serde_json::json!({"key": "val"});
         let cloned = original.clone();
         assert_eq!(cloned.id, original.id);
@@ -2635,6 +2659,13 @@ mod tests {
         assert_eq!(cloned.depends_on, original.depends_on);
         assert_eq!(cloned.zone, original.zone);
         assert_eq!(cloned.input, original.input);
+    }
+
+    #[test]
+    fn batch_operation_invalid_zone_rejected_on_deserialize() {
+        let json = r#"{"id":"x","tool":"t","input":{},"zone":"zone-work"}"#;
+        let err = serde_json::from_str::<BatchOperation>(json).unwrap_err();
+        assert!(err.to_string().contains("zone id"));
     }
 
     // ── New tests: zone_accessible exhaustive pairs ──

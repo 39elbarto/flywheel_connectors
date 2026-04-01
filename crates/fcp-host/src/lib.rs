@@ -22,6 +22,7 @@ mod discovery;
 mod doctor;
 mod enforcement;
 mod error;
+#[allow(dead_code)]
 mod health;
 mod output_capture;
 mod progress;
@@ -40,7 +41,6 @@ pub use discovery::*;
 pub use doctor::*;
 pub use enforcement::*;
 pub use error::*;
-pub use health::*;
 pub use output_capture::*;
 pub use progress::*;
 pub use redaction::*;

@@ -511,6 +511,75 @@ pub trait ConnectorErrorMapping: fmt::Display + fmt::Debug + Send + Sync {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Canonical HTTP → FCP Error Mapping
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Map an HTTP status code to the canonical FCP error.
+///
+/// Provides a single source of truth for the HTTP-to-FCP error taxonomy so
+/// connectors do not each invent ad-hoc mappings. Connectors MAY override
+/// specific codes when the service assigns non-standard semantics (e.g., a
+/// 403 that means "resource not found" rather than "capability denied").
+///
+/// The `message` parameter is included in the resulting `FcpError` for
+/// diagnostics. Pass the upstream response body or a short summary.
+#[must_use]
+pub fn map_http_status(status: u16, service: &str, message: String) -> FcpError {
+    match status {
+        400 => FcpError::InvalidRequest {
+            code: 1001,
+            message,
+        },
+        401 => FcpError::Unauthorized {
+            code: 2001,
+            message,
+        },
+        403 => FcpError::CapabilityDenied {
+            capability: String::new(),
+            reason: message,
+        },
+        404 => FcpError::ResourceNotFound { resource: message },
+        408 => FcpError::UpstreamTimeout {
+            service: service.to_string(),
+        },
+        409 => FcpError::Conflict { message },
+        429 => FcpError::RateLimited {
+            retry_after_ms: 0,
+            violation: None,
+        },
+        // Server errors → External (upstream fault, retryable)
+        500..=599 => FcpError::External {
+            service: service.to_string(),
+            message,
+            status_code: Some(status),
+            retryable: matches!(status, 500 | 502 | 503 | 504),
+            retry_after: None,
+        },
+        // Everything else → External with status context
+        _ => FcpError::External {
+            service: service.to_string(),
+            message: format!("HTTP {status}: {message}"),
+            status_code: Some(status),
+            retryable: false,
+            retry_after: None,
+        },
+    }
+}
+
+/// Whether an HTTP status code is retryable per standard semantics.
+///
+/// - 408 Request Timeout: transient, retry
+/// - 429 Too Many Requests: retry after delay
+/// - 500 Internal Server Error: transient, retry
+/// - 502 Bad Gateway: transient, retry
+/// - 503 Service Unavailable: transient, retry
+/// - 504 Gateway Timeout: transient, retry
+#[must_use]
+pub const fn is_http_status_retryable(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RetryLoop
 // ─────────────────────────────────────────────────────────────────────────────
 

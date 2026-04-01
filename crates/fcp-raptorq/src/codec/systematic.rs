@@ -690,7 +690,7 @@ pub struct SystematicEncoder {
     stats: EncodingStats,
     /// Whether systematic symbols have been emitted via `emit_systematic()`.
     systematic_emitted: bool,
-    /// Next repair ESI to emit (monotonic cursor, starts at K).
+    /// Next repair ESI to emit (monotonic cursor, starts at K').
     next_repair_esi: u32,
 }
 
@@ -746,6 +746,7 @@ impl SystematicEncoder {
             repair_bytes_emitted: 0,
         };
 
+        let k_prime_u32 = params.k_prime as u32;
         Some(Self {
             params,
             intermediate,
@@ -753,7 +754,7 @@ impl SystematicEncoder {
             seed,
             stats,
             systematic_emitted: false,
-            next_repair_esi: k as u32,
+            next_repair_esi: k_prime_u32,
         })
     }
 
@@ -849,7 +850,7 @@ impl SystematicEncoder {
     ///
     /// `count` specifies how many repair symbols to generate.
     /// Symbols are emitted in ascending ESI order, continuing from where
-    /// the previous call left off (starting at ESI = K for the first call).
+    /// the previous call left off (starting at ESI = K' for the first call).
     ///
     /// This method updates internal statistics and advances the emission cursor.
     /// Multiple calls emit non-overlapping, monotonically increasing ESI sequences.
@@ -885,7 +886,7 @@ impl SystematicEncoder {
         // Advance cursor
         self.next_repair_esi = start_esi + count as u32;
 
-        // Invariant: all emitted ESIs are strictly ascending and >= K
+        // Invariant: all emitted ESIs are strictly ascending and >= K'
         debug_assert!(
             result
                 .iter()
@@ -894,8 +895,8 @@ impl SystematicEncoder {
             "repair emission ESIs must be monotonically ascending"
         );
         debug_assert!(
-            result.iter().all(|s| s.esi >= self.params.k as u32),
-            "repair ESIs must be >= K"
+            result.iter().all(|s| s.esi >= self.params.k_prime as u32),
+            "repair ESIs must be >= K'"
         );
 
         result
@@ -904,7 +905,7 @@ impl SystematicEncoder {
     /// Emit all symbols (systematic + repair) in deterministic order.
     ///
     /// First emits K source symbols (ESI 0..K-1), then `repair_count` repair
-    /// symbols (ESI K..K+repair_count-1).
+    /// symbols (ESI K'..K'+repair_count-1).
     pub fn emit_all(&mut self, repair_count: usize) -> Vec<EmittedSymbol> {
         let mut result: Vec<EmittedSymbol> = self.emit_systematic();
         result.extend(self.emit_repair(repair_count));
@@ -920,7 +921,7 @@ impl SystematicEncoder {
 
     /// Returns the next repair ESI that will be emitted.
     ///
-    /// Starts at K and advances with each `emit_repair()` call.
+    /// Starts at K' and advances with each `emit_repair()` call.
     #[must_use]
     pub const fn next_repair_esi(&self) -> u32 {
         self.next_repair_esi
@@ -1263,14 +1264,15 @@ mod tests {
         let symbol_size = 32;
         let source = make_source_symbols(k, symbol_size);
         let mut enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+        let k_prime = enc.params().k_prime as u32;
 
         let repair_count = 10;
         let emitted = enc.emit_repair(repair_count);
 
         assert_eq!(emitted.len(), repair_count, "should emit requested count");
         for (i, sym) in emitted.iter().enumerate() {
-            let expected_esi = k as u32 + i as u32;
-            assert_eq!(sym.esi, expected_esi, "ESI should start at K");
+            let expected_esi = k_prime + i as u32;
+            assert_eq!(sym.esi, expected_esi, "ESI should start at K'");
             assert!(!sym.is_source, "should be marked as repair");
             assert!(sym.degree >= 1, "degree should be at least 1");
             assert_eq!(sym.data.len(), symbol_size, "correct symbol size");
@@ -1295,9 +1297,10 @@ mod tests {
             assert!(sym.is_source);
         }
 
-        // Rest are repair
+        // Rest are repair (ESIs start at K')
+        let k_prime = enc.params().k_prime;
         for (i, sym) in emitted.iter().skip(k).enumerate() {
-            assert_eq!(sym.esi, (k + i) as u32);
+            assert_eq!(sym.esi, (k_prime + i) as u32);
             assert!(!sym.is_source);
         }
     }
@@ -1410,23 +1413,23 @@ mod tests {
     fn repair_cursor_advances_across_calls() {
         let symbol_size = 16;
         let mut enc = require_encoder(16, symbol_size, 42);
-        let k = enc.params().k;
+        let kp = enc.params().k_prime as u32;
 
-        assert_eq!(enc.next_repair_esi(), k as u32, "cursor starts at K");
+        assert_eq!(enc.next_repair_esi(), kp, "cursor starts at K'");
 
         let batch1 = enc.emit_repair(3);
-        assert_eq!(enc.next_repair_esi(), k as u32 + 3);
-        assert_eq!(batch1[0].esi, k as u32);
-        assert_eq!(batch1[2].esi, k as u32 + 2);
+        assert_eq!(enc.next_repair_esi(), kp + 3);
+        assert_eq!(batch1[0].esi, kp);
+        assert_eq!(batch1[2].esi, kp + 2);
 
         let batch2 = enc.emit_repair(5);
-        assert_eq!(enc.next_repair_esi(), k as u32 + 8);
+        assert_eq!(enc.next_repair_esi(), kp + 8);
         assert_eq!(
             batch2[0].esi,
-            k as u32 + 3,
+            kp + 3,
             "second batch continues from cursor"
         );
-        assert_eq!(batch2[4].esi, k as u32 + 7);
+        assert_eq!(batch2[4].esi, kp + 7);
     }
 
     #[test]

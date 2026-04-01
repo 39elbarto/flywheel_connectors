@@ -12,7 +12,6 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-asupersync = { path = "/dp/asupersync", default-features = false }
 bytes.workspace = true
 blake3.workspace = true
 parking_lot.workspace = true

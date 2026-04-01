@@ -34,8 +34,12 @@ impl ChunkedObjectManifest {
     /// Create a manifest from a large payload.
     ///
     /// Returns the manifest and the raw chunks that should be stored separately.
+    /// # Panics
+    ///
+    /// Panics if `chunk_size` is zero.
     #[must_use]
     pub fn from_payload(payload: &[u8], chunk_size: u32) -> (Self, Vec<RawChunk>) {
+        assert!(chunk_size > 0, "chunk_size must be non-zero");
         let payload_hash = *blake3::hash(payload).as_bytes();
         let chunk_count = payload.len().div_ceil(chunk_size as usize);
         let mut chunks = Vec::with_capacity(chunk_count);

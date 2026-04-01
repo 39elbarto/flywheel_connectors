@@ -145,7 +145,7 @@ impl RaptorQConfig {
     #[must_use]
     pub fn source_symbols(&self, payload_len: usize) -> u32 {
         let size = usize::from(self.symbol_size).max(1);
-        payload_len.div_ceil(size) as u32
+        u32::try_from(payload_len.div_ceil(size)).unwrap_or(u32::MAX)
     }
 
     /// Total symbols (source + repair) for a payload.

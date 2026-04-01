@@ -1781,7 +1781,7 @@ mod tests {
         for i in 0..k {
             all_symbols.push((i as u32, source_data[i].clone()));
         }
-        let repair_count = (k as u32 * repair_ratio_bps / 10000).max(1);
+        let repair_count = (u64::from(k as u32) * u64::from(repair_ratio_bps) / 10000).max(1) as u32;
         for i in 0..repair_count {
             let esi = k_prime as u32 + i;
             all_symbols.push((esi, encoder.repair_symbol(esi)));

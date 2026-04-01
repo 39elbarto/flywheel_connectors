@@ -10,6 +10,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use fcp_async_core::http::{HttpClient, HttpClientBuilder, HttpResponse, Method};
 use fcp_async_core::time;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use url::Url;
 
 use crate::{
@@ -605,7 +606,7 @@ impl AuthorizationCallback {
             .as_ref()
             .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing state parameter".into()))?;
 
-        if state != expected_state {
+        if state.as_bytes().ct_eq(expected_state.as_bytes()).unwrap_u8() == 0 {
             return Err(OAuthError::StateMismatch {
                 expected: expected_state.to_string(),
                 actual: state.clone(),

@@ -5,6 +5,7 @@
 use crate::error::{CryptoError, CryptoResult};
 use crate::kid::KeyId;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -84,7 +85,8 @@ impl X25519SecretKey {
         peer_public: &X25519PublicKey,
     ) -> CryptoResult<X25519SharedSecret> {
         let shared = self.inner.diffie_hellman(&peer_public.inner);
-        if shared.as_bytes().iter().all(|&b| b == 0) {
+        let zero = [0u8; 32];
+        if bool::from(shared.as_bytes().ct_eq(&zero)) {
             return Err(CryptoError::InvalidPublicKey);
         }
         Ok(X25519SharedSecret {

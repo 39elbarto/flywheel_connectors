@@ -187,24 +187,25 @@ impl M365Client {
             }
             None => String::new(),
         };
-        let mut url = self.build_api_url(&format!(
+        let base = self.build_api_url(&format!(
             "{}{folder_part}/messages",
             user_scope_path(user_id)?
         ))?;
-        let mut params = Vec::new();
-        if let Some(t) = top {
-            params.push(format!("$top={t}"));
+        let mut url = reqwest::Url::parse(&base)
+            .map_err(|e| M365Error::InvalidConfig(format!("Invalid Graph base URL: {e}")))?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(t) = top {
+                pairs.append_pair("$top", &t.to_string());
+            }
+            if let Some(s) = skip {
+                pairs.append_pair("$skip", &s.to_string());
+            }
+            if let Some(f) = filter {
+                pairs.append_pair("$filter", f);
+            }
         }
-        if let Some(s) = skip {
-            params.push(format!("$skip={s}"));
-        }
-        if let Some(f) = filter {
-            params.push(format!("$filter={f}"));
-        }
-        if !params.is_empty() {
-            url = format!("{url}?{}", params.join("&"));
-        }
-        let data = self.get(&url).await?;
+        let data = self.get(url.as_str()).await?;
         Ok(serde_json::from_value(data)?)
     }
 

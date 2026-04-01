@@ -197,9 +197,17 @@ fn default_client_credential_scope() -> String {
     DEFAULT_CLIENT_CREDENTIAL_SCOPE.to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct OAuthTokenResponse {
     access_token: String,
+}
+
+impl std::fmt::Debug for OAuthTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {

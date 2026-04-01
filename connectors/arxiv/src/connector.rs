@@ -16,12 +16,23 @@ use tracing::{info, instrument};
 use crate::{client::ArxivClient, error::ArxivError, types::arxiv_categories};
 
 /// Parsed and validated arXiv connector configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ArxivConfig {
     arxiv_base_url: String,
     scholar_base_url: String,
     scholar_api_key: Option<String>,
     rate_limit_rps: f64,
+}
+
+impl std::fmt::Debug for ArxivConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArxivConfig")
+            .field("arxiv_base_url", &self.arxiv_base_url)
+            .field("scholar_base_url", &self.scholar_base_url)
+            .field("scholar_api_key", &self.scholar_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("rate_limit_rps", &self.rate_limit_rps)
+            .finish()
+    }
 }
 
 impl ArxivConfig {

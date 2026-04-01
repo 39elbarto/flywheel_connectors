@@ -46,10 +46,19 @@ fn sanitize_query_param<'a>(value: &'a str, field: &str) -> PayPalResult<&'a str
 /// PayPal API client with OAuth2 token management and retry support.
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CachedToken {
     access_token: String,
     expires_at: Option<Instant>,
+}
+
+impl std::fmt::Debug for CachedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedToken")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl CachedToken {

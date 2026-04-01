@@ -15,10 +15,19 @@ use crate::types::{
     NormalizedDingTalkEvent, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CachedAccessToken {
     token: String,
     expires_at: Instant,
+}
+
+impl std::fmt::Debug for CachedAccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedAccessToken")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 pub struct DingTalkClient {

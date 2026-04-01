@@ -127,6 +127,13 @@ impl fmt::Debug for SalesforceAuth {
     }
 }
 
+/// Escape a string for safe interpolation into a SOQL single-quoted literal.
+///
+/// SOQL escapes single quotes by doubling them and backslashes by doubling them.
+fn escape_soql_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SalesforceResult<&'a str> {
     if value.trim().is_empty() {
@@ -395,7 +402,8 @@ impl SalesforceClient {
         );
         let mut query = format!("SELECT {cols} FROM Contact");
         if let Some(aid) = account_id {
-            let _ = write!(query, " WHERE AccountId = '{aid}'");
+            let escaped = escape_soql_string(aid);
+            let _ = write!(query, " WHERE AccountId = '{escaped}'");
         }
         if let Some(l) = limit {
             let _ = write!(query, " LIMIT {l}");
@@ -433,7 +441,8 @@ impl SalesforceClient {
         );
         let mut query = format!("SELECT {cols} FROM Lead");
         if let Some(s) = status {
-            let _ = write!(query, " WHERE Status = '{s}'");
+            let escaped = escape_soql_string(s);
+            let _ = write!(query, " WHERE Status = '{escaped}'");
         }
         if let Some(l) = limit {
             let _ = write!(query, " LIMIT {l}");
@@ -464,7 +473,8 @@ impl SalesforceClient {
         );
         let mut query = format!("SELECT {cols} FROM Opportunity");
         if let Some(s) = stage {
-            let _ = write!(query, " WHERE StageName = '{s}'");
+            let escaped = escape_soql_string(s);
+            let _ = write!(query, " WHERE StageName = '{escaped}'");
         }
         if let Some(l) = limit {
             let _ = write!(query, " LIMIT {l}");
@@ -495,7 +505,8 @@ impl SalesforceClient {
         );
         let mut query = format!("SELECT {cols} FROM Case");
         if let Some(s) = status {
-            let _ = write!(query, " WHERE Status = '{s}'");
+            let escaped = escape_soql_string(s);
+            let _ = write!(query, " WHERE Status = '{escaped}'");
         }
         if let Some(l) = limit {
             let _ = write!(query, " LIMIT {l}");

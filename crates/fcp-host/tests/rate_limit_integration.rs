@@ -12,15 +12,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RateLimit, RateLimitConfig, RateLimitDeclarations,
-    RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit, RiskLevel, SafetyTier,
-    SelfCheckReport,
-};
+use fcp_core::{CapabilityId, RateLimit, RiskLevel, SafetyTier};
 use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
     PreflightRequest, PreflightResponse,
+};
+use fcp_kernel::{
+    AgentHint, ApprovalMode, ConnectorHealth, ConnectorId, IdempotencyClass, Introspection,
+    OperationId, OperationInfo, RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement,
+    RateLimitPool, RateLimitScope, RateLimitUnit, SelfCheckReport,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

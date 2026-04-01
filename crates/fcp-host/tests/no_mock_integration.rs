@@ -14,18 +14,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use fcp_core::{
-    AgentHint, ApprovalMode, BudgetEnforcement, CapabilityId, ConnectorHealth, ConnectorId,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RateLimitDeclarations, RiskLevel,
-    SafetyTier, SelfCheckReport, SelfCheckStatus, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric,
-    UsageMetricKind, ZoneId,
-};
+use fcp_core::{CapabilityId, RiskLevel, SafetyTier, ZoneId};
 use fcp_host::{
     BudgetAction, BudgetPolicyEngine, BudgetTracker, ConnectorArchetype, ConnectorRegistry,
     ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DoctorReport, DoctorRequest,
     DoctorService, HealthFilter, HostError, HostHealthResponse, HostHealthStatus,
     IntrospectionResponse, PolicyEngine, PreflightRequest, SafetyTierExt, SelfCheckResponse,
     ToolDescriptor,
+};
+use fcp_kernel::{
+    AgentHint, ApprovalMode, BudgetEnforcement, ConnectorHealth, ConnectorId, IdempotencyClass,
+    Introspection, OperationId, OperationInfo, RateLimitDeclarations, SelfCheckReport,
+    SelfCheckStatus, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric, UsageMetricKind,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

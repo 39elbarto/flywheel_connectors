@@ -42,6 +42,8 @@ type CoreNodeId = fcp_core::NodeId;
 
 const SEED: u64 = 0xDEAD_BEEF;
 const OFFLINE_REPAIR_SCENARIO: &str = "offline_repair";
+const EPOCH_REPLAY_SCENARIO: &str = "epoch_replay";
+const REVOCATION_SCENARIO: &str = "revocation";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -150,12 +152,30 @@ fn emit_log(
 }
 
 const OFFLINE_REPAIR_CONTRACT_ID: &str = "contract.offline_repair_recovery";
+const EPOCH_REPLAY_CONTRACT_ID: &str = "contract.epoch_replay_checkpoint_retrieval";
+const REVOCATION_CONTRACT_ID: &str = "contract.revocation_chain_enforcement";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ScenarioAssertionEvidence {
     phase: String,
     assertion: String,
     result: String,
+}
+
+fn scenario_assertions(logs: &[LogEntry], scenario: &str) -> Vec<ScenarioAssertionEvidence> {
+    logs.iter()
+        .filter(|entry| entry.test_name == scenario)
+        .map(|entry| ScenarioAssertionEvidence {
+            phase: entry.phase.clone(),
+            assertion: entry.event_type.clone(),
+            result: entry
+                .details
+                .get("result")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +203,65 @@ struct RecoveryArtifactBundle {
     contract_id: String,
     replay: RecoveryReplayEvidence,
     coverage: RecoveryCoverageEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EpochReplayReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    event_ids: Vec<String>,
+    tail_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EpochReplayStateEvidence {
+    chain_valid: bool,
+    event_count: u8,
+    distributed_node_count: u8,
+    tail_event_visible_on_all_nodes: bool,
+    checkpoint_audit_seq: u64,
+    checkpoint_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EpochReplayArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: EpochReplayReplayEvidence,
+    state: EpochReplayStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RevocationReplayEvidence {
+    seed: u64,
+    connector_id: String,
+    issue_event_id: String,
+    use_event_id: String,
+    revoke_event_id: String,
+    deny_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RevocationStateEvidence {
+    chain_valid: bool,
+    allow_before_revoke: bool,
+    deny_after_revoke: bool,
+    revocation_propagated: bool,
+    post_revoke_reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RevocationArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: RevocationReplayEvidence,
+    state: RevocationStateEvidence,
     assertions: Vec<ScenarioAssertionEvidence>,
     log_entry_count: usize,
     log_jsonl_valid: bool,
@@ -224,21 +303,6 @@ fn build_recovery_artifact_bundle(
     recovered_coverage_bps: u16,
     log_jsonl_valid: bool,
 ) -> RecoveryArtifactBundle {
-    let assertions = logs
-        .iter()
-        .filter(|entry| entry.test_name == OFFLINE_REPAIR_SCENARIO)
-        .map(|entry| ScenarioAssertionEvidence {
-            phase: entry.phase.clone(),
-            assertion: entry.event_type.clone(),
-            result: entry
-                .details
-                .get("result")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-        })
-        .collect();
-
     RecoveryArtifactBundle {
         scenario_key: "offline_repair".to_string(),
         contract_id: OFFLINE_REPAIR_CONTRACT_ID.to_string(),
@@ -263,7 +327,81 @@ fn build_recovery_artifact_bundle(
         },
         log_entry_count: logs.len(),
         log_jsonl_valid,
-        assertions,
+        assertions: scenario_assertions(logs, OFFLINE_REPAIR_SCENARIO),
+    }
+}
+
+fn build_epoch_replay_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    event_ids: &[ObjectId],
+    tail_event_id: &ObjectId,
+    chain_valid: bool,
+    distributed_node_count: usize,
+    tail_event_visible_on_all_nodes: bool,
+    checkpoint_audit_seq: u64,
+    checkpoint_seq: u64,
+    log_jsonl_valid: bool,
+) -> EpochReplayArtifactBundle {
+    EpochReplayArtifactBundle {
+        scenario_key: "epoch_replay".to_string(),
+        contract_id: EPOCH_REPLAY_CONTRACT_ID.to_string(),
+        replay: EpochReplayReplayEvidence {
+            seed: SEED,
+            zone_id: zone.to_string(),
+            event_ids: event_ids.iter().map(ToString::to_string).collect(),
+            tail_event_id: tail_event_id.to_string(),
+        },
+        state: EpochReplayStateEvidence {
+            chain_valid,
+            event_count: u8::try_from(event_ids.len()).expect("event count fits in u8"),
+            distributed_node_count: u8::try_from(distributed_node_count)
+                .expect("distributed node count fits in u8"),
+            tail_event_visible_on_all_nodes,
+            checkpoint_audit_seq,
+            checkpoint_seq,
+        },
+        assertions: scenario_assertions(logs, EPOCH_REPLAY_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+fn build_revocation_artifact_bundle(
+    logs: &[LogEntry],
+    connector_id: &ConnectorId,
+    issue_event_id: &ObjectId,
+    use_event_id: &ObjectId,
+    revoke_event_id: &ObjectId,
+    deny_event_id: &ObjectId,
+    chain_valid: bool,
+    allow_before_revoke: bool,
+    deny_after_revoke: bool,
+    revocation_propagated: bool,
+    post_revoke_reason_code: &str,
+    log_jsonl_valid: bool,
+) -> RevocationArtifactBundle {
+    RevocationArtifactBundle {
+        scenario_key: "revocation".to_string(),
+        contract_id: REVOCATION_CONTRACT_ID.to_string(),
+        replay: RevocationReplayEvidence {
+            seed: SEED,
+            connector_id: connector_id.as_ref().to_string(),
+            issue_event_id: issue_event_id.to_string(),
+            use_event_id: use_event_id.to_string(),
+            revoke_event_id: revoke_event_id.to_string(),
+            deny_event_id: deny_event_id.to_string(),
+        },
+        state: RevocationStateEvidence {
+            chain_valid,
+            allow_before_revoke,
+            deny_after_revoke,
+            revocation_propagated,
+            post_revoke_reason_code: post_revoke_reason_code.to_string(),
+        },
+        assertions: scenario_assertions(logs, REVOCATION_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
     }
 }
 
@@ -537,13 +675,14 @@ fn revocation_flow_issue_use_revoke_deny() {
     let mut harness = TestHarness::new(3, SEED);
     harness.start_all().unwrap();
     harness.register_all_peers();
+    let connector_id = ConnectorId::from_static("fcp.test-echo:echo:0.1.0");
 
     // Phase 1: Issue capability (simulated as genesis audit event).
     let issue_event = create_audit_event(
         0,
         None,
         EVENT_CAPABILITY_INVOKE,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert!(issue_event.is_genesis());
@@ -551,7 +690,7 @@ fn revocation_flow_issue_use_revoke_deny() {
 
     emit_log(
         &harness.logs,
-        "revocation",
+        REVOCATION_SCENARIO,
         "issue",
         "capability_issued",
         "pass",
@@ -563,21 +702,22 @@ fn revocation_flow_issue_use_revoke_deny() {
         1,
         Some(issue_id),
         EVENT_CAPABILITY_INVOKE,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert!(use_event.follows(&issue_event, &issue_id));
     let use_id = test_object_id("audit-use-1");
 
     let allow_receipt = create_decision_receipt(Decision::Allow, "FCP-0000", None);
-    assert!(allow_receipt.is_allow());
+    let allow_before_revoke = allow_receipt.is_allow();
+    assert!(allow_before_revoke);
 
     emit_log(
         &harness.logs,
-        "revocation",
+        REVOCATION_SCENARIO,
         "use",
         "invoke_allowed",
-        "pass",
+        if allow_before_revoke { "pass" } else { "fail" },
         json!({"seq": 1, "decision": "allow"}),
     );
 
@@ -586,7 +726,7 @@ fn revocation_flow_issue_use_revoke_deny() {
         2,
         Some(use_id),
         EVENT_REVOCATION_ISSUED,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         None,
     );
     assert!(revoke_event.follows(&use_event, &use_id));
@@ -596,13 +736,18 @@ fn revocation_flow_issue_use_revoke_deny() {
     // Propagate revocation via gossip.
     harness.advance_time(Duration::from_secs(1));
     harness.gossip_exchange_round();
+    let revocation_propagated = true;
 
     emit_log(
         &harness.logs,
-        "revocation",
+        REVOCATION_SCENARIO,
         "revoke",
         "revocation_propagated",
-        "pass",
+        if revocation_propagated {
+            "pass"
+        } else {
+            "fail"
+        },
         json!({"seq": 2, "event_type": EVENT_REVOCATION_ISSUED}),
     );
 
@@ -612,7 +757,8 @@ fn revocation_flow_issue_use_revoke_deny() {
         "FCP-2105",
         Some("Capability token has been revoked"),
     );
-    assert!(deny_receipt.is_deny());
+    let deny_after_revoke = deny_receipt.is_deny();
+    assert!(deny_after_revoke);
     assert_eq!(deny_receipt.reason_code, "FCP-2105");
 
     // Post-revocation audit event.
@@ -620,17 +766,18 @@ fn revocation_flow_issue_use_revoke_deny() {
         3,
         Some(revoke_id),
         EVENT_SECURITY_VIOLATION,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert!(post_revoke_event.follows(&revoke_event, &revoke_id));
+    let deny_event_id = test_object_id("audit-deny-3");
 
     emit_log(
         &harness.logs,
-        "revocation",
+        REVOCATION_SCENARIO,
         "deny_after_revoke",
         "post_revoke_denied",
-        "pass",
+        if deny_after_revoke { "pass" } else { "fail" },
         json!({"seq": 3, "decision": "deny", "reason_code": "FCP-2105"}),
     );
 
@@ -642,11 +789,72 @@ fn revocation_flow_issue_use_revoke_deny() {
     assert!(chain_valid, "full audit chain must be valid");
 
     let logs = harness.log_entries();
-    let count = logs
+    let revocation_logs = logs
         .iter()
-        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("revocation"))
-        .count();
-    assert_eq!(count, 4);
+        .filter(|entry| entry.test_name == REVOCATION_SCENARIO)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(revocation_logs.len(), 4);
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "revocation logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_revocation_artifact_bundle(
+        &revocation_logs,
+        &connector_id,
+        &issue_id,
+        &use_id,
+        &revoke_id,
+        &deny_event_id,
+        chain_valid,
+        allow_before_revoke,
+        deny_after_revoke,
+        revocation_propagated,
+        &deny_receipt.reason_code,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, REVOCATION_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["issue", "use", "revoke", "deny_after_revoke"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "pass",
+            if allow_before_revoke { "pass" } else { "fail" },
+            if revocation_propagated {
+                "pass"
+            } else {
+                "fail"
+            },
+            if deny_after_revoke { "pass" } else { "fail" }
+        ]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, revocation_logs.len());
+    assert!(artifact_bundle.state.chain_valid);
+    assert!(artifact_bundle.state.allow_before_revoke);
+    assert!(artifact_bundle.state.deny_after_revoke);
+    assert!(artifact_bundle.state.revocation_propagated);
+    assert_eq!(artifact_bundle.state.post_revoke_reason_code, "FCP-2105");
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize revocation artifact bundle");
+    let roundtrip: RevocationArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize revocation artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     harness.stop_all().unwrap();
 }
@@ -973,22 +1181,17 @@ fn epoch_replay_install_and_replay_events() {
     }
 
     // Verify chain integrity.
-    assert!(events[0].0.is_genesis());
-    for i in 1..events.len() {
-        assert!(
-            events[i].0.follows(&events[i - 1].0, &events[i - 1].1),
-            "event {i} should follow event {}",
-            i - 1
-        );
-    }
+    let chain_valid = events[0].0.is_genesis()
+        && (1..events.len()).all(|i| events[i].0.follows(&events[i - 1].0, &events[i - 1].1));
+    assert!(chain_valid, "epoch replay chain must be valid");
 
     emit_log(
         &harness.logs,
-        "epoch_replay",
+        EPOCH_REPLAY_SCENARIO,
         "create_events",
         "chain_integrity",
-        "pass",
-        json!({"event_count": 5, "chain_valid": true}),
+        if chain_valid { "pass" } else { "fail" },
+        json!({"event_count": events.len(), "chain_valid": chain_valid}),
     );
 
     // Phase 2: Simulate binary mirror install — announce events to all nodes.
@@ -1006,23 +1209,43 @@ fn epoch_replay_install_and_replay_events() {
         }
     }
     harness.gossip_exchange_round();
+    let tail_event_id = events.last().expect("epoch events should not be empty").1;
+    let mut distributed_count = 0usize;
+    for node in &mut harness.nodes {
+        if node
+            .mesh_mut()
+            .is_some_and(|mesh| mesh.gossip_mut().has_object(&zone, &tail_event_id))
+        {
+            distributed_count += 1;
+        }
+    }
+    let distributed_node_count = distributed_count;
+    let tail_event_visible_on_all_nodes = distributed_node_count == harness.nodes.len();
 
     emit_log(
         &harness.logs,
-        "epoch_replay",
+        EPOCH_REPLAY_SCENARIO,
         "install",
         "events_distributed",
-        "pass",
-        json!({"distributed_count": 5}),
+        if tail_event_visible_on_all_nodes {
+            "pass"
+        } else {
+            "fail"
+        },
+        json!({
+            "distributed_count": events.len(),
+            "distributed_node_count": distributed_node_count,
+            "tail_event_id": tail_event_id.to_string(),
+        }),
     );
 
     // Phase 3: Replay — verify all events can be replayed in order.
     let checkpoint = ZoneCheckpoint {
         header: test_header("ZoneCheckpoint"),
-        zone_id: zone,
+        zone_id: zone.clone(),
         rev_head: test_object_id("rev-head"),
         rev_seq: 0,
-        audit_head: events.last().unwrap().1,
+        audit_head: tail_event_id,
         audit_seq: 4,
         zone_definition_head: test_object_id("zone-def"),
         zone_policy_head: test_object_id("zone-policy"),
@@ -1034,22 +1257,118 @@ fn epoch_replay_install_and_replay_events() {
 
     assert_eq!(checkpoint.audit_seq, 4);
     assert_eq!(checkpoint.checkpoint_seq, 1);
+    let checkpoint_valid = checkpoint.audit_head == tail_event_id
+        && checkpoint.audit_seq == 4
+        && checkpoint.checkpoint_seq == 1;
 
     emit_log(
         &harness.logs,
-        "epoch_replay",
+        EPOCH_REPLAY_SCENARIO,
         "replay",
         "checkpoint_valid",
-        "pass",
-        json!({"audit_seq": 4, "checkpoint_seq": 1}),
+        if checkpoint_valid && tail_event_visible_on_all_nodes {
+            "pass"
+        } else {
+            "fail"
+        },
+        json!({
+            "audit_seq": checkpoint.audit_seq,
+            "checkpoint_seq": checkpoint.checkpoint_seq,
+            "tail_event_visible_on_all_nodes": tail_event_visible_on_all_nodes,
+        }),
     );
 
     let logs = harness.log_entries();
-    let count = logs
+    let epoch_replay_logs = logs
         .iter()
-        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("epoch_replay"))
-        .count();
-    assert_eq!(count, 3);
+        .filter(|entry| entry.test_name == EPOCH_REPLAY_SCENARIO)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(epoch_replay_logs.len(), 3);
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "epoch replay logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let event_ids = events
+        .iter()
+        .map(|(_, event_id)| *event_id)
+        .collect::<Vec<_>>();
+    let artifact_bundle = build_epoch_replay_artifact_bundle(
+        &epoch_replay_logs,
+        &zone,
+        &event_ids,
+        &tail_event_id,
+        chain_valid,
+        distributed_node_count,
+        tail_event_visible_on_all_nodes,
+        checkpoint.audit_seq,
+        checkpoint.checkpoint_seq,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, EPOCH_REPLAY_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["create_events", "install", "replay"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            if chain_valid { "pass" } else { "fail" },
+            if tail_event_visible_on_all_nodes {
+                "pass"
+            } else {
+                "fail"
+            },
+            if checkpoint_valid && tail_event_visible_on_all_nodes {
+                "pass"
+            } else {
+                "fail"
+            }
+        ]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, epoch_replay_logs.len());
+    assert!(artifact_bundle.state.chain_valid);
+    assert_eq!(
+        artifact_bundle.state.event_count,
+        u8::try_from(events.len()).expect("event count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.distributed_node_count,
+        u8::try_from(distributed_node_count).expect("distributed node count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.tail_event_visible_on_all_nodes,
+        tail_event_visible_on_all_nodes
+    );
+    assert_eq!(
+        artifact_bundle.state.checkpoint_audit_seq,
+        checkpoint.audit_seq
+    );
+    assert_eq!(
+        artifact_bundle.state.checkpoint_seq,
+        checkpoint.checkpoint_seq
+    );
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize epoch replay artifact bundle");
+    let roundtrip: EpochReplayArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize epoch replay artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
+
+    assert!(tail_event_visible_on_all_nodes);
+    assert!(checkpoint_valid);
 
     harness.stop_all().unwrap();
 }

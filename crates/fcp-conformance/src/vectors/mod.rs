@@ -14,5 +14,6 @@ pub mod session;
 pub mod session_messages;
 pub mod evidence;
 pub mod recovery;
+pub mod repair;
 pub mod replay;
 pub mod signing;

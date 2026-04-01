@@ -740,9 +740,12 @@ impl ExecutionPlanner {
     fn matches_exclusion(candidate: &CandidateNode, pattern: &DevicePattern) -> bool {
         match pattern {
             DevicePattern::NodeId { id } => candidate.node_id == *id,
-            DevicePattern::Tag { .. } => false, // needs tag info from NodeInfo
-            DevicePattern::Zone { .. } => false, // needs zone info from NodeInfo
-            DevicePattern::AvailabilityProfile { .. } => false, // needs profile info
+            // Tag, Zone, and AvailabilityProfile exclusions need additional
+            // node metadata that isn't available on CandidateNode alone.
+            // These will be wired once NodeInfo is threaded through.
+            DevicePattern::Tag { .. }
+            | DevicePattern::Zone { .. }
+            | DevicePattern::AvailabilityProfile { .. } => false,
         }
     }
 
@@ -2786,5 +2789,151 @@ mod tests {
         assert!(eligible.eligible);
         assert!(!excluded.eligible);
         assert!(excluded.exclusion_reason.is_some());
+    }
+
+    // ── plan_with_policy tests ─────────────────────────────────────
+
+    fn test_node(id: &str, memory_mb: u32, has_gpu: bool) -> NodeInfo {
+        use crate::device::{
+            DeviceProfileBuilder, GpuProfile, GpuVendor, InstalledConnector, PowerSource,
+        };
+        let mut builder = DeviceProfileBuilder::new(NodeId::new(id))
+            .memory_mb(memory_mb)
+            .power_source(PowerSource::Mains)
+            .add_connector(InstalledConnector::new(
+                ConnectorId::from_static("fcp.test"),
+                "0.1.0",
+                ObjectId::from_bytes([0u8; 32]),
+            ));
+        if has_gpu {
+            builder = builder.gpu(GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576));
+        }
+        NodeInfo {
+            profile: builder.build(),
+            local_symbols: HashSet::new(),
+            held_leases: vec![],
+        }
+    }
+
+    #[test]
+    fn plan_with_policy_excludes_by_node_id() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(
+            vec![test_node("node-a", 1024, false), test_node("node-b", 1024, false)],
+            1_700_000_000,
+        );
+        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let policy = PlacementPolicy {
+            excludes: vec![DevicePattern::NodeId {
+                id: NodeId::new("node-a"),
+            }],
+            ..Default::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &context, &policy);
+        // node-a excluded, only node-b should be selected
+        assert!(plan.selected.is_some());
+        assert_eq!(plan.selected.unwrap().node_id.as_str(), "node-b");
+    }
+
+    #[test]
+    fn plan_with_policy_requires_memory() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(
+            vec![
+                test_node("low-mem", 256, false),
+                test_node("high-mem", 4096, false),
+            ],
+            1_700_000_000,
+        );
+        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let policy = PlacementPolicy {
+            requires: vec![DeviceRequirement::Memory { min_mb: 1024 }],
+            ..Default::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &context, &policy);
+        assert!(plan.selected.is_some());
+        assert_eq!(plan.selected.unwrap().node_id.as_str(), "high-mem");
+    }
+
+    #[test]
+    fn plan_with_policy_requires_gpu() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(
+            vec![
+                test_node("no-gpu", 4096, false),
+                test_node("has-gpu", 4096, true),
+            ],
+            1_700_000_000,
+        );
+        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let policy = PlacementPolicy {
+            requires: vec![DeviceRequirement::Gpu { min_vram_mb: 8192 }],
+            ..Default::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &context, &policy);
+        assert!(plan.selected.is_some());
+        assert_eq!(plan.selected.unwrap().node_id.as_str(), "has-gpu");
+    }
+
+    #[test]
+    fn plan_with_policy_empty_policy_same_as_plan() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(
+            vec![test_node("node-a", 1024, false)],
+            1_700_000_000,
+        );
+        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let policy = PlacementPolicy::default();
+
+        let base = planner.plan(&input, &context);
+        let with_policy = planner.plan_with_policy(&input, &context, &policy);
+
+        assert_eq!(base.len(), 1);
+        assert!(with_policy.selected.is_some());
+    }
+
+    #[test]
+    fn plan_with_policy_prefers_specific_device() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(
+            vec![
+                test_node("node-a", 1024, false),
+                test_node("node-b", 1024, false),
+            ],
+            1_700_000_000,
+        );
+        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let policy = PlacementPolicy {
+            prefers: vec![DevicePreference::SpecificDevice {
+                node_id: NodeId::new("node-b"),
+                weight_bps: 10000,
+            }],
+            ..Default::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &context, &policy);
+        assert!(plan.selected.is_some());
+        // node-b should be preferred due to affinity bonus
+        assert_eq!(plan.selected.unwrap().node_id.as_str(), "node-b");
+    }
+
+    #[test]
+    fn plan_with_policy_no_eligible_returns_empty() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(
+            vec![test_node("node-a", 256, false)],
+            1_700_000_000,
+        );
+        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let policy = PlacementPolicy {
+            requires: vec![DeviceRequirement::Gpu { min_vram_mb: 8192 }],
+            ..Default::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &context, &policy);
+        assert!(plan.selected.is_none());
     }
 }

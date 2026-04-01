@@ -393,7 +393,7 @@ async fn items_delete() {
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(graphql_ok(&json!({
-            "delete_item": {"id": "item_abc"}
+            "delete_item": {"id": "98765"}
         }))))
         .mount(&server)
         .await;
@@ -402,7 +402,7 @@ async fn items_delete() {
     let result = c
         .handle_invoke(json!({
             "operation_id": "monday.items.delete",
-            "input": {"item_id": "item_abc"}
+            "input": {"item_id": "98765"}
         }))
         .await
         .unwrap();
@@ -446,7 +446,7 @@ async fn updates_list() {
     let result = c
         .handle_invoke(json!({
             "operation_id": "monday.updates.list",
-            "input": {"item_id": "item_123"}
+            "input": {"item_id": "12345"}
         }))
         .await
         .unwrap();
@@ -470,7 +470,7 @@ async fn updates_list_empty() {
     let result = c
         .handle_invoke(json!({
             "operation_id": "monday.updates.list",
-            "input": {"item_id": "item_123"}
+            "input": {"item_id": "12345"}
         }))
         .await
         .unwrap();
@@ -512,7 +512,7 @@ async fn updates_create() {
         .handle_invoke(json!({
             "operation_id": "monday.updates.create",
             "input": {
-                "item_id": "item_123",
+                "item_id": "12345",
                 "body": "Great progress!"
             }
         }))
@@ -543,7 +543,7 @@ async fn updates_create_missing_body() {
     assert!(
         c.handle_invoke(json!({
             "operation_id": "monday.updates.create",
-            "input": {"item_id": "item_123"}
+            "input": {"item_id": "12345"}
         }))
         .await
         .is_err()

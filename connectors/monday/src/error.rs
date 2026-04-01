@@ -44,6 +44,10 @@ pub enum MondayError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input parameter
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl MondayError {
@@ -121,6 +125,10 @@ impl MondayError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 4000,
+                message: msg.clone(),
             },
         }
     }

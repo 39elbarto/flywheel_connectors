@@ -17,6 +17,16 @@ use crate::{
 /// Default Monday.com API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.monday.com/v2";
 
+/// Validate that a Monday.com ID is numeric to prevent GraphQL injection.
+fn validate_numeric_id<'a>(value: &'a str, field: &str) -> MondayResult<&'a str> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(MondayError::InvalidInput(format!(
+            "{field} must be a non-empty numeric string, got: {value:?}"
+        )));
+    }
+    Ok(value)
+}
+
 /// Authentication mode for the Monday.com API.
 #[derive(Clone)]
 pub enum MondayAuth {
@@ -193,6 +203,7 @@ impl MondayClient {
 
     /// Get a single board by ID.
     pub async fn get_board(&self, board_id: &str) -> MondayResult<serde_json::Value> {
+        let board_id = validate_numeric_id(board_id, "board_id")?;
         let query = format!("{{ boards(ids: [{board_id}]) {{ id name description state }} }}");
         self.query(&query).await
     }
@@ -201,6 +212,7 @@ impl MondayClient {
 
     /// List items on a board.
     pub async fn list_items(&self, board_id: &str) -> MondayResult<serde_json::Value> {
+        let board_id = validate_numeric_id(board_id, "board_id")?;
         let query = format!(
             "{{ boards(ids: [{board_id}]) {{ items_page(limit: 50) {{ items {{ id name state column_values {{ id text value }} }} }} }} }}"
         );
@@ -214,6 +226,7 @@ impl MondayClient {
         item_name: &str,
         column_values: Option<&str>,
     ) -> MondayResult<serde_json::Value> {
+        let board_id = validate_numeric_id(board_id, "board_id")?;
         let cv_arg = match column_values {
             Some(cv) => {
                 // Escape the column_values JSON string for embedding in GraphQL.
@@ -232,6 +245,7 @@ impl MondayClient {
 
     /// Delete an item.
     pub async fn delete_item(&self, item_id: &str) -> MondayResult<serde_json::Value> {
+        let item_id = validate_numeric_id(item_id, "item_id")?;
         let query = format!("mutation {{ delete_item(item_id: {item_id}) {{ id }} }}");
         self.query(&query).await
     }
@@ -240,6 +254,7 @@ impl MondayClient {
 
     /// List updates on an item.
     pub async fn list_updates(&self, item_id: &str) -> MondayResult<serde_json::Value> {
+        let item_id = validate_numeric_id(item_id, "item_id")?;
         let query = format!(
             "{{ items(ids: [{item_id}]) {{ updates {{ id text_body creator {{ name }} created_at }} }} }}"
         );
@@ -252,6 +267,7 @@ impl MondayClient {
         item_id: &str,
         body_text: &str,
     ) -> MondayResult<serde_json::Value> {
+        let item_id = validate_numeric_id(item_id, "item_id")?;
         let escaped = serde_json::to_string(body_text).unwrap_or_else(|_| "\"\"".to_string());
         let query = format!(
             "mutation {{ create_update(item_id: {item_id}, body: {escaped}) {{ id text_body }} }}"

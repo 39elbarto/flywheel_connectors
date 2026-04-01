@@ -17,7 +17,8 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use chrono::{SecondsFormat, Utc};
@@ -36,7 +37,133 @@ use fcp_mesh::planner::{
 };
 use fcp_mesh::transport::{TransportPath, TransportPathKind, TransportSelector};
 use fcp_tailscale::NodeId;
-use fcp_testkit::LogCapture;
+use jsonschema::Validator;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
+
+const E2E_LOG_V1_SCHEMA: &str =
+    include_str!("../../fcp-conformance/src/schemas/E2E_Log_v1.schema.json");
+
+fn e2e_log_validator() -> &'static Validator {
+    static VALIDATOR: OnceLock<Validator> = OnceLock::new();
+    VALIDATOR.get_or_init(|| {
+        let schema: serde_json::Value =
+            serde_json::from_str(E2E_LOG_V1_SCHEMA).expect("E2E log schema should parse");
+        Validator::new(&schema).expect("E2E log schema should compile")
+    })
+}
+
+fn validate_e2e_log_entry(value: &serde_json::Value) -> Result<(), String> {
+    e2e_log_validator()
+        .validate(value)
+        .map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Clone, Default)]
+struct LogCaptureBuffer {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl LogCaptureBuffer {
+    fn snapshot(&self) -> Vec<u8> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+struct LogCaptureWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for LogCaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCaptureBuffer {
+    type Writer = LogCaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        Self::Writer {
+            bytes: Arc::clone(&self.bytes),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct LogCapture {
+    buffer: LogCaptureBuffer,
+}
+
+impl LogCapture {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn install_json_with_filter(
+        &self,
+        filter: impl Into<EnvFilter>,
+    ) -> tracing::subscriber::DefaultGuard {
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(self.buffer.clone())
+            .json()
+            .with_ansi(false)
+            .with_level(false)
+            .with_target(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_current_span(false)
+            .flatten_event(true);
+        let subscriber = tracing_subscriber::registry()
+            .with(filter.into())
+            .with(layer);
+        tracing::subscriber::set_default(subscriber)
+    }
+
+    fn jsonl(&self) -> String {
+        let bytes = self.buffer.snapshot();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    fn push_line(&self, line: &str) {
+        let mut guard = self
+            .buffer
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.extend_from_slice(line.as_bytes());
+        guard.push(b'\n');
+    }
+
+    fn push_value(&self, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+        let line = serde_json::to_string(value)?;
+        self.push_line(&line);
+        Ok(())
+    }
+
+    fn assert_valid(&self) {
+        for line in self.jsonl().lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: serde_json::Value =
+                serde_json::from_str(trimmed).expect("captured line should be valid JSON");
+            validate_e2e_log_entry(&value)
+                .unwrap_or_else(|err| panic!("expected log line to match E2E schema: {err}"));
+        }
+    }
+}
 
 // ============================================================================
 // Test Utilities

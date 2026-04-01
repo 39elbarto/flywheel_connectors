@@ -39,8 +39,9 @@ ciborium.workspace = true
 criterion.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
-fcp-testkit = { path = "../fcp-testkit" }
+jsonschema.workspace = true
 proptest.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 semver.workspace = true
 serde_json.workspace = true

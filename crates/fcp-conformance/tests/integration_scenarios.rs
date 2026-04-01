@@ -43,8 +43,15 @@ use fcp_conformance::harness::{
 use fcp_core::{ObjectId, ZoneId};
 use fcp_mesh::ObjectAdmissionClass;
 use fcp_tailscale::NodeId;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+const CRASH_RECOVERY_SCENARIO: &str = "crash-recovery";
+const CRASH_RECOVERY_CONTRACT_ID: &str = "contract.crash_recovery_rejoin";
+const DEGRADED_AVAILABILITY_SCENARIO: &str = "degraded-availability";
+const DEGRADED_AVAILABILITY_CONTRACT_ID: &str = "contract.degraded_symbol_availability";
+const PARTITION_HEAL_SCENARIO: &str = "partition-heal";
+const PARTITION_HEAL_CONTRACT_ID: &str = "contract.partition_heal_convergence";
 
 /// Create a deterministic test object ID from a name.
 fn test_object_id(name: &str) -> ObjectId {
@@ -87,6 +94,254 @@ fn emit_scenario_log<E: Serialize>(
     logs.push(entry);
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ScenarioAssertionEvidence {
+    phase: String,
+    assertion: String,
+    result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CrashRecoveryReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    object_id: String,
+    crashed_node_id: String,
+    lease_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CrashRecoveryStateEvidence {
+    restarted_node_running: bool,
+    post_crash_gossip_works: bool,
+    running_nodes_after_restart: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CrashRecoveryArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: CrashRecoveryReplayEvidence,
+    state: CrashRecoveryStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn scenario_assertions(logs: &[LogEntry], scenario: &str) -> Vec<ScenarioAssertionEvidence> {
+    logs.iter()
+        .filter(|entry| entry.test_name == scenario)
+        .map(|entry| ScenarioAssertionEvidence {
+            phase: entry.phase.clone(),
+            assertion: entry.event_type.clone(),
+            result: entry
+                .details
+                .get("result")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+        })
+        .collect()
+}
+
+fn build_crash_recovery_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    object_id: &ObjectId,
+    crashed_node_id: &NodeId,
+    lease_timeout_secs: u64,
+    restarted_node_running: bool,
+    post_crash_gossip_works: bool,
+    running_nodes_after_restart: usize,
+    log_jsonl_valid: bool,
+) -> CrashRecoveryArtifactBundle {
+    CrashRecoveryArtifactBundle {
+        scenario_key: "crash_recovery".to_string(),
+        contract_id: CRASH_RECOVERY_CONTRACT_ID.to_string(),
+        replay: CrashRecoveryReplayEvidence {
+            seed: 0xFEED_FACE,
+            zone_id: zone.to_string(),
+            object_id: object_id.to_string(),
+            crashed_node_id: crashed_node_id.as_str().to_string(),
+            lease_timeout_secs,
+        },
+        state: CrashRecoveryStateEvidence {
+            restarted_node_running,
+            post_crash_gossip_works,
+            running_nodes_after_restart: u8::try_from(running_nodes_after_restart)
+                .expect("running node count fits in u8"),
+        },
+        assertions: scenario_assertions(logs, CRASH_RECOVERY_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DegradedAvailabilityReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    object_id: String,
+    crashed_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DegradedAvailabilityStateEvidence {
+    pre_crash_symbol_count: u64,
+    a_has_obj_before_crash: bool,
+    a_has_obj_after_crash: bool,
+    c_has_obj_after_crash: bool,
+    running_nodes_after_crash: u8,
+    availability_degraded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DegradedAvailabilityArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: DegradedAvailabilityReplayEvidence,
+    state: DegradedAvailabilityStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_degraded_availability_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    object_id: &ObjectId,
+    crashed_node_id: &NodeId,
+    pre_crash_symbol_count: usize,
+    a_has_obj_before_crash: bool,
+    a_has_obj_after_crash: bool,
+    c_has_obj_after_crash: bool,
+    running_nodes_after_crash: usize,
+    availability_degraded: bool,
+    log_jsonl_valid: bool,
+) -> DegradedAvailabilityArtifactBundle {
+    DegradedAvailabilityArtifactBundle {
+        scenario_key: "degraded_availability".to_string(),
+        contract_id: DEGRADED_AVAILABILITY_CONTRACT_ID.to_string(),
+        replay: DegradedAvailabilityReplayEvidence {
+            seed: 0x5CAFE,
+            zone_id: zone.to_string(),
+            object_id: object_id.to_string(),
+            crashed_node_id: crashed_node_id.as_str().to_string(),
+        },
+        state: DegradedAvailabilityStateEvidence {
+            pre_crash_symbol_count: u64::try_from(pre_crash_symbol_count)
+                .expect("symbol count fits in u64"),
+            a_has_obj_before_crash,
+            a_has_obj_after_crash,
+            c_has_obj_after_crash,
+            running_nodes_after_crash: u8::try_from(running_nodes_after_crash)
+                .expect("running node count fits in u8"),
+            availability_degraded,
+        },
+        assertions: scenario_assertions(logs, DEGRADED_AVAILABILITY_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PartitionHealReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    isolated_node_id: String,
+    object_a_id: String,
+    object_b_id: String,
+    partition_duration_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PartitionHealNodeStateEvidence {
+    node_id: String,
+    has_obj_a: bool,
+    has_obj_b: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PartitionHealStateEvidence {
+    converged: bool,
+    pending_messages: u64,
+    nodes_with_obj_a: u8,
+    nodes_with_obj_b: u8,
+    isolated_node_received_both_objects: bool,
+    nodes: Vec<PartitionHealNodeStateEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PartitionHealArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: PartitionHealReplayEvidence,
+    state: PartitionHealStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_partition_heal_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    isolated_node_id: &NodeId,
+    node_ids: [&NodeId; 3],
+    object_a_id: &ObjectId,
+    object_b_id: &ObjectId,
+    partition_duration_secs: u64,
+    converged: bool,
+    pending_messages: usize,
+    gossip_presence: [[bool; 2]; 3],
+    log_jsonl_valid: bool,
+) -> PartitionHealArtifactBundle {
+    let nodes = [
+        (node_ids[0], gossip_presence[0]),
+        (node_ids[1], gossip_presence[1]),
+        (node_ids[2], gossip_presence[2]),
+    ]
+    .into_iter()
+    .map(|(node_id, presence)| PartitionHealNodeStateEvidence {
+        node_id: node_id.as_str().to_string(),
+        has_obj_a: presence[0],
+        has_obj_b: presence[1],
+    })
+    .collect::<Vec<_>>();
+    let nodes_with_obj_a = gossip_presence
+        .iter()
+        .filter(|presence| presence[0])
+        .count();
+    let nodes_with_obj_b = gossip_presence
+        .iter()
+        .filter(|presence| presence[1])
+        .count();
+
+    PartitionHealArtifactBundle {
+        scenario_key: "partition_heal".to_string(),
+        contract_id: PARTITION_HEAL_CONTRACT_ID.to_string(),
+        replay: PartitionHealReplayEvidence {
+            seed: 0xDEAD_BEEF,
+            zone_id: zone.to_string(),
+            isolated_node_id: isolated_node_id.as_str().to_string(),
+            object_a_id: object_a_id.to_string(),
+            object_b_id: object_b_id.to_string(),
+            partition_duration_secs,
+        },
+        state: PartitionHealStateEvidence {
+            converged,
+            pending_messages: u64::try_from(pending_messages)
+                .expect("pending message count fits in u64"),
+            nodes_with_obj_a: u8::try_from(nodes_with_obj_a).expect("node count fits in u8"),
+            nodes_with_obj_b: u8::try_from(nodes_with_obj_b).expect("node count fits in u8"),
+            isolated_node_received_both_objects: gossip_presence[2][0] && gossip_presence[2][1],
+            nodes,
+        },
+        assertions: scenario_assertions(logs, PARTITION_HEAL_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
 // ============================================================================
 // Network Partition Recovery Scenarios
 // ============================================================================
@@ -100,13 +355,16 @@ fn emit_scenario_log<E: Serialize>(
 async fn scenario_partition_heal_convergence() {
     let mut harness = TestHarness::new(3, 0xDEAD_BEEF);
     harness.start_all().expect("start all nodes");
+    let partition_duration_secs = 60;
 
+    let node_a_id = harness.nodes[0].node_id.clone();
+    let node_b_id = harness.nodes[1].node_id.clone();
     let node_c_id = harness.nodes[2].node_id.clone();
 
     // Phase 1: Partition node C
     emit_scenario_log(
         &harness.logs,
-        "partition-heal",
+        PARTITION_HEAL_SCENARIO,
         "partition",
         &["A", "B", "C"],
         "partition_injected",
@@ -140,12 +398,12 @@ async fn scenario_partition_heal_convergence() {
     harness.gossip_exchange_round();
 
     // Advance time to simulate partition duration
-    harness.advance_time(Duration::from_secs(60));
+    harness.advance_time(Duration::from_secs(partition_duration_secs));
 
     // Phase 2: Heal partition
     emit_scenario_log(
         &harness.logs,
-        "partition-heal",
+        PARTITION_HEAL_SCENARIO,
         "heal",
         &["A", "B", "C"],
         "partition_healed",
@@ -164,6 +422,7 @@ async fn scenario_partition_heal_convergence() {
     } else {
         "fail"
     };
+    let pending_messages = harness.network.pending_len();
 
     // Verify all nodes know about both objects via gossip state.
     let gossip_presence = [
@@ -207,14 +466,14 @@ async fn scenario_partition_heal_convergence() {
 
     emit_scenario_log(
         &harness.logs,
-        "partition-heal",
+        PARTITION_HEAL_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "convergence",
         result,
         json!({
             "converged": convergence_result.is_ok(),
-            "pending_messages": harness.network.pending_len(),
+            "pending_messages": pending_messages,
             "gossip_state": {
                 "node_a": { "has_obj_a": gossip_presence[0][0], "has_obj_b": gossip_presence[0][1] },
                 "node_b": { "has_obj_a": gossip_presence[1][0], "has_obj_b": gossip_presence[1][1] },
@@ -222,6 +481,99 @@ async fn scenario_partition_heal_convergence() {
             },
         }),
     );
+
+    let partition_heal_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == PARTITION_HEAL_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partition_heal_logs.len(),
+        3,
+        "expected 3 partition-heal log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "partition-heal logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_partition_heal_artifact_bundle(
+        &partition_heal_logs,
+        &zone,
+        &node_c_id,
+        [&node_a_id, &node_b_id, &node_c_id],
+        &obj_a,
+        &obj_b,
+        partition_duration_secs,
+        convergence_result.is_ok(),
+        pending_messages,
+        gossip_presence,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, PARTITION_HEAL_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["partition", "heal", "verify"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, partition_heal_logs.len());
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", "pass", result]
+    );
+    assert_eq!(
+        artifact_bundle.replay.isolated_node_id,
+        node_c_id.as_str().to_string()
+    );
+    assert_eq!(
+        artifact_bundle.replay.partition_duration_secs,
+        partition_duration_secs
+    );
+    assert_eq!(artifact_bundle.state.converged, convergence_result.is_ok());
+    assert_eq!(
+        artifact_bundle.state.pending_messages,
+        u64::try_from(pending_messages).expect("pending message count fits in u64")
+    );
+    assert_eq!(
+        artifact_bundle.state.nodes_with_obj_a,
+        u8::try_from(
+            gossip_presence
+                .iter()
+                .filter(|presence| presence[0])
+                .count()
+        )
+        .expect("node count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.nodes_with_obj_b,
+        u8::try_from(
+            gossip_presence
+                .iter()
+                .filter(|presence| presence[1])
+                .count()
+        )
+        .expect("node count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.isolated_node_received_both_objects,
+        gossip_presence[2][0] && gossip_presence[2][1]
+    );
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize partition-heal artifact bundle");
+    let roundtrip: PartitionHealArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize partition-heal artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     // Verify gossip convergence: A and B should agree on objects
     assert!(
@@ -242,12 +594,6 @@ async fn scenario_partition_heal_convergence() {
     );
 
     harness.stop_all().expect("stop all nodes");
-
-    // Validate structured logs
-    assert!(
-        harness.logs.validate_jsonl().is_ok(),
-        "logs should validate against schema"
-    );
 }
 
 /// Scenario: Split-Brain Prevention
@@ -568,13 +914,14 @@ async fn scenario_graceful_shutdown() {
 async fn scenario_crash_recovery() {
     let mut harness = TestHarness::new(3, 0xFEED_FACE);
     harness.start_all().expect("start all nodes");
+    let lease_timeout_secs = 120;
 
     let crash_node_idx = 0;
     let crash_node_id = harness.nodes[crash_node_idx].node_id.clone();
 
     emit_scenario_log(
         &harness.logs,
-        "crash-recovery",
+        CRASH_RECOVERY_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "crash_simulated",
@@ -590,14 +937,12 @@ async fn scenario_crash_recovery() {
     );
 
     // Advance time past lease timeout
-    harness.advance_time(Duration::from_secs(120));
+    harness.advance_time(Duration::from_secs(lease_timeout_secs));
 
     // Restart node
     harness.nodes[crash_node_idx].start().expect("restart node");
-    assert!(
-        harness.nodes[crash_node_idx].is_running(),
-        "restarted node should be running"
-    );
+    let restarted_node_running = harness.nodes[crash_node_idx].is_running();
+    assert!(restarted_node_running, "restarted node should be running");
 
     // After restart, the node should have fresh mesh state but same stores
     // Register peers and announce objects to verify the restarted node participates
@@ -627,7 +972,7 @@ async fn scenario_crash_recovery() {
 
     emit_scenario_log(
         &harness.logs,
-        "crash-recovery",
+        CRASH_RECOVERY_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "recovery_complete",
@@ -638,6 +983,68 @@ async fn scenario_crash_recovery() {
             "post_crash_gossip_works": node_b_has_obj,
         }),
     );
+
+    let crash_recovery_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == CRASH_RECOVERY_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        crash_recovery_logs.len(),
+        2,
+        "expected 2 crash-recovery log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "crash-recovery logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_crash_recovery_artifact_bundle(
+        &crash_recovery_logs,
+        &zone,
+        &obj_post_crash,
+        &crash_node_id,
+        lease_timeout_secs,
+        restarted_node_running,
+        node_b_has_obj,
+        harness.running_count(),
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, CRASH_RECOVERY_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, crash_recovery_logs.len());
+    assert!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .all(|assertion| assertion.result == "pass")
+    );
+    assert_eq!(
+        artifact_bundle.replay.crashed_node_id,
+        crash_node_id.as_str().to_string()
+    );
+    assert_eq!(
+        artifact_bundle.replay.lease_timeout_secs,
+        lease_timeout_secs
+    );
+    assert_eq!(artifact_bundle.state.running_nodes_after_restart, 3);
+    assert!(artifact_bundle.state.restarted_node_running);
+    assert!(artifact_bundle.state.post_crash_gossip_works);
+
+    let artifact_json = serde_json::to_value(&artifact_bundle).expect("serialize artifact bundle");
+    let roundtrip: CrashRecoveryArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     assert!(
         node_b_has_obj,
@@ -1422,6 +1829,7 @@ async fn scenario_hot_key_rotation() {
 async fn scenario_degraded_symbol_availability() {
     let mut harness = TestHarness::new(3, 0x5CAFE);
     harness.start_all().expect("start all nodes");
+    let crashed_node_id = harness.nodes[1].node_id.clone();
 
     // Register peers and announce symbols BEFORE crash
     harness.register_all_peers();
@@ -1471,7 +1879,7 @@ async fn scenario_degraded_symbol_availability() {
 
     emit_scenario_log(
         &harness.logs,
-        "degraded-availability",
+        DEGRADED_AVAILABILITY_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "availability_scenario",
@@ -1500,13 +1908,13 @@ async fn scenario_degraded_symbol_availability() {
 
     emit_scenario_log(
         &harness.logs,
-        "degraded-availability",
+        DEGRADED_AVAILABILITY_SCENARIO,
         "verify",
         &["A", "C"],
         "repair_activated",
         "pass",
         json!({
-            "crashed_node": "B",
+            "crashed_node": crashed_node_id.as_str(),
             "b_symbol_count_before_crash": b_sym_count,
             "a_has_obj_before_crash": a_has_obj_before,
             "a_has_obj_after_crash": a_has_obj_after,
@@ -1515,6 +1923,79 @@ async fn scenario_degraded_symbol_availability() {
             "availability_degraded": true,
         }),
     );
+
+    let degraded_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == DEGRADED_AVAILABILITY_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        degraded_logs.len(),
+        2,
+        "expected 2 degraded-availability log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "degraded-availability logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_degraded_availability_artifact_bundle(
+        &degraded_logs,
+        &zone,
+        &sym_obj,
+        &crashed_node_id,
+        b_sym_count,
+        a_has_obj_before,
+        a_has_obj_after,
+        c_has_obj,
+        running,
+        true,
+        log_jsonl_valid,
+    );
+    assert_eq!(
+        artifact_bundle.contract_id,
+        DEGRADED_AVAILABILITY_CONTRACT_ID
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, degraded_logs.len());
+    assert!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .all(|assertion| assertion.result == "pass")
+    );
+    assert_eq!(
+        artifact_bundle.replay.crashed_node_id,
+        crashed_node_id.as_str().to_string()
+    );
+    assert_eq!(
+        artifact_bundle.state.pre_crash_symbol_count,
+        u64::try_from(b_sym_count).expect("symbol count fits in u64")
+    );
+    assert_eq!(
+        artifact_bundle.state.a_has_obj_before_crash,
+        a_has_obj_before
+    );
+    assert_eq!(artifact_bundle.state.a_has_obj_after_crash, a_has_obj_after);
+    assert_eq!(artifact_bundle.state.c_has_obj_after_crash, c_has_obj);
+    assert_eq!(artifact_bundle.state.running_nodes_after_crash, 2);
+    assert!(artifact_bundle.state.availability_degraded);
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize degraded availability bundle");
+    let roundtrip: DegradedAvailabilityArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize degraded availability bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     assert_eq!(running, 2, "only 2 nodes should be running after crash");
     assert!(

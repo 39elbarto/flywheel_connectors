@@ -15,7 +15,7 @@ use std::fmt;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use fcp_kernel::{ConnectorId, OperationId};
+use fcp_kernel::{ConnectorId, IdempotencyClass, OperationId};
 use serde::{Deserialize, Serialize};
 
 use crate::ToolDescriptor;
@@ -1306,10 +1306,7 @@ impl ToolDescriptor {
     const fn mcp_read_only_hint(&self) -> bool {
         matches!(
             (self.safety_tier, self.idempotency),
-            (
-                fcp_core::SafetyTier::Safe,
-                fcp_core::IdempotencyClass::Strict
-            )
+            (fcp_core::SafetyTier::Safe, IdempotencyClass::Strict)
         )
     }
 
@@ -2758,7 +2755,7 @@ mod tests {
             capability: fcp_core::CapabilityId::from_static("messaging.send"),
             risk_level: fcp_core::RiskLevel::Medium,
             safety_tier: fcp_core::SafetyTier::Risky,
-            idempotency: fcp_core::IdempotencyClass::None,
+            idempotency: IdempotencyClass::None,
             approval_mode: None,
             requires_confirmation: false,
             idempotent: false,
@@ -2793,7 +2790,7 @@ mod tests {
             capability: fcp_core::CapabilityId::from_static("items.list"),
             risk_level: fcp_core::RiskLevel::Low,
             safety_tier: fcp_core::SafetyTier::Safe,
-            idempotency: fcp_core::IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::Strict,
             approval_mode: None,
             requires_confirmation: false,
             idempotent: true,
@@ -2819,7 +2816,7 @@ mod tests {
             capability: fcp_core::CapabilityId::from_static("messaging.send"),
             risk_level: fcp_core::RiskLevel::Low,
             safety_tier: fcp_core::SafetyTier::Safe,
-            idempotency: fcp_core::IdempotencyClass::None,
+            idempotency: IdempotencyClass::None,
             approval_mode: None,
             requires_confirmation: false,
             idempotent: false,
@@ -2844,7 +2841,7 @@ mod tests {
             capability: fcp_core::CapabilityId::from_static("admin.delete"),
             risk_level: fcp_core::RiskLevel::Critical,
             safety_tier: fcp_core::SafetyTier::Dangerous,
-            idempotency: fcp_core::IdempotencyClass::None,
+            idempotency: IdempotencyClass::None,
             approval_mode: None,
             requires_confirmation: true,
             idempotent: false,
@@ -2870,7 +2867,7 @@ mod tests {
             capability: fcp_core::CapabilityId::from_static("zone.nuke"),
             risk_level: fcp_core::RiskLevel::Critical,
             safety_tier: fcp_core::SafetyTier::Critical,
-            idempotency: fcp_core::IdempotencyClass::None,
+            idempotency: IdempotencyClass::None,
             approval_mode: None,
             requires_confirmation: true,
             idempotent: false,
@@ -2903,7 +2900,7 @@ mod tests {
             capability: fcp_core::CapabilityId::from_static("search.query"),
             risk_level: fcp_core::RiskLevel::Low,
             safety_tier: fcp_core::SafetyTier::Safe,
-            idempotency: fcp_core::IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::Strict,
             approval_mode: None,
             requires_confirmation: false,
             idempotent: true,

@@ -437,8 +437,9 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{
-        BudgetEnforcement, UsageBudgetLimit, UsageBudgetPolicy, UsageMetricKind, ZoneId,
+    use fcp_core::ZoneId;
+    use fcp_kernel::{
+        BudgetEnforcement, ConnectorId, UsageBudgetLimit, UsageBudgetPolicy, UsageMetricKind,
     };
 
     #[test]
@@ -502,7 +503,7 @@ mod tests {
         assert_eq!(eval.action, BudgetAction::Deny);
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
+            connector_id: ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -1016,7 +1017,7 @@ mod tests {
         assert_eq!(eval.action, BudgetAction::Allow);
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
+            connector_id: ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -1033,7 +1034,7 @@ mod tests {
         let engine = BudgetPolicyEngine::new();
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
+            connector_id: ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -1068,7 +1069,7 @@ mod tests {
             .await;
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
+            connector_id: ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -2596,7 +2597,7 @@ mod tests {
     async fn budget_policy_engine_preflight_zone_without_policy_allows() {
         let engine = BudgetPolicyEngine::new();
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
+            connector_id: ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -2760,7 +2761,7 @@ mod tests {
             .unwrap();
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
+            connector_id: ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,
@@ -2890,7 +2891,7 @@ mod tests {
             .unwrap();
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("budget", "test", "v1").expect("connector id"),
+            connector_id: ConnectorId::new("budget", "test", "v1").expect("connector id"),
             operation: "invoke".to_string(),
             params: None,
             principal: None,

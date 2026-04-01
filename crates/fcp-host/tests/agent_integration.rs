@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier,
-    SelfCheckReport,
-};
+use fcp_core::{CapabilityId, RiskLevel, SafetyTier};
 use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
     PreflightRequest, PreflightResponse,
+};
+use fcp_kernel::{
+    AgentHint, ApprovalMode, ConnectorHealth, ConnectorId, IdempotencyClass, Introspection,
+    OperationId, OperationInfo, RateLimitDeclarations, SelfCheckReport,
 };
 use fcp_testkit::{AsyncTestContext, LogCapture};
 use serde_json::json;

@@ -16,8 +16,8 @@ use fcp_core::{
     ApprovalToken, CapabilityConstraints, CapabilityToken, CredentialId, ObjectPlacementPolicy,
 };
 use fcp_kernel::{
-    ConnectorId, LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState,
-    LifecycleStatus, TransitionReason,
+    ConnectorHealth, ConnectorId, LifecycleError, LifecycleManager, LifecycleRecord,
+    LifecycleState, LifecycleStatus, TransitionReason,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -2263,9 +2263,9 @@ const fn observed_state_from_summary(summary: &ConnectorSummary) -> ObservedRunt
     }
 
     match &summary.health {
-        fcp_core::ConnectorHealth::Healthy => ObservedRuntimeState::Running,
-        fcp_core::ConnectorHealth::Degraded { .. } => ObservedRuntimeState::Degraded,
-        fcp_core::ConnectorHealth::Unavailable { .. } => ObservedRuntimeState::Stopped,
+        ConnectorHealth::Healthy => ObservedRuntimeState::Running,
+        ConnectorHealth::Degraded { .. } => ObservedRuntimeState::Degraded,
+        ConnectorHealth::Unavailable { .. } => ObservedRuntimeState::Stopped,
     }
 }
 
@@ -4905,8 +4905,9 @@ const fn is_false(value: &bool) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
-    use fcp_core::{CanaryPolicy, ConnectorHealth};
+    use fcp_core::SafetyTier;
     use fcp_crypto::cose::CoseToken;
+    use fcp_kernel::{CanaryPolicy, ConnectorHealth, HealthMetrics};
 
     fn connector_id() -> ConnectorId {
         ConnectorId::from_static("fcp.test.admin-state:utility:1.0.0")
@@ -4939,7 +4940,7 @@ mod tests {
             version: Version::new(1, 0, 0),
             categories: vec!["test".to_string()],
             tool_count: 1,
-            max_safety_tier: fcp_core::SafetyTier::Safe,
+            max_safety_tier: SafetyTier::Safe,
             enabled,
             health,
             last_health_check: Some(Utc::now()),
@@ -5418,7 +5419,7 @@ mod tests {
             deployed_at: now - Duration::minutes(15),
             state_changed_at: now - Duration::minutes(10),
             transitions: Vec::new(),
-            health: fcp_core::HealthMetrics::default(),
+            health: HealthMetrics::default(),
             canary_policy: CanaryPolicy::default(),
             previous_version: None,
         };
@@ -5444,7 +5445,7 @@ mod tests {
             deployed_at: now - Duration::minutes(30),
             state_changed_at: now - Duration::minutes(20),
             transitions: Vec::new(),
-            health: fcp_core::HealthMetrics::default(),
+            health: HealthMetrics::default(),
             canary_policy: CanaryPolicy {
                 max_canary_duration_secs: 60,
                 ..CanaryPolicy::default()
@@ -9797,7 +9798,7 @@ mod tests {
             deployed_at: now,
             state_changed_at: now - Duration::seconds(299), // just below 300s
             transitions: Vec::new(),
-            health: fcp_core::HealthMetrics::default(),
+            health: HealthMetrics::default(),
             canary_policy: CanaryPolicy::default(),
             previous_version: None,
         };
@@ -9814,7 +9815,7 @@ mod tests {
             deployed_at: now,
             state_changed_at: now - Duration::seconds(300), // exactly 300s
             transitions: Vec::new(),
-            health: fcp_core::HealthMetrics::default(),
+            health: HealthMetrics::default(),
             canary_policy: CanaryPolicy::default(),
             previous_version: None,
         };
@@ -9831,7 +9832,7 @@ mod tests {
             deployed_at: now,
             state_changed_at: now - Duration::seconds(600),
             transitions: Vec::new(),
-            health: fcp_core::HealthMetrics::default(),
+            health: HealthMetrics::default(),
             canary_policy: CanaryPolicy::default(),
             previous_version: None,
         };
@@ -9848,7 +9849,7 @@ mod tests {
             deployed_at: now,
             state_changed_at: now - Duration::seconds(600),
             transitions: Vec::new(),
-            health: fcp_core::HealthMetrics::default(),
+            health: HealthMetrics::default(),
             canary_policy: CanaryPolicy::default(),
             previous_version: None,
         };

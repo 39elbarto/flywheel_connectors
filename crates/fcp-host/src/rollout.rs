@@ -15,10 +15,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use fcp_core::{ConnectorHealth, RolloutPolicy};
+use fcp_core::RolloutPolicy;
 use fcp_kernel::{
-    CanaryPolicy, ConnectorId, CrashLoopDetector, LifecycleError, LifecycleManager,
-    LifecycleRecord, LifecycleState, SelfCheckReport, SelfCheckStatus, TransitionReason,
+    CanaryPolicy, ConnectorHealth, ConnectorId, CrashLoopDetector, LifecycleError,
+    LifecycleManager, LifecycleRecord, LifecycleState, SelfCheckReport, SelfCheckStatus,
+    TransitionReason,
 };
 pub use fcp_kernel::{
     RolloutAuditEvent, RolloutDecision, RolloutEvidence, RolloutObservation, RolloutOutcome,

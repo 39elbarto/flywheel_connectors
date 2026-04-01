@@ -7,9 +7,11 @@
 
 use chrono::{TimeZone, Utc};
 use fcp_core::{
-    AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorId,
-    SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
-    SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainSignature,
+    AttestationMaterial, AttestationMetadata, AttestationPredicateType, SBOM_SIGNED_FIELDS,
+    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
+};
+use fcp_evidence::{
+    ConnectorId, SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainSignature,
     SupplyChainVerificationPolicy, TrustRootBinding, VerificationDecision, VerificationReasonCode,
 };
 use fcp_host::{GateOutcome, SupplyChainGate, SupplyChainGateConfig};

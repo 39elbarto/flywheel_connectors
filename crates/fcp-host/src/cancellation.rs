@@ -252,7 +252,7 @@ impl Default for CancellationController {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use fcp_core::OperationId;
+    use fcp_kernel::OperationId;
 
     fn fixed_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 3, 7, 12, 0, 0).unwrap()
@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(ctrl.audit_events().len(), 6);
     }
 
-    // Note: OperationId from fcp_core is not used directly in the controller
+    // Note: OperationId from fcp_kernel is not used directly in the controller
     // to keep the API string-based and flexible. Callers convert as needed.
     #[test]
     fn operation_id_interop() {

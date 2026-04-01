@@ -526,8 +526,10 @@ fn recommended_actions_from_checks(checks: &[CheckResult]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    use fcp_core::{ConnectorHealth, RateLimitDeclarations};
-    use fcp_kernel::{ConnectorId, Introspection, SelfCheckReport, SelfCheckStatus};
+    use fcp_kernel::{
+        ConnectorHealth, ConnectorId, Introspection, RateLimitDeclarations, SelfCheckReport,
+        SelfCheckStatus,
+    };
 
     use crate::{ConnectorArchetype, ConnectorRegistry, ConnectorSummary};
 

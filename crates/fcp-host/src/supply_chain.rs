@@ -1,10 +1,10 @@
 //! Host-side supply chain verification gate.
 //!
-//! Wraps the core [`fcp_core::VerificationPipeline`] with host-specific
+//! Wraps the evidence-owned [`VerificationPipeline`] with host-specific
 //! behaviour:
 //!
 //! - Policy configuration from zone or host config.
-//! - Digest-keyed result cache for offline/repeated installs.
+//! - Verification-input-keyed result cache for offline/repeated installs.
 //! - Deterministic evidence bundles with stable hashing.
 //! - Structured audit events for every verification decision.
 
@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use blake3::hash;
 use chrono::{DateTime, Utc};
-use fcp_core::{
+use fcp_evidence::{
     ConnectorId, HashAlgorithm, SoftwareBillOfMaterials, SupplyChainAttestation,
     SupplyChainVerificationPolicy, VerificationDecision, VerificationEvidence,
     VerificationPipeline, VerificationReasonCode,
@@ -105,8 +105,8 @@ struct CacheEntry {
 /// Host-side gate that enforces supply chain verification before
 /// connector installation or upgrade.
 ///
-/// The gate wraps the core [`VerificationPipeline`] with:
-/// - A digest-keyed result cache for repeated/offline installs.
+/// The gate wraps the evidence-owned [`VerificationPipeline`] with:
+/// - A verification-input-keyed result cache for repeated/offline installs.
 /// - Structured audit events for every decision.
 /// - Policy override support for dev zones (when enabled).
 pub struct SupplyChainGate {
@@ -156,8 +156,9 @@ impl SupplyChainGate {
     /// Verify a connector artifact before installation.
     ///
     /// Returns a [`GateOutcome`] with the decision, evidence, and audit event.
-    /// Results are cached by artifact digest so repeated checks for the same
-    /// binary are free.
+    /// Results are cached by artifact digest plus the verification inputs so
+    /// repeated checks for the same artifact under the same evidence and policy
+    /// are free.
     ///
     /// # Errors
     ///
@@ -195,8 +196,15 @@ impl SupplyChainGate {
         sbom: Option<&SoftwareBillOfMaterials>,
         now: DateTime<Utc>,
     ) -> HostResult<GateOutcome> {
+        // Resolve effective policy (allow dev overrides when configured).
+        let effective_policy = self.effective_policy(attestation, sbom);
+        let cache_key =
+            verification_cache_key(artifact_digest, &effective_policy, attestation, sbom).map_err(
+                |e| crate::HostError::Internal(format!("cache key construction failed: {e}")),
+            )?;
+
         // Check cache first.
-        if let Some(cached) = self.lookup_cache(artifact_digest) {
+        if let Some(cached) = self.lookup_cache(&cache_key) {
             let audit_event = build_audit_event(
                 connector_id,
                 version,
@@ -216,9 +224,6 @@ impl SupplyChainGate {
             });
         }
 
-        // Resolve effective policy (allow dev overrides when configured).
-        let effective_policy = self.effective_policy(attestation, sbom);
-
         // Run pipeline.
         let pipeline = VerificationPipeline::new(effective_policy);
         let evidence = pipeline.verify(artifact_digest, attestation, sbom);
@@ -229,7 +234,7 @@ impl SupplyChainGate {
 
         // Cache the result.
         self.store_cache(
-            artifact_digest,
+            &cache_key,
             CacheEntry {
                 evidence: evidence.clone(),
                 evidence_digest: evidence_digest.clone(),
@@ -257,22 +262,22 @@ impl SupplyChainGate {
         })
     }
 
-    /// Look up a previous result by artifact digest.
-    fn lookup_cache(&self, artifact_digest: &str) -> Option<CacheEntry> {
+    /// Look up a previous result by verification cache key.
+    fn lookup_cache(&self, cache_key: &str) -> Option<CacheEntry> {
         self.cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(artifact_digest)
+            .get(cache_key)
             .cloned()
     }
 
     /// Store a result in cache, evicting the oldest entry if at capacity.
-    fn store_cache(&self, artifact_digest: &str, entry: CacheEntry) {
+    fn store_cache(&self, cache_key: &str, entry: CacheEntry) {
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if cache.len() >= self.config.cache_capacity && !cache.contains_key(artifact_digest) {
+        if cache.len() >= self.config.cache_capacity && !cache.contains_key(cache_key) {
             // Simple eviction: remove oldest entry by verification time.
             if let Some(oldest_key) = cache
                 .iter()
@@ -282,7 +287,7 @@ impl SupplyChainGate {
                 cache.remove(&oldest_key);
             }
         }
-        cache.insert(artifact_digest.to_string(), entry);
+        cache.insert(cache_key.to_string(), entry);
     }
 
     /// Compute the effective policy, applying dev overrides when allowed.
@@ -337,6 +342,30 @@ fn build_audit_event(
     }
 }
 
+#[derive(Serialize)]
+struct VerificationCacheKey<'a> {
+    artifact_digest: &'a str,
+    policy: &'a SupplyChainVerificationPolicy,
+    attestation: Option<&'a SupplyChainAttestation>,
+    sbom: Option<&'a SoftwareBillOfMaterials>,
+}
+
+fn verification_cache_key(
+    artifact_digest: &str,
+    policy: &SupplyChainVerificationPolicy,
+    attestation: Option<&SupplyChainAttestation>,
+    sbom: Option<&SoftwareBillOfMaterials>,
+) -> Result<String, serde_json::Error> {
+    let payload = VerificationCacheKey {
+        artifact_digest,
+        policy,
+        attestation,
+        sbom,
+    };
+    let bytes = serde_json::to_vec(&payload)?;
+    Ok(format!("blake3-256:{}", hash(&bytes).to_hex()))
+}
+
 /// Compute a stable digest of a [`GateOutcome`] for cross-referencing.
 #[must_use]
 pub fn outcome_digest(outcome: &GateOutcome) -> String {
@@ -351,10 +380,12 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use fcp_core::{
-        AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorId,
-        SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
-        SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainSignature,
-        TrustRootBinding, VerificationDecision, VerificationReasonCode,
+        AttestationMaterial, AttestationMetadata, AttestationPredicateType, SBOM_SIGNED_FIELDS,
+        SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
+    };
+    use fcp_evidence::{
+        ConnectorId, SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation,
+        SupplyChainSignature, TrustRootBinding, VerificationDecision, VerificationReasonCode,
     };
 
     // ── Test Helpers ─────────────────────────────────────────────
@@ -937,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn same_digest_overwrites_cache() {
+    fn reverifying_same_input_does_not_grow_cache() {
         let gate = SupplyChainGate::new();
         let cid = test_connector_id();
         let digest = valid_digest();
@@ -948,8 +979,7 @@ mod tests {
             .unwrap();
         assert_eq!(gate.cache_size(), 1);
 
-        // Re-verify same digest doesn't grow cache.
-        gate.clear_cache();
+        // Re-verify the same verification inputs; the second call should hit cache.
         gate.verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
             .unwrap();
         gate.verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
@@ -3096,7 +3126,7 @@ mod tests {
 
         for step in &outcome.evidence.steps {
             let json = serde_json::to_string(step).unwrap();
-            let rt: fcp_core::VerificationStep = serde_json::from_str(&json).unwrap();
+            let rt: fcp_evidence::VerificationStep = serde_json::from_str(&json).unwrap();
             assert_eq!(rt, *step);
         }
     }
@@ -3104,7 +3134,7 @@ mod tests {
     // ── Eviction Does Not Evict Current Digest ──────────────────
 
     #[test]
-    fn reinserting_same_digest_does_not_trigger_eviction() {
+    fn reinserting_same_verification_input_does_not_trigger_eviction() {
         let config = SupplyChainGateConfig {
             policy: permissive_policy(),
             cache_capacity: 2,
@@ -3755,7 +3785,7 @@ mod tests {
             .unwrap();
         assert!(!first.cached);
 
-        // Same digest, different connector: cache is keyed by digest so this is a hit.
+        // Same verification inputs, different connector: cache reuse is still valid.
         let second = gate
             .verify_at(&cid_b, "1.0.0", &digest, None, None, test_time())
             .unwrap();
@@ -4204,7 +4234,7 @@ mod tests {
     // ── Cache Key Boundary: Same Digest New Artifacts ──────────
 
     #[test]
-    fn cache_hit_ignores_new_artifacts_on_same_digest() {
+    fn same_digest_with_new_artifacts_recomputes_and_allows() {
         let gate = SupplyChainGate::new();
         let cid = test_connector_id();
         let digest = valid_digest();
@@ -4215,14 +4245,36 @@ mod tests {
             .unwrap();
         assert!(!first.allowed);
 
-        // Second verify with valid artifacts, but same digest -> cache hit, still denied.
+        // Second verify with valid artifacts should recompute under a different cache key.
         let att = valid_attestation(&digest);
         let sbom = valid_sbom();
         let second = gate
             .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
             .unwrap();
-        assert!(second.cached);
+        assert!(!second.cached);
+        assert!(second.allowed);
+        assert_eq!(gate.cache_size(), 2);
+    }
+
+    #[test]
+    fn same_digest_without_artifacts_after_verified_artifacts_recomputes_and_denies() {
+        let gate = SupplyChainGate::new();
+        let cid = test_connector_id();
+        let digest = valid_digest();
+        let att = valid_attestation(&digest);
+        let sbom = valid_sbom();
+
+        let first = gate
+            .verify_at(&cid, "1.0.0", &digest, Some(&att), Some(&sbom), test_time())
+            .unwrap();
+        assert!(first.allowed);
+
+        let second = gate
+            .verify_at(&cid, "1.0.0", &digest, None, None, test_time())
+            .unwrap();
+        assert!(!second.cached);
         assert!(!second.allowed);
+        assert_eq!(gate.cache_size(), 2);
     }
 
     // ── Verify At Epoch Time ───────────────────────────────────

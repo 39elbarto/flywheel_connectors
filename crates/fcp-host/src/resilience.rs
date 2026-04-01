@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
 use fcp_async_core::time;
-use fcp_core::ConnectorHealth;
-use fcp_kernel::ConnectorId;
+use fcp_kernel::{ConnectorHealth, ConnectorId};
 
 const MAX_PER_MILLE: u32 = 1_000;
 

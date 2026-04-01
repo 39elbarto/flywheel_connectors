@@ -31,10 +31,9 @@ use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ApprovalMode, ApprovalToken, CapabilityVerifier, ConnectorHealth, CostEstimateConfidence,
-    Decision, DecisionReceiptPolicy, LifecycleStatus, ObjectHeader, PolicySimulationInput,
-    Provenance, ResourceAvailability, RolloutPolicy, SafetyTier, SoftwareBillOfMaterials,
-    SupplyChainAttestation, TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
+    ApprovalToken, CapabilityVerifier, CostEstimateConfidence, Decision, DecisionReceiptPolicy,
+    ObjectHeader, PolicySimulationInput, Provenance, ResourceAvailability, RolloutPolicy,
+    SafetyTier, TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
     simulate_policy_decision,
 };
 use fcp_crypto::{
@@ -42,6 +41,7 @@ use fcp_crypto::{
     cose::fcp2_claims,
     ed25519::{Ed25519Signature, Ed25519VerifyingKey, PUBLIC_KEY_SIZE},
 };
+use fcp_evidence::{SoftwareBillOfMaterials, SupplyChainAttestation};
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetAction, BudgetPolicyEngine, BudgetReportRequest,
@@ -71,9 +71,10 @@ use fcp_host::{
 };
 use fcp_host::{HostError, HostResult};
 use fcp_kernel::{
-    ConnectorId, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
-    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError, LifecycleManager,
-    LifecycleState, RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
+    ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
+    HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, RateLimitDeclarations,
+    RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
 use futures_util::future::join_all;
 use hyper::body::Incoming;
@@ -582,7 +583,7 @@ impl ConnectorRegistry for SubprocessRegistry {
         Some(configured_subprocess_archetype(&entry.config))
     }
 
-    async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_core::RateLimitDeclarations> {
+    async fn get_rate_limits(&self, id: &ConnectorId) -> Option<RateLimitDeclarations> {
         let state = self.state.read().await;
         let entry = state.connectors.get(id)?;
         configured_subprocess_rate_limits(&entry.config)
@@ -631,9 +632,7 @@ fn configured_subprocess_archetype(config: &ConnectorConfig) -> ConnectorArchety
     }
 }
 
-fn configured_subprocess_rate_limits(
-    _config: &ConnectorConfig,
-) -> Option<fcp_core::RateLimitDeclarations> {
+fn configured_subprocess_rate_limits(_config: &ConnectorConfig) -> Option<RateLimitDeclarations> {
     None
 }
 

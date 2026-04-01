@@ -2156,18 +2156,6 @@ pub mod http {
     }
 }
 
-/// `RaptorQ` codec re-exports from asupersync.
-pub mod raptorq {
-    /// Decoder types for `RaptorQ` symbol reconstruction.
-    pub mod decoder {
-        pub use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
-    }
-    /// Systematic encoder for `RaptorQ` symbol generation.
-    pub mod systematic {
-        pub use asupersync::raptorq::systematic::SystematicEncoder;
-    }
-}
-
 /// Byte buffer re-exports from asupersync.
 pub mod bytes {
     pub use asupersync::bytes::{Buf, BufMut, Bytes, BytesMut};

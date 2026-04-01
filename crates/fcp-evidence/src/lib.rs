@@ -11,7 +11,9 @@
 //! - **Audit chain**: `AuditEvent`, `AuditChainHead`, `AuditChainEntry`
 //! - **Checkpoints**: `ZoneCheckpoint`, `ComputationCheckpoint`, `CheckpointTrigger`
 //! - **Revocation**: `RevocationObject`, `RevocationScope`, `RevocationFreshness`
-//! - **Supply chain**: `SupplyChainAttestation`, `ProvenanceChain`
+//! - **Supply chain**: `SupplyChainAttestation`, `SoftwareBillOfMaterials`,
+//!   `VerificationPipeline`, `VerificationEvidence`, `VerificationStep`,
+//!   `VerificationDecision`, `VerificationReasonCode`
 //!
 //! ## Migration Note
 //!
@@ -44,11 +46,13 @@ pub use fcp_core::{
     ForkEvidence, FreshnessResult, MigrationCapabilityContext, ZoneCheckpoint,
 };
 
-// ── Supply Chain Attestation ───────────────────────────────────────
+// ── Supply Chain Attestation & Verification ────────────────────────
 
 pub use fcp_core::{
-    AttestationMaterial, AttestationMetadata, SupplyChainAttestation,
-    SupplyChainSignature, SupplyChainVerificationPolicy,
+    AttestationMaterial, AttestationMetadata, HashAlgorithm, SbomFormat, SoftwareBillOfMaterials,
+    SupplyChainAttestation, SupplyChainSignature, SupplyChainVerificationPolicy, TrustRootBinding,
+    VerificationDecision, VerificationEvidence, VerificationPipeline, VerificationReasonCode,
+    VerificationStep,
 };
 
 // ── Shared Identity Types ──────────────────────────────────────────
@@ -88,5 +92,18 @@ mod tests {
     #[test]
     fn evidence_exports_supply_chain_types() {
         fn _sc_exists(_a: SupplyChainAttestation) {}
+    }
+
+    #[test]
+    fn evidence_exports_supply_chain_verification_types() {
+        fn _verify_exists(
+            _decision: VerificationDecision,
+            _reason: VerificationReasonCode,
+            _evidence: VerificationEvidence,
+            _step: VerificationStep,
+            _pipeline: VerificationPipeline,
+            _sbom: SoftwareBillOfMaterials,
+        ) {
+        }
     }
 }

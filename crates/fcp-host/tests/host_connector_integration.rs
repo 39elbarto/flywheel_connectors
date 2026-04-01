@@ -21,17 +21,17 @@ use fcp_async_core::process::{
 use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::JoinHandle as AsyncJoinHandle;
 use fcp_core::{
-    ApprovalMode, AttestationMaterial, AttestationMetadata, AttestationPredicateType,
-    CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
-    IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleManager,
-    LifecycleRecord, LifecycleState, LifecycleStatus, OperationId, RequestId, RollbackRules,
-    RolloutPolicy, SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent,
-    SbomDependency, SbomFormat, SelfCheckReport, SoftwareBillOfMaterials, SuccessThresholds,
-    SupplyChainAttestation, SupplyChainSignature, TransitionReason, TrustRootBinding,
-    VerificationReasonCode, ZoneId,
+    AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityToken,
+    CorrelationId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
+    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SuccessThresholds,
+    TransitionReason, ZoneId,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_evidence::{
+    SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainSignature,
+    TrustRootBinding, VerificationReasonCode,
+};
 use fcp_host::{
     BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
     CancellationResponse, CleanupBehavior, ConfigDiffKind, ConfigRevisionRecord,
@@ -46,6 +46,11 @@ use fcp_host::{
     PolicyEngine, PreflightRequest, PreflightResponse, ReceiptQueryRequest, ReceiptQueryResponse,
     RecoveryAction, RolloutDecision, RolloutOutcome, SimulatePhase, SimulateReceiptQueryRequest,
     SimulateReceiptQueryResponse,
+};
+use fcp_kernel::{
+    ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HealthSnapshot, IdempotencyClass,
+    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleManager, LifecycleRecord,
+    LifecycleState, LifecycleStatus, OperationId, RequestId, SelfCheckReport, SelfCheckStatus,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -203,7 +208,10 @@ fn validate_jsonrpc_response(
         )
     })?;
 
-    match response_object.get("jsonrpc").and_then(serde_json::Value::as_str) {
+    match response_object
+        .get("jsonrpc")
+        .and_then(serde_json::Value::as_str)
+    {
         Some("2.0") => {}
         Some(version) => {
             return Err(std::io::Error::new(
@@ -511,7 +519,7 @@ impl ConnectorRegistry for SubprocessRegistry {
         Some(ConnectorArchetype::Unknown)
     }
 
-    async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_core::RateLimitDeclarations> {
+    async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_kernel::RateLimitDeclarations> {
         self.connectors.get(id)?;
         None
     }
@@ -745,7 +753,7 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
     }));
 
     let self_check = endpoint.self_check(&connector_a_id).await?;
-    assert_eq!(self_check.report.status, fcp_core::SelfCheckStatus::Ok);
+    assert_eq!(self_check.report.status, SelfCheckStatus::Ok);
     logs.push(json!({
         "step": "self_check",
         "correlation_id": CorrelationId::new().to_string(),

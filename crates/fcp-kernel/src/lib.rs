@@ -88,7 +88,9 @@ pub use fcp_core::{
 
 // ── Health / Self-Check ──────────────────────────────────────────
 
-pub use fcp_core::{HealthSnapshot, HealthState, SelfCheckReport, SelfCheckStatus};
+pub use fcp_core::{
+    ConnectorHealth, HealthSnapshot, HealthState, SelfCheckReport, SelfCheckStatus,
+};
 
 // ── Identity Types (re-exported for convenience) ─────────────────
 
@@ -187,6 +189,7 @@ mod tests {
 
     #[test]
     fn kernel_exports_health_types() {
+        let _: ConnectorHealth = ConnectorHealth::Healthy;
         let _: HealthState = HealthState::Ready;
         let _: SelfCheckStatus = SelfCheckStatus::Ok;
     }

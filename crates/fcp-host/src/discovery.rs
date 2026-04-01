@@ -14,12 +14,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::RwLock;
-use fcp_core::{
-    ApprovalToken, CapabilityId, CapabilityToken, ConnectorHealth, RiskLevel, SafetyTier, ZoneId,
-};
+use fcp_core::{ApprovalToken, CapabilityId, CapabilityToken, RiskLevel, SafetyTier, ZoneId};
 use fcp_kernel::{
-    AgentHint, ApprovalMode, ConnectorId, IdempotencyClass, Introspection, OperationInfo,
-    RateLimitDeclarations, RequestId, SelfCheckReport, UsageBudgetSnapshot,
+    AgentHint, ApprovalMode, ConnectorHealth, ConnectorId, IdempotencyClass, Introspection,
+    OperationInfo, RateLimitDeclarations, RequestId, SelfCheckReport, UsageBudgetSnapshot,
 };
 use serde::{Deserialize, Serialize};
 

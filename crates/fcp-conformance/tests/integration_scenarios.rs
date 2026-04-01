@@ -52,6 +52,14 @@ const DEGRADED_AVAILABILITY_SCENARIO: &str = "degraded-availability";
 const DEGRADED_AVAILABILITY_CONTRACT_ID: &str = "contract.degraded_symbol_availability";
 const PARTITION_HEAL_SCENARIO: &str = "partition-heal";
 const PARTITION_HEAL_CONTRACT_ID: &str = "contract.partition_heal_convergence";
+const STALE_REJOIN_SCENARIO: &str = "stale-rejoin";
+const STALE_REJOIN_CONTRACT_ID: &str = "contract.stale_node_rejoin_sync";
+const GRACEFUL_SHUTDOWN_SCENARIO: &str = "graceful-shutdown";
+const GRACEFUL_SHUTDOWN_CONTRACT_ID: &str = "contract.graceful_shutdown_gossip_preservation";
+const MULTI_NODE_FAILURE_SCENARIO: &str = "multi-node-failure";
+const MULTI_NODE_FAILURE_CONTRACT_ID: &str = "contract.multi_node_failure_within_tolerance";
+const QUORUM_LOSS_SCENARIO: &str = "quorum-loss";
+const QUORUM_LOSS_CONTRACT_ID: &str = "contract.quorum_loss_fail_closed";
 
 /// Create a deterministic test object ID from a name.
 fn test_object_id(name: &str) -> ObjectId {
@@ -337,6 +345,261 @@ fn build_partition_heal_artifact_bundle(
             nodes,
         },
         assertions: scenario_assertions(logs, PARTITION_HEAL_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StaleRejoinReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    stale_node_id: String,
+    object_id: String,
+    offline_duration_hours: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StaleRejoinStateEvidence {
+    had_object_before_heal: bool,
+    has_object_after_sync: bool,
+    running_nodes_after_sync: u8,
+    catch_up_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StaleRejoinArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: StaleRejoinReplayEvidence,
+    state: StaleRejoinStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_stale_rejoin_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    stale_node_id: &NodeId,
+    object_id: &ObjectId,
+    offline_duration_hours: u16,
+    had_object_before_heal: bool,
+    has_object_after_sync: bool,
+    running_nodes_after_sync: usize,
+    catch_up_required: bool,
+    log_jsonl_valid: bool,
+) -> StaleRejoinArtifactBundle {
+    StaleRejoinArtifactBundle {
+        scenario_key: "stale_rejoin".to_string(),
+        contract_id: STALE_REJOIN_CONTRACT_ID.to_string(),
+        replay: StaleRejoinReplayEvidence {
+            seed: 0x1234_5678,
+            zone_id: zone.to_string(),
+            stale_node_id: stale_node_id.as_str().to_string(),
+            object_id: object_id.to_string(),
+            offline_duration_hours,
+        },
+        state: StaleRejoinStateEvidence {
+            had_object_before_heal,
+            has_object_after_sync,
+            running_nodes_after_sync: u8::try_from(running_nodes_after_sync)
+                .expect("running node count fits in u8"),
+            catch_up_required,
+        },
+        assertions: scenario_assertions(logs, STALE_REJOIN_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GracefulShutdownReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    object_id: String,
+    shutdown_node_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GracefulShutdownStateEvidence {
+    node_stopped: bool,
+    gossip_preserved: bool,
+    remaining_running_nodes: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GracefulShutdownArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: GracefulShutdownReplayEvidence,
+    state: GracefulShutdownStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_graceful_shutdown_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    object_id: &ObjectId,
+    shutdown_node_id: &NodeId,
+    node_stopped: bool,
+    gossip_preserved: bool,
+    remaining_running_nodes: usize,
+    log_jsonl_valid: bool,
+) -> GracefulShutdownArtifactBundle {
+    GracefulShutdownArtifactBundle {
+        scenario_key: "graceful_shutdown".to_string(),
+        contract_id: GRACEFUL_SHUTDOWN_CONTRACT_ID.to_string(),
+        replay: GracefulShutdownReplayEvidence {
+            seed: 0xABCD_EF01,
+            zone_id: zone.to_string(),
+            object_id: object_id.to_string(),
+            shutdown_node_id: shutdown_node_id.as_str().to_string(),
+        },
+        state: GracefulShutdownStateEvidence {
+            node_stopped,
+            gossip_preserved,
+            remaining_running_nodes: u8::try_from(remaining_running_nodes)
+                .expect("running node count fits in u8"),
+        },
+        assertions: scenario_assertions(logs, GRACEFUL_SHUTDOWN_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MultiNodeFailureReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    object_id: String,
+    crashed_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MultiNodeFailureStateEvidence {
+    running_nodes: u8,
+    quorum_tolerance_f: u8,
+    node3_has_obj: bool,
+    node4_has_obj: bool,
+    operations_continue: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MultiNodeFailureArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: MultiNodeFailureReplayEvidence,
+    state: MultiNodeFailureStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_multi_node_failure_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    object_id: &ObjectId,
+    crashed_node_ids: &[NodeId],
+    running_nodes: usize,
+    quorum_tolerance_f: usize,
+    node3_has_obj: bool,
+    node4_has_obj: bool,
+    operations_continue: bool,
+    log_jsonl_valid: bool,
+) -> MultiNodeFailureArtifactBundle {
+    MultiNodeFailureArtifactBundle {
+        scenario_key: "multi_node_failure".to_string(),
+        contract_id: MULTI_NODE_FAILURE_CONTRACT_ID.to_string(),
+        replay: MultiNodeFailureReplayEvidence {
+            seed: 0x5AFE_5AFE,
+            zone_id: zone.to_string(),
+            object_id: object_id.to_string(),
+            crashed_node_ids: crashed_node_ids
+                .iter()
+                .map(|node_id| node_id.as_str().to_string())
+                .collect(),
+        },
+        state: MultiNodeFailureStateEvidence {
+            running_nodes: u8::try_from(running_nodes).expect("running node count fits in u8"),
+            quorum_tolerance_f: u8::try_from(quorum_tolerance_f)
+                .expect("quorum tolerance fits in u8"),
+            node3_has_obj,
+            node4_has_obj,
+            operations_continue,
+        },
+        assertions: scenario_assertions(logs, MULTI_NODE_FAILURE_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct QuorumLossReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    object_id: String,
+    crashed_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct QuorumLossStateEvidence {
+    running_nodes: u8,
+    quorum_threshold: u8,
+    survivor_peer_count: u8,
+    quorum_available: bool,
+    gossip_still_works: bool,
+    operations_halted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct QuorumLossArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: QuorumLossReplayEvidence,
+    state: QuorumLossStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_quorum_loss_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    object_id: &ObjectId,
+    crashed_node_ids: &[NodeId],
+    running_nodes: usize,
+    quorum_threshold: usize,
+    survivor_peer_count: usize,
+    quorum_available: bool,
+    gossip_still_works: bool,
+    operations_halted: bool,
+    log_jsonl_valid: bool,
+) -> QuorumLossArtifactBundle {
+    QuorumLossArtifactBundle {
+        scenario_key: "quorum_loss".to_string(),
+        contract_id: QUORUM_LOSS_CONTRACT_ID.to_string(),
+        replay: QuorumLossReplayEvidence {
+            seed: 0xDEAD_C0DE,
+            zone_id: zone.to_string(),
+            object_id: object_id.to_string(),
+            crashed_node_ids: crashed_node_ids
+                .iter()
+                .map(|node_id| node_id.as_str().to_string())
+                .collect(),
+        },
+        state: QuorumLossStateEvidence {
+            running_nodes: u8::try_from(running_nodes).expect("running node count fits in u8"),
+            quorum_threshold: u8::try_from(quorum_threshold).expect("quorum threshold fits in u8"),
+            survivor_peer_count: u8::try_from(survivor_peer_count)
+                .expect("survivor peer count fits in u8"),
+            quorum_available,
+            gossip_still_works,
+            operations_halted,
+        },
+        assertions: scenario_assertions(logs, QUORUM_LOSS_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
     }
@@ -735,6 +998,7 @@ async fn scenario_split_brain_prevention() {
 async fn scenario_stale_node_rejoins() {
     let mut harness = TestHarness::new(3, 0x1234_5678);
     harness.start_all().expect("start all nodes");
+    let offline_duration_hours = 24;
 
     let stale_node = harness.nodes[2].node_id.clone();
 
@@ -742,16 +1006,21 @@ async fn scenario_stale_node_rejoins() {
     harness.partition(std::slice::from_ref(&stale_node));
 
     // Advance time beyond revocation freshness window (e.g., 24 hours)
-    harness.advance_time(Duration::from_secs(24 * 60 * 60));
+    harness.advance_time(Duration::from_secs(
+        u64::from(offline_duration_hours) * 60 * 60,
+    ));
 
     emit_scenario_log(
         &harness.logs,
-        "stale-rejoin",
+        STALE_REJOIN_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "stale_duration_exceeded",
         "pass",
-        json!({ "stale_node": stale_node.as_str(), "offline_duration_hours": 24 }),
+        json!({
+            "stale_node": stale_node.as_str(),
+            "offline_duration_hours": offline_duration_hours
+        }),
     );
 
     // While stale node is offline, announce objects on the connected nodes
@@ -794,7 +1063,7 @@ async fn scenario_stale_node_rejoins() {
 
     emit_scenario_log(
         &harness.logs,
-        "stale-rejoin",
+        STALE_REJOIN_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "checkpoint_sync",
@@ -805,6 +1074,79 @@ async fn scenario_stale_node_rejoins() {
             "has_object_after_sync": stale_has_obj_after,
         }),
     );
+
+    let stale_rejoin_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == STALE_REJOIN_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stale_rejoin_logs.len(),
+        2,
+        "expected 2 stale-rejoin log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "stale-rejoin logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_stale_rejoin_artifact_bundle(
+        &stale_rejoin_logs,
+        &zone,
+        &stale_node,
+        &obj_while_stale,
+        offline_duration_hours,
+        stale_has_obj_before,
+        stale_has_obj_after,
+        harness.running_count(),
+        true,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, STALE_REJOIN_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, stale_rejoin_logs.len());
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", sync_result]
+    );
+    assert_eq!(
+        artifact_bundle.replay.stale_node_id,
+        stale_node.as_str().to_string()
+    );
+    assert_eq!(
+        artifact_bundle.replay.offline_duration_hours,
+        offline_duration_hours
+    );
+    assert_eq!(
+        artifact_bundle.state.had_object_before_heal,
+        stale_has_obj_before
+    );
+    assert_eq!(
+        artifact_bundle.state.has_object_after_sync,
+        stale_has_obj_after
+    );
+    assert_eq!(artifact_bundle.state.running_nodes_after_sync, 3);
+    assert!(artifact_bundle.state.catch_up_required);
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize stale-rejoin artifact bundle");
+    let roundtrip: StaleRejoinArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize stale-rejoin artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     harness.stop_all().expect("stop all nodes");
 }
@@ -841,7 +1183,7 @@ async fn scenario_graceful_shutdown() {
 
     emit_scenario_log(
         &harness.logs,
-        "graceful-shutdown",
+        GRACEFUL_SHUTDOWN_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "shutdown_initiated",
@@ -853,16 +1195,14 @@ async fn scenario_graceful_shutdown() {
     harness.nodes[shutdown_node_idx]
         .stop()
         .expect("graceful stop");
+    let node_stopped = !harness.nodes[shutdown_node_idx].is_running();
 
     // Verify node stopped
-    assert!(
-        !harness.nodes[shutdown_node_idx].is_running(),
-        "node should be stopped"
-    );
+    assert!(node_stopped, "node should be stopped");
 
     emit_scenario_log(
         &harness.logs,
-        "graceful-shutdown",
+        GRACEFUL_SHUTDOWN_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "node_stopped",
@@ -886,7 +1226,7 @@ async fn scenario_graceful_shutdown() {
 
     emit_scenario_log(
         &harness.logs,
-        "graceful-shutdown",
+        GRACEFUL_SHUTDOWN_SCENARIO,
         "verify",
         &["A", "C"],
         "gossip_preserved",
@@ -896,6 +1236,69 @@ async fn scenario_graceful_shutdown() {
             "gossip_preserved": node_a_has_obj,
         }),
     );
+
+    let graceful_shutdown_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == GRACEFUL_SHUTDOWN_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        graceful_shutdown_logs.len(),
+        3,
+        "expected 3 graceful-shutdown log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "graceful-shutdown logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_graceful_shutdown_artifact_bundle(
+        &graceful_shutdown_logs,
+        &zone,
+        &obj_from_shutdown,
+        &shutdown_node_id,
+        node_stopped,
+        node_a_has_obj,
+        running,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, GRACEFUL_SHUTDOWN_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", "pass", if node_a_has_obj { "pass" } else { "fail" }]
+    );
+    assert_eq!(
+        artifact_bundle.log_entry_count,
+        graceful_shutdown_logs.len()
+    );
+    assert_eq!(
+        artifact_bundle.replay.shutdown_node_id,
+        shutdown_node_id.as_str().to_string()
+    );
+    assert!(artifact_bundle.state.node_stopped);
+    assert_eq!(artifact_bundle.state.gossip_preserved, node_a_has_obj);
+    assert_eq!(artifact_bundle.state.remaining_running_nodes, 2);
+
+    let artifact_json = serde_json::to_value(&artifact_bundle)
+        .expect("serialize graceful-shutdown artifact bundle");
+    let roundtrip: GracefulShutdownArtifactBundle = serde_json::from_value(artifact_json)
+        .expect("deserialize graceful-shutdown artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     assert!(
         node_a_has_obj,
@@ -1061,15 +1464,20 @@ async fn scenario_multi_node_failure_within_tolerance() {
     // 5-node quorum: f = 2, so losing 2 nodes should still work
     let mut harness = TestHarness::new(5, 0x5AFE_5AFE);
     harness.start_all().expect("start all nodes");
+    let quorum_tolerance_f = 2;
+    let crashed_node_ids = vec![
+        harness.nodes[0].node_id.clone(),
+        harness.nodes[1].node_id.clone(),
+    ];
 
     emit_scenario_log(
         &harness.logs,
-        "multi-node-failure",
+        MULTI_NODE_FAILURE_SCENARIO,
         "setup",
         &["0", "1", "2", "3", "4"],
         "initial_state",
         "pass",
-        json!({ "node_count": 5, "quorum_tolerance_f": 2 }),
+        json!({ "node_count": 5, "quorum_tolerance_f": quorum_tolerance_f }),
     );
 
     // Crash 2 nodes (within tolerance)
@@ -1111,7 +1519,7 @@ async fn scenario_multi_node_failure_within_tolerance() {
 
     emit_scenario_log(
         &harness.logs,
-        "multi-node-failure",
+        MULTI_NODE_FAILURE_SCENARIO,
         "verify",
         &["2", "3", "4"],
         "operations_continue",
@@ -1121,7 +1529,10 @@ async fn scenario_multi_node_failure_within_tolerance() {
             "fail"
         },
         json!({
-            "crashed_nodes": ["0", "1"],
+            "crashed_nodes": crashed_node_ids
+                .iter()
+                .map(|node_id| node_id.as_str())
+                .collect::<Vec<_>>(),
             "running_nodes": running_count,
             "gossip_propagation": {
                 "node3_has_obj": node3_has_obj,
@@ -1129,6 +1540,74 @@ async fn scenario_multi_node_failure_within_tolerance() {
             },
         }),
     );
+
+    let multi_node_failure_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == MULTI_NODE_FAILURE_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        multi_node_failure_logs.len(),
+        2,
+        "expected 2 multi-node-failure log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "multi-node-failure logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let operations_continue = node3_has_obj && node4_has_obj;
+    let artifact_bundle = build_multi_node_failure_artifact_bundle(
+        &multi_node_failure_logs,
+        &zone,
+        &obj_survivor,
+        &crashed_node_ids,
+        running_count,
+        quorum_tolerance_f,
+        node3_has_obj,
+        node4_has_obj,
+        operations_continue,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, MULTI_NODE_FAILURE_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", if operations_continue { "pass" } else { "fail" }]
+    );
+    assert_eq!(
+        artifact_bundle.log_entry_count,
+        multi_node_failure_logs.len()
+    );
+    assert_eq!(artifact_bundle.replay.crashed_node_ids.len(), 2);
+    assert_eq!(artifact_bundle.state.running_nodes, 3);
+    assert_eq!(
+        artifact_bundle.state.quorum_tolerance_f,
+        u8::try_from(quorum_tolerance_f).expect("quorum tolerance fits in u8")
+    );
+    assert_eq!(artifact_bundle.state.node3_has_obj, node3_has_obj);
+    assert_eq!(artifact_bundle.state.node4_has_obj, node4_has_obj);
+    assert!(artifact_bundle.state.operations_continue);
+
+    let artifact_json = serde_json::to_value(&artifact_bundle)
+        .expect("serialize multi-node-failure artifact bundle");
+    let roundtrip: MultiNodeFailureArtifactBundle = serde_json::from_value(artifact_json)
+        .expect("deserialize multi-node-failure artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     assert!(node3_has_obj, "survivor node 3 should receive gossip");
     assert!(node4_has_obj, "survivor node 4 should receive gossip");
@@ -1143,15 +1622,21 @@ async fn scenario_quorum_loss() {
     // 5-node quorum: f = 2, so losing 3 nodes should halt operations
     let mut harness = TestHarness::new(5, 0xDEAD_C0DE);
     harness.start_all().expect("start all nodes");
+    let quorum_tolerance_f = 2;
+    let crashed_node_ids = vec![
+        harness.nodes[0].node_id.clone(),
+        harness.nodes[1].node_id.clone(),
+        harness.nodes[2].node_id.clone(),
+    ];
 
     emit_scenario_log(
         &harness.logs,
-        "quorum-loss",
+        QUORUM_LOSS_SCENARIO,
         "setup",
         &["0", "1", "2", "3", "4"],
         "initial_state",
         "pass",
-        json!({ "node_count": 5, "quorum_tolerance_f": 2 }),
+        json!({ "node_count": 5, "quorum_tolerance_f": quorum_tolerance_f }),
     );
 
     // Crash 3 nodes (exceeds tolerance)
@@ -1190,22 +1675,95 @@ async fn scenario_quorum_loss() {
     // Quorum requires > n/2 nodes. With 5 nodes and 3 crashed, quorum is lost.
     let quorum_threshold = 3; // ceil(5/2) + 1 for strict majority
     let quorum_available = running_count >= quorum_threshold;
+    let operations_halted = !quorum_available;
 
     emit_scenario_log(
         &harness.logs,
-        "quorum-loss",
+        QUORUM_LOSS_SCENARIO,
         "verify",
         &["3", "4"],
         "operations_halted",
-        if quorum_available { "fail" } else { "pass" },
+        if operations_halted { "pass" } else { "fail" },
         json!({
-            "crashed_nodes": ["0", "1", "2"],
+            "crashed_nodes": crashed_node_ids
+                .iter()
+                .map(|node_id| node_id.as_str())
+                .collect::<Vec<_>>(),
             "running_nodes": running_count,
             "survivor_peer_count": survivor_peer_count,
             "quorum_available": quorum_available,
             "gossip_still_works": node4_has_obj,
         }),
     );
+
+    let quorum_loss_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == QUORUM_LOSS_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        quorum_loss_logs.len(),
+        2,
+        "expected 2 quorum-loss log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "quorum-loss logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_quorum_loss_artifact_bundle(
+        &quorum_loss_logs,
+        &zone,
+        &obj_degraded,
+        &crashed_node_ids,
+        running_count,
+        quorum_threshold,
+        survivor_peer_count,
+        quorum_available,
+        node4_has_obj,
+        operations_halted,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, QUORUM_LOSS_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", "pass"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, quorum_loss_logs.len());
+    assert_eq!(artifact_bundle.replay.crashed_node_ids.len(), 3);
+    assert_eq!(artifact_bundle.state.running_nodes, 2);
+    assert_eq!(
+        artifact_bundle.state.quorum_threshold,
+        u8::try_from(quorum_threshold).expect("quorum threshold fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.survivor_peer_count,
+        u8::try_from(survivor_peer_count).expect("survivor peer count fits in u8")
+    );
+    assert!(!artifact_bundle.state.quorum_available);
+    assert!(artifact_bundle.state.gossip_still_works);
+    assert!(artifact_bundle.state.operations_halted);
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize quorum-loss artifact bundle");
+    let roundtrip: QuorumLossArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize quorum-loss artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     assert!(
         !quorum_available,

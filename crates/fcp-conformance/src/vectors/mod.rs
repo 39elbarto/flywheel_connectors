@@ -13,5 +13,6 @@ pub mod hpke;
 pub mod session;
 pub mod session_messages;
 pub mod evidence;
+pub mod recovery;
 pub mod replay;
 pub mod signing;

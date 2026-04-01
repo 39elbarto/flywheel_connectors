@@ -769,6 +769,263 @@ impl DelegationRequest {
 }
 
 // ============================================================================
+// V3 Placement Policy Types (FCP Spec Section 11.2)
+// ============================================================================
+
+/// Placement policy from capability grants or zone defaults.
+///
+/// Combines hard requirements, soft preferences, and exclusions to constrain
+/// where a connector may execute. Multiple policies (e.g., from different
+/// capability grants) are intersected: requirements union, preferences merge
+/// with weights, and exclusions union.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PlacementPolicy {
+    /// Hard requirements — node MUST satisfy all of these to be eligible.
+    #[serde(default)]
+    pub requires: Vec<DeviceRequirement>,
+    /// Soft preferences — scored with weights but not required.
+    #[serde(default)]
+    pub prefers: Vec<DevicePreference>,
+    /// Exclusion patterns — nodes matching any pattern are ineligible.
+    #[serde(default)]
+    pub excludes: Vec<DevicePattern>,
+    /// Zone restrictions — if non-empty, node must be in one of these zones.
+    #[serde(default)]
+    pub zones: Vec<ZoneId>,
+}
+
+/// Hard device requirement — node is ineligible if not satisfied.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DeviceRequirement {
+    /// Node must have a GPU with at least this much VRAM.
+    Gpu { min_vram_mb: u32 },
+    /// Node must have at least this much available memory.
+    Memory { min_mb: u32 },
+    /// Node must be on mains power (not battery).
+    OnPower,
+    /// Node must have specific software installed.
+    Software {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
+    /// Node must have a minimum network bandwidth.
+    Network {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min_bandwidth_mbps: Option<u32>,
+    },
+    /// Node must have a specific Tailscale tag.
+    TailscaleTag(String),
+    /// Node must have the specified connector installed.
+    ConnectorAvailable {
+        connector_id: ConnectorId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min_version: Option<String>,
+    },
+    /// Node must participate in enough secret shares for reconstruction.
+    SecretReconstructable {
+        secret_id: String,
+        min_nodes: u8,
+    },
+    /// Node's zone store must have headroom.
+    ZoneQuotaHeadroom {
+        zone_id: ZoneId,
+        min_free_mb: u32,
+    },
+}
+
+/// Soft device preference — influences scoring but doesn't exclude.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DevicePreference {
+    /// Prefer nodes with low latency.
+    LowLatency {
+        max_ms: u32,
+        /// Weight in basis points (0–10000).
+        weight_bps: u16,
+    },
+    /// Prefer nodes with more available resources.
+    HighResources {
+        weight_bps: u16,
+    },
+    /// Prefer a specific device (e.g., for affinity).
+    SpecificDevice {
+        node_id: NodeId,
+        weight_bps: u16,
+    },
+    /// Prefer nodes that already hold required data.
+    DataLocality {
+        object_ids: Vec<ObjectId>,
+        weight_bps: u16,
+    },
+}
+
+/// Device exclusion pattern — nodes matching are ineligible.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DevicePattern {
+    /// Exclude a specific node by ID.
+    NodeId { id: NodeId },
+    /// Exclude nodes with a Tailscale tag.
+    Tag { tag: String },
+    /// Exclude nodes in a specific zone.
+    Zone { zone: ZoneId },
+    /// Exclude nodes with a specific availability profile.
+    AvailabilityProfile { profile: String },
+}
+
+// ============================================================================
+// Placement Decision Evidence (FCP Spec Section 11.2.2)
+// ============================================================================
+
+/// Auditable evidence for a placement decision.
+///
+/// Every placement decision produces this evidence struct so that operators
+/// can understand why a node was chosen, what alternatives existed, and
+/// whether the decision was made under degraded conditions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlacementDecisionEvidence {
+    /// The request that triggered placement (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_object_id: Option<ObjectId>,
+    /// The connector being placed.
+    pub connector_id: ConnectorId,
+    /// The chosen node (None if no eligible placement found).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chosen_node: Option<NodeId>,
+    /// All candidate nodes with their scores.
+    pub candidate_scores: Vec<CandidateScore>,
+    /// Whether the planner operated in degraded mode.
+    pub degraded_mode: bool,
+    /// Factors that most influenced the decision.
+    pub limiting_factors: Vec<String>,
+    /// Machine-readable reason code for the outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Timestamp of the decision (seconds since epoch).
+    pub decided_at: u64,
+    /// Number of nodes considered.
+    pub nodes_considered: u32,
+    /// Number of nodes excluded before scoring.
+    pub nodes_excluded: u32,
+}
+
+/// A node's score in a placement decision (for evidence).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CandidateScore {
+    /// Node identifier.
+    pub node_id: NodeId,
+    /// Final score (higher is better).
+    pub score: i64,
+    /// Whether this node was eligible.
+    pub eligible: bool,
+    /// Why it was excluded (if not eligible).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusion_reason: Option<String>,
+}
+
+// ============================================================================
+// Degraded Mode (FCP Spec Section 11.2.3)
+// ============================================================================
+
+/// Degraded placement mode classification.
+///
+/// The planner MUST distinguish between "no eligible node exists" and
+/// "eligible nodes exist only under degraded assumptions".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementMode {
+    /// Normal placement — all health, connectivity, and policy checks pass.
+    Normal,
+    /// Degraded — some checks are relaxed (relay-only, reduced coverage, etc.).
+    Degraded,
+    /// No eligible placement found under any conditions.
+    NoPlacement,
+}
+
+impl PlacementMode {
+    /// Whether the placement is operating normally.
+    #[must_use]
+    pub const fn is_normal(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    /// Whether the placement was made under degraded conditions.
+    #[must_use]
+    pub const fn is_degraded(self) -> bool {
+        matches!(self, Self::Degraded)
+    }
+}
+
+impl ExecutionPlanner {
+    /// Generate placement evidence from a plan result.
+    ///
+    /// Converts an `ExecutionPlan` into a `PlacementDecisionEvidence` struct
+    /// suitable for audit logging and operator explanation.
+    #[must_use]
+    pub fn evidence_from_plan(
+        &self,
+        plan: &ExecutionPlan,
+        connector_id: &ConnectorId,
+        request_object_id: Option<&ObjectId>,
+    ) -> PlacementDecisionEvidence {
+        let mut candidate_scores: Vec<CandidateScore> = Vec::new();
+
+        if let Some(selected) = &plan.selected {
+            candidate_scores.push(CandidateScore {
+                node_id: selected.node_id.clone(),
+                #[allow(clippy::cast_possible_truncation)]
+                score: selected.score as i64,
+                eligible: true,
+                exclusion_reason: None,
+            });
+        }
+
+        for alt in &plan.alternatives {
+            candidate_scores.push(CandidateScore {
+                node_id: alt.node_id.clone(),
+                #[allow(clippy::cast_possible_truncation)]
+                score: alt.score as i64,
+                eligible: true,
+                exclusion_reason: None,
+            });
+        }
+
+        let limiting_factors: Vec<String> = plan
+            .selected
+            .as_ref()
+            .map(|s| {
+                s.adjustments
+                    .iter()
+                    .filter(|a| a.delta < 0.0)
+                    .map(|a| a.explanation.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let reason_code = if plan.selected.is_some() {
+            Some("placement_found".to_string())
+        } else {
+            Some("no_eligible_node".to_string())
+        };
+
+        PlacementDecisionEvidence {
+            request_object_id: request_object_id.copied(),
+            connector_id: connector_id.clone(),
+            chosen_node: plan.selected.as_ref().map(|s| s.node_id.clone()),
+            candidate_scores,
+            degraded_mode: false,
+            limiting_factors,
+            reason_code,
+            decided_at: plan.planned_at,
+            nodes_considered: u32::try_from(plan.nodes_considered).unwrap_or(u32::MAX),
+            nodes_excluded: u32::try_from(plan.nodes_excluded).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2206,5 +2463,162 @@ mod tests {
                 better_count: 2
             }
         )));
+    }
+
+    // ── V3 Placement Policy Tests ──────────────────────────────────────
+
+    #[test]
+    fn placement_policy_default_is_empty() {
+        let policy = PlacementPolicy::default();
+        assert!(policy.requires.is_empty());
+        assert!(policy.prefers.is_empty());
+        assert!(policy.excludes.is_empty());
+        assert!(policy.zones.is_empty());
+    }
+
+    #[test]
+    fn placement_policy_serde_roundtrip() {
+        let policy = PlacementPolicy {
+            requires: vec![
+                DeviceRequirement::Memory { min_mb: 512 },
+                DeviceRequirement::OnPower,
+                DeviceRequirement::ConnectorAvailable {
+                    connector_id: ConnectorId::from_static("fcp.gmail"),
+                    min_version: Some("0.2.0".into()),
+                },
+            ],
+            prefers: vec![DevicePreference::HighResources { weight_bps: 5000 }],
+            excludes: vec![DevicePattern::Tag { tag: "unstable".into() }],
+            zones: vec![ZoneId::work()],
+        };
+        let json = serde_json::to_string(&policy).expect("serialize");
+        let parsed: PlacementPolicy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.requires.len(), 3);
+        assert_eq!(parsed.prefers.len(), 1);
+        assert_eq!(parsed.excludes.len(), 1);
+        assert_eq!(parsed.zones.len(), 1);
+    }
+
+    #[test]
+    fn placement_mode_classifications() {
+        assert!(PlacementMode::Normal.is_normal());
+        assert!(!PlacementMode::Normal.is_degraded());
+        assert!(PlacementMode::Degraded.is_degraded());
+        assert!(!PlacementMode::Degraded.is_normal());
+        assert!(!PlacementMode::NoPlacement.is_normal());
+        assert!(!PlacementMode::NoPlacement.is_degraded());
+    }
+
+    #[test]
+    fn placement_evidence_from_plan_with_selected() {
+        let planner = ExecutionPlanner::new();
+        let connector_id = ConnectorId::from_static("fcp.test");
+        let plan = ExecutionPlan {
+            selected: Some(CandidateNode {
+                node_id: NodeId::new("node-1"),
+                score: 85.0,
+                base_fitness: 70.0,
+                eligible: true,
+                decision_reasons: vec![DecisionReason::SelectedAsBest { rank: 1 }],
+                adjustments: vec![ScoreAdjustment::bonus(
+                    AdjustmentFactor::DataLocality,
+                    15.0,
+                    "3 of 5 symbols local",
+                )],
+            }),
+            alternatives: vec![CandidateNode {
+                node_id: NodeId::new("node-2"),
+                score: 60.0,
+                base_fitness: 55.0,
+                eligible: true,
+                decision_reasons: vec![DecisionReason::EligibleNotSelected {
+                    rank: 2,
+                    better_count: 1,
+                }],
+                adjustments: vec![],
+            }],
+            nodes_considered: 5,
+            nodes_excluded: 2,
+            planned_at: 1_700_000_000,
+        };
+
+        let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
+        assert_eq!(evidence.connector_id.as_str(), "fcp.test");
+        assert!(evidence.chosen_node.is_some());
+        assert_eq!(evidence.candidate_scores.len(), 2);
+        assert_eq!(evidence.nodes_considered, 5);
+        assert_eq!(evidence.nodes_excluded, 2);
+        assert!(!evidence.degraded_mode);
+        assert_eq!(evidence.reason_code.as_deref(), Some("placement_found"));
+    }
+
+    #[test]
+    fn placement_evidence_from_plan_no_eligible() {
+        let planner = ExecutionPlanner::new();
+        let connector_id = ConnectorId::from_static("fcp.test");
+        let plan = ExecutionPlan {
+            selected: None,
+            alternatives: vec![],
+            nodes_considered: 3,
+            nodes_excluded: 3,
+            planned_at: 1_700_000_000,
+        };
+
+        let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
+        assert!(evidence.chosen_node.is_none());
+        assert_eq!(evidence.reason_code.as_deref(), Some("no_eligible_node"));
+        assert!(evidence.candidate_scores.is_empty());
+    }
+
+    #[test]
+    fn device_requirement_serde_variants() {
+        let reqs = vec![
+            DeviceRequirement::Gpu { min_vram_mb: 4096 },
+            DeviceRequirement::Memory { min_mb: 1024 },
+            DeviceRequirement::OnPower,
+            DeviceRequirement::Network {
+                min_bandwidth_mbps: Some(100),
+            },
+        ];
+        let json = serde_json::to_string(&reqs).expect("serialize");
+        let parsed: Vec<DeviceRequirement> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.len(), 4);
+    }
+
+    #[test]
+    fn device_preference_serde_variants() {
+        let prefs = vec![
+            DevicePreference::LowLatency {
+                max_ms: 50,
+                weight_bps: 3000,
+            },
+            DevicePreference::HighResources { weight_bps: 5000 },
+            DevicePreference::DataLocality {
+                object_ids: vec![],
+                weight_bps: 7000,
+            },
+        ];
+        let json = serde_json::to_string(&prefs).expect("serialize");
+        let parsed: Vec<DevicePreference> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.len(), 3);
+    }
+
+    #[test]
+    fn candidate_score_eligible_vs_excluded() {
+        let eligible = CandidateScore {
+            node_id: NodeId::new("node-1"),
+            score: 85,
+            eligible: true,
+            exclusion_reason: None,
+        };
+        let excluded = CandidateScore {
+            node_id: NodeId::new("node-2"),
+            score: 0,
+            eligible: false,
+            exclusion_reason: Some("missing connector".into()),
+        };
+        assert!(eligible.eligible);
+        assert!(!excluded.eligible);
+        assert!(excluded.exclusion_reason.is_some());
     }
 }

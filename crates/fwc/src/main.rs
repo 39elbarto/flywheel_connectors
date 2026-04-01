@@ -5155,6 +5155,74 @@ fn attach_template_provenance(
     }
 }
 
+fn attach_live_host_admin_contract(
+    payload: &mut Value,
+    command: &str,
+    endpoint: &str,
+    scope: &str,
+    degraded: bool,
+    evidence_handles: Vec<Value>,
+) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "provenance".to_owned(),
+            json!({
+                "command": command,
+                "source": "host-admin-api",
+                "transport": "node-local-root-app",
+                "scope": scope,
+                "endpoint": endpoint,
+                "authoritative": true,
+                "mesh_backed": false,
+                "fallback_derived": false,
+                "degraded": degraded,
+                "caveat": "Live host-admin API answers are authoritative for the current node, but they do not by themselves prove mesh-wide placement or offline artifact coverage.",
+            }),
+        );
+        obj.insert(
+            "evidence_handles".to_owned(),
+            Value::Array(evidence_handles),
+        );
+    }
+}
+
+fn attach_install_contract(
+    payload: &mut Value,
+    command: &str,
+    source: &str,
+    transport: &str,
+    scope: &str,
+    endpoint: Option<&str>,
+    live_host_mutated: bool,
+    degraded: bool,
+    fallback_derived: bool,
+    caveat: &str,
+    evidence_handles: Vec<Value>,
+) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "provenance".to_owned(),
+            json!({
+                "command": command,
+                "source": source,
+                "transport": transport,
+                "scope": scope,
+                "endpoint": endpoint,
+                "authoritative": true,
+                "mesh_backed": false,
+                "live_host_mutated": live_host_mutated,
+                "fallback_derived": fallback_derived,
+                "degraded": degraded,
+                "caveat": caveat,
+            }),
+        );
+        obj.insert(
+            "evidence_handles".to_owned(),
+            Value::Array(evidence_handles),
+        );
+    }
+}
+
 fn tool_inventory_mode_label(source: &catalog::ToolInventorySource) -> &'static str {
     match source {
         catalog::ToolInventorySource::LiveHostInventory => "live-introspection",
@@ -6733,6 +6801,79 @@ fn mesh_live_source_selection_value(
     )
 }
 
+fn mesh_live_evidence_handles(
+    connector_id: &str,
+    host: &str,
+    status: &HostConnectorAdminStatus,
+) -> Vec<Value> {
+    let mut handles = vec![json!({
+        "kind": "mesh-live-availability",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "observed_state": status.observed_state,
+        "desired_state": status.desired_state,
+    })];
+
+    if let Some(artifact) = status.artifact.as_ref() {
+        handles.push(json!({
+            "kind": "host-artifact-provenance",
+            "connector_id": connector_id,
+            "source_kind": artifact_source_kind_tag(artifact.provenance.source_kind.clone()),
+            "source_uri": &artifact.provenance.source_uri,
+            "content_hash": &artifact.provenance.content_hash,
+            "hash_verified": artifact.provenance.hash_verified,
+            "signature_verified": artifact.provenance.signature_verified,
+            "recorded_at": artifact.recorded_at,
+        }));
+
+        if let Some(policy) = artifact.placement.as_ref() {
+            handles.push(json!({
+                "kind": "mesh-placement-policy",
+                "connector_id": connector_id,
+                "placement_policy": policy,
+            }));
+        }
+    }
+
+    if let Some(drift) = status.drift.as_ref() {
+        handles.push(json!({
+            "kind": "host-runtime-drift",
+            "connector_id": connector_id,
+            "recovery_action": drift.recovery_action,
+            "message": &drift.message,
+        }));
+    }
+
+    handles
+}
+
+fn mesh_offline_evidence_handles(
+    connector_id: &str,
+    manifest_path: &str,
+    requested_zone: Option<&str>,
+    zone_supported: Option<bool>,
+    has_local_mirror: bool,
+    mirror_path: &str,
+) -> Vec<Value> {
+    let mut handles = vec![json!({
+        "kind": "workspace-manifest",
+        "connector_id": connector_id,
+        "manifest_path": manifest_path,
+        "requested_zone": requested_zone,
+        "supported_by_manifest": zone_supported,
+    })];
+
+    if has_local_mirror {
+        handles.push(json!({
+            "kind": "local-mesh-mirror",
+            "connector_id": connector_id,
+            "mirror_path": mirror_path,
+        }));
+    }
+
+    handles
+}
+
 fn mesh_live_zone_filter_dispatch(
     subcommand: &str,
     connector: &str,
@@ -6796,6 +6937,8 @@ fn mesh_availability_dispatch(
         };
         let status = client.connector_status(connector.summary.id.as_str())?;
         let repair_hints = mesh_live_repair_hints(&status, &connector.slug, &host.endpoint);
+        let evidence_handles =
+            mesh_live_evidence_handles(connector.summary.id.as_str(), &host.endpoint, &status);
 
         let message = if hints_only {
             format!(
@@ -6843,6 +6986,7 @@ fn mesh_availability_dispatch(
             "source_selection": mesh_live_source_selection_value(status.artifact.as_ref()),
             "offline_readiness": mesh_live_offline_readiness_value(status.artifact.as_ref()),
             "repair_hints": repair_hints,
+            "evidence_handles": evidence_handles,
             "next_actions": [
                 format!("fwc show {} --host {}", connector.slug, host.endpoint),
                 format!("fwc doctor --host {}", host.endpoint),
@@ -6891,9 +7035,17 @@ fn mesh_availability_dispatch(
     // Check if a local mirror exists (e.g., from a mesh peer replication).
     // In offline mode we only have workspace manifests, so mirror detection is
     // based on whether a local artifact path exists for this connector.
-    let has_local_mirror =
-        std::path::Path::new(&format!(".fcp/mirrors/{}.wasm", connector.slug)).exists();
+    let mirror_path = format!(".fcp/mirrors/{}.wasm", connector.slug);
+    let has_local_mirror = std::path::Path::new(&mirror_path).exists();
     let availability_fact = mesh_offline_availability_fact(zone_supported, has_local_mirror);
+    let evidence_handles = mesh_offline_evidence_handles(
+        &connector.detail.summary.id,
+        &connector.manifest_path,
+        args.zone.as_deref(),
+        zone_supported,
+        has_local_mirror,
+        &mirror_path,
+    );
     let offline_readiness = json!({
         "state": match zone_supported {
             Some(true) => "declared-in-manifest",
@@ -6958,6 +7110,7 @@ fn mesh_availability_dispatch(
         },
         "offline_readiness": offline_readiness,
         "repair_hints": repair_hints,
+        "evidence_handles": evidence_handles,
         "next_actions": [
             format!("fwc show {} --offline", connector.slug),
             format!("fwc install {} --verify-only", connector.slug),
@@ -9487,9 +9640,9 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         // Avoid duplicating if --all already produced a report for this id.
         if !diagnostic_reports
             .iter()
-            .any(|r| r.connector_id == sc.connector_id)
+            .any(|r| r.connector_id == sc.connector_id.as_str())
         {
-            diagnostic_reports.push(doctor::diagnose(&sc.connector_id, &symptoms));
+            diagnostic_reports.push(doctor::diagnose(sc.connector_id.as_str(), &symptoms));
         }
     }
 
@@ -9542,6 +9695,20 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         "toon": fleet_toon,
         "next_actions": next_actions,
     });
+    attach_live_host_admin_contract(
+        &mut payload,
+        "doctor",
+        &host.endpoint,
+        "zone-diagnostics",
+        report.degraded_mode.is_degraded || report.overall_status != fcp_host::OverallStatus::Ok,
+        vec![json!({
+            "kind": "doctor-report",
+            "zone_id": report.zone_id.as_str(),
+            "generated_at": report.generated_at,
+            "check_count": report.checks.len(),
+            "connector_self_check_count": report.connector_self_checks.len(),
+        })],
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -9633,6 +9800,24 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
                 format!("fwc pin {} --to {} --host {}", connector.slug, connector.summary.version, host.endpoint),
             ],
         });
+        attach_live_host_admin_contract(
+            &mut payload,
+            "status",
+            &host.endpoint,
+            "connector-status",
+            !connector.summary.health.is_healthy(),
+            vec![
+                json!({
+                    "kind": "connector-status",
+                    "connector_id": connector.summary.id.as_str(),
+                    "evaluated_at": admin.evaluated_at,
+                }),
+                json!({
+                    "kind": "host-health-snapshot",
+                    "timestamp": health.timestamp,
+                }),
+            ],
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -9674,6 +9859,23 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
             format!("fwc show <connector> --host {}", host.endpoint),
         ],
     });
+    attach_live_host_admin_contract(
+        &mut payload,
+        "status",
+        &host.endpoint,
+        "fleet-status",
+        health.status != fcp_host::HostHealthStatus::Healthy
+            || catalog
+                .connectors
+                .iter()
+                .any(|connector| !connector.summary.health.is_healthy()),
+        vec![json!({
+            "kind": "fleet-status",
+            "timestamp": health.timestamp,
+            "registry_version": discovery.registry_version,
+            "connector_count": connector_rows.len(),
+        })],
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -9745,6 +9947,24 @@ fn health_connector_payload(
             format!("fwc health --host {endpoint}"),
         ],
     });
+    attach_live_host_admin_contract(
+        &mut payload,
+        "health",
+        endpoint,
+        "connector-health",
+        entry.status != health::HealthStatus::Healthy,
+        vec![
+            json!({
+                "kind": "connector-health",
+                "connector_id": &entry.connector_id,
+                "last_check": entry.last_check,
+            }),
+            json!({
+                "kind": "host-health-snapshot",
+                "timestamp": host_health.timestamp,
+            }),
+        ],
+    );
     envelope.inject_into(&mut payload);
     payload
 }
@@ -9787,6 +10007,27 @@ fn health_fleet_payload(
             format!("fwc doctor --zone z:work --host {endpoint}"),
         ],
     });
+    attach_live_host_admin_contract(
+        &mut payload,
+        "health",
+        endpoint,
+        "fleet-health",
+        filtered.summary.degraded > 0
+            || filtered.summary.error > 0
+            || filtered.summary.unknown > 0
+            || host_health.status != fcp_host::HostHealthStatus::Healthy,
+        vec![
+            json!({
+                "kind": "fleet-health-dashboard",
+                "checked_at": filtered.checked_at,
+                "connector_count": filtered.summary.total,
+            }),
+            json!({
+                "kind": "host-health-snapshot",
+                "timestamp": host_health.timestamp,
+            }),
+        ],
+    );
     envelope.inject_into(&mut payload);
     payload
 }
@@ -12436,6 +12677,96 @@ fn package_local_offline_readiness_value(artifact: &PreparedPackageArtifact) -> 
     }
 }
 
+fn package_artifact_evidence_handles(artifact: &PreparedPackageArtifact) -> Vec<Value> {
+    vec![json!({
+        "kind": "package-output",
+        "connector_id": artifact.manifest.connector.id.as_str(),
+        "requested_source": &artifact.requested_source,
+        "source_kind": artifact.source_kind.state(),
+        "resolved_input_path": artifact.resolved_input_path.display().to_string(),
+        "package_output_dir": artifact.package_output.output_dir.display().to_string(),
+        "binary_path": artifact.package_output.binary_path.display().to_string(),
+        "manifest_path": artifact.package_output.manifest_path.display().to_string(),
+    })]
+}
+
+fn install_verify_only_evidence_handles(artifact: &PreparedPackageArtifact) -> Vec<Value> {
+    let mut handles = package_artifact_evidence_handles(artifact);
+    handles.push(json!({
+        "kind": "local-package-verification",
+        "connector_id": artifact.manifest.connector.id.as_str(),
+        "verification_count": artifact.verification.len(),
+        "authoritative_scope": match artifact.source_kind {
+            PreparedPackageSourceKind::LocalPackageMetadataFile
+            | PreparedPackageSourceKind::LocalPackagedDirectory => "local-machine-only",
+            PreparedPackageSourceKind::LocalConnectorCrate
+            | PreparedPackageSourceKind::WorkspaceConnector => "local-workspace-only",
+        },
+    }));
+    handles
+}
+
+fn install_live_evidence_handles(
+    artifact: &PreparedPackageArtifact,
+    host: &str,
+    applied: &HostConnectorInventoryMutationResponse,
+    post_install_status: Option<&HostConnectorAdminStatus>,
+) -> Vec<Value> {
+    let mut handles = package_artifact_evidence_handles(artifact);
+    handles.push(json!({
+        "kind": "host-inventory-apply",
+        "connector_id": applied.current.id.as_str(),
+        "endpoint": host,
+        "connectors_file": &applied.connectors_file,
+        "registry_version": applied.apply.registry_version,
+        "added": applied.apply.added,
+        "updated": applied.apply.updated,
+        "removed": applied.apply.removed,
+        "unchanged": applied.apply.unchanged,
+    }));
+
+    if let Some(status) = post_install_status {
+        handles.extend(mesh_live_evidence_handles(
+            applied.current.id.as_str(),
+            host,
+            status,
+        ));
+    } else {
+        handles.push(json!({
+            "kind": "post-install-status-unavailable",
+            "connector_id": applied.current.id.as_str(),
+            "endpoint": host,
+            "requested_package_source": &artifact.source_description,
+        }));
+    }
+
+    handles
+}
+
+fn update_evidence_handles(
+    artifact: &PreparedPackageArtifact,
+    host: &str,
+    target_connector_id: &str,
+    applied: &HostConnectorInventoryMutationResponse,
+) -> Vec<Value> {
+    let mut handles = package_artifact_evidence_handles(artifact);
+    handles.push(json!({
+        "kind": if applied.dry_run { "host-inventory-preview" } else { "host-inventory-apply" },
+        "connector_id": target_connector_id,
+        "endpoint": host,
+        "connectors_file": &applied.connectors_file,
+        "registry_version": applied.apply.registry_version,
+        "dry_run": applied.dry_run,
+        "added": applied.apply.added,
+        "updated": applied.apply.updated,
+        "removed": applied.apply.removed,
+        "unchanged": applied.apply.unchanged,
+        "previous_version": applied.previous.as_ref().and_then(|entry| entry.version.clone()),
+        "current_version": applied.current.version.clone(),
+    }));
+    handles
+}
+
 fn install_unknown_live_source_selection_value(artifact: &PreparedPackageArtifact) -> Value {
     json!({
         "state": "unknown",
@@ -12484,6 +12815,7 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     let candidate = managed_connector_from_artifact(&artifact, None);
 
     if args.verify_only {
+        let evidence_handles = install_verify_only_evidence_handles(&artifact);
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "install");
         let mut payload = json!({
             "status": "ok",
@@ -12510,6 +12842,19 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
                 ),
             ],
         });
+        attach_install_contract(
+            &mut payload,
+            "install",
+            "local-package-artifact",
+            "local-filesystem",
+            "install-verification",
+            None,
+            false,
+            false,
+            false,
+            "Verify-only install answers are authoritative for the local package artifact and verification result, but they do not prove any live host inventory or mesh placement state.",
+            evidence_handles,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -12602,6 +12947,12 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
         || install_unknown_live_repair_hints(applied.current.id.as_str(), &host.endpoint),
         |status| mesh_live_repair_hints(status, applied.current.id.as_str(), &host.endpoint),
     );
+    let evidence_handles = install_live_evidence_handles(
+        &artifact,
+        &host.endpoint,
+        &applied,
+        post_install_status.as_ref(),
+    );
     let mut warnings = Vec::new();
     if post_install_status.is_none() {
         warnings.push(
@@ -12658,6 +13009,19 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     if !warnings.is_empty() {
         payload["warnings"] = json!(warnings);
     }
+    attach_install_contract(
+        &mut payload,
+        "install",
+        "host-admin-api",
+        "node-local-root-app",
+        "install-activation",
+        Some(&host.endpoint),
+        true,
+        post_install_status.is_none(),
+        post_install_status.is_none(),
+        "Live install answers are authoritative for the current node's inventory mutation. When post-install status readback is unavailable, live runtime truth remains degraded until a later host-backed check succeeds.",
+        evidence_handles,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -12773,6 +13137,8 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
         }
     };
 
+    let evidence_handles =
+        update_evidence_handles(&artifact, &host.endpoint, &target_connector_id, &applied);
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "update");
     let mut payload = json!({
         "status": "ok",
@@ -12812,6 +13178,23 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
             format!("fwc show {} --host {}", target_connector_id, host.endpoint),
         ],
     });
+    attach_install_contract(
+        &mut payload,
+        "update",
+        "host-admin-api",
+        "node-local-root-app",
+        if applied.dry_run {
+            "update-preview"
+        } else {
+            "update-activation"
+        },
+        Some(&host.endpoint),
+        !applied.dry_run,
+        false,
+        false,
+        "Live update answers are authoritative for the current node's inventory preview or mutation result. They do not by themselves prove mesh-wide placement or post-update runtime convergence.",
+        evidence_handles,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -23151,6 +23534,86 @@ mod tests {
         );
     }
 
+    fn assert_live_host_admin_contract(
+        payload: &Value,
+        scope: &str,
+        degraded: bool,
+        evidence_kind: &str,
+    ) {
+        assert_eq!(payload["provenance"]["source"], "host-admin-api");
+        assert_eq!(payload["provenance"]["transport"], "node-local-root-app");
+        assert_eq!(payload["provenance"]["scope"], scope);
+        assert_eq!(payload["provenance"]["authoritative"], true);
+        assert_eq!(payload["provenance"]["mesh_backed"], false);
+        assert_eq!(payload["provenance"]["fallback_derived"], false);
+        assert_eq!(payload["provenance"]["degraded"], degraded);
+        assert_eq!(payload["provenance"]["command"], payload["command"]);
+        assert!(
+            payload["provenance"]["endpoint"]
+                .as_str()
+                .is_some_and(|endpoint| !endpoint.is_empty())
+        );
+        assert!(
+            payload["provenance"]["caveat"]
+                .as_str()
+                .is_some_and(|caveat| !caveat.is_empty())
+        );
+        assert!(
+            payload["evidence_handles"]
+                .as_array()
+                .is_some_and(|handles| handles
+                    .iter()
+                    .any(|handle| handle["kind"] == evidence_kind))
+        );
+    }
+
+    fn assert_evidence_handle(payload: &Value, evidence_kind: &str) {
+        assert!(
+            payload["evidence_handles"]
+                .as_array()
+                .is_some_and(|handles| handles
+                    .iter()
+                    .any(|handle| handle["kind"] == evidence_kind))
+        );
+    }
+
+    fn assert_install_contract(
+        payload: &Value,
+        source: &str,
+        transport: &str,
+        scope: &str,
+        live_host_mutated: bool,
+        degraded: bool,
+        fallback_derived: bool,
+    ) {
+        assert_eq!(payload["provenance"]["source"], source);
+        assert_eq!(payload["provenance"]["transport"], transport);
+        assert_eq!(payload["provenance"]["scope"], scope);
+        assert_eq!(payload["provenance"]["authoritative"], true);
+        assert_eq!(payload["provenance"]["mesh_backed"], false);
+        assert_eq!(
+            payload["provenance"]["live_host_mutated"],
+            live_host_mutated
+        );
+        assert_eq!(payload["provenance"]["degraded"], degraded);
+        assert_eq!(payload["provenance"]["fallback_derived"], fallback_derived);
+        assert_eq!(payload["provenance"]["command"], payload["command"]);
+        assert!(
+            payload["provenance"]["caveat"]
+                .as_str()
+                .is_some_and(|caveat| !caveat.is_empty())
+        );
+        if source == "host-admin-api" {
+            assert!(
+                payload["provenance"]["endpoint"]
+                    .as_str()
+                    .is_some_and(|endpoint| !endpoint.is_empty())
+            );
+        } else {
+            assert!(payload["provenance"]["endpoint"].is_null());
+        }
+    }
+
     fn assert_tool_inventory_provenance(
         payload: &Value,
         source: &str,
@@ -26326,6 +26789,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "doctor");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_live_host_admin_contract(&payload, "zone-diagnostics", false, "doctor-report");
         assert_eq!(payload["report"]["zone_id"], "z:work");
         assert_eq!(payload["summary"]["overall_status"], "OK");
     }
@@ -26605,6 +27069,15 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "install");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "install-activation",
+            true,
+            false,
+            false,
+        );
         assert_eq!(payload["activation"]["live_reload_applied"], true);
         assert_eq!(payload["activation"]["registry_version"], 11);
         assert_eq!(
@@ -26622,6 +27095,11 @@ deny_ptrace = true
             payload["offline_readiness"]["state"],
             "tracked-by-placement-policy"
         );
+        assert_evidence_handle(&payload, "package-output");
+        assert_evidence_handle(&payload, "host-inventory-apply");
+        assert_evidence_handle(&payload, "mesh-live-availability");
+        assert_evidence_handle(&payload, "host-artifact-provenance");
+        assert_evidence_handle(&payload, "mesh-placement-policy");
         assert!(
             payload["repair_hints"]
                 .as_array()
@@ -26682,10 +27160,22 @@ deny_ptrace = true
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "install-activation",
+            true,
+            true,
+            true,
+        );
         assert_eq!(payload["availability_fact"]["state"], "unknown");
         assert_eq!(payload["source_selection"]["state"], "unknown");
         assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(payload["offline_readiness"]["state"], "unknown");
+        assert_evidence_handle(&payload, "package-output");
+        assert_evidence_handle(&payload, "host-inventory-apply");
+        assert_evidence_handle(&payload, "post-install-status-unavailable");
         assert!(
             payload["repair_hints"]
                 .as_array()
@@ -26742,9 +27232,21 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "install");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "install-activation",
+            true,
+            true,
+            true,
+        );
         assert_eq!(payload["availability_fact"]["state"], "unknown");
         assert_eq!(payload["source_selection"]["state"], "unknown");
         assert_eq!(payload["offline_readiness"]["state"], "unknown");
+        assert_evidence_handle(&payload, "package-output");
+        assert_evidence_handle(&payload, "host-inventory-apply");
+        assert_evidence_handle(&payload, "post-install-status-unavailable");
         assert!(
             payload["repair_hints"]
                 .as_array()
@@ -26826,10 +27328,98 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "update");
         assert_eq!(payload["mode"], "dry-run");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "update-preview",
+            false,
+            false,
+            false,
+        );
         assert_eq!(payload["activation"]["inventory_updated"], false);
         assert_eq!(payload["response"]["dry_run"], true);
         assert_eq!(payload["response"]["current"]["args"][0], "--existing");
         assert_eq!(payload["updated"]["version"], "1.2.4");
+        assert_evidence_handle(&payload, "package-output");
+        assert_evidence_handle(&payload, "host-inventory-preview");
+    }
+
+    #[test]
+    fn execute_update_apply_reports_live_host_mutation_contract() {
+        let (_package_dir, package_output_path) =
+            write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
+        let package_output_path = package_output_path.display().to_string();
+        let previous = ManagedConnectorConfig {
+            id: "fcp.github:enterprise:v1".to_string(),
+            binary: "/opt/fcp/github-enterprise-old".to_string(),
+            name: Some("GitHub Enterprise".to_string()),
+            description: Some("Existing live GitHub connector".to_string()),
+            args: vec!["--existing".to_string()],
+            env: StdBTreeMap::from([("LOG_LEVEL".to_string(), "debug".to_string())]),
+            config: Some(json!({ "profile": "work" })),
+            categories: vec!["code".to_string(), "dev-tools".to_string()],
+            version: Some("1.2.3".to_string()),
+        };
+        let updated = ManagedConnectorConfig {
+            id: "fcp.github:enterprise:v1".to_string(),
+            binary: "/opt/fcp/github-enterprise-new".to_string(),
+            name: Some("GitHub Enterprise".to_string()),
+            description: Some("Updated live GitHub connector".to_string()),
+            args: previous.args.clone(),
+            env: previous.env.clone(),
+            config: previous.config.clone(),
+            categories: previous.categories.clone(),
+            version: Some("1.2.4".to_string()),
+        };
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "POST /rpc/connectors/apply".to_owned(),
+                    mock_inventory_mutation_response_json(
+                        ConnectorInventoryMutationKind::Update,
+                        false,
+                        updated,
+                        Some(previous),
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "update",
+            "github",
+            "--source",
+            &package_output_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "update");
+        assert_eq!(payload["mode"], "apply");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "update-activation",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["activation"]["inventory_updated"], true);
+        assert_eq!(payload["activation"]["live_reload_applied"], true);
+        assert_eq!(payload["updated"]["version"], "1.2.4");
+        assert_evidence_handle(&payload, "package-output");
+        assert_evidence_handle(&payload, "host-inventory-apply");
     }
 
     #[test]
@@ -27972,6 +28562,7 @@ deny_ptrace = true
         assert_eq!(payload["source_selection"]["state"], "workspace-manifest");
         assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(payload["offline_readiness"]["supported_by_manifest"], true);
+        assert_evidence_handle(&payload, "workspace-manifest");
     }
 
     #[test]
@@ -28018,6 +28609,9 @@ deny_ptrace = true
             payload["offline_readiness"]["state"],
             "tracked-by-placement-policy"
         );
+        assert_evidence_handle(&payload, "mesh-live-availability");
+        assert_evidence_handle(&payload, "host-artifact-provenance");
+        assert_evidence_handle(&payload, "mesh-placement-policy");
         assert!(
             payload["explanation"]
                 .as_array()
@@ -28067,6 +28661,8 @@ deny_ptrace = true
             payload["offline_readiness"]["state"],
             "artifact-recorded-without-placement-policy"
         );
+        assert_evidence_handle(&payload, "mesh-live-availability");
+        assert_evidence_handle(&payload, "host-artifact-provenance");
     }
 
     #[test]
@@ -28129,6 +28725,7 @@ deny_ptrace = true
         assert_eq!(payload["subcommand"], "repair-hints");
         assert_eq!(payload["inventory"]["observed_state"], "missing");
         assert_eq!(payload["availability_fact"]["state"], "unavailable");
+        assert_evidence_handle(&payload, "mesh-live-availability");
         assert!(
             payload["repair_hints"]
                 .as_array()
@@ -28169,6 +28766,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["availability_fact"]["state"], "degraded");
         assert_eq!(payload["inventory"]["observed_state"], "degraded");
+        assert_evidence_handle(&payload, "mesh-live-availability");
+        assert_evidence_handle(&payload, "host-runtime-drift");
         assert!(
             payload["repair_hints"]
                 .as_array()
@@ -33229,6 +33828,7 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "status");
         assert_eq!(payload["scope"], "fleet");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_live_host_admin_contract(&payload, "fleet-status", false, "fleet-status");
         assert!(
             payload["connectors"]
                 .as_array()
@@ -33311,6 +33911,7 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "status");
         assert_eq!(payload["scope"], "connector");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_live_host_admin_contract(&payload, "connector-status", false, "connector-status");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], cid);
         assert!(!payload["admin"].is_null());
@@ -33417,6 +34018,7 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "health");
         assert_eq!(payload["scope"], "fleet");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_live_host_admin_contract(&payload, "fleet-health", false, "fleet-health-dashboard");
         assert!(payload["dashboard"]["connectors"].is_array());
         assert!(
             payload["dashboard"]["summary"]["total"]
@@ -33499,6 +34101,7 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "health");
         assert_eq!(payload["scope"], "connector");
+        assert_live_host_admin_contract(&payload, "connector-health", false, "connector-health");
     }
 
     #[test]
@@ -33729,6 +34332,15 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "install");
         assert_eq!(payload["mode"], "verify-only");
+        assert_install_contract(
+            &payload,
+            "local-package-artifact",
+            "local-filesystem",
+            "install-verification",
+            false,
+            false,
+            false,
+        );
         assert_eq!(
             payload["candidate"]["canonical_id"],
             "fcp.github:enterprise:v1"
@@ -33747,6 +34359,8 @@ depends_on = ["missing"]
             payload["offline_readiness"]["state"],
             "local-artifact-present"
         );
+        assert_evidence_handle(&payload, "package-output");
+        assert_evidence_handle(&payload, "local-package-verification");
         assert!(
             payload["repair_hints"]
                 .as_array()
@@ -38178,6 +38792,15 @@ depends_on = ["missing"]
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["command"], "install");
         assert_eq!(payload["mode"], "verify-only");
+        assert_install_contract(
+            &payload,
+            "local-package-artifact",
+            "local-filesystem",
+            "install-verification",
+            false,
+            false,
+            false,
+        );
         assert_eq!(
             payload["availability_fact"]["state"],
             "local-verification-only"
@@ -38193,6 +38816,8 @@ depends_on = ["missing"]
             payload["candidate"].is_object(),
             "verify-only should include the candidate descriptor"
         );
+        assert_evidence_handle(&payload, "package-output");
+        assert_evidence_handle(&payload, "local-package-verification");
     }
 
     #[test]

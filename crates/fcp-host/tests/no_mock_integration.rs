@@ -626,7 +626,7 @@ async fn doctor_with_healthy_connectors() {
         "both reader and writer are healthy"
     );
     assert_eq!(report.connector_self_checks.len(), 2);
-    assert_eq!(report.zone_id, "z:work");
+    assert_eq!(report.zone_id.as_str(), "z:work");
 }
 
 #[fcp_async_core::runtime::test]
@@ -684,7 +684,7 @@ async fn doctor_missing_connector_returns_error() {
     let report = service.handle(request).await.unwrap();
     assert_eq!(report.connector_self_checks.len(), 1);
     let check = &report.connector_self_checks[0];
-    assert_eq!(check.connector_id, "fcp.missing:utility:1.0.0");
+    assert_eq!(check.connector_id.as_str(), "fcp.missing:utility:1.0.0");
     assert_eq!(check.report.status, SelfCheckStatus::Failed);
     assert_eq!(check.report.reason_code.as_deref(), Some("not_found"));
 }
@@ -1465,21 +1465,21 @@ async fn doctor_with_mixed_health_statuses() {
     let ok_check = report
         .connector_self_checks
         .iter()
-        .find(|c| c.connector_id.contains("healthy"))
+        .find(|c| c.connector_id.as_str().contains("healthy"))
         .unwrap();
     assert_eq!(ok_check.report.status, SelfCheckStatus::Ok);
 
     let degraded_check = report
         .connector_self_checks
         .iter()
-        .find(|c| c.connector_id.contains("degraded"))
+        .find(|c| c.connector_id.as_str().contains("degraded"))
         .unwrap();
     assert_eq!(degraded_check.report.status, SelfCheckStatus::Degraded);
 
     let failed_check = report
         .connector_self_checks
         .iter()
-        .find(|c| c.connector_id.contains("down"))
+        .find(|c| c.connector_id.as_str().contains("down"))
         .unwrap();
     assert_eq!(failed_check.report.status, SelfCheckStatus::Failed);
 }
@@ -2347,7 +2347,7 @@ fn host_error_is_send_sync() {
 #[test]
 fn doctor_report_baseline_defaults() {
     let report = DoctorReport::baseline("z:private");
-    assert_eq!(report.zone_id, "z:private");
+    assert_eq!(report.zone_id.as_str(), "z:private");
     assert_eq!(report.overall_status, fcp_host::OverallStatus::Ok);
     assert_eq!(report.schema_version, DoctorReport::SCHEMA_VERSION);
     assert!(report.connector_self_checks.is_empty());
@@ -2593,5 +2593,91 @@ async fn connector_summary_serde_roundtrip() {
         assert_eq!(orig.tool_count, parsed.tool_count);
         assert_eq!(orig.max_safety_tier, parsed.max_safety_tier);
         assert_eq!(orig.enabled, parsed.enabled);
+    }
+
+    // ── Execution Form Neutrality ─────────────────────────────────────────
+    // Verify that lifecycle vocabulary is consistent regardless of whether
+    // a connector runs as native binary or WASI sandbox.
+
+    #[test]
+    fn execution_form_health_vocabulary_is_unified() {
+        use fcp_kernel::HealthState;
+
+        let variants: Vec<HealthState> = vec![
+            HealthState::Starting,
+            HealthState::Ready,
+            HealthState::Degraded {
+                reason: "test".into(),
+            },
+            HealthState::Error {
+                reason: "test".into(),
+            },
+            HealthState::Stopping,
+        ];
+
+        for state in &variants {
+            let json = serde_json::to_string(state).unwrap();
+            let roundtrip: HealthState = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_string(&roundtrip).unwrap(),
+                json,
+                "HealthState serde roundtrip must be deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_form_self_check_vocabulary_is_unified() {
+        let ok = SelfCheckReport::ok();
+        let degraded =
+            SelfCheckReport::degraded("rate_limit_near", "API rate near threshold");
+        let failed = SelfCheckReport::failed("auth_expired", "OAuth token expired");
+
+        for report in [&ok, &degraded, &failed] {
+            let json = serde_json::to_string(report).unwrap();
+            let roundtrip: SelfCheckReport = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_string(&roundtrip).unwrap(),
+                json,
+                "SelfCheckReport serde roundtrip must be deterministic"
+            );
+        }
+
+        assert!(matches!(ok.status, SelfCheckStatus::Ok));
+        assert!(matches!(degraded.status, SelfCheckStatus::Degraded));
+        assert!(matches!(failed.status, SelfCheckStatus::Failed));
+    }
+
+    #[test]
+    fn execution_form_doctor_report_schema_stable() {
+        let report = DoctorReport::baseline("z:work");
+        let json = serde_json::to_value(&report).unwrap();
+
+        // Doctor report schema is the same regardless of execution form.
+        assert!(json.get("status").is_some());
+        assert!(json.get("version").is_some());
+        assert!(json.get("zone_id").is_some());
+        assert!(json.get("checkpoint").is_some());
+        assert!(json.get("revocation").is_some());
+        assert!(json.get("audit").is_some());
+    }
+
+    #[test]
+    fn execution_form_connector_health_variants_cover_both_forms() {
+        // ConnectorHealth vocabulary works for both native and WASI.
+        let healthy = ConnectorHealth::Healthy;
+        let degraded = ConnectorHealth::Degraded {
+            reason: "sandbox memory pressure".into(),
+        };
+        let unavailable = ConnectorHealth::Unavailable {
+            reason: "WASI module failed to load".into(),
+            since: Utc::now(),
+        };
+
+        for health in [&healthy, &degraded, &unavailable] {
+            let json = serde_json::to_string(health).unwrap();
+            let roundtrip: ConnectorHealth = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&roundtrip).unwrap(), json);
+        }
     }
 }

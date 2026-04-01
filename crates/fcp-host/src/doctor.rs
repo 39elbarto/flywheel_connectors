@@ -199,6 +199,8 @@ impl DoctorReport {
     /// Schema version constant (aligned with fcp-cli).
     pub const SCHEMA_VERSION: &'static str = "1.1.0";
 
+    /// # Panics
+    /// Panics if `zone_id` is not a valid canonical zone ID.
     #[must_use]
     pub fn baseline(zone_id: &str) -> Self {
         let zone_id: ZoneId = zone_id
@@ -549,6 +551,10 @@ mod tests {
     fn test_connector_id(raw: &str) -> ConnectorId {
         raw.parse()
             .expect("doctor tests must use canonical connector identifiers")
+    }
+
+    fn fixture_connector_id(name: impl AsRef<str>) -> ConnectorId {
+        test_connector_id(&format!("fixture.{}:utility:1.0.0", name.as_ref()))
     }
 
     // ── Mock Registry ──
@@ -1521,7 +1527,7 @@ mod tests {
     #[test]
     fn connector_self_check_clone() {
         let check = ConnectorSelfCheck {
-            connector_id: "test:conn:1.0.0".to_string(),
+            connector_id: test_connector_id("test:conn:1.0.0"),
             report: SelfCheckReport::ok(),
         };
         let cloned = check.clone();
@@ -1534,7 +1540,7 @@ mod tests {
     #[test]
     fn connector_self_check_debug() {
         let check = ConnectorSelfCheck {
-            connector_id: "debug:conn:1.0.0".to_string(),
+            connector_id: test_connector_id("debug:conn:1.0.0"),
             report: SelfCheckReport::ok(),
         };
         let dbg = format!("{check:?}");
@@ -1721,8 +1727,8 @@ mod tests {
 
     #[test]
     fn baseline_report_unicode_zone_id() {
-        let report = DoctorReport::baseline("z:\u{00e9}l\u{00e8}ve");
-        assert_eq!(report.zone_id, "z:\u{00e9}l\u{00e8}ve");
+        let report = DoctorReport::baseline("z:eleve");
+        assert_eq!(report.zone_id.as_str(), "z:eleve");
     }
 
     // ── DoctorRequest unicode ──
@@ -1753,7 +1759,7 @@ mod tests {
     fn overall_status_many_ok_entries() {
         let checks: Vec<ConnectorSelfCheck> = (0..50)
             .map(|i| ConnectorSelfCheck {
-                connector_id: format!("conn_{i}"),
+                connector_id: fixture_connector_id(format!("conn{i}")),
                 report: SelfCheckReport::ok(),
             })
             .collect();
@@ -1764,12 +1770,12 @@ mod tests {
     fn overall_status_last_entry_failed() {
         let mut checks: Vec<ConnectorSelfCheck> = (0..10)
             .map(|i| ConnectorSelfCheck {
-                connector_id: format!("conn_{i}"),
+                connector_id: fixture_connector_id(format!("conn{i}")),
                 report: SelfCheckReport::ok(),
             })
             .collect();
         checks.push(ConnectorSelfCheck {
-            connector_id: "last".to_string(),
+            connector_id: fixture_connector_id("last"),
             report: SelfCheckReport::failed("err", "final failure"),
         });
         assert_eq!(
@@ -2105,7 +2111,7 @@ mod tests {
     #[test]
     fn overall_status_single_ok() {
         let checks = [ConnectorSelfCheck {
-            connector_id: "sole".to_string(),
+            connector_id: fixture_connector_id("sole"),
             report: SelfCheckReport::ok(),
         }];
         assert_eq!(overall_status_from_self_checks(&checks), OverallStatus::Ok);
@@ -2114,7 +2120,7 @@ mod tests {
     #[test]
     fn overall_status_single_degraded() {
         let checks = [ConnectorSelfCheck {
-            connector_id: "sole".to_string(),
+            connector_id: fixture_connector_id("sole"),
             report: SelfCheckReport::degraded("deg", "degraded"),
         }];
         assert_eq!(
@@ -2126,7 +2132,7 @@ mod tests {
     #[test]
     fn overall_status_single_failed() {
         let checks = [ConnectorSelfCheck {
-            connector_id: "sole".to_string(),
+            connector_id: fixture_connector_id("sole"),
             report: SelfCheckReport::failed("err", "failed"),
         }];
         assert_eq!(
@@ -2139,11 +2145,11 @@ mod tests {
     fn overall_status_fail_first_entry() {
         let checks = [
             ConnectorSelfCheck {
-                connector_id: "first".to_string(),
+                connector_id: fixture_connector_id("first"),
                 report: SelfCheckReport::failed("err", "failed"),
             },
             ConnectorSelfCheck {
-                connector_id: "second".to_string(),
+                connector_id: fixture_connector_id("second"),
                 report: SelfCheckReport::ok(),
             },
         ];
@@ -2157,15 +2163,15 @@ mod tests {
     fn overall_status_degraded_middle_entry() {
         let checks = [
             ConnectorSelfCheck {
-                connector_id: "first".to_string(),
+                connector_id: fixture_connector_id("first"),
                 report: SelfCheckReport::ok(),
             },
             ConnectorSelfCheck {
-                connector_id: "middle".to_string(),
+                connector_id: fixture_connector_id("middle"),
                 report: SelfCheckReport::degraded("slow", "slow"),
             },
             ConnectorSelfCheck {
-                connector_id: "last".to_string(),
+                connector_id: fixture_connector_id("last"),
                 report: SelfCheckReport::ok(),
             },
         ];
@@ -2179,7 +2185,7 @@ mod tests {
     fn overall_status_all_degraded() {
         let checks: Vec<ConnectorSelfCheck> = (0u64..3)
             .map(|i| ConnectorSelfCheck {
-                connector_id: format!("d_{i}"),
+                connector_id: fixture_connector_id(format!("d{i}")),
                 report: SelfCheckReport::degraded("slow", "slow"),
             })
             .collect();
@@ -2193,7 +2199,7 @@ mod tests {
     fn overall_status_all_failed() {
         let checks: Vec<ConnectorSelfCheck> = (0u64..3)
             .map(|i| ConnectorSelfCheck {
-                connector_id: format!("f_{i}"),
+                connector_id: fixture_connector_id(format!("f{i}")),
                 report: SelfCheckReport::failed("err", "fail"),
             })
             .collect();
@@ -2210,7 +2216,7 @@ mod tests {
         let baseline = DoctorReport::baseline("z:override");
         assert_eq!(baseline.overall_status, OverallStatus::Ok);
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "bad".to_string(),
+            connector_id: fixture_connector_id("bad"),
             report: SelfCheckReport::failed("err", "fail"),
         }];
         let report = baseline.with_self_checks(checks);
@@ -2221,7 +2227,7 @@ mod tests {
     fn with_self_checks_overrides_baseline_ok_to_warn() {
         let baseline = DoctorReport::baseline("z:override-warn");
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "slow".to_string(),
+            connector_id: fixture_connector_id("slow"),
             report: SelfCheckReport::degraded("lag", "high latency"),
         }];
         let report = baseline.with_self_checks(checks);
@@ -2234,13 +2240,13 @@ mod tests {
         baseline.checkpoint.freshness = FreshnessLevel::Stale;
         baseline.degraded_mode.is_degraded = true;
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "c".to_string(),
+            connector_id: fixture_connector_id("c"),
             report: SelfCheckReport::ok(),
         }];
         let report = baseline.with_self_checks(checks);
         assert_eq!(report.checkpoint.freshness, FreshnessLevel::Stale);
         assert!(report.degraded_mode.is_degraded);
-        assert_eq!(report.zone_id, "z:preserve");
+        assert_eq!(report.zone_id.as_str(), "z:preserve");
     }
 
     // ── NEW: DoctorReport clone with checks ──
@@ -2258,7 +2264,7 @@ mod tests {
             repair_hints: Vec::new(),
         });
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "sc".to_string(),
+            connector_id: fixture_connector_id("sc"),
             report: SelfCheckReport::degraded("slow", "slow"),
         }];
         let report = report.with_self_checks(checks);
@@ -2280,7 +2286,7 @@ mod tests {
     #[test]
     fn connector_self_check_unsupported_report() {
         let check = ConnectorSelfCheck {
-            connector_id: "unsup:conn:1.0.0".to_string(),
+            connector_id: test_connector_id("unsup:conn:1.0.0"),
             report: SelfCheckReport::unsupported(),
         };
         assert_eq!(check.report.status, SelfCheckStatus::Unsupported);
@@ -2291,7 +2297,7 @@ mod tests {
     #[test]
     fn overall_status_unsupported_treated_as_ok() {
         let checks = [ConnectorSelfCheck {
-            connector_id: "unsup".to_string(),
+            connector_id: fixture_connector_id("unsup"),
             report: SelfCheckReport::unsupported(),
         }];
         // Unsupported is neither Failed nor Degraded, so overall should be Ok
@@ -2302,11 +2308,11 @@ mod tests {
     fn with_self_checks_derives_actionable_checks_and_recommended_actions() {
         let checks = vec![
             ConnectorSelfCheck {
-                connector_id: "cfg".to_string(),
+                connector_id: fixture_connector_id("cfg"),
                 report: SelfCheckReport::failed("schema_invalid", "config field is invalid"),
             },
             ConnectorSelfCheck {
-                connector_id: "slow".to_string(),
+                connector_id: fixture_connector_id("slow"),
                 report: SelfCheckReport::degraded("self_check_timeout", "timed out"),
             },
         ];
@@ -2317,7 +2323,8 @@ mod tests {
         assert_eq!(report.checks.len(), 2);
         assert!(report.checks.iter().any(|check| check.name == "schema"
             && check.code.as_deref() == Some("schema_invalid")
-            && check.connector_id.as_deref() == Some("cfg")
+            && check.connector_id.as_ref().map(ConnectorId::as_str)
+                == Some("fixture.cfg:utility:1.0.0")
             && !check.repair_hints.is_empty()));
         assert!(
             report
@@ -2333,11 +2340,11 @@ mod tests {
     fn with_self_checks_deduplicates_recommended_actions() {
         let checks = vec![
             ConnectorSelfCheck {
-                connector_id: "missing-a".to_string(),
+                connector_id: fixture_connector_id("missing-a"),
                 report: SelfCheckReport::failed("not_found", "missing"),
             },
             ConnectorSelfCheck {
-                connector_id: "missing-b".to_string(),
+                connector_id: fixture_connector_id("missing-b"),
                 report: SelfCheckReport::failed("not_found", "missing"),
             },
         ];
@@ -2412,7 +2419,7 @@ mod tests {
     #[test]
     fn doctor_report_json_has_self_checks_key_when_present() {
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "sc".to_string(),
+            connector_id: fixture_connector_id("sc"),
             report: SelfCheckReport::ok(),
         }];
         let report = DoctorReport::baseline("z:with-sc").with_self_checks(checks);
@@ -2424,7 +2431,7 @@ mod tests {
     #[test]
     fn doctor_report_json_has_recommended_actions_when_present() {
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "cfg".to_string(),
+            connector_id: fixture_connector_id("cfg"),
             report: SelfCheckReport::failed("schema_invalid", "config field is invalid"),
         }];
         let report = DoctorReport::baseline("z:with-actions").with_self_checks(checks);
@@ -2511,16 +2518,16 @@ mod tests {
 
     #[test]
     fn baseline_report_long_zone_id() {
-        let long_zone = format!("z:{}", "a".repeat(1000));
+        let long_zone = format!("z:{}", "a".repeat(62));
         let report = DoctorReport::baseline(&long_zone);
-        assert_eq!(report.zone_id, long_zone);
+        assert_eq!(report.zone_id.as_str(), long_zone);
     }
 
     #[test]
     fn baseline_report_zone_id_with_special_chars() {
-        let zone = "z:test-zone_123.prod";
+        let zone = "z:test-zone_123-prod";
         let report = DoctorReport::baseline(zone);
-        assert_eq!(report.zone_id, zone);
+        assert_eq!(report.zone_id.as_str(), zone);
     }
 
     // ── NEW: DoctorReport generated_at is recent ──
@@ -2748,8 +2755,9 @@ mod tests {
 
     #[test]
     fn check_result_from_self_check_ok_returns_none() {
+        let connector_id = fixture_connector_id("ok-conn");
         let check = ConnectorSelfCheck {
-            connector_id: "ok-conn".to_string(),
+            connector_id,
             report: SelfCheckReport::ok(),
         };
         assert!(check_result_from_self_check(&check).is_none());
@@ -2757,20 +2765,22 @@ mod tests {
 
     #[test]
     fn check_result_from_self_check_degraded_returns_warn() {
+        let connector_id = fixture_connector_id("deg-conn");
         let check = ConnectorSelfCheck {
-            connector_id: "deg-conn".to_string(),
+            connector_id: connector_id.clone(),
             report: SelfCheckReport::degraded("slow", "slow response"),
         };
         let result = check_result_from_self_check(&check).unwrap();
         assert_eq!(result.status, CheckStatus::Warn);
         assert_eq!(result.severity, CheckSeverity::Warning);
-        assert_eq!(result.connector_id.as_deref(), Some("deg-conn"));
+        assert_eq!(result.connector_id.as_ref(), Some(&connector_id));
     }
 
     #[test]
     fn check_result_from_self_check_failed_returns_fail_critical() {
+        let connector_id = fixture_connector_id("fail-conn");
         let check = ConnectorSelfCheck {
-            connector_id: "fail-conn".to_string(),
+            connector_id,
             report: SelfCheckReport::failed("err", "error happened"),
         };
         let result = check_result_from_self_check(&check).unwrap();
@@ -2780,8 +2790,9 @@ mod tests {
 
     #[test]
     fn check_result_from_self_check_unsupported_returns_warn_info() {
+        let connector_id = fixture_connector_id("unsup-conn");
         let check = ConnectorSelfCheck {
-            connector_id: "unsup-conn".to_string(),
+            connector_id,
             report: SelfCheckReport::unsupported(),
         };
         let result = check_result_from_self_check(&check).unwrap();
@@ -2792,8 +2803,9 @@ mod tests {
 
     #[test]
     fn check_result_from_self_check_preserves_reason_code() {
+        let connector_id = fixture_connector_id("code-conn");
         let check = ConnectorSelfCheck {
-            connector_id: "code-conn".to_string(),
+            connector_id,
             report: SelfCheckReport::failed("auth_expired", "token is old"),
         };
         let result = check_result_from_self_check(&check).unwrap();
@@ -2802,8 +2814,9 @@ mod tests {
 
     #[test]
     fn check_result_from_self_check_uses_default_message_when_none() {
+        let connector_id = fixture_connector_id("no-msg");
         let check = ConnectorSelfCheck {
-            connector_id: "no-msg".to_string(),
+            connector_id,
             report: SelfCheckReport {
                 status: SelfCheckStatus::Failed,
                 reason_code: Some("runtime_err".to_string()),
@@ -2854,7 +2867,7 @@ mod tests {
     #[test]
     fn repair_hints_schema_classification() {
         let check = ConnectorSelfCheck {
-            connector_id: "cfg".to_string(),
+            connector_id: fixture_connector_id("cfg"),
             report: SelfCheckReport::failed("schema_err", "invalid config"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2865,7 +2878,7 @@ mod tests {
     #[test]
     fn repair_hints_secrets_classification() {
         let check = ConnectorSelfCheck {
-            connector_id: "sec".to_string(),
+            connector_id: fixture_connector_id("sec"),
             report: SelfCheckReport::failed("token_err", "token expired"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2879,7 +2892,7 @@ mod tests {
     #[test]
     fn repair_hints_policy_classification() {
         let check = ConnectorSelfCheck {
-            connector_id: "pol".to_string(),
+            connector_id: fixture_connector_id("pol"),
             report: SelfCheckReport::failed("policy_err", "policy violation"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2893,7 +2906,7 @@ mod tests {
     #[test]
     fn repair_hints_availability_generic() {
         let check = ConnectorSelfCheck {
-            connector_id: "avail".to_string(),
+            connector_id: fixture_connector_id("avail"),
             report: SelfCheckReport::failed("offline_err", "service is offline"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2907,7 +2920,7 @@ mod tests {
     #[test]
     fn repair_hints_availability_timeout_reason_code() {
         let check = ConnectorSelfCheck {
-            connector_id: "timeout".to_string(),
+            connector_id: fixture_connector_id("timeout"),
             report: SelfCheckReport::failed("self_check_timeout", "timed out"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2922,7 +2935,7 @@ mod tests {
     #[test]
     fn repair_hints_availability_not_found_reason_code() {
         let check = ConnectorSelfCheck {
-            connector_id: "nf".to_string(),
+            connector_id: fixture_connector_id("nf"),
             report: SelfCheckReport::failed("not_found", "connector missing"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2937,7 +2950,7 @@ mod tests {
     #[test]
     fn repair_hints_availability_missing_reason_code() {
         let check = ConnectorSelfCheck {
-            connector_id: "miss".to_string(),
+            connector_id: fixture_connector_id("miss"),
             report: SelfCheckReport::failed("missing", "resource is missing"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2947,7 +2960,7 @@ mod tests {
     #[test]
     fn repair_hints_unsupported_classification() {
         let check = ConnectorSelfCheck {
-            connector_id: "unsup".to_string(),
+            connector_id: fixture_connector_id("unsup"),
             report: SelfCheckReport::unsupported(),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2958,7 +2971,7 @@ mod tests {
     #[test]
     fn repair_hints_runtime_fallback() {
         let check = ConnectorSelfCheck {
-            connector_id: "rt".to_string(),
+            connector_id: fixture_connector_id("rt"),
             report: SelfCheckReport::failed("unknown", "something broke"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2968,7 +2981,7 @@ mod tests {
     #[test]
     fn repair_hints_degraded_inserts_prefix_hint() {
         let check = ConnectorSelfCheck {
-            connector_id: "deg".to_string(),
+            connector_id: fixture_connector_id("deg"),
             report: SelfCheckReport::degraded("unknown_slow", "something slow"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -2979,7 +2992,7 @@ mod tests {
     fn repair_hints_degraded_no_duplicate_degraded_hint() {
         // When classification already contains "degraded" in a hint, no prefix inserted
         let check = ConnectorSelfCheck {
-            connector_id: "deg2".to_string(),
+            connector_id: fixture_connector_id("deg2"),
             report: SelfCheckReport::degraded("timeout", "degraded due to slow network"),
         };
         let hints = repair_hints_for_self_check(&check);
@@ -3190,7 +3203,7 @@ mod tests {
     fn check_result_serde_roundtrip() {
         let original = CheckResult {
             name: "roundtrip".to_string(),
-            connector_id: Some("rt:conn:1.0.0".to_string()),
+            connector_id: Some(test_connector_id("rt:conn:1.0.0")),
             code: Some("rt_code".to_string()),
             status: CheckStatus::Warn,
             severity: CheckSeverity::Warning,
@@ -3200,7 +3213,10 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: CheckResult = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "roundtrip");
-        assert_eq!(deserialized.connector_id.as_deref(), Some("rt:conn:1.0.0"));
+        assert_eq!(
+            deserialized.connector_id.as_ref().map(ConnectorId::as_str),
+            Some("rt:conn:1.0.0")
+        );
         assert_eq!(deserialized.code.as_deref(), Some("rt_code"));
         assert_eq!(deserialized.status, CheckStatus::Warn);
         assert_eq!(deserialized.severity, CheckSeverity::Warning);
@@ -3223,13 +3239,13 @@ mod tests {
     #[test]
     fn doctor_report_serde_full_roundtrip() {
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "sc-rt".to_string(),
+            connector_id: fixture_connector_id("sc-rt"),
             report: SelfCheckReport::failed("rt_err", "broken"),
         }];
         let original = DoctorReport::baseline("z:roundtrip").with_self_checks(checks);
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: DoctorReport = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.zone_id, "z:roundtrip");
+        assert_eq!(deserialized.zone_id.as_str(), "z:roundtrip");
         assert_eq!(deserialized.overall_status, OverallStatus::Fail);
         assert_eq!(deserialized.connector_self_checks.len(), 1);
         assert!(!deserialized.recommended_actions.is_empty());
@@ -3293,7 +3309,7 @@ mod tests {
             repair_hints: Vec::new(),
         });
         let checks = vec![ConnectorSelfCheck {
-            connector_id: "new".to_string(),
+            connector_id: fixture_connector_id("new"),
             report: SelfCheckReport::failed("err", "broken"),
         }];
         let report = report.with_self_checks(checks);

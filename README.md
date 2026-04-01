@@ -1467,9 +1467,17 @@ rch exec -- cargo clippy --workspace --all-targets -- -D warnings
 # Narrow crate-local compiler smoke check for fcp-core without syncing the full connector workspace
 (cd .rch/probes/fcp-core && rch exec -- cargo check)
 
+# Narrow crate-local compiler smoke check for fcp-host without syncing the full connector workspace
+(cd .rch/probes/fcp-host && rch exec -- cargo check)
+
 # ASUPERSYNC Tokio guardrail (local + CI parity)
 bash scripts/ci/asupersync_tokio_guard.sh
 ```
+
+The tracked `rch` probes pin their `target-dir` under `/tmp`, outside the synced
+project tree. That keeps `rch` from spending most of the run syncing probe-local
+`target/` artifacts back into the repo after the remote check has already
+finished.
 
 ### Creating a New Connector
 

@@ -150,9 +150,21 @@ For a narrow `fcp-core` compiler smoke check, use the tracked probe package:
 (cd .rch/probes/fcp-core && rch exec -- cargo check)
 ```
 
+For a narrow `fcp-host` library smoke check, use:
+
+```bash
+(cd .rch/probes/fcp-host && rch exec -- cargo check)
+```
+
 This keeps `rch` from syncing the full connector workspace when you only need the
-`fcp-core` library closure. It is a targeted optimization, not a substitute for
-workspace-wide verification after broad or cross-crate changes.
+`fcp-core` or `fcp-host` library closure. These probe packages also pin their
+`target-dir` under `/tmp` so `rch` does not spend minutes syncing probe-local
+build artifacts back into the repo. It is a targeted optimization, not a
+substitute for workspace-wide verification after broad or cross-crate changes.
+
+Do not point one probe at a different crate with `cargo check --manifest-path ...`.
+`rch` plans sync roots from the current probe directory, so that pattern can compile
+stale remote code for the target crate.
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 

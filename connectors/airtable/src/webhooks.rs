@@ -88,7 +88,7 @@ impl Default for WebhookIncludes {
 // ── Webhook registration ───────────────────────────────────────────
 
 /// A registered webhook, returned after successful creation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WebhookRegistration {
     /// The unique webhook ID assigned by Airtable.
     pub id: String,
@@ -107,6 +107,18 @@ pub struct WebhookRegistration {
         rename = "expirationTime"
     )]
     pub expiration_time: Option<String>,
+}
+
+impl std::fmt::Debug for WebhookRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookRegistration")
+            .field("id", &self.id)
+            .field("mac_secret_base64", &"[REDACTED]")
+            .field("cursor", &self.cursor)
+            .field("notification_url", &self.notification_url)
+            .field("expiration_time", &self.expiration_time)
+            .finish()
+    }
 }
 
 // ── Webhook notification payload ───────────────────────────────────

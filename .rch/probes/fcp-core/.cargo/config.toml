@@ -1,0 +1,3 @@
+[build]
+target-dir = "/tmp/rch-fcp-core-target"
+incremental = false

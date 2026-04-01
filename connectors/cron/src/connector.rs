@@ -1068,6 +1068,7 @@ impl CronConnector {
     }
 
     /// Read-only execution list for trait-based invoke (&self).
+    #[allow(clippy::unnecessary_wraps)]
     fn invoke_executions_list_readonly(
         &self,
         input: &serde_json::Value,

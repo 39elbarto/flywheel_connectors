@@ -1,0 +1,67 @@
+# Project-level RCH configuration for flywheel_connectors.
+#
+# This repo accumulates local Beads recovery/state under `.beads/`. We mirror the
+# critical excludes here so `rch config show --sources` exposes them explicitly
+# and upload-side filtering does not depend on `.rchignore` alone. We also keep
+# worker git metadata isolated from local syncs: syncing refs without the
+# corresponding object database can corrupt the worker clone and surface as
+# `RCH-E326` / `fatal: bad object HEAD`.
+#
+# The current upstream `rch` source applies retrieval-side filtering from
+# `.rchignore`, not from `transfer.exclude_patterns`, but older installed `rch`
+# releases can still predate that retrieval fix, so both the repo config and the
+# local client version matter when deep `.beads` recovery trees exist on a
+# worker.
+#
+# Current cargo offload still normalizes worker paths under `/data/projects`, so
+# repo-local config cannot force a fresh remote workspace root.
+
+[transfer]
+exclude_patterns = [
+    # ---- Defaults mirrored from user config ----
+    "target/",
+    "target_*/",
+    "target-*/",
+    ".target-*/",
+    ".cargo-target/",
+    ".cargo-target-rusticmill/",
+    ".cargo-target-*/",
+    ".rch/probes/*/target/",
+    "*.rlib",
+    "*.rmeta",
+    ".git/",
+    ".git/objects/",
+    "node_modules/",
+    ".bun/",
+    ".npm/",
+    ".pnpm-store/",
+    "dist/",
+    "build/",
+    ".next/",
+    ".nuxt/",
+    ".turbo/",
+    ".parcel-cache/",
+    "coverage/",
+    ".nyc_output/",
+    "perf.data",
+    "perf.data.old",
+    "tests/artifacts/",
+    "sample_sqlite_db_files/",
+    "legacy_python_mcp_agent_mail_code/mcp_agent_mail/.venv/",
+
+    # ---- Project-specific excludes ----
+    ".claude/",
+    ".codex/",
+    ".codex-targets/",
+    ".beads_recovery_*/",
+    ".beads/",
+    "**/.beads/",
+    "**/.br_recovery/",
+    "**/.br_history/",
+    ".beads/.codex_recovery_*/",
+    ".beads/.codex_snapshot_*/",
+    ".beads/recovery_*/",
+    ".beads/recovery_manual_*/",
+    ".beads/recovery-promotions/",
+    ".beads/beads.db.rebuild*",
+]

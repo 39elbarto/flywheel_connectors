@@ -32,7 +32,7 @@ pub struct HuggingfaceConnector {
     config: Option<HuggingfaceConfig>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct HuggingfaceConfig {
     #[serde(default)]
     pub api_token: String,
@@ -44,6 +44,18 @@ pub struct HuggingfaceConfig {
     pub retry: HttpRetryConfig,
     #[serde(default = "default_timeout_ms")]
     pub request_timeout_ms: u64,
+}
+
+impl std::fmt::Debug for HuggingfaceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HuggingfaceConfig")
+            .field("api_token", &if self.api_token.is_empty() { "<empty>" } else { "[REDACTED]" })
+            .field("inference_url", &self.inference_url)
+            .field("hub_url", &self.hub_url)
+            .field("retry", &self.retry)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish()
+    }
 }
 
 fn default_inference_url() -> String {

@@ -161,7 +161,9 @@ This keeps `rch` from syncing the full connector workspace when you only need th
 `target-dir` under `/tmp` so `rch` does not spend minutes syncing probe-local
 build artifacts back into the repo, and probe-local `target/` trees remain
 excluded from git and `rch` sync rules so stale worker artifacts do not leak
-back into the workspace. It is a targeted optimization, not a
+back into the workspace. Each probe root also carries its own `.rchignore`
+because `rch` applies retrieval-side filtering relative to the current project
+root, not the repository root. It is a targeted optimization, not a
 substitute for workspace-wide verification after broad or cross-crate changes.
 
 Do not point one probe at a different crate with `cargo check --manifest-path ...`.

@@ -1,0 +1,10 @@
+[package]
+name = "rch-fcp-core-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+fcp-core = { path = "../../../crates/fcp-core" }
+
+[workspace]

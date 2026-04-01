@@ -23,12 +23,23 @@ impl std::fmt::Debug for TenantAccessTokenRequest {
 }
 
 /// Tenant access token response.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TenantAccessTokenResponse {
     pub code: i32,
     pub msg: String,
     pub tenant_access_token: Option<String>,
     pub expire: Option<i64>,
+}
+
+impl std::fmt::Debug for TenantAccessTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantAccessTokenResponse")
+            .field("code", &self.code)
+            .field("msg", &self.msg)
+            .field("tenant_access_token", &self.tenant_access_token.as_ref().map(|_| "[REDACTED]"))
+            .field("expire", &self.expire)
+            .finish()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -220,7 +220,7 @@ pub enum TelegramAuthConfig {
 }
 
 /// Telegram connector configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct TelegramConfig {
     /// Bot credential (required)
     #[serde(default)]
@@ -241,6 +241,18 @@ pub struct TelegramConfig {
     /// Allowed updates filter
     #[serde(default)]
     pub allowed_updates: Vec<String>,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("credential", &self.credential.as_ref().map(|_| "[REDACTED]"))
+            .field("credential_id", &self.credential_id)
+            .field("base_url", &self.base_url)
+            .field("poll_timeout", &self.poll_timeout)
+            .field("allowed_updates", &self.allowed_updates)
+            .finish()
+    }
 }
 
 pub(crate) fn default_poll_timeout() -> i32 {

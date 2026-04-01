@@ -22,9 +22,61 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use fcp_core::{ConnectorId, IdValidationError, OperationId, ZoneId, ZoneIdError};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Enforcement configuration
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EnforcementConfigError {
+    #[error("invalid zone id: {0}")]
+    InvalidZoneId(ZoneIdError),
+    #[error("invalid connector id: {0}")]
+    InvalidConnectorId(IdValidationError),
+    #[error("invalid operation id: {0}")]
+    InvalidOperationId(IdValidationError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AllowedConnector {
+    Any,
+    Connector(ConnectorId),
+}
+
+impl AllowedConnector {
+    fn parse(value: &str) -> Result<Self, IdValidationError> {
+        if value == "*" {
+            Ok(Self::Any)
+        } else {
+            Ok(Self::Connector(value.parse()?))
+        }
+    }
+
+    fn matches(&self, connector_id: &ConnectorId) -> bool {
+        matches!(self, Self::Any) || matches!(self, Self::Connector(id) if id == connector_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AllowedOperation {
+    Any,
+    Operation(OperationId),
+}
+
+impl AllowedOperation {
+    fn parse(value: &str) -> Result<Self, IdValidationError> {
+        if value == "*" {
+            Ok(Self::Any)
+        } else {
+            Ok(Self::Operation(value.parse()?))
+        }
+    }
+
+    fn matches(&self, operation_id: &OperationId) -> bool {
+        matches!(self, Self::Any) || matches!(self, Self::Operation(id) if id == operation_id)
+    }
+}
 
 /// Configurable thresholds for enforcement checks.
 #[derive(Debug, Clone)]
@@ -36,11 +88,11 @@ pub struct EnforcementConfig {
     /// Taint flags that require an explicit approval token.
     pub critical_taint_flags: Vec<String>,
     /// Per-principal allowed zone IDs. Principal → set of zone IDs.
-    pub zone_memberships: HashMap<String, HashSet<String>>,
+    pub zone_memberships: HashMap<String, HashSet<ZoneId>>,
     /// Per-zone allowed connector IDs.
-    pub zone_allowed_connectors: HashMap<String, HashSet<String>>,
+    pub zone_allowed_connectors: HashMap<ZoneId, HashSet<AllowedConnector>>,
     /// Per-zone allowed operation IDs.
-    pub zone_allowed_operations: HashMap<String, HashSet<String>>,
+    pub zone_allowed_operations: HashMap<ZoneId, HashSet<AllowedOperation>>,
 }
 
 impl Default for EnforcementConfig {
@@ -90,27 +142,64 @@ impl EnforcementConfig {
     }
 
     /// Add a zone membership for a principal.
-    pub fn add_zone_membership(&mut self, principal: &str, zone: &str) {
+    ///
+    /// # Errors
+    /// Returns an error if the zone string is not a valid zone ID.
+    pub fn add_zone_membership(
+        &mut self,
+        principal: &str,
+        zone: &str,
+    ) -> Result<(), EnforcementConfigError> {
+        let zone_id = zone
+            .parse()
+            .map_err(EnforcementConfigError::InvalidZoneId)?;
         self.zone_memberships
             .entry(principal.to_string())
             .or_default()
-            .insert(zone.to_string());
+            .insert(zone_id);
+        Ok(())
     }
 
     /// Add an allowed connector to a zone.
-    pub fn add_zone_connector(&mut self, zone: &str, connector: &str) {
+    ///
+    /// # Errors
+    /// Returns an error if the zone or connector string is invalid.
+    pub fn add_zone_connector(
+        &mut self,
+        zone: &str,
+        connector: &str,
+    ) -> Result<(), EnforcementConfigError> {
+        let zone_id = zone
+            .parse()
+            .map_err(EnforcementConfigError::InvalidZoneId)?;
+        let connector = AllowedConnector::parse(connector)
+            .map_err(EnforcementConfigError::InvalidConnectorId)?;
         self.zone_allowed_connectors
-            .entry(zone.to_string())
+            .entry(zone_id)
             .or_default()
-            .insert(connector.to_string());
+            .insert(connector);
+        Ok(())
     }
 
     /// Add an allowed operation to a zone.
-    pub fn add_zone_operation(&mut self, zone: &str, operation: &str) {
+    ///
+    /// # Errors
+    /// Returns an error if the zone or operation string is invalid.
+    pub fn add_zone_operation(
+        &mut self,
+        zone: &str,
+        operation: &str,
+    ) -> Result<(), EnforcementConfigError> {
+        let zone_id = zone
+            .parse()
+            .map_err(EnforcementConfigError::InvalidZoneId)?;
+        let operation = AllowedOperation::parse(operation)
+            .map_err(EnforcementConfigError::InvalidOperationId)?;
         self.zone_allowed_operations
-            .entry(zone.to_string())
+            .entry(zone_id)
             .or_default()
-            .insert(operation.to_string());
+            .insert(operation);
+        Ok(())
     }
 }
 
@@ -500,6 +589,33 @@ pub trait EnforcementCheck: Send + Sync {
     fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome;
 }
 
+fn parse_zone_id_for_check(zone_id: &str) -> Result<ZoneId, CheckOutcome> {
+    zone_id
+        .parse()
+        .map_err(|err: ZoneIdError| CheckOutcome::Deny {
+            reason_code: "INVALID_ZONE_ID".into(),
+            explanation: format!("zone_id '{zone_id}' is not canonical: {err}"),
+        })
+}
+
+fn parse_connector_id_for_check(connector_id: &str) -> Result<ConnectorId, CheckOutcome> {
+    connector_id
+        .parse()
+        .map_err(|err: IdValidationError| CheckOutcome::Deny {
+            reason_code: "INVALID_CONNECTOR_ID".into(),
+            explanation: format!("connector_id '{connector_id}' is not canonical: {err}"),
+        })
+}
+
+fn parse_operation_id_for_check(operation: &str) -> Result<OperationId, CheckOutcome> {
+    operation
+        .parse()
+        .map_err(|err: IdValidationError| CheckOutcome::Deny {
+            reason_code: "INVALID_OPERATION_ID".into(),
+            explanation: format!("operation '{operation}' is not canonical: {err}"),
+        })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Concrete checks
 // ─────────────────────────────────────────────────────────────────────────────
@@ -543,6 +659,15 @@ impl EnforcementCheck for CanonicalDecodeCheck {
                 explanation: "request_id is required and must be non-empty".into(),
             };
         }
+        if let Err(outcome) = parse_connector_id_for_check(&ctx.connector_id) {
+            return outcome;
+        }
+        if let Err(outcome) = parse_operation_id_for_check(&ctx.operation) {
+            return outcome;
+        }
+        if let Err(outcome) = parse_zone_id_for_check(&ctx.zone_id) {
+            return outcome;
+        }
         CheckOutcome::Allow
     }
 }
@@ -563,8 +688,13 @@ impl EnforcementCheck for ZoneMembershipCheck {
             };
         }
 
+        let zone_id = match parse_zone_id_for_check(&ctx.zone_id) {
+            Ok(zone_id) => zone_id,
+            Err(outcome) => return outcome,
+        };
+
         match config.zone_memberships.get(&ctx.principal) {
-            Some(zones) if zones.contains(&ctx.zone_id) => CheckOutcome::Allow,
+            Some(zones) if zones.contains(&zone_id) => CheckOutcome::Allow,
             Some(_) => CheckOutcome::Deny {
                 reason_code: "ZONE_MEMBERSHIP_DENIED".into(),
                 explanation: format!(
@@ -749,10 +879,24 @@ impl EnforcementCheck for PolicyCeilingCheck {
     }
 
     fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome {
+        let zone_id = match parse_zone_id_for_check(&ctx.zone_id) {
+            Ok(zone_id) => zone_id,
+            Err(outcome) => return outcome,
+        };
+        let connector_id = match parse_connector_id_for_check(&ctx.connector_id) {
+            Ok(connector_id) => connector_id,
+            Err(outcome) => return outcome,
+        };
+        let operation_id = match parse_operation_id_for_check(&ctx.operation) {
+            Ok(operation_id) => operation_id,
+            Err(outcome) => return outcome,
+        };
+
         // Check connector allow list for this zone.
-        if let Some(allowed_connectors) = config.zone_allowed_connectors.get(&ctx.zone_id)
-            && !allowed_connectors.contains(&ctx.connector_id)
-            && !allowed_connectors.contains("*")
+        if let Some(allowed_connectors) = config.zone_allowed_connectors.get(&zone_id)
+            && !allowed_connectors
+                .iter()
+                .any(|allowed| allowed.matches(&connector_id))
         {
             return CheckOutcome::Deny {
                 reason_code: "CONNECTOR_NOT_IN_ZONE_POLICY".into(),
@@ -764,9 +908,10 @@ impl EnforcementCheck for PolicyCeilingCheck {
         }
 
         // Check operation allow list for this zone.
-        if let Some(allowed_ops) = config.zone_allowed_operations.get(&ctx.zone_id)
-            && !allowed_ops.contains(&ctx.operation)
-            && !allowed_ops.contains("*")
+        if let Some(allowed_ops) = config.zone_allowed_operations.get(&zone_id)
+            && !allowed_ops
+                .iter()
+                .any(|allowed| allowed.matches(&operation_id))
         {
             return CheckOutcome::Deny {
                 reason_code: "OPERATION_NOT_IN_ZONE_POLICY".into(),
@@ -1016,7 +1161,7 @@ fn test_context() -> EnforcementContext {
         request_id: "req-001".into(),
         connector_id: "slack:utility:1.0.0".into(),
         operation: "send_message".into(),
-        zone_id: "zone-prod".into(),
+        zone_id: "z:prod".into(),
         principal: "agent-alpha".into(),
         capability_claims: vec!["messages.write".into()],
         required_capability: Some("messages.write".into()),
@@ -1085,13 +1230,13 @@ mod tests {
     #[test]
     fn config_add_zone_membership() {
         let mut config = EnforcementConfig::new();
-        config.add_zone_membership("alice", "zone-a");
-        config.add_zone_membership("alice", "zone-b");
-        config.add_zone_membership("bob", "zone-a");
+        config.add_zone_membership("alice", "z:zone-a").unwrap();
+        config.add_zone_membership("alice", "z:zone-b").unwrap();
+        config.add_zone_membership("bob", "z:zone-a").unwrap();
 
         let alice_zones = config.zone_memberships.get("alice").unwrap();
-        assert!(alice_zones.contains("zone-a"));
-        assert!(alice_zones.contains("zone-b"));
+        assert!(alice_zones.contains(&"z:zone-a".parse::<ZoneId>().unwrap()));
+        assert!(alice_zones.contains(&"z:zone-b".parse::<ZoneId>().unwrap()));
         assert_eq!(alice_zones.len(), 2);
 
         let bob_zones = config.zone_memberships.get("bob").unwrap();
@@ -1101,29 +1246,55 @@ mod tests {
     #[test]
     fn config_add_zone_connector() {
         let mut config = EnforcementConfig::new();
-        config.add_zone_connector("zone-a", "slack");
-        config.add_zone_connector("zone-a", "github");
+        config
+            .add_zone_connector("z:zone-a", "slack:utility:1.0.0")
+            .unwrap();
+        config
+            .add_zone_connector("z:zone-a", "github:utility:1.0.0")
+            .unwrap();
 
-        let connectors = config.zone_allowed_connectors.get("zone-a").unwrap();
-        assert!(connectors.contains("slack"));
-        assert!(connectors.contains("github"));
+        let connectors = config
+            .zone_allowed_connectors
+            .get(&"z:zone-a".parse::<ZoneId>().unwrap())
+            .unwrap();
+        assert!(
+            connectors.contains(&AllowedConnector::Connector(ConnectorId::from_static(
+                "slack:utility:1.0.0"
+            )))
+        );
+        assert!(
+            connectors.contains(&AllowedConnector::Connector(ConnectorId::from_static(
+                "github:utility:1.0.0"
+            )))
+        );
     }
 
     #[test]
     fn config_add_zone_operation() {
         let mut config = EnforcementConfig::new();
-        config.add_zone_operation("zone-a", "read");
-        config.add_zone_operation("zone-a", "write");
+        config.add_zone_operation("z:zone-a", "read").unwrap();
+        config.add_zone_operation("z:zone-a", "write").unwrap();
 
-        let ops = config.zone_allowed_operations.get("zone-a").unwrap();
-        assert!(ops.contains("read"));
-        assert!(ops.contains("write"));
+        let ops = config
+            .zone_allowed_operations
+            .get(&"z:zone-a".parse::<ZoneId>().unwrap())
+            .unwrap();
+        assert!(
+            ops.contains(&AllowedOperation::Operation(OperationId::from_static(
+                "read"
+            )))
+        );
+        assert!(
+            ops.contains(&AllowedOperation::Operation(OperationId::from_static(
+                "write"
+            )))
+        );
     }
 
     #[test]
     fn config_clone() {
         let mut original = EnforcementConfig::new();
-        original.add_zone_membership("alice", "zone-a");
+        original.add_zone_membership("alice", "z:zone-a").unwrap();
         let cloned = original.clone();
         assert_eq!(
             cloned.zone_memberships.get("alice").unwrap().len(),
@@ -1136,6 +1307,42 @@ mod tests {
         let config = EnforcementConfig::new();
         let debug = format!("{config:?}");
         assert!(debug.contains("EnforcementConfig"));
+    }
+
+    #[test]
+    fn config_add_zone_membership_rejects_invalid_zone_id() {
+        let mut config = EnforcementConfig::new();
+        assert!(matches!(
+            config.add_zone_membership("alice", "zone-a"),
+            Err(EnforcementConfigError::InvalidZoneId(
+                ZoneIdError::MissingPrefix
+            ))
+        ));
+        assert!(config.zone_memberships.get("alice").is_none());
+    }
+
+    #[test]
+    fn config_add_zone_connector_rejects_invalid_connector_id() {
+        let mut config = EnforcementConfig::new();
+        assert!(matches!(
+            config.add_zone_connector("z:zone-a", "Slack:utility:1.0.0"),
+            Err(EnforcementConfigError::InvalidConnectorId(
+                IdValidationError::UppercaseNotAllowed
+            ))
+        ));
+        assert!(config.zone_allowed_connectors.is_empty());
+    }
+
+    #[test]
+    fn config_add_zone_operation_rejects_invalid_operation_id() {
+        let mut config = EnforcementConfig::new();
+        assert!(matches!(
+            config.add_zone_operation("z:zone-a", "send message"),
+            Err(EnforcementConfigError::InvalidOperationId(
+                IdValidationError::InvalidChar { .. }
+            ))
+        ));
+        assert!(config.zone_allowed_operations.is_empty());
     }
 
     // ── EnforcementContextBuilder ──
@@ -1626,6 +1833,43 @@ mod tests {
         assert!(outcome.is_deny());
     }
 
+    #[test]
+    fn canonical_decode_deny_invalid_connector_id() {
+        let mut ctx = test_context();
+        // Use an actually invalid ID (uppercase is rejected by canonical ID validation)
+        ctx.connector_id = "INVALID_UPPERCASE".into();
+        let config = EnforcementConfig::default();
+        let outcome = CanonicalDecodeCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "INVALID_CONNECTOR_ID");
+        }
+    }
+
+    #[test]
+    fn canonical_decode_deny_invalid_operation_id() {
+        let mut ctx = test_context();
+        ctx.operation = "send message".into();
+        let config = EnforcementConfig::default();
+        let outcome = CanonicalDecodeCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "INVALID_OPERATION_ID");
+        }
+    }
+
+    #[test]
+    fn canonical_decode_deny_invalid_zone_id() {
+        let mut ctx = test_context();
+        ctx.zone_id = "zone-prod".into();
+        let config = EnforcementConfig::default();
+        let outcome = CanonicalDecodeCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "INVALID_ZONE_ID");
+        }
+    }
+
     // ── ZoneMembershipCheck ──
 
     #[test]
@@ -1645,7 +1889,7 @@ mod tests {
     fn zone_membership_allow_member() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_membership("agent-alpha", "zone-prod");
+        config.add_zone_membership("agent-alpha", "z:prod").unwrap();
         let outcome = ZoneMembershipCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -1654,7 +1898,9 @@ mod tests {
     fn zone_membership_deny_not_member() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_membership("agent-alpha", "zone-staging");
+        config
+            .add_zone_membership("agent-alpha", "z:staging")
+            .unwrap();
         let outcome = ZoneMembershipCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny {
@@ -1664,7 +1910,7 @@ mod tests {
         {
             assert_eq!(reason_code, "ZONE_MEMBERSHIP_DENIED");
             assert!(explanation.contains("agent-alpha"));
-            assert!(explanation.contains("zone-prod"));
+            assert!(explanation.contains("z:prod"));
         }
     }
 
@@ -1672,7 +1918,7 @@ mod tests {
     fn zone_membership_deny_unknown_principal() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_membership("agent-beta", "zone-prod");
+        config.add_zone_membership("agent-beta", "z:prod").unwrap();
         let outcome = ZoneMembershipCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
@@ -1684,8 +1930,10 @@ mod tests {
     fn zone_membership_allow_multiple_zones() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_membership("agent-alpha", "zone-staging");
-        config.add_zone_membership("agent-alpha", "zone-prod");
+        config
+            .add_zone_membership("agent-alpha", "z:staging")
+            .unwrap();
+        config.add_zone_membership("agent-alpha", "z:prod").unwrap();
         let outcome = ZoneMembershipCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2086,7 +2334,9 @@ mod tests {
     fn policy_ceiling_allow_connector_permitted() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
+        config
+            .add_zone_connector("z:prod", "slack:utility:1.0.0")
+            .unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2095,7 +2345,9 @@ mod tests {
     fn policy_ceiling_deny_connector_not_allowed() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "github:utility:1.0.0");
+        config
+            .add_zone_connector("z:prod", "github:utility:1.0.0")
+            .unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
@@ -2107,7 +2359,7 @@ mod tests {
     fn policy_ceiling_allow_operation_permitted() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_operation("zone-prod", "send_message");
+        config.add_zone_operation("z:prod", "send_message").unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2116,7 +2368,7 @@ mod tests {
     fn policy_ceiling_allow_connector_wildcard() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "*");
+        config.add_zone_connector("z:prod", "*").unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2125,8 +2377,10 @@ mod tests {
     fn policy_ceiling_allow_operation_wildcard() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
-        config.add_zone_operation("zone-prod", "*");
+        config
+            .add_zone_connector("z:prod", "slack:utility:1.0.0")
+            .unwrap();
+        config.add_zone_operation("z:prod", "*").unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2135,7 +2389,9 @@ mod tests {
     fn policy_ceiling_deny_operation_not_allowed() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_operation("zone-prod", "list_channels");
+        config
+            .add_zone_operation("z:prod", "list_channels")
+            .unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
@@ -2147,8 +2403,10 @@ mod tests {
     fn policy_ceiling_allow_both_permitted() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
-        config.add_zone_operation("zone-prod", "send_message");
+        config
+            .add_zone_connector("z:prod", "slack:utility:1.0.0")
+            .unwrap();
+        config.add_zone_operation("z:prod", "send_message").unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2157,8 +2415,10 @@ mod tests {
     fn policy_ceiling_deny_connector_blocks_before_operation() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "github:utility:1.0.0");
-        config.add_zone_operation("zone-prod", "send_message");
+        config
+            .add_zone_connector("z:prod", "github:utility:1.0.0")
+            .unwrap();
+        config.add_zone_operation("z:prod", "send_message").unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
@@ -2170,8 +2430,10 @@ mod tests {
     fn policy_ceiling_other_zone_rules_dont_affect() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-staging", "github:utility:1.0.0");
-        // zone-prod has no rules, so allow.
+        config
+            .add_zone_connector("z:staging", "github:utility:1.0.0")
+            .unwrap();
+        // z:prod has no rules, so allow.
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -2557,7 +2819,9 @@ mod tests {
     #[test]
     fn pipeline_evaluate_deny_at_policy_ceiling() {
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "github:utility:1.0.0");
+        config
+            .add_zone_connector("z:prod", "github:utility:1.0.0")
+            .unwrap();
         let pipeline = EnforcementPipeline::with_config(config);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
@@ -2934,10 +3198,12 @@ mod tests {
     #[test]
     fn zone_membership_check_with_many_zones() {
         let mut ctx = test_context();
-        ctx.zone_id = "zone-99".into();
+        ctx.zone_id = "z:zone-99".into();
         let mut config = EnforcementConfig::default();
         for i in 0..100 {
-            config.add_zone_membership("agent-alpha", &format!("zone-{i}"));
+            config
+                .add_zone_membership("agent-alpha", &format!("z:zone-{i}"))
+                .unwrap();
         }
         let outcome = ZoneMembershipCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
@@ -2977,9 +3243,15 @@ mod tests {
     fn policy_ceiling_multiple_connectors_in_zone() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "github:utility:1.0.0");
-        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
-        config.add_zone_connector("zone-prod", "jira:utility:1.0.0");
+        config
+            .add_zone_connector("z:prod", "github:utility:1.0.0")
+            .unwrap();
+        config
+            .add_zone_connector("z:prod", "slack:utility:1.0.0")
+            .unwrap();
+        config
+            .add_zone_connector("z:prod", "jira:utility:1.0.0")
+            .unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -3042,9 +3314,11 @@ mod tests {
     #[test]
     fn pipeline_zone_membership_configured_allow_passes_through() {
         let mut config = EnforcementConfig::default();
-        config.add_zone_membership("agent-alpha", "zone-prod");
-        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
-        config.add_zone_operation("zone-prod", "send_message");
+        config.add_zone_membership("agent-alpha", "z:prod").unwrap();
+        config
+            .add_zone_connector("z:prod", "slack:utility:1.0.0")
+            .unwrap();
+        config.add_zone_operation("z:prod", "send_message").unwrap();
         let pipeline = EnforcementPipeline::with_config(config);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
@@ -3054,7 +3328,9 @@ mod tests {
     #[test]
     fn pipeline_fully_configured_deny_zone_membership() {
         let mut config = EnforcementConfig::default();
-        config.add_zone_membership("agent-alpha", "zone-staging");
+        config
+            .add_zone_membership("agent-alpha", "z:staging")
+            .unwrap();
         let pipeline = EnforcementPipeline::with_config(config);
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
@@ -3146,8 +3422,8 @@ mod tests {
     #[test]
     fn config_add_duplicate_zone_membership_is_idempotent() {
         let mut config = EnforcementConfig::new();
-        config.add_zone_membership("alice", "zone-a");
-        config.add_zone_membership("alice", "zone-a");
+        config.add_zone_membership("alice", "z:zone-a").unwrap();
+        config.add_zone_membership("alice", "z:zone-a").unwrap();
         let zones = config.zone_memberships.get("alice").unwrap();
         assert_eq!(zones.len(), 1);
     }
@@ -3155,18 +3431,28 @@ mod tests {
     #[test]
     fn config_add_duplicate_zone_connector_is_idempotent() {
         let mut config = EnforcementConfig::new();
-        config.add_zone_connector("zone-a", "slack");
-        config.add_zone_connector("zone-a", "slack");
-        let connectors = config.zone_allowed_connectors.get("zone-a").unwrap();
+        config
+            .add_zone_connector("z:zone-a", "slack:utility:1.0.0")
+            .unwrap();
+        config
+            .add_zone_connector("z:zone-a", "slack:utility:1.0.0")
+            .unwrap();
+        let connectors = config
+            .zone_allowed_connectors
+            .get(&"z:zone-a".parse::<ZoneId>().unwrap())
+            .unwrap();
         assert_eq!(connectors.len(), 1);
     }
 
     #[test]
     fn config_add_duplicate_zone_operation_is_idempotent() {
         let mut config = EnforcementConfig::new();
-        config.add_zone_operation("zone-a", "read");
-        config.add_zone_operation("zone-a", "read");
-        let ops = config.zone_allowed_operations.get("zone-a").unwrap();
+        config.add_zone_operation("z:zone-a", "read").unwrap();
+        config.add_zone_operation("z:zone-a", "read").unwrap();
+        let ops = config
+            .zone_allowed_operations
+            .get(&"z:zone-a".parse::<ZoneId>().unwrap())
+            .unwrap();
         assert_eq!(ops.len(), 1);
     }
 
@@ -3497,8 +3783,12 @@ mod tests {
     fn policy_ceiling_connector_allowed_operation_denied() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
-        config.add_zone_operation("zone-prod", "list_channels");
+        config
+            .add_zone_connector("z:prod", "slack:utility:1.0.0")
+            .unwrap();
+        config
+            .add_zone_operation("z:prod", "list_channels")
+            .unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
@@ -3510,8 +3800,10 @@ mod tests {
     fn policy_ceiling_no_connector_rules_but_operation_rules_deny() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        // No connector rules for zone-prod, but operation rules exist
-        config.add_zone_operation("zone-prod", "list_channels");
+        // No connector rules for z:prod, but operation rules exist
+        config
+            .add_zone_operation("z:prod", "list_channels")
+            .unwrap();
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
@@ -3523,9 +3815,11 @@ mod tests {
     fn policy_ceiling_rules_for_other_zone_only() {
         let ctx = test_context();
         let mut config = EnforcementConfig::default();
-        config.add_zone_connector("zone-dev", "slack:utility:1.0.0");
-        config.add_zone_operation("zone-dev", "send_message");
-        // zone-prod has no rules → allow
+        config
+            .add_zone_connector("z:dev", "slack:utility:1.0.0")
+            .unwrap();
+        config.add_zone_operation("z:dev", "send_message").unwrap();
+        // z:prod has no rules → allow
         let outcome = PolicyCeilingCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
@@ -3805,9 +4099,11 @@ mod tests {
         let mut config = EnforcementConfig::new()
             .with_checkpoint_max_age_ms(100_000)
             .with_revocation_max_age_ms(200_000);
-        config.add_zone_membership("agent-alpha", "zone-prod");
-        config.add_zone_connector("zone-prod", "slack:utility:1.0.0");
-        config.add_zone_operation("zone-prod", "send_message");
+        config.add_zone_membership("agent-alpha", "z:prod").unwrap();
+        config
+            .add_zone_connector("z:prod", "slack:utility:1.0.0")
+            .unwrap();
+        config.add_zone_operation("z:prod", "send_message").unwrap();
 
         let pipeline = EnforcementPipeline::with_config(config);
         let ctx = test_context();
@@ -3823,7 +4119,9 @@ mod tests {
     #[test]
     fn pipeline_deny_zone_membership_before_capability() {
         let mut config = EnforcementConfig::default();
-        config.add_zone_membership("agent-alpha", "zone-staging");
+        config
+            .add_zone_membership("agent-alpha", "z:staging")
+            .unwrap();
         let pipeline = EnforcementPipeline::with_config(config);
         let mut ctx = test_context();
         ctx.capability_claims = Vec::new(); // would also fail

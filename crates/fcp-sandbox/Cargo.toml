@@ -1,6 +1,6 @@
 [package]
 name = "fcp-sandbox"
-description = "FCP2 sandbox enforcement (OS sandbox profiles + egress guard)"
+description = "FCP sandbox enforcement (OS sandbox profiles + egress guard)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

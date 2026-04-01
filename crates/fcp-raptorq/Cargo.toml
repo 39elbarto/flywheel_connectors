@@ -1,6 +1,6 @@
 [package]
 name = "fcp-raptorq"
-description = "FCP2 RaptorQ encoding/decoding and chunking policy"
+description = "FCP RaptorQ encoding/decoding and chunking policy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "fcp-tailscale"
-description = "FCP2 Tailscale integration (mesh identity and peer discovery)"
+description = "FCP Tailscale integration (mesh identity and peer discovery)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

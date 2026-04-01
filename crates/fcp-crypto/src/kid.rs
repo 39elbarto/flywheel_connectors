@@ -1,4 +1,4 @@
-//! Key Identifier (KID) types for FCP2.
+//! Key Identifier (KID) types for FCP.
 //!
 //! KIDs are 8-byte identifiers used to route signature verification and
 //! decryption to the correct key. They are derived from the public key

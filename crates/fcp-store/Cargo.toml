@@ -1,6 +1,6 @@
 [package]
 name = "fcp-store"
-description = "FCP2 object and symbol stores (placement, repair, retention)"
+description = "FCP object and symbol stores (placement, repair, retention)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

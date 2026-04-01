@@ -1,4 +1,4 @@
-//! Signature canonicalization helpers for FCP2.
+//! Signature canonicalization helpers for FCP.
 //!
 //! Provides a single signing-bytes procedure to prevent cross-implementation drift:
 //! 1. Define an "unsigned view" of an object (remove `signature`/`quorum_signatures` fields)

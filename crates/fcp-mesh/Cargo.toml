@@ -1,6 +1,6 @@
 [package]
 name = "fcp-mesh"
-description = "FCP2 mesh node orchestration (routing, admission, gossip, leases)"
+description = "FCP mesh node orchestration (routing, admission, gossip, leases)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

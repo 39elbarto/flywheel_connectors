@@ -1,6 +1,6 @@
 [package]
 name = "fcp-audit"
-description = "FCP2 audit chain and receipt primitives"
+description = "FCP audit chain and receipt primitives"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

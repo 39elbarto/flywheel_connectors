@@ -1,6 +1,6 @@
 [package]
 name = "fcp-bootstrap"
-description = "FCP2 bootstrap and genesis: first-run workflow, owner key ceremony, enrollment"
+description = "FCP bootstrap and genesis: first-run workflow, owner key ceremony, enrollment"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

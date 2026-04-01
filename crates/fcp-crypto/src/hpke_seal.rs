@@ -1,4 +1,4 @@
-//! HPKE (Hybrid Public Key Encryption) for FCP2.
+//! HPKE (Hybrid Public Key Encryption) for FCP.
 //!
 //! Implements RFC 9180 sealed boxes for distributing zone keys and shares
 //! to node encryption keys.

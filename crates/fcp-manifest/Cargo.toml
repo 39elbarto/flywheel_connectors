@@ -1,6 +1,6 @@
 [package]
 name = "fcp-manifest"
-description = "FCP2 connector manifest parsing and validation"
+description = "FCP connector manifest parsing and validation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "fcp-protocol"
-description = "FCP2 protocol framing and session primitives (FCPS/FCPC)"
+description = "FCP protocol framing and session primitives (FCPS/FCPC)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

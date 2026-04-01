@@ -1,6 +1,6 @@
 [package]
 name = "fcp-cbor"
-description = "FCP2 canonical serialization (deterministic CBOR + schema hashing)"
+description = "FCP canonical serialization (deterministic CBOR + schema hashing)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,4 +1,4 @@
-//! Ed25519 signing and verification for FCP2.
+//! Ed25519 signing and verification for FCP.
 //!
 //! This module provides type-safe wrappers around ed25519-dalek with
 //! proper domain separation and key ID derivation.
@@ -21,7 +21,7 @@ pub const SIGNATURE_SIZE: usize = 64;
 /// Ed25519 signing key (secret key).
 ///
 /// This is a wrapper around `ed25519_dalek::SigningKey` with zeroize-on-drop
-/// semantics and FCP2 key ID derivation.
+/// semantics and FCP key ID derivation.
 #[derive(ZeroizeOnDrop)]
 pub struct Ed25519SigningKey {
     inner: SigningKey,

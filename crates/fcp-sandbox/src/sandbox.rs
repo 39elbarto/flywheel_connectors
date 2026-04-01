@@ -1,6 +1,6 @@
 //! OS-level sandbox enforcement.
 //!
-//! This module provides platform-specific process isolation for FCP2 connectors.
+//! This module provides platform-specific process isolation for FCP connectors.
 //! The sandbox enforces:
 //!
 //! - Resource limits (memory, CPU, wall-clock time)

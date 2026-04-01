@@ -1,6 +1,6 @@
 [package]
 name = "fcp-crypto"
-description = "FCP2 crypto primitives and helpers"
+description = "FCP crypto primitives and helpers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,4 +1,4 @@
-//! HKDF-SHA256 key derivation for FCP2.
+//! HKDF-SHA256 key derivation for FCP.
 //!
 //! Provides HMAC-based Key Derivation Function as specified in RFC 5869.
 

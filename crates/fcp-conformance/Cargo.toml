@@ -1,6 +1,6 @@
 [package]
 name = "fcp-conformance"
-description = "FCP2 conformance tooling: golden vectors, interop helpers, and harness glue"
+description = "FCP conformance tooling: golden vectors, interop helpers, and harness glue"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

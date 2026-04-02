@@ -1040,11 +1040,24 @@ struct LeaseContentionStateEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LeaseContentionAuthorityEvidence {
+    coordinator_node_id: Option<String>,
+    failover_order: Vec<String>,
+    active_holder_node_id: Option<String>,
+    active_fencing_token: Option<u64>,
+    record_statuses: Vec<fcp_mesh::AuthorityStatus>,
+    record_reason_codes: Vec<fcp_mesh::AuthorityReasonCode>,
+    timeline_operations: Vec<String>,
+    timeline_reason_codes: Vec<fcp_mesh::AuthorityReasonCode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LeaseContentionArtifactBundle {
     scenario_key: String,
     contract_id: String,
     replay: LeaseContentionReplayEvidence,
     state: LeaseContentionStateEvidence,
+    authority: LeaseContentionAuthorityEvidence,
     assertions: Vec<ScenarioAssertionEvidence>,
     log_entry_count: usize,
     log_jsonl_valid: bool,
@@ -1063,6 +1076,7 @@ fn build_lease_contention_artifact_bundle(
     contender_eligible: bool,
     lease_holder_preferred: bool,
     singleton_writer_enforced: bool,
+    authority_view: &fcp_mesh::AuthorityView,
     log_jsonl_valid: bool,
 ) -> LeaseContentionArtifactBundle {
     LeaseContentionArtifactBundle {
@@ -1083,6 +1097,42 @@ fn build_lease_contention_artifact_bundle(
             contender_eligible,
             lease_holder_preferred,
             singleton_writer_enforced,
+        },
+        authority: LeaseContentionAuthorityEvidence {
+            coordinator_node_id: authority_view
+                .coordinator
+                .as_ref()
+                .map(|node| node.as_str().to_string()),
+            failover_order: authority_view
+                .failover_order
+                .iter()
+                .map(|node| node.as_str().to_string())
+                .collect(),
+            active_holder_node_id: authority_view
+                .active_holder
+                .as_ref()
+                .map(|node| node.as_str().to_string()),
+            active_fencing_token: authority_view.active_fencing_token,
+            record_statuses: authority_view
+                .records
+                .iter()
+                .map(|record| record.status)
+                .collect(),
+            record_reason_codes: authority_view
+                .records
+                .iter()
+                .map(|record| record.reason_code)
+                .collect(),
+            timeline_operations: authority_view
+                .timeline
+                .iter()
+                .map(|event| event.operation.clone())
+                .collect(),
+            timeline_reason_codes: authority_view
+                .timeline
+                .iter()
+                .map(|event| event.reason_code)
+                .collect(),
         },
         assertions: scenario_assertions(logs, LEASE_CONTENTION_SCENARIO),
         log_entry_count: logs.len(),
@@ -2416,6 +2466,7 @@ async fn scenario_lease_contention() {
         subject_id: contested_obj,
         purpose: fcp_mesh::LeasePurpose::SingletonWriter,
         expires_at: now_ms / 1000 + lease_expires_in_secs,
+        fencing_token: 11,
     };
 
     // Update node A's state with the held lease
@@ -2460,16 +2511,24 @@ async fn scenario_lease_contention() {
         preferred_symbols: Vec::new(),
         required_symbols: Vec::new(),
         singleton_writer: true,
+        authority_subject: Some(contested_obj),
         target_zone: None,
         excluded_nodes: HashSet::new(),
     };
 
     // Node B plans execution - it should see node A as the lease holder and
     // prioritize A (or deprioritize B since A already holds the lease)
-    let candidates = harness.nodes[1]
-        .mesh_mut()
-        .unwrap()
-        .plan_execution(&planner_ctx, now_ms);
+    let (candidates, authority_view) = {
+        let mesh = harness.nodes[1].mesh_mut().unwrap();
+        let candidates = mesh.plan_execution(&planner_ctx, now_ms);
+        let authority_view = mesh.authority_view(
+            &ZoneId::work(),
+            &contested_obj,
+            fcp_mesh::LeasePurpose::SingletonWriter,
+            now_ms,
+        );
+        (candidates, authority_view)
+    };
 
     // In singleton_writer mode, the lease holder (node A) should be prioritized
     let candidate_for_node_a = candidates.iter().find(|c| c.node_id == node_a_id);
@@ -2484,6 +2543,20 @@ async fn scenario_lease_contention() {
     };
     let singleton_writer_enforced =
         lease_holder_candidate_present && lease_holder_preferred && !contender_eligible;
+    let authority_holder_matches = authority_view
+        .active_holder
+        .as_ref()
+        .is_some_and(|holder| holder.as_str() == node_a_id.as_str());
+    let authority_records_active = authority_view
+        .records
+        .iter()
+        .filter(|record| record.status == fcp_mesh::AuthorityStatus::Active)
+        .count();
+    let authority_timeline_ops = authority_view
+        .timeline
+        .iter()
+        .map(|event| event.operation.as_str())
+        .collect::<Vec<_>>();
 
     emit_scenario_log(
         &harness.logs,
@@ -2502,6 +2575,9 @@ async fn scenario_lease_contention() {
             "node_b_eligible": candidate_for_node_b.map(|c| c.eligible),
             "lease_holder_preferred": lease_holder_preferred,
             "singleton_writer_enforced": singleton_writer_enforced,
+            "authority_holder_matches": authority_holder_matches,
+            "authority_active_fencing_token": authority_view.active_fencing_token,
+            "authority_timeline_operations": authority_timeline_ops,
         }),
     );
 
@@ -2536,6 +2612,7 @@ async fn scenario_lease_contention() {
         contender_eligible,
         lease_holder_preferred,
         singleton_writer_enforced,
+        &authority_view,
         log_jsonl_valid,
     );
     assert_eq!(artifact_bundle.contract_id, LEASE_CONTENTION_CONTRACT_ID);
@@ -2583,6 +2660,26 @@ async fn scenario_lease_contention() {
         artifact_bundle.state.singleton_writer_enforced,
         singleton_writer_enforced
     );
+    assert_eq!(
+        artifact_bundle.authority.active_holder_node_id.as_deref(),
+        Some(node_a_id.as_str())
+    );
+    assert_eq!(artifact_bundle.authority.active_fencing_token, Some(11));
+    assert_eq!(
+        artifact_bundle.authority.record_statuses,
+        vec![fcp_mesh::AuthorityStatus::Active]
+    );
+    assert_eq!(
+        artifact_bundle.authority.record_reason_codes,
+        vec![fcp_mesh::AuthorityReasonCode::ActiveAuthority]
+    );
+    assert_eq!(
+        artifact_bundle.authority.timeline_operations,
+        vec![
+            "coordinator_selected".to_string(),
+            "authority_active".to_string()
+        ]
+    );
     assert_eq!(artifact_bundle.log_entry_count, lease_contention_logs.len());
 
     let artifact_json =
@@ -2594,6 +2691,19 @@ async fn scenario_lease_contention() {
     assert!(
         lease_holder_candidate_present,
         "lease holder should be among singleton-writer candidates"
+    );
+    assert!(
+        authority_holder_matches,
+        "authority evidence should identify node A as the active holder"
+    );
+    assert_eq!(
+        authority_records_active, 1,
+        "expected exactly one active authority record for the contested object"
+    );
+    assert_eq!(
+        authority_timeline_ops,
+        vec!["coordinator_selected", "authority_active"],
+        "lease contention should emit a deterministic authority timeline"
     );
     assert!(
         singleton_writer_enforced,

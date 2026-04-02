@@ -12,14 +12,15 @@ use fcp_core::{
 };
 use fcp_store::{
     AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig,
-    GcDecisionAction, GcReasonCode, GcRoots, MemoryObjectStore, MemoryObjectStoreConfig,
-    MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
-    ObjectTransmissionInfo, OfflineAccess, OfflineCapability, OfflineStatus, RepairController,
-    RepairControllerConfig, RepairEvaluationReasonCode, RepairPlanningOptions, RepairQueueAction,
-    RepairReasonCode, RepairRequest, RepairResult, RepairStats, StoredSymbol, SymbolDistribution,
-    SymbolMeta, SymbolStore, snapshot_zone_lifecycle,
+    GcDecisionAction, GcReasonCode, GcRoots, GcRunReport, MemoryObjectStore,
+    MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore,
+    ObjectSymbolMeta, ObjectTransmissionInfo, OfflineAccess, OfflineCapability, OfflineStatus,
+    RepairController, RepairControllerConfig, RepairEvaluationReasonCode, RepairEvaluationReport,
+    RepairPlan, RepairPlanningOptions, RepairQueueAction, RepairReasonCode, RepairRequest,
+    RepairResult, RepairStats, StoredSymbol, SymbolDistribution, SymbolMeta, SymbolStore,
+    ZoneLifecycleSnapshot, snapshot_zone_lifecycle,
 };
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,6 +59,214 @@ fn default_repair_config() -> RepairControllerConfig {
         repair_interval: Duration::from_secs(60),
         min_deficit_bps: 500,
         max_symbols_per_repair: 100,
+    }
+}
+
+const OFFLINE_REPAIR_E2E_SCENARIO: &str = "offline_repair_lifecycle_gc";
+const OFFLINE_REPAIR_E2E_CONTRACT_ID: &str = "contract.offline_repair_e2e.lifecycle_gc";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OfflineRepairPhaseAssertion {
+    phase: String,
+    passed: bool,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OfflineRepairStateEvidence {
+    root_id: ObjectId,
+    payload_id: ObjectId,
+    expired_id: ObjectId,
+    repair_queue_depth_before: usize,
+    repair_queue_depth_after: usize,
+    repair_reason_before: RepairEvaluationReasonCode,
+    repair_reason_after: RepairEvaluationReasonCode,
+    repair_plan_reason_before: RepairReasonCode,
+    plan_action_count_before: usize,
+    plan_action_count_after: usize,
+    reconstructable_before: bool,
+    reconstructable_after: bool,
+    placement_before: bool,
+    placement_after: bool,
+    gc_root_count: usize,
+    gc_evicted: usize,
+    gc_expired_leases: usize,
+    root_retained_after_gc: bool,
+    payload_retained_after_gc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OfflineRepairArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    phase_assertions: Vec<OfflineRepairPhaseAssertion>,
+    state: OfflineRepairStateEvidence,
+    before_repair: ZoneLifecycleSnapshot,
+    repair_evaluation_before: RepairEvaluationReport,
+    repair_plan_before: RepairPlan,
+    after_repair: ZoneLifecycleSnapshot,
+    repair_evaluation_after: RepairEvaluationReport,
+    repair_plan_after: RepairPlan,
+    gc_report: GcRunReport,
+}
+
+fn build_offline_repair_artifact_bundle(
+    root_id: ObjectId,
+    payload_id: ObjectId,
+    expired_id: ObjectId,
+    before_repair: ZoneLifecycleSnapshot,
+    repair_evaluation_before: RepairEvaluationReport,
+    repair_plan_before: RepairPlan,
+    after_repair: ZoneLifecycleSnapshot,
+    repair_evaluation_after: RepairEvaluationReport,
+    repair_plan_after: RepairPlan,
+    gc_report: GcRunReport,
+    root_retained_after_gc: bool,
+    payload_retained_after_gc: bool,
+) -> OfflineRepairArtifactBundle {
+    let payload_before = before_repair
+        .objects
+        .iter()
+        .find(|object| object.object_id == payload_id)
+        .expect("payload before snapshot present");
+    let payload_after = after_repair
+        .objects
+        .iter()
+        .find(|object| object.object_id == payload_id)
+        .expect("payload after snapshot present");
+    let before_decision = repair_evaluation_before
+        .decisions
+        .iter()
+        .find(|decision| decision.object_id == payload_id)
+        .expect("payload queued before repair");
+    let after_decision = repair_evaluation_after
+        .decisions
+        .iter()
+        .find(|decision| decision.object_id == payload_id)
+        .expect("payload refreshed after repair");
+    let plan_action_before = repair_plan_before
+        .actions
+        .iter()
+        .find(|action| action.object_id == payload_id)
+        .expect("payload plan action before repair");
+
+    let phase_assertions = vec![
+        OfflineRepairPhaseAssertion {
+            phase: "setup".to_string(),
+            passed: before_repair.object_count == 3
+                && before_repair.reachable_count == 2
+                && before_repair.unreachable_count == 1,
+            detail: format!(
+                "objects={} reachable={} unreachable={}",
+                before_repair.object_count,
+                before_repair.reachable_count,
+                before_repair.unreachable_count
+            ),
+        },
+        OfflineRepairPhaseAssertion {
+            phase: "evaluate_before_repair".to_string(),
+            passed: repair_evaluation_before.queue_depth_after == 1
+                && before_decision.action == RepairQueueAction::Queue
+                && before_decision.reason_code == RepairEvaluationReasonCode::PolicySloDeficit
+                && plan_action_before.reason_code == RepairReasonCode::PolicySloDeficit,
+            detail: format!(
+                "queue_depth_after={} action={:?} reason={:?}",
+                repair_evaluation_before.queue_depth_after,
+                before_decision.action,
+                before_decision.reason_code
+            ),
+        },
+        OfflineRepairPhaseAssertion {
+            phase: "repair".to_string(),
+            passed: payload_before.reconstructable == Some(false)
+                && payload_before.meets_placement_policy == Some(false)
+                && payload_after.reconstructable == Some(true)
+                && payload_after.meets_placement_policy == Some(true),
+            detail: format!(
+                "reconstructable_before={:?} reconstructable_after={:?} placement_before={:?} placement_after={:?}",
+                payload_before.reconstructable,
+                payload_after.reconstructable,
+                payload_before.meets_placement_policy,
+                payload_after.meets_placement_policy
+            ),
+        },
+        OfflineRepairPhaseAssertion {
+            phase: "evaluate_after_repair".to_string(),
+            passed: repair_evaluation_after.queue_depth_after == 0
+                && repair_plan_after.actions.is_empty()
+                && after_decision.action == RepairQueueAction::Remove
+                && after_decision.reason_code == RepairEvaluationReasonCode::Healthy,
+            detail: format!(
+                "queue_depth_after={} action={:?} reason={:?} remaining_actions={}",
+                repair_evaluation_after.queue_depth_after,
+                after_decision.action,
+                after_decision.reason_code,
+                repair_plan_after.actions.len()
+            ),
+        },
+        OfflineRepairPhaseAssertion {
+            phase: "gc".to_string(),
+            passed: gc_report.result.evicted == 1
+                && gc_report.result.expired_leases == 1
+                && root_retained_after_gc
+                && payload_retained_after_gc
+                && gc_report.transcript.decisions.iter().any(|decision| {
+                    decision.object_id == root_id
+                        && decision.reason_code == GcReasonCode::RootCheckpoint
+                })
+                && gc_report.transcript.decisions.iter().any(|decision| {
+                    decision.object_id == payload_id
+                        && decision.reason_code == GcReasonCode::ReachableRef
+                })
+                && gc_report.transcript.decisions.iter().any(|decision| {
+                    decision.object_id == expired_id
+                        && decision.reason_code == GcReasonCode::LeaseExpired
+                        && decision.action == GcDecisionAction::Evict
+                }),
+            detail: format!(
+                "evicted={} expired_leases={} root_retained={} payload_retained={}",
+                gc_report.result.evicted,
+                gc_report.result.expired_leases,
+                root_retained_after_gc,
+                payload_retained_after_gc
+            ),
+        },
+    ];
+
+    let state = OfflineRepairStateEvidence {
+        root_id,
+        payload_id,
+        expired_id,
+        repair_queue_depth_before: repair_evaluation_before.queue_depth_after,
+        repair_queue_depth_after: repair_evaluation_after.queue_depth_after,
+        repair_reason_before: before_decision.reason_code,
+        repair_reason_after: after_decision.reason_code,
+        repair_plan_reason_before: plan_action_before.reason_code,
+        plan_action_count_before: repair_plan_before.actions.len(),
+        plan_action_count_after: repair_plan_after.actions.len(),
+        reconstructable_before: payload_before.reconstructable.unwrap_or(false),
+        reconstructable_after: payload_after.reconstructable.unwrap_or(false),
+        placement_before: payload_before.meets_placement_policy.unwrap_or(false),
+        placement_after: payload_after.meets_placement_policy.unwrap_or(false),
+        gc_root_count: gc_report.transcript.root_count,
+        gc_evicted: gc_report.result.evicted,
+        gc_expired_leases: gc_report.result.expired_leases,
+        root_retained_after_gc,
+        payload_retained_after_gc,
+    };
+
+    OfflineRepairArtifactBundle {
+        scenario_key: OFFLINE_REPAIR_E2E_SCENARIO.to_string(),
+        contract_id: OFFLINE_REPAIR_E2E_CONTRACT_ID.to_string(),
+        phase_assertions,
+        state,
+        before_repair,
+        repair_evaluation_before,
+        repair_plan_before,
+        after_repair,
+        repair_evaluation_after,
+        repair_plan_after,
+        gc_report,
     }
 }
 
@@ -1332,28 +1541,89 @@ async fn offline_repair_artifact_bundle_captures_lifecycle_and_gc_evidence() {
                 && decision.action == GcDecisionAction::Evict)
     );
     assert!(!store.exists(&expired_id).await);
+    let root_retained_after_gc = store.exists(&root_id).await;
+    let payload_retained_after_gc = store.exists(&payload_id).await;
+    assert!(root_retained_after_gc);
+    assert!(payload_retained_after_gc);
 
-    let artifact_bundle = json!({
-        "before_repair": before_snapshot,
-        "repair_evaluation_before": repair_evaluation_before,
-        "repair_plan_before": plan_before,
-        "after_repair": after_snapshot,
-        "repair_evaluation_after": repair_evaluation_after,
-        "repair_plan_after": plan_after,
-        "gc_report": gc_report,
-    });
-    assert_eq!(artifact_bundle["before_repair"]["object_count"], 3);
+    let artifact_bundle = build_offline_repair_artifact_bundle(
+        root_id,
+        payload_id,
+        expired_id,
+        before_snapshot,
+        repair_evaluation_before,
+        plan_before,
+        after_snapshot,
+        repair_evaluation_after,
+        plan_after,
+        gc_report,
+        root_retained_after_gc,
+        payload_retained_after_gc,
+    );
+    let phase_order: Vec<_> = artifact_bundle
+        .phase_assertions
+        .iter()
+        .map(|assertion| assertion.phase.as_str())
+        .collect();
     assert_eq!(
-        artifact_bundle["repair_evaluation_before"]["queue_depth_after"],
+        phase_order,
+        vec![
+            "setup",
+            "evaluate_before_repair",
+            "repair",
+            "evaluate_after_repair",
+            "gc",
+        ]
+    );
+    assert!(
+        artifact_bundle
+            .phase_assertions
+            .iter()
+            .all(|assertion| assertion.passed),
+        "offline repair phase assertions should all pass: {:?}",
+        artifact_bundle.phase_assertions
+    );
+    assert_eq!(
+        artifact_bundle.state.repair_reason_before,
+        RepairEvaluationReasonCode::PolicySloDeficit
+    );
+    assert_eq!(
+        artifact_bundle.state.repair_reason_after,
+        RepairEvaluationReasonCode::Healthy
+    );
+    assert_eq!(artifact_bundle.state.plan_action_count_before, 1);
+    assert_eq!(artifact_bundle.state.plan_action_count_after, 0);
+    assert!(!artifact_bundle.state.reconstructable_before);
+    assert!(artifact_bundle.state.reconstructable_after);
+    assert!(!artifact_bundle.state.placement_before);
+    assert!(artifact_bundle.state.placement_after);
+    assert_eq!(artifact_bundle.state.gc_evicted, 1);
+    assert_eq!(artifact_bundle.state.gc_expired_leases, 1);
+    assert_eq!(artifact_bundle.state.gc_root_count, 1);
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize offline repair artifact bundle");
+    assert_eq!(artifact_json["before_repair"]["object_count"], 3);
+    assert_eq!(
+        artifact_json["repair_evaluation_before"]["queue_depth_after"],
         1
     );
     assert_eq!(
-        artifact_bundle["repair_evaluation_after"]["queue_depth_after"],
+        artifact_json["repair_evaluation_after"]["queue_depth_after"],
         0
     );
-    assert_eq!(artifact_bundle["after_repair"]["reconstructable_count"], 1);
-    assert_eq!(artifact_bundle["gc_report"]["result"]["expired_leases"], 1);
-    assert_eq!(artifact_bundle["gc_report"]["transcript"]["root_count"], 1);
+    assert_eq!(artifact_json["after_repair"]["reconstructable_count"], 1);
+    assert_eq!(artifact_json["gc_report"]["result"]["expired_leases"], 1);
+    assert_eq!(artifact_json["gc_report"]["transcript"]["root_count"], 1);
+    let roundtrip: OfflineRepairArtifactBundle = serde_json::from_value(artifact_json.clone())
+        .expect("deserialize offline repair artifact bundle");
+    let roundtrip_json =
+        serde_json::to_value(&roundtrip).expect("re-serialize offline repair artifact bundle");
+    assert_eq!(roundtrip_json, artifact_json);
+    assert_eq!(roundtrip.scenario_key, OFFLINE_REPAIR_E2E_SCENARIO);
+    assert_eq!(roundtrip.contract_id, OFFLINE_REPAIR_E2E_CONTRACT_ID);
+    assert_eq!(roundtrip.phase_assertions, artifact_bundle.phase_assertions);
+    assert_eq!(roundtrip.state, artifact_bundle.state);
 }
 
 #[test]

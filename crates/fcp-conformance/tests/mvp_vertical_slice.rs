@@ -44,6 +44,9 @@ const SEED: u64 = 0xDEAD_BEEF;
 const OFFLINE_REPAIR_SCENARIO: &str = "offline_repair";
 const EPOCH_REPLAY_SCENARIO: &str = "epoch_replay";
 const REVOCATION_SCENARIO: &str = "revocation";
+const TAINT_APPROVAL_SCENARIO: &str = "taint_approval";
+const HAPPY_PATH_SCENARIO: &str = "happy_path";
+const DENIAL_PATH_SCENARIO: &str = "denial_path";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -154,6 +157,9 @@ fn emit_log(
 const OFFLINE_REPAIR_CONTRACT_ID: &str = "contract.offline_repair_recovery";
 const EPOCH_REPLAY_CONTRACT_ID: &str = "contract.epoch_replay_checkpoint_retrieval";
 const REVOCATION_CONTRACT_ID: &str = "contract.revocation_chain_enforcement";
+const TAINT_APPROVAL_CONTRACT_ID: &str = "contract.taint_approval_chain_retrieval";
+const HAPPY_PATH_CONTRACT_ID: &str = "contract.happy_path_chain_retrieval";
+const DENIAL_PATH_CONTRACT_ID: &str = "contract.denial_path_receipt_retrieval";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ScenarioAssertionEvidence {
@@ -262,6 +268,98 @@ struct RevocationArtifactBundle {
     contract_id: String,
     replay: RevocationReplayEvidence,
     state: RevocationStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaintApprovalReplayEvidence {
+    seed: u64,
+    connector_id: String,
+    taint_event_id: String,
+    approval_event_id: String,
+    success_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaintApprovalStateEvidence {
+    chain_valid: bool,
+    denied_before_approval: bool,
+    allowed_after_approval: bool,
+    taint_reason_code: String,
+    approval_event_type: String,
+    allow_explanation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaintApprovalArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: TaintApprovalReplayEvidence,
+    state: TaintApprovalStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HappyPathReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    connector_id: String,
+    manifest_obj_id: String,
+    genesis_event_id: String,
+    invoke_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HappyPathStateEvidence {
+    chain_valid: bool,
+    receipt_is_allow: bool,
+    allow_reason_code: String,
+    evidence_count: u8,
+    audit_head_seq: u64,
+    manifest_visible_nodes: u8,
+    running_node_count: u8,
+    gossip_converged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HappyPathArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: HappyPathReplayEvidence,
+    state: HappyPathStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DenialPathReplayEvidence {
+    seed: u64,
+    connector_id: String,
+    request_object_id: String,
+    violation_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DenialPathStateEvidence {
+    decision_is_deny: bool,
+    violation_is_genesis: bool,
+    reason_code: String,
+    explanation_mentions_capability: bool,
+    explanation_mentions_connector: bool,
+    explanation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DenialPathArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: DenialPathReplayEvidence,
+    state: DenialPathStateEvidence,
     assertions: Vec<ScenarioAssertionEvidence>,
     log_entry_count: usize,
     log_jsonl_valid: bool,
@@ -405,6 +503,126 @@ fn build_revocation_artifact_bundle(
     }
 }
 
+fn build_taint_approval_artifact_bundle(
+    logs: &[LogEntry],
+    connector_id: &ConnectorId,
+    taint_event_id: &ObjectId,
+    approval_event_id: &ObjectId,
+    success_event_id: &ObjectId,
+    chain_valid: bool,
+    denied_before_approval: bool,
+    allowed_after_approval: bool,
+    taint_reason_code: &str,
+    approval_event_type: &str,
+    allow_explanation: &str,
+    log_jsonl_valid: bool,
+) -> TaintApprovalArtifactBundle {
+    TaintApprovalArtifactBundle {
+        scenario_key: TAINT_APPROVAL_SCENARIO.to_string(),
+        contract_id: TAINT_APPROVAL_CONTRACT_ID.to_string(),
+        replay: TaintApprovalReplayEvidence {
+            seed: SEED,
+            connector_id: connector_id.as_ref().to_string(),
+            taint_event_id: taint_event_id.to_string(),
+            approval_event_id: approval_event_id.to_string(),
+            success_event_id: success_event_id.to_string(),
+        },
+        state: TaintApprovalStateEvidence {
+            chain_valid,
+            denied_before_approval,
+            allowed_after_approval,
+            taint_reason_code: taint_reason_code.to_string(),
+            approval_event_type: approval_event_type.to_string(),
+            allow_explanation: allow_explanation.to_string(),
+        },
+        assertions: scenario_assertions(logs, TAINT_APPROVAL_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+fn build_happy_path_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    connector_id: &ConnectorId,
+    manifest_obj_id: &ObjectId,
+    genesis_event_id: &ObjectId,
+    invoke_event_id: &ObjectId,
+    chain_valid: bool,
+    receipt_is_allow: bool,
+    allow_reason_code: &str,
+    evidence_count: usize,
+    audit_head_seq: u64,
+    manifest_visible_nodes: usize,
+    running_node_count: usize,
+    gossip_converged: bool,
+    log_jsonl_valid: bool,
+) -> HappyPathArtifactBundle {
+    HappyPathArtifactBundle {
+        scenario_key: HAPPY_PATH_SCENARIO.to_string(),
+        contract_id: HAPPY_PATH_CONTRACT_ID.to_string(),
+        replay: HappyPathReplayEvidence {
+            seed: SEED,
+            zone_id: zone.to_string(),
+            connector_id: connector_id.as_ref().to_string(),
+            manifest_obj_id: manifest_obj_id.to_string(),
+            genesis_event_id: genesis_event_id.to_string(),
+            invoke_event_id: invoke_event_id.to_string(),
+        },
+        state: HappyPathStateEvidence {
+            chain_valid,
+            receipt_is_allow,
+            allow_reason_code: allow_reason_code.to_string(),
+            evidence_count: u8::try_from(evidence_count).expect("evidence count fits in u8"),
+            audit_head_seq,
+            manifest_visible_nodes: u8::try_from(manifest_visible_nodes)
+                .expect("visible node count fits in u8"),
+            running_node_count: u8::try_from(running_node_count)
+                .expect("running node count fits in u8"),
+            gossip_converged,
+        },
+        assertions: scenario_assertions(logs, HAPPY_PATH_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+fn build_denial_path_artifact_bundle(
+    logs: &[LogEntry],
+    connector_id: &ConnectorId,
+    request_object_id: &ObjectId,
+    violation_event_id: &ObjectId,
+    decision_is_deny: bool,
+    violation_is_genesis: bool,
+    reason_code: &str,
+    explanation_mentions_capability: bool,
+    explanation_mentions_connector: bool,
+    explanation: &str,
+    log_jsonl_valid: bool,
+) -> DenialPathArtifactBundle {
+    DenialPathArtifactBundle {
+        scenario_key: DENIAL_PATH_SCENARIO.to_string(),
+        contract_id: DENIAL_PATH_CONTRACT_ID.to_string(),
+        replay: DenialPathReplayEvidence {
+            seed: SEED,
+            connector_id: connector_id.as_ref().to_string(),
+            request_object_id: request_object_id.to_string(),
+            violation_event_id: violation_event_id.to_string(),
+        },
+        state: DenialPathStateEvidence {
+            decision_is_deny,
+            violation_is_genesis,
+            reason_code: reason_code.to_string(),
+            explanation_mentions_capability,
+            explanation_mentions_connector,
+            explanation: explanation.to_string(),
+        },
+        assertions: scenario_assertions(logs, DENIAL_PATH_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scenario 1: Happy Path — Install → Invoke → Receipt → Audit → Verify
 // ─────────────────────────────────────────────────────────────────────────────
@@ -420,7 +638,7 @@ fn happy_path_install_invoke_receipt_audit_verify() {
     assert_eq!(harness.running_count(), 3);
     emit_log(
         &harness.logs,
-        "happy_path",
+        HAPPY_PATH_SCENARIO,
         "setup",
         "nodes_running",
         "pass",
@@ -448,7 +666,7 @@ fn happy_path_install_invoke_receipt_audit_verify() {
 
     emit_log(
         &harness.logs,
-        "happy_path",
+        HAPPY_PATH_SCENARIO,
         "install",
         "manifest_announced",
         "pass",
@@ -460,7 +678,7 @@ fn happy_path_install_invoke_receipt_audit_verify() {
         0,
         None,
         EVENT_CAPABILITY_INVOKE,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert!(genesis_event.is_genesis());
@@ -470,18 +688,20 @@ fn happy_path_install_invoke_receipt_audit_verify() {
         1,
         Some(genesis_id),
         EVENT_CAPABILITY_INVOKE,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
-    assert!(invoke_event.follows(&genesis_event, &genesis_id));
+    let chain_valid =
+        genesis_event.is_genesis() && invoke_event.follows(&genesis_event, &genesis_id);
+    assert!(chain_valid);
 
     emit_log(
         &harness.logs,
-        "happy_path",
+        HAPPY_PATH_SCENARIO,
         "invoke",
         "audit_chain_valid",
-        "pass",
-        json!({"genesis_seq": 0, "invoke_seq": 1, "follows": true}),
+        if chain_valid { "pass" } else { "fail" },
+        json!({"genesis_seq": 0, "invoke_seq": 1, "follows": chain_valid}),
     );
 
     // Phase 4: Receipt — create allow receipt.
@@ -490,28 +710,31 @@ fn happy_path_install_invoke_receipt_audit_verify() {
         "FCP-0000",
         Some("Capability present and valid"),
     );
-    assert!(receipt.is_allow());
+    let receipt_is_allow = receipt.is_allow();
+    let evidence_count = receipt.evidence.len();
+    assert!(receipt_is_allow);
     assert!(!receipt.is_deny());
     assert_eq!(receipt.reason_code, "FCP-0000");
-    assert_eq!(receipt.evidence.len(), 2);
+    assert_eq!(evidence_count, 2);
 
     emit_log(
         &harness.logs,
-        "happy_path",
+        HAPPY_PATH_SCENARIO,
         "receipt",
         "allow_receipt_valid",
-        "pass",
-        json!({"decision": "allow", "reason_code": "FCP-0000", "evidence_count": 2}),
+        if receipt_is_allow { "pass" } else { "fail" },
+        json!({"decision": "allow", "reason_code": receipt.reason_code.as_str(), "evidence_count": evidence_count}),
     );
 
     // Phase 5: Audit — verify chain integrity, create audit head.
-    let head = create_audit_head(test_object_id("audit-event-1"), 1, 1.0);
+    let invoke_event_id = test_object_id("audit-event-1");
+    let head = create_audit_head(invoke_event_id, 1, 1.0);
     assert_eq!(head.head_seq, 1);
     assert!(head.coverage >= 1.0);
 
     emit_log(
         &harness.logs,
-        "happy_path",
+        HAPPY_PATH_SCENARIO,
         "audit",
         "audit_head_valid",
         "pass",
@@ -522,23 +745,90 @@ fn happy_path_install_invoke_receipt_audit_verify() {
     harness.advance_time(Duration::from_secs(5));
     harness.gossip_exchange_round();
 
+    let running_node_count = harness.running_count();
+    let total_nodes = harness.nodes.len();
+    let node_indices = (0..total_nodes).collect::<Vec<_>>();
+    let manifest_visible_nodes =
+        count_available_replicas(&mut harness, &zone, &manifest_obj_id, &node_indices);
+    let gossip_converged = manifest_visible_nodes == total_nodes;
+    assert!(
+        gossip_converged,
+        "manifest should converge across all running nodes"
+    );
+
+    emit_log(
+        &harness.logs,
+        HAPPY_PATH_SCENARIO,
+        "verify",
+        "manifest_converged",
+        if gossip_converged { "pass" } else { "fail" },
+        json!({"visible_nodes": manifest_visible_nodes, "running_nodes": running_node_count}),
+    );
+
     let logs = harness.log_entries();
-    let scenario_logs: Vec<&LogEntry> = logs
+    let happy_logs = logs
         .iter()
-        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("happy_path"))
-        .collect();
+        .filter(|entry| entry.test_name == HAPPY_PATH_SCENARIO)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(happy_logs.len(), 6, "expected 6 happy_path log entries");
 
-    assert_eq!(scenario_logs.len(), 5, "expected 5 happy_path log entries");
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "happy path logs should validate against schema: {log_jsonl_validation:?}"
+    );
 
-    // All phases passed.
-    for log in scenario_logs {
-        assert_eq!(
-            log.details.get("result").and_then(|v| v.as_str()),
-            Some("pass"),
-            "phase failed: {}",
-            log.phase
-        );
-    }
+    let artifact_bundle = build_happy_path_artifact_bundle(
+        &happy_logs,
+        &zone,
+        &connector_id,
+        &manifest_obj_id,
+        &genesis_id,
+        &invoke_event_id,
+        chain_valid,
+        receipt_is_allow,
+        &receipt.reason_code,
+        evidence_count,
+        head.head_seq,
+        manifest_visible_nodes,
+        running_node_count,
+        gossip_converged,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, HAPPY_PATH_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "install", "invoke", "receipt", "audit", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", "pass", "pass", "pass", "pass", "pass"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, happy_logs.len());
+    assert!(artifact_bundle.state.chain_valid);
+    assert!(artifact_bundle.state.receipt_is_allow);
+    assert_eq!(artifact_bundle.state.allow_reason_code, "FCP-0000");
+    assert_eq!(artifact_bundle.state.evidence_count, 2);
+    assert_eq!(artifact_bundle.state.audit_head_seq, 1);
+    assert!(artifact_bundle.state.gossip_converged);
+    assert_eq!(artifact_bundle.state.manifest_visible_nodes, 3);
+    assert_eq!(artifact_bundle.state.running_node_count, 3);
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize happy path artifact bundle");
+    let roundtrip: HappyPathArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize happy path artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     harness.stop_all().unwrap();
     assert_eq!(harness.running_count(), 0);
@@ -553,6 +843,7 @@ fn denial_path_invoke_without_cap_produces_receipt() {
     let mut harness = TestHarness::new(3, SEED);
     harness.start_all().unwrap();
     harness.register_all_peers();
+    let connector_id = ConnectorId::from_static("fcp.test-echo:echo:0.1.0");
 
     // Phase 1: Attempt invoke without capability.
     let receipt = create_decision_receipt(
@@ -560,39 +851,46 @@ fn denial_path_invoke_without_cap_produces_receipt() {
         "FCP-2101",
         Some("No valid capability token for operation echo on connector fcp.test-echo"),
     );
-    assert!(receipt.is_deny());
+    let decision_is_deny = receipt.is_deny();
+    assert!(decision_is_deny);
     assert_eq!(receipt.reason_code, "FCP-2101");
 
     emit_log(
         &harness.logs,
-        "denial_path",
+        DENIAL_PATH_SCENARIO,
         "invoke_no_cap",
         "deny_receipt_generated",
-        "pass",
+        if decision_is_deny { "pass" } else { "fail" },
         json!({
             "decision": "deny",
-            "reason_code": "FCP-2101",
+            "reason_code": receipt.reason_code.as_str(),
             "explanation": receipt.explanation.as_deref(),
         }),
     );
 
     // Phase 2: Verify explanation is actionable.
     let explanation = receipt.explanation.as_deref().unwrap();
+    let explanation_mentions_capability = explanation.contains("capability");
+    let explanation_mentions_connector = explanation.contains("fcp.test-echo");
     assert!(
-        explanation.contains("capability"),
+        explanation_mentions_capability,
         "explanation should mention capability"
     );
     assert!(
-        explanation.contains("fcp.test-echo"),
+        explanation_mentions_connector,
         "explanation should mention connector"
     );
 
     emit_log(
         &harness.logs,
-        "denial_path",
+        DENIAL_PATH_SCENARIO,
         "explain",
         "explanation_actionable",
-        "pass",
+        if explanation_mentions_capability && explanation_mentions_connector {
+            "pass"
+        } else {
+            "fail"
+        },
         json!({"explanation": explanation}),
     );
 
@@ -601,28 +899,80 @@ fn denial_path_invoke_without_cap_produces_receipt() {
         0,
         None,
         EVENT_SECURITY_VIOLATION,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert_eq!(violation_event.event_type, EVENT_SECURITY_VIOLATION);
-    assert!(violation_event.is_genesis());
+    let violation_is_genesis = violation_event.is_genesis();
+    assert!(violation_is_genesis);
+    let violation_event_id = test_object_id("audit-violation-0");
 
     emit_log(
         &harness.logs,
-        "denial_path",
+        DENIAL_PATH_SCENARIO,
         "audit",
         "violation_recorded",
-        "pass",
+        if violation_is_genesis { "pass" } else { "fail" },
         json!({"event_type": EVENT_SECURITY_VIOLATION, "seq": 0}),
     );
 
-    // Verify all logs.
     let logs = harness.log_entries();
-    let count = logs
+    let denial_logs = logs
         .iter()
-        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("denial_path"))
-        .count();
-    assert_eq!(count, 3);
+        .filter(|entry| entry.test_name == DENIAL_PATH_SCENARIO)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(denial_logs.len(), 3);
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "denial path logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_denial_path_artifact_bundle(
+        &denial_logs,
+        &connector_id,
+        &receipt.request_object_id,
+        &violation_event_id,
+        decision_is_deny,
+        violation_is_genesis,
+        &receipt.reason_code,
+        explanation_mentions_capability,
+        explanation_mentions_connector,
+        explanation,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, DENIAL_PATH_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["invoke_no_cap", "explain", "audit"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pass", "pass", "pass"]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, denial_logs.len());
+    assert!(artifact_bundle.state.decision_is_deny);
+    assert!(artifact_bundle.state.violation_is_genesis);
+    assert_eq!(artifact_bundle.state.reason_code, "FCP-2101");
+    assert!(artifact_bundle.state.explanation_mentions_capability);
+    assert!(artifact_bundle.state.explanation_mentions_connector);
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize denial path artifact bundle");
+    let roundtrip: DenialPathArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize denial path artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     harness.stop_all().unwrap();
 }
@@ -868,6 +1218,7 @@ fn taint_approval_deny_then_approve_then_succeed() {
     let mut harness = TestHarness::new(3, SEED);
     harness.start_all().unwrap();
     harness.register_all_peers();
+    let connector_id = ConnectorId::from_static("fcp.test-echo:echo:0.1.0");
 
     // Phase 1: Tainted input → denial.
     let taint_receipt = create_decision_receipt(
@@ -875,14 +1226,15 @@ fn taint_approval_deny_then_approve_then_succeed() {
         "FCP-3001",
         Some("Input classified as tainted (risk_tier=high, requires approval)"),
     );
-    assert!(taint_receipt.is_deny());
+    let denied_before_approval = taint_receipt.is_deny();
+    assert!(denied_before_approval);
     assert_eq!(taint_receipt.reason_code, "FCP-3001");
 
     let taint_event = create_audit_event(
         0,
         None,
         EVENT_SECURITY_VIOLATION,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert!(taint_event.is_genesis());
@@ -890,11 +1242,15 @@ fn taint_approval_deny_then_approve_then_succeed() {
 
     emit_log(
         &harness.logs,
-        "taint_approval",
+        TAINT_APPROVAL_SCENARIO,
         "taint_deny",
         "tainted_input_denied",
-        "pass",
-        json!({"decision": "deny", "reason_code": "FCP-3001"}),
+        if denied_before_approval {
+            "pass"
+        } else {
+            "fail"
+        },
+        json!({"decision": "deny", "reason_code": taint_receipt.reason_code.as_str()}),
     );
 
     // Phase 2: Approval granted (elevation event).
@@ -902,7 +1258,7 @@ fn taint_approval_deny_then_approve_then_succeed() {
         1,
         Some(taint_id),
         "elevation.granted",
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert!(approval_event.follows(&taint_event, &taint_id));
@@ -910,11 +1266,11 @@ fn taint_approval_deny_then_approve_then_succeed() {
 
     emit_log(
         &harness.logs,
-        "taint_approval",
+        TAINT_APPROVAL_SCENARIO,
         "approval",
         "elevation_granted",
         "pass",
-        json!({"event_type": "elevation.granted", "seq": 1}),
+        json!({"event_type": approval_event.event_type.as_str(), "seq": 1}),
     );
 
     // Phase 3: Re-invoke succeeds after approval.
@@ -922,33 +1278,119 @@ fn taint_approval_deny_then_approve_then_succeed() {
         2,
         Some(approval_id),
         EVENT_CAPABILITY_INVOKE,
-        Some("fcp.test-echo:echo:0.1.0"),
+        Some(connector_id.as_ref()),
         Some("echo"),
     );
     assert!(success_event.follows(&approval_event, &approval_id));
+    let success_id = test_object_id("audit-success-2");
 
     let allow_receipt = create_decision_receipt(
         Decision::Allow,
         "FCP-0000",
         Some("Elevated approval granted; operation permitted"),
     );
-    assert!(allow_receipt.is_allow());
+    let allowed_after_approval = allow_receipt.is_allow();
+    assert!(allowed_after_approval);
+    let allow_explanation = allow_receipt
+        .explanation
+        .as_deref()
+        .expect("allow explanation");
 
     emit_log(
         &harness.logs,
-        "taint_approval",
+        TAINT_APPROVAL_SCENARIO,
         "success",
         "post_approval_allowed",
-        "pass",
+        if allowed_after_approval {
+            "pass"
+        } else {
+            "fail"
+        },
         json!({"decision": "allow", "seq": 2}),
     );
 
+    let chain_valid = taint_event.is_genesis()
+        && approval_event.follows(&taint_event, &taint_id)
+        && success_event.follows(&approval_event, &approval_id);
+    assert!(chain_valid, "taint/approval audit chain must be valid");
+
     let logs = harness.log_entries();
-    let count = logs
+    let taint_logs = logs
         .iter()
-        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("taint_approval"))
-        .count();
-    assert_eq!(count, 3);
+        .filter(|entry| entry.test_name == TAINT_APPROVAL_SCENARIO)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(taint_logs.len(), 3);
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "taint/approval logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_taint_approval_artifact_bundle(
+        &taint_logs,
+        &connector_id,
+        &taint_id,
+        &approval_id,
+        &success_id,
+        chain_valid,
+        denied_before_approval,
+        allowed_after_approval,
+        &taint_receipt.reason_code,
+        &approval_event.event_type,
+        allow_explanation,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, TAINT_APPROVAL_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["taint_deny", "approval", "success"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            if denied_before_approval {
+                "pass"
+            } else {
+                "fail"
+            },
+            "pass",
+            if allowed_after_approval {
+                "pass"
+            } else {
+                "fail"
+            }
+        ]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, taint_logs.len());
+    assert!(artifact_bundle.state.chain_valid);
+    assert!(artifact_bundle.state.denied_before_approval);
+    assert!(artifact_bundle.state.allowed_after_approval);
+    assert_eq!(artifact_bundle.state.taint_reason_code, "FCP-3001");
+    assert_eq!(
+        artifact_bundle.state.approval_event_type,
+        "elevation.granted"
+    );
+    assert_eq!(
+        artifact_bundle.state.allow_explanation,
+        "Elevated approval granted; operation permitted"
+    );
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize taint artifact bundle");
+    let roundtrip: TaintApprovalArtifactBundle =
+        serde_json::from_value(artifact_json).expect("deserialize taint artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     harness.stop_all().unwrap();
 }

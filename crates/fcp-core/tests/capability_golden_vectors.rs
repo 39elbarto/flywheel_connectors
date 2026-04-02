@@ -929,7 +929,7 @@ mod adversarial_attacks {
 
         let now = Utc::now();
         let constraints = CapabilityConstraints {
-            resource_allow: vec!["/safe/".into()],
+            resource_allow: vec!["/safe/*".into()],
             resource_deny: vec![],
             max_calls: None,
             max_bytes: None,

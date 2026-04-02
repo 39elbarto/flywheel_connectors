@@ -10234,6 +10234,13 @@ fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<Dis
             ]
         },
     );
+    let evidence_handles = budget_report_evidence_handles(
+        &host.endpoint,
+        &report,
+        args.zone.as_deref(),
+        budget_count,
+        exceeded_count,
+    );
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "budget");
     let mut payload = json!({
@@ -10258,6 +10265,19 @@ fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<Dis
         "zones": report.zones,
         "next_actions": next_actions,
     });
+    attach_install_contract(
+        &mut payload,
+        "budget",
+        "host-admin-api",
+        "node-local-root-app",
+        "budget-report",
+        Some(&host.endpoint),
+        false,
+        false,
+        false,
+        "Live budget answers are authoritative for the current node's usage-budget snapshots and optional zone filter, but they do not mutate policy or prove future usage outcomes.",
+        evidence_handles,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -13234,6 +13254,32 @@ fn rollout_rollback_evidence_handles(
         "from_version": response.from_version,
         "to_version": response.to_version,
     })]
+}
+
+fn budget_report_evidence_handles(
+    host: &str,
+    report: &HostBudgetReportResponse,
+    zone_filter: Option<&str>,
+    budget_count: usize,
+    exceeded_count: usize,
+) -> Vec<Value> {
+    let mut handles = vec![json!({
+        "kind": "budget-report",
+        "endpoint": host,
+        "schema_version": &report.schema_version,
+        "generated_at": report.generated_at,
+        "zone_count": report.zones.len(),
+        "budget_count": budget_count,
+        "exceeded_count": exceeded_count,
+    })];
+    if let Some(zone) = zone_filter {
+        handles.push(json!({
+            "kind": "budget-zone-filter",
+            "endpoint": host,
+            "zone_id": zone,
+        }));
+    }
+    handles
 }
 
 fn config_snapshot_evidence_handles(
@@ -27562,8 +27608,39 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "budget");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "budget-report",
+            false,
+            false,
+            false,
+        );
         assert_eq!(payload["summary"]["zone_count"], 1);
         assert_eq!(payload["zones"][0]["zone_id"], "z:work");
+        assert_evidence_handle(&payload, "budget-report");
+    }
+
+    #[test]
+    fn execute_budget_reads_zone_filtered_live_host_report() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([(
+                "POST /rpc/budget/report".to_owned(),
+                mock_budget_report_response_json(),
+            )]),
+            1,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "budget", "--zone", "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "budget");
+        assert_eq!(payload["filter"]["zone"], "z:work");
+        assert_evidence_handle(&payload, "budget-report");
+        assert_evidence_handle(&payload, "budget-zone-filter");
     }
 
     #[test]

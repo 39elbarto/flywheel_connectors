@@ -1,4 +1,4 @@
-//! FCP2 mesh node orchestration (routing, admission, gossip, leases).
+//! FCP mesh node orchestration (routing, admission, gossip, leases).
 //!
 //! This crate provides:
 //! - [`admission`] - Admission control with per-peer budgets and anti-amplification
@@ -26,6 +26,7 @@
 
 pub mod admission;
 pub mod authority;
+pub mod coordinator;
 pub mod degraded;
 
 pub mod device;
@@ -39,6 +40,7 @@ pub mod transport;
 
 pub use admission::*;
 pub use authority::*;
+pub use coordinator::*;
 pub use degraded::*;
 
 pub use device::*;

@@ -6300,6 +6300,7 @@ dependencies = [
  "fcp-core",
  "fcp-crypto",
  "fcp-host",
+ "fcp-kernel",
  "fcp-manifest",
  "fcp-mesh",
  "fcp-raptorq",

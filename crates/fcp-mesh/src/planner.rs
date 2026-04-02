@@ -34,6 +34,7 @@ use std::collections::HashSet;
 
 use fcp_core::{ConnectorId, ObjectId, ZoneId};
 use fcp_tailscale::NodeId;
+use serde::{Deserialize, Serialize};
 
 use crate::device::{DeviceProfile, FitnessContext};
 
@@ -230,6 +231,8 @@ pub struct PlannerContext {
     pub required_symbols: Vec<ObjectId>,
     /// If true, operation requires singleton_writer semantics.
     pub singleton_writer: bool,
+    /// Subject whose singleton authority should be resolved when applicable.
+    pub authority_subject: Option<ObjectId>,
     /// Target zone for zone-aware routing.
     pub target_zone: Option<ZoneId>,
     /// Nodes to exclude from consideration.
@@ -249,6 +252,7 @@ impl PlannerContext {
             preferred_symbols: Vec::new(),
             required_symbols: Vec::new(),
             singleton_writer: false,
+            authority_subject: None,
             target_zone: None,
             excluded_nodes: HashSet::new(),
         }
@@ -303,6 +307,13 @@ impl PlannerContext {
         self
     }
 
+    /// Bind singleton authority resolution to a specific leased subject.
+    #[must_use]
+    pub fn with_authority_subject(mut self, subject: ObjectId) -> Self {
+        self.authority_subject = Some(subject);
+        self
+    }
+
     /// Set target zone.
     #[must_use]
     pub fn with_target_zone(mut self, zone: ZoneId) -> Self {
@@ -343,7 +354,7 @@ impl NodeInfo {
 }
 
 /// A lease held by a node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeldLease {
     /// Subject object ID the lease is for.
     pub subject_id: ObjectId,
@@ -351,10 +362,13 @@ pub struct HeldLease {
     pub purpose: LeasePurpose,
     /// Expiration timestamp (seconds since epoch).
     pub expires_at: u64,
+    /// Monotonic fencing token for deterministic conflict resolution.
+    pub fencing_token: u64,
 }
 
 /// Simplified lease purpose for planner decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LeasePurpose {
     /// Exclusive write access for singleton-writer connector state.
     SingletonWriter,
@@ -374,6 +388,14 @@ impl std::fmt::Display for LeasePurpose {
             Self::CoordinatorElection => write!(f, "coordinator_election"),
             Self::Other => write!(f, "other"),
         }
+    }
+}
+
+impl HeldLease {
+    /// Whether this lease remains active at the provided timestamp.
+    #[must_use]
+    pub const fn is_active(&self, now_secs: u64) -> bool {
+        self.expires_at > now_secs
     }
 }
 
@@ -686,11 +708,7 @@ impl ExecutionPlanner {
         // Apply requirement filtering
         for requirement in &policy.requires {
             candidates.retain(|c| {
-                let meets = Self::meets_requirement_by_id(
-                    &c.node_id,
-                    requirement,
-                    input,
-                );
+                let meets = Self::meets_requirement_by_id(&c.node_id, requirement, input);
                 if !meets {
                     // Node excluded by requirement — logged but can't modify
                     // candidate from retain closure
@@ -805,7 +823,10 @@ impl ExecutionPlanner {
                 // Higher base fitness = higher bonus
                 (candidate.base_fitness / 100.0) * f64::from(*weight_bps) / 10000.0
             }
-            DevicePreference::SpecificDevice { node_id, weight_bps } => {
+            DevicePreference::SpecificDevice {
+                node_id,
+                weight_bps,
+            } => {
                 if candidate.node_id == *node_id {
                     f64::from(*weight_bps) / 100.0
                 } else {
@@ -993,15 +1014,9 @@ pub enum DeviceRequirement {
         min_version: Option<String>,
     },
     /// Node must participate in enough secret shares for reconstruction.
-    SecretReconstructable {
-        secret_id: String,
-        min_nodes: u8,
-    },
+    SecretReconstructable { secret_id: String, min_nodes: u8 },
     /// Node's zone store must have headroom.
-    ZoneQuotaHeadroom {
-        zone_id: ZoneId,
-        min_free_mb: u32,
-    },
+    ZoneQuotaHeadroom { zone_id: ZoneId, min_free_mb: u32 },
 }
 
 /// Soft device preference — influences scoring but doesn't exclude.
@@ -1015,14 +1030,9 @@ pub enum DevicePreference {
         weight_bps: u16,
     },
     /// Prefer nodes with more available resources.
-    HighResources {
-        weight_bps: u16,
-    },
+    HighResources { weight_bps: u16 },
     /// Prefer a specific device (e.g., for affinity).
-    SpecificDevice {
-        node_id: NodeId,
-        weight_bps: u16,
-    },
+    SpecificDevice { node_id: NodeId, weight_bps: u16 },
     /// Prefer nodes that already hold required data.
     DataLocality {
         object_ids: Vec<ObjectId>,
@@ -1671,6 +1681,13 @@ mod tests {
     }
 
     #[test]
+    fn planner_context_with_authority_subject() {
+        let subject = test_object_id(42);
+        let ctx = PlannerContext::new(test_connector_id()).with_authority_subject(subject);
+        assert_eq!(ctx.authority_subject, Some(subject));
+    }
+
+    #[test]
     fn planner_context_with_target_zone() {
         let zone: ZoneId = "z:test".parse().unwrap();
         let ctx = PlannerContext::new(test_connector_id()).with_target_zone(zone);
@@ -1926,9 +1943,11 @@ mod tests {
             subject_id: test_object_id(1),
             purpose: LeasePurpose::OperationExecution,
             expires_at: 9999,
+            fencing_token: 7,
         };
         assert_eq!(lease.purpose, LeasePurpose::OperationExecution);
         assert_eq!(lease.expires_at, 9999);
+        assert_eq!(lease.fencing_token, 7);
     }
 
     // ============================================================
@@ -2187,13 +2206,15 @@ mod tests {
 
     #[test]
     fn score_adjustment_bonus_zero() {
-        let adj = ScoreAdjustment::bonus(AdjustmentFactor::Custom("test".into()), 0.0, "zero bonus");
+        let adj =
+            ScoreAdjustment::bonus(AdjustmentFactor::Custom("test".into()), 0.0, "zero bonus");
         assert!((adj.delta).abs() < f64::EPSILON);
     }
 
     #[test]
     fn score_adjustment_penalty_zero() {
-        let adj = ScoreAdjustment::penalty(AdjustmentFactor::Custom("test".into()), 0.0, "zero penalty");
+        let adj =
+            ScoreAdjustment::penalty(AdjustmentFactor::Custom("test".into()), 0.0, "zero penalty");
         assert!((adj.delta).abs() < f64::EPSILON);
     }
 
@@ -2301,10 +2322,12 @@ mod tests {
             subject_id: test_object_id(5),
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 12345,
+            fencing_token: 3,
         };
         let cloned = lease.clone();
         assert_eq!(lease.purpose, LeasePurpose::SingletonWriter);
         assert_eq!(cloned.expires_at, 12345);
+        assert_eq!(cloned.fencing_token, 3);
     }
 
     #[test]
@@ -2313,6 +2336,7 @@ mod tests {
             subject_id: test_object_id(1),
             purpose: LeasePurpose::Other,
             expires_at: 0,
+            fencing_token: 5,
         };
         let dbg = format!("{lease:?}");
         assert!(dbg.contains("Other"));
@@ -2657,7 +2681,9 @@ mod tests {
                 },
             ],
             prefers: vec![DevicePreference::HighResources { weight_bps: 5000 }],
-            excludes: vec![DevicePattern::Tag { tag: "unstable".into() }],
+            excludes: vec![DevicePattern::Tag {
+                tag: "unstable".into(),
+            }],
             zones: vec![ZoneId::work()],
         };
         let json = serde_json::to_string(&policy).expect("serialize");
@@ -2819,7 +2845,10 @@ mod tests {
     fn plan_with_policy_excludes_by_node_id() {
         let planner = ExecutionPlanner::new();
         let input = PlannerInput::new(
-            vec![test_node("node-a", 1024, false), test_node("node-b", 1024, false)],
+            vec![
+                test_node("node-a", 1024, false),
+                test_node("node-b", 1024, false),
+            ],
             1_700_000_000,
         );
         let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
@@ -2881,10 +2910,7 @@ mod tests {
     #[test]
     fn plan_with_policy_empty_policy_same_as_plan() {
         let planner = ExecutionPlanner::new();
-        let input = PlannerInput::new(
-            vec![test_node("node-a", 1024, false)],
-            1_700_000_000,
-        );
+        let input = PlannerInput::new(vec![test_node("node-a", 1024, false)], 1_700_000_000);
         let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
         let policy = PlacementPolicy::default();
 
@@ -2923,10 +2949,7 @@ mod tests {
     #[test]
     fn plan_with_policy_no_eligible_returns_empty() {
         let planner = ExecutionPlanner::new();
-        let input = PlannerInput::new(
-            vec![test_node("node-a", 256, false)],
-            1_700_000_000,
-        );
+        let input = PlannerInput::new(vec![test_node("node-a", 256, false)], 1_700_000_000);
         let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
         let policy = PlacementPolicy {
             requires: vec![DeviceRequirement::Gpu { min_vram_mb: 8192 }],

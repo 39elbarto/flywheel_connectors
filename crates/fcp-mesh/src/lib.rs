@@ -25,6 +25,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 pub mod admission;
+pub mod authority;
 pub mod degraded;
 
 pub mod device;
@@ -37,6 +38,7 @@ pub mod symbol_request;
 pub mod transport;
 
 pub use admission::*;
+pub use authority::*;
 pub use degraded::*;
 
 pub use device::*;

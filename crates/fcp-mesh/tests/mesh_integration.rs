@@ -1767,6 +1767,7 @@ mod meshnode {
                 subject_id: object_id,
                 purpose: LeasePurpose::SingletonWriter,
                 expires_at: 2_000,
+                fencing_token: 4,
             }],
         );
 
@@ -4869,6 +4870,7 @@ mod lease_coordination {
                     subject_id: test_object_id("stateobject"),
                     purpose: LeasePurpose::SingletonWriter,
                     expires_at: 2000,
+                    fencing_token: 5,
                 }],
             },
             NodeInfo {
@@ -5045,6 +5047,7 @@ mod lease_coordination {
             subject_id: subject,
             purpose: LeasePurpose::OperationExecution,
             expires_at: 5000,
+            fencing_token: 3,
         };
 
         // Verify lease structure
@@ -5074,6 +5077,7 @@ mod lease_coordination {
             subject_id: subject,
             purpose: LeasePurpose::CoordinatorElection,
             expires_at: 10000,
+            fencing_token: 8,
         };
 
         // Verify lease structure
@@ -5133,6 +5137,7 @@ mod integration_scenarios {
                     subject_id: test_object_id("state"),
                     purpose: LeasePurpose::SingletonWriter,
                     expires_at: 5000,
+                    fencing_token: 9,
                 }],
             },
             NodeInfo {

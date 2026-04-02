@@ -1167,6 +1167,7 @@ fn planner_singleton_writer_lease() {
                 subject_id: test_object_id(1),
                 purpose: LeasePurpose::SingletonWriter,
                 expires_at: 2_000_000,
+                fencing_token: 5,
             }],
         },
         NodeInfo {
@@ -2212,6 +2213,7 @@ fn mesh_node_update_local_state_with_leases() {
         subject_id: test_object_id(1),
         purpose: LeasePurpose::SingletonWriter,
         expires_at: 2_000_000,
+        fencing_token: 7,
     }];
     node.update_local_state(profile, HashSet::new(), leases);
     // Functional after update

@@ -9,7 +9,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -34,6 +34,7 @@ use tracing::debug;
 use crate::admission::{
     AdmissionController, AdmissionError, AdmissionPolicy, ObjectAdmissionClass,
 };
+use crate::authority::{AuthorityView, ObservedLeaseAuthority};
 use crate::degraded::{
     ControlPlaneEnvelope, ControlPlaneHandler, DegradedModeDecoder, DegradedModeEncoder,
     DegradedTransportError, RetentionClass,
@@ -41,7 +42,8 @@ use crate::degraded::{
 use crate::device::DeviceProfile;
 use crate::gossip::{GossipConfig, MeshGossip};
 use crate::planner::{
-    CandidateNode, ExecutionPlanner, HeldLease, NodeInfo, PlannerContext, PlannerInput,
+    CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
+    PlannerInput,
 };
 use crate::session::MeshSession;
 use crate::symbol_request::{
@@ -401,15 +403,15 @@ impl MeshNode {
 
         let mut previous_map = HashMap::new();
         for lease in previous {
-            previous_map.insert((lease.subject_id, lease.purpose), lease.expires_at);
+            previous_map.insert((lease.subject_id, lease.purpose), lease.clone());
         }
 
         let mut next_map = HashMap::new();
         for lease in next {
-            next_map.insert((lease.subject_id, lease.purpose), lease.expires_at);
+            next_map.insert((lease.subject_id, lease.purpose), lease.clone());
         }
 
-        for (key, next_expiry) in next_map {
+        for (key, next_lease) in next_map {
             let (subject_id, purpose) = key;
             match previous_map.remove(&key) {
                 None => {
@@ -424,7 +426,10 @@ impl MeshNode {
                         conflict_holder: None,
                     }));
                 }
-                Some(prev_expiry) if prev_expiry != next_expiry => {
+                Some(previous_lease)
+                    if previous_lease.expires_at != next_lease.expires_at
+                        || previous_lease.fencing_token != next_lease.fencing_token =>
+                {
                     self.record_trace_event(TraceEvent::Lease(LeaseEvent {
                         timestamp: now_ms,
                         trace_id: trace_id.clone(),
@@ -483,6 +488,95 @@ impl MeshNode {
             SymbolRequestError::SignatureInvalid => "signature_invalid",
             SymbolRequestError::AlreadyComplete { .. } => "already_complete",
         }
+    }
+
+    fn observed_lease_authorities(&self) -> Vec<ObservedLeaseAuthority> {
+        let mut observed = Vec::new();
+
+        if self.local_profile.is_some() {
+            for lease in &self.local_leases {
+                observed.push(ObservedLeaseAuthority::new(
+                    self.local_node_ts.clone(),
+                    lease.clone(),
+                ));
+            }
+        }
+
+        for state in self.peers.values() {
+            let holder = TailscaleNodeId::new(state.profile.node_id.as_str());
+            for lease in &state.held_leases {
+                observed.push(ObservedLeaseAuthority::new(holder.clone(), lease.clone()));
+            }
+        }
+
+        observed
+    }
+
+    fn eligible_authority_nodes(&self) -> Vec<TailscaleNodeId> {
+        let mut nodes = BTreeSet::new();
+
+        if let Some(profile) = &self.local_profile {
+            nodes.insert(profile.node_id.as_str().to_string());
+        }
+
+        for state in self.peers.values() {
+            nodes.insert(state.profile.node_id.as_str().to_string());
+        }
+
+        nodes.into_iter().map(TailscaleNodeId::new).collect()
+    }
+
+    fn preferred_singleton_holder(
+        &self,
+        subject_id: Option<&ObjectId>,
+        now_ms: u64,
+    ) -> Option<String> {
+        let now_secs = now_ms / 1000;
+        let mut active = self
+            .observed_lease_authorities()
+            .into_iter()
+            .filter(|entry| {
+                entry.lease.purpose == LeasePurpose::SingletonWriter
+                    && entry.lease.is_active(now_secs)
+                    && match subject_id {
+                        Some(subject_id) => entry.lease.subject_id == *subject_id,
+                        None => true,
+                    }
+            })
+            .collect::<Vec<_>>();
+
+        active.sort_by(|left, right| {
+            right
+                .lease
+                .fencing_token
+                .cmp(&left.lease.fencing_token)
+                .then_with(|| right.lease.expires_at.cmp(&left.lease.expires_at))
+                .then_with(|| left.holder.as_str().cmp(right.holder.as_str()))
+        });
+
+        active
+            .first()
+            .map(|entry| entry.holder.as_str().to_string())
+    }
+
+    /// Build an inspectable authority view for one subject/purpose pair.
+    #[must_use]
+    pub fn authority_view(
+        &self,
+        zone_id: &ZoneId,
+        subject_id: &ObjectId,
+        purpose: LeasePurpose,
+        now_ms: u64,
+    ) -> AuthorityView {
+        AuthorityView::from_observed(
+            zone_id,
+            subject_id,
+            purpose,
+            &self.eligible_authority_nodes(),
+            &self.observed_lease_authorities(),
+            now_ms / 1000,
+            now_ms,
+        )
     }
 
     /// Update local device profile and symbol/lease state.
@@ -607,19 +701,8 @@ impl MeshNode {
     /// Build a planner input from current local + peer state.
     fn build_planner_input(&self, now_ms: u64) -> PlannerInput {
         let mut nodes = Vec::new();
-        let mut singleton_holder: Option<String> = None;
-        let now_secs = now_ms / 1000;
 
         if let Some(profile) = &self.local_profile {
-            if singleton_holder.is_none()
-                && self.local_leases.iter().any(|lease| {
-                    lease.purpose == crate::planner::LeasePurpose::SingletonWriter
-                        && lease.expires_at > now_secs
-                })
-            {
-                singleton_holder = Some(profile.node_id.as_str().to_string());
-            }
-
             nodes.push(NodeInfo {
                 profile: profile.clone(),
                 local_symbols: self.local_symbols.clone(),
@@ -628,15 +711,6 @@ impl MeshNode {
         }
 
         for state in self.peers.values() {
-            if singleton_holder.is_none()
-                && state.held_leases.iter().any(|lease| {
-                    lease.purpose == crate::planner::LeasePurpose::SingletonWriter
-                        && lease.expires_at > now_secs
-                })
-            {
-                singleton_holder = Some(state.profile.node_id.as_str().to_string());
-            }
-
             nodes.push(NodeInfo {
                 profile: state.profile.clone(),
                 local_symbols: state.local_symbols.clone(),
@@ -645,7 +719,7 @@ impl MeshNode {
         }
 
         let mut input = PlannerInput::new(nodes, now_ms);
-        if let Some(holder) = singleton_holder {
+        if let Some(holder) = self.preferred_singleton_holder(None, now_ms) {
             input = input.with_singleton_holder(holder);
         }
         input
@@ -654,7 +728,30 @@ impl MeshNode {
     /// Plan execution candidates for a connector.
     #[must_use]
     pub fn plan_execution(&self, context: &PlannerContext, now_ms: u64) -> Vec<CandidateNode> {
-        let input = self.build_planner_input(now_ms);
+        let mut input = self.build_planner_input(now_ms);
+        if context.singleton_writer {
+            input.singleton_lease_holder =
+                self.preferred_singleton_holder(context.authority_subject.as_ref(), now_ms);
+            if input.singleton_lease_holder.is_none() && context.authority_subject.is_some() {
+                let default_zone = context
+                    .target_zone
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(ZoneId::work);
+                if let Some(subject_id) = context.authority_subject.as_ref() {
+                    input.singleton_lease_holder = self
+                        .authority_view(
+                            &default_zone,
+                            subject_id,
+                            LeasePurpose::SingletonWriter,
+                            now_ms,
+                        )
+                        .active_holder
+                        .as_ref()
+                        .map(|holder| holder.as_str().to_string());
+                }
+            }
+        }
         self.planner.plan(&input, context)
     }
 
@@ -1577,6 +1674,7 @@ mod tests {
             subject_id: test_object_id("lease-1"),
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 100,
+            fencing_token: 1,
         };
 
         node.update_local_state(test_device_profile("node-1"), HashSet::new(), vec![lease]);
@@ -2191,6 +2289,7 @@ mod tests {
             subject_id: obj_id,
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 999_999, // Far future
+            fencing_token: 7,
         };
 
         node.update_local_state(local_profile, HashSet::new(), vec![lease]);
@@ -2424,6 +2523,7 @@ mod tests {
             subject_id: ObjectId::from_bytes([0xCC; 32]),
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 999_999,
+            fencing_token: 9,
         }];
 
         node.update_peer_state(NodeId::new("peer-1"), profile, HashSet::new(), leases, 1000);
@@ -2622,11 +2722,13 @@ mod tests {
                 subject_id: ObjectId::from_bytes([0xAA; 32]),
                 purpose: LeasePurpose::SingletonWriter,
                 expires_at: 999_999,
+                fencing_token: 3,
             },
             HeldLease {
                 subject_id: ObjectId::from_bytes([0xBB; 32]),
                 purpose: LeasePurpose::SingletonWriter,
                 expires_at: 999_999,
+                fencing_token: 4,
             },
         ];
 
@@ -2883,6 +2985,7 @@ mod tests {
             subject_id: ObjectId::from_bytes([0xDD; 32]),
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 999_999,
+            fencing_token: 5,
         };
         node.update_peer_state(
             NodeId::new("peer-1"),
@@ -2906,6 +3009,7 @@ mod tests {
             subject_id: ObjectId::from_bytes([0xCC; 32]),
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 0, // Already expired
+            fencing_token: 2,
         };
 
         node.update_local_state(local_profile, HashSet::new(), vec![lease]);
@@ -2913,6 +3017,168 @@ mod tests {
         let input = node.build_planner_input(5000);
         assert_eq!(input.nodes.len(), 1);
         assert!(input.singleton_lease_holder.is_none());
+    }
+
+    #[test]
+    fn build_planner_input_prefers_highest_fencing_token_holder() {
+        let mut node = test_node("node-1");
+        let subject_id = ObjectId::from_bytes([0xEF; 32]);
+        node.update_local_state(
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id,
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+                fencing_token: 7,
+            }],
+        );
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id,
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+                fencing_token: 9,
+            }],
+            1000,
+        );
+
+        let input = node.build_planner_input(1000);
+        assert_eq!(input.singleton_lease_holder.as_deref(), Some("peer-1"));
+    }
+
+    #[test]
+    fn plan_execution_ignores_unrelated_singleton_leases_when_subject_bound() {
+        use crate::device::{DeviceProfileBuilder, InstalledConnector};
+
+        let mut node = test_node("node-1");
+        let connector_id =
+            fcp_core::ConnectorId::new("fcp.test", "test", "v1").expect("valid connector id");
+        let installed = InstalledConnector::new(
+            connector_id.clone(),
+            "1.0.0",
+            ObjectId::from_bytes([0xAB; 32]),
+        );
+        let target_subject = ObjectId::from_bytes([0xAC; 32]);
+        let unrelated_subject = ObjectId::from_bytes([0xAD; 32]);
+
+        let local_profile = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .add_connector(installed.clone())
+            .build();
+        let peer_profile = DeviceProfileBuilder::new(NodeId::new("peer-1"))
+            .add_connector(installed)
+            .build();
+
+        node.update_local_state(
+            local_profile,
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id: target_subject,
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+                fencing_token: 5,
+            }],
+        );
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            peer_profile,
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id: unrelated_subject,
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+                fencing_token: 99,
+            }],
+            1000,
+        );
+
+        let context = PlannerContext::new(connector_id)
+            .with_singleton_writer()
+            .with_authority_subject(target_subject);
+        let candidates = node.plan_execution(&context, 1000);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_id.as_str(), "node-1");
+    }
+
+    #[test]
+    fn authority_view_reports_records_and_timeline() {
+        let mut node = test_node("node-1");
+        let subject_id = ObjectId::from_bytes([0xAE; 32]);
+
+        node.update_local_state(
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id,
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+                fencing_token: 7,
+            }],
+        );
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id,
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+                fencing_token: 9,
+            }],
+            1_000,
+        );
+
+        let authority = node.authority_view(
+            &ZoneId::work(),
+            &subject_id,
+            LeasePurpose::SingletonWriter,
+            1_000,
+        );
+
+        assert_eq!(
+            authority
+                .active_holder
+                .as_ref()
+                .map(TailscaleNodeId::as_str),
+            Some("peer-1")
+        );
+        assert_eq!(authority.active_fencing_token, Some(9));
+        assert_eq!(authority.records.len(), 2);
+        assert_eq!(
+            authority.records[0].status,
+            crate::authority::AuthorityStatus::Active
+        );
+        assert_eq!(
+            authority.records[0].reason_code,
+            crate::authority::AuthorityReasonCode::ActiveAuthority
+        );
+        assert_eq!(
+            authority.records[1].status,
+            crate::authority::AuthorityStatus::Superseded
+        );
+        assert_eq!(
+            authority.records[1].reason_code,
+            crate::authority::AuthorityReasonCode::SupersededByPreferredLease
+        );
+        assert_eq!(
+            authority
+                .timeline
+                .iter()
+                .map(|event| event.operation.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "coordinator_selected",
+                "authority_active",
+                "authority_superseded"
+            ]
+        );
+        assert_eq!(
+            authority.coordinator.as_ref(),
+            authority.failover_order.first()
+        );
     }
 
     // ---- Admission reason codes ----
@@ -3022,6 +3288,7 @@ mod tests {
             subject_id: test_object_id("lease-release"),
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 100,
+            fencing_token: 1,
         };
 
         // First add a lease
@@ -3047,11 +3314,13 @@ mod tests {
             subject_id: obj_id,
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 100,
+            fencing_token: 1,
         };
         let lease_v2 = HeldLease {
             subject_id: obj_id,
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 200,
+            fencing_token: 2,
         };
 
         node.update_local_state(
@@ -3123,6 +3392,7 @@ mod tests {
             subject_id: ObjectId::from_bytes([0x22; 32]),
             purpose: LeasePurpose::SingletonWriter,
             expires_at: 5000,
+            fencing_token: 6,
         }];
 
         let state = PeerState {

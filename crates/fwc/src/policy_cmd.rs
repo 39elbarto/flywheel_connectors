@@ -21,6 +21,7 @@ use fcp_core::{
     ZonePolicyObject, compute_policy_bundle_hash, diff_policy_bundles, preview_policy_bundles,
 };
 use fcp_crypto::ed25519::{Ed25519SigningKey, SECRET_KEY_SIZE};
+use fcp_kernel::{CapabilityId, SafetyTier};
 use hex::decode as hex_decode;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -996,7 +997,7 @@ fn parse_simulation_input(raw: &str) -> Result<PolicySimulationInput> {
         related_object_ids: Vec::new(),
         request_object_id: None,
         request_input_hash: None,
-        safety_tier: fcp_core::SafetyTier::Safe,
+        safety_tier: SafetyTier::Safe,
         principal: None,
         capability_id: None,
         provenance_record: None,
@@ -1408,8 +1409,8 @@ fn diff_patterns(
 }
 
 fn diff_capability_ids(
-    before: &[fcp_core::CapabilityId],
-    after: &[fcp_core::CapabilityId],
+    before: &[CapabilityId],
+    after: &[CapabilityId],
 ) -> (Vec<String>, Vec<String>) {
     let before_set: BTreeSet<String> = before.iter().map(|c| c.as_str().to_string()).collect();
     let after_set: BTreeSet<String> = after.iter().map(|c| c.as_str().to_string()).collect();
@@ -3507,12 +3508,12 @@ mod tests {
 
     #[test]
     fn diff_capability_ids_multiple_added_and_removed() {
-        let before: Vec<fcp_core::CapabilityId> = vec![
+        let before: Vec<CapabilityId> = vec![
             "cap.read".parse().unwrap(),
             "cap.write".parse().unwrap(),
             "cap.admin".parse().unwrap(),
         ];
-        let after: Vec<fcp_core::CapabilityId> =
+        let after: Vec<CapabilityId> =
             vec!["cap.read".parse().unwrap(), "cap.exec".parse().unwrap()];
         let (added, removed) = diff_capability_ids(&before, &after);
         assert!(added.contains(&"cap.exec".to_string()));

@@ -614,7 +614,9 @@ pub fn classify_fcp_error(err: &fcp_core::FcpError) -> FcpErrorCode {
             FcpErrorCode::FcpErrTransportFailed
         }
         fcp_core::FcpError::Unauthorized { .. } => FcpErrorCode::FcpErrUnauthorized,
-        fcp_core::FcpError::TokenExpired => FcpErrorCode::FcpErrTokenExpired,
+        fcp_core::FcpError::TokenExpired | fcp_core::FcpError::TokenNotYetValid => {
+            FcpErrorCode::FcpErrTokenExpired
+        }
         fcp_core::FcpError::InvalidSignature => FcpErrorCode::FcpErrInvalidSignature,
         fcp_core::FcpError::CapabilityDenied { .. } => FcpErrorCode::FcpErrCapabilityDenied,
         fcp_core::FcpError::RateLimited { .. } => FcpErrorCode::FcpErrRateLimited,

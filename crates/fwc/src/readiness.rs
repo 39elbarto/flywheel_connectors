@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use anyhow::{Context, Result};
-use fcp_core::{
+use fcp_kernel::{
     AgentHint, ApprovalMode, AuthDescriptor, CapabilityId, ConnectorDescriptor, DescriptorCheck,
     DescriptorStatus, IdempotencyClass, OperationId, OperationInfo, PrerequisiteCatalog,
     ReadinessDescriptor, RiskLevel, SafetyTier,
@@ -2914,32 +2914,32 @@ fn parse_approval_mode(label: &str) -> Result<Option<ApprovalMode>> {
 }
 
 #[must_use]
-pub const fn risk_level_label(level: fcp_core::RiskLevel) -> &'static str {
+pub const fn risk_level_label(level: RiskLevel) -> &'static str {
     match level {
-        fcp_core::RiskLevel::Low => "low",
-        fcp_core::RiskLevel::Medium => "medium",
-        fcp_core::RiskLevel::High => "high",
-        fcp_core::RiskLevel::Critical => "critical",
+        RiskLevel::Low => "low",
+        RiskLevel::Medium => "medium",
+        RiskLevel::High => "high",
+        RiskLevel::Critical => "critical",
     }
 }
 
 #[must_use]
-pub const fn safety_tier_label(tier: fcp_core::SafetyTier) -> &'static str {
+pub const fn safety_tier_label(tier: SafetyTier) -> &'static str {
     match tier {
-        fcp_core::SafetyTier::Safe => "safe",
-        fcp_core::SafetyTier::Risky => "risky",
-        fcp_core::SafetyTier::Dangerous => "dangerous",
-        fcp_core::SafetyTier::Critical => "critical",
-        fcp_core::SafetyTier::Forbidden => "forbidden",
+        SafetyTier::Safe => "safe",
+        SafetyTier::Risky => "risky",
+        SafetyTier::Dangerous => "dangerous",
+        SafetyTier::Critical => "critical",
+        SafetyTier::Forbidden => "forbidden",
     }
 }
 
 #[must_use]
-pub const fn idempotency_label(idempotency: fcp_core::IdempotencyClass) -> &'static str {
+pub const fn idempotency_label(idempotency: IdempotencyClass) -> &'static str {
     match idempotency {
-        fcp_core::IdempotencyClass::None => "none",
-        fcp_core::IdempotencyClass::BestEffort => "best-effort",
-        fcp_core::IdempotencyClass::Strict => "strict",
+        IdempotencyClass::None => "none",
+        IdempotencyClass::BestEffort => "best-effort",
+        IdempotencyClass::Strict => "strict",
     }
 }
 

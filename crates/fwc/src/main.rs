@@ -13282,6 +13282,75 @@ fn budget_report_evidence_handles(
     handles
 }
 
+fn cancellation_evidence_handles(
+    host: &str,
+    request: &HostCancellationRequest,
+    response: &HostCancellationResponse,
+) -> Vec<Value> {
+    vec![
+        json!({
+            "kind": "cancel-request",
+            "endpoint": host,
+            "operation_id": &request.operation_id,
+            "reason": &request.reason,
+            "cleanup": &request.cleanup,
+            "return_partial": request.return_partial,
+        }),
+        json!({
+            "kind": "cancel-outcome",
+            "endpoint": host,
+            "operation_id": &response.operation_id,
+            "outcome": response.outcome,
+            "duration_ms": response.duration_ms,
+            "cleanup_success": response.cleanup_result.as_ref().map(|result| result.success),
+            "cleanup_duration_ms": response.cleanup_result.as_ref().map(|result| result.duration_ms),
+            "checkpoint_id": response.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
+            "partial_result_items": response.partial_result.as_ref().map(|partial| partial.completed_items),
+        }),
+    ]
+}
+
+fn cancellation_operator_guidance(
+    operation_id: &str,
+    host: &str,
+    outcome: fcp_host::CancellationOutcome,
+) -> (String, Vec<String>) {
+    match outcome {
+        fcp_host::CancellationOutcome::Cancelled => (
+            format!("Cancelled live operation `{operation_id}` via `fcp-host`."),
+            vec![
+                format!("fwc watch {operation_id} --host {host}"),
+                "fwc history --limit 10".to_owned(),
+            ],
+        ),
+        fcp_host::CancellationOutcome::Pending => (
+            format!(
+                "Cancellation for live operation `{operation_id}` is still in progress on `fcp-host`."
+            ),
+            vec![
+                format!("fwc watch {operation_id} --host {host}"),
+                format!("fwc status --host {host}"),
+            ],
+        ),
+        fcp_host::CancellationOutcome::TooLate => (
+            format!(
+                "Operation `{operation_id}` had already completed before `fcp-host` received the cancellation request."
+            ),
+            vec![
+                "fwc history --limit 10".to_owned(),
+                format!("fwc status --host {host}"),
+            ],
+        ),
+        fcp_host::CancellationOutcome::Failed => (
+            format!("`fcp-host` could not cancel live operation `{operation_id}`."),
+            vec![
+                format!("fwc watch {operation_id} --host {host}"),
+                format!("fwc status --host {host}"),
+            ],
+        ),
+    }
+}
+
 fn config_snapshot_evidence_handles(
     connector_id: &str,
     host: &str,
@@ -17900,23 +17969,38 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
     } else {
         CliExitCode::Success
     };
+    let live_host_mutated = matches!(
+        response.outcome,
+        fcp_host::CancellationOutcome::Cancelled | fcp_host::CancellationOutcome::Pending
+    );
+    let degraded = matches!(response.outcome, fcp_host::CancellationOutcome::Failed);
+    let evidence_handles = cancellation_evidence_handles(&host.endpoint, &request, &response);
+    let (message, next_actions) =
+        cancellation_operator_guidance(&args.operation_id, &host.endpoint, response.outcome);
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "cancel");
     let mut payload = json!({
         "status": if exit_code.is_success() { "ok" } else { "error" },
         "command": "cancel",
         "source": "host-admin-api",
-        "message": format!(
-            "Submitted a live cancellation request for operation `{}` against `fcp-host`.",
-            args.operation_id
-        ),
+        "message": message,
         "request": request,
         "response": response,
-        "next_actions": [
-            format!("fwc history --status error --limit 10"),
-            format!("fwc status --host {}", host.endpoint),
-        ],
+        "next_actions": next_actions,
     });
+    attach_install_contract(
+        &mut payload,
+        "cancel",
+        "host-admin-api",
+        "node-local-root-app",
+        "cancel-operation",
+        Some(&host.endpoint),
+        live_host_mutated,
+        degraded,
+        false,
+        "Live cancel answers are authoritative for the submitted cancellation request and reported host outcome, but they do not by themselves prove downstream cleanup side effects beyond the returned host audit surface.",
+        evidence_handles,
+    );
     if exit_code.is_success() {
         envelope.inject_into(&mut payload);
     }
@@ -34338,9 +34422,113 @@ depends_on = ["missing"]
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["command"], "cancel");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "cancel-operation",
+            true,
+            false,
+            false,
+        );
         assert_eq!(payload["response"]["operation_id"], "op-test-12345");
         assert_eq!(payload["response"]["outcome"], "cancelled");
         assert_eq!(payload["request"]["operation_id"], "op-test-12345");
+        assert_evidence_handle(&payload, "cancel-request");
+        assert_evidence_handle(&payload, "cancel-outcome");
+    }
+
+    #[test]
+    fn execute_cancel_host_failure_reports_contract() {
+        let cancel_response = serde_json::to_value(fcp_host::CancellationResponse {
+            operation_id: "op-test-999".to_owned(),
+            outcome: fcp_host::CancellationOutcome::Failed,
+            partial_result: None,
+            checkpoint: None,
+            cleanup_result: Some(fcp_host::CleanupResult {
+                success: false,
+                cleaned: Vec::new(),
+                failed: vec!["temp-resource".to_owned()],
+                duration_ms: 9,
+            }),
+            duration_ms: 31,
+        })
+        .expect("cancel response should serialize");
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([("POST /rpc/cancel".to_owned(), cancel_response)]),
+            1,
+        );
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "cancel", "op-test-999"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Connector.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "cancel");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "cancel-operation",
+            false,
+            true,
+            false,
+        );
+        assert_eq!(payload["response"]["operation_id"], "op-test-999");
+        assert_eq!(payload["response"]["outcome"], "failed");
+        assert_evidence_handle(&payload, "cancel-request");
+        assert_evidence_handle(&payload, "cancel-outcome");
+    }
+
+    #[test]
+    fn execute_cancel_host_too_late_reports_completed_operation() {
+        let cancel_response = serde_json::to_value(fcp_host::CancellationResponse {
+            operation_id: "op-test-too-late".to_owned(),
+            outcome: fcp_host::CancellationOutcome::TooLate,
+            partial_result: None,
+            checkpoint: None,
+            cleanup_result: None,
+            duration_ms: 7,
+        })
+        .expect("cancel response should serialize");
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([("POST /rpc/cancel".to_owned(), cancel_response)]),
+            1,
+        );
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "cancel",
+            "op-test-too-late",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["command"], "cancel");
+        assert_eq!(
+            payload["message"],
+            "Operation `op-test-too-late` had already completed before `fcp-host` received the cancellation request."
+        );
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "cancel-operation",
+            false,
+            false,
+            false,
+        );
+        assert_eq!(payload["response"]["operation_id"], "op-test-too-late");
+        assert_eq!(payload["response"]["outcome"], "too_late");
+        assert_evidence_handle(&payload, "cancel-request");
+        assert_evidence_handle(&payload, "cancel-outcome");
+        assert_eq!(payload["next_actions"][0], "fwc history --limit 10");
     }
 
     #[test]

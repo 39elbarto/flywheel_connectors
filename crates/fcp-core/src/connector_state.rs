@@ -28,9 +28,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    ComputationCheckpoint, ConnectorId, InstanceId, Lease, LeaseHandoff, LeaseId, LeasePurpose,
-    LeaseTransferValidationError, LeaseValidationError, MigrationCapabilityContext, ObjectHeader,
-    ObjectId, TailscaleNodeId, ZoneId, validate_lease, validate_lease_handoff,
+    CheckpointTransferEncoding, ComputationCheckpoint, ConnectorId, InstanceId, Lease,
+    LeaseHandoff, LeaseId, LeasePurpose, LeaseTransferValidationError, LeaseValidationError,
+    MigrationCapabilityContext, ObjectHeader, ObjectId, TailscaleNodeId, ZoneId, validate_lease,
+    validate_lease_handoff,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -862,6 +863,777 @@ impl MigratableComputation {
     }
 }
 
+/// Durable boundary that a target must validate before resuming a computation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeBoundary {
+    /// Subject being resumed.
+    pub subject_id: ObjectId,
+    /// Canonical checkpoint object that anchors the resume attempt.
+    pub checkpoint_object_id: ObjectId,
+    /// Monotonic checkpoint sequence used for rollback detection.
+    pub checkpoint_seq: u64,
+    /// Durable state object referenced by the checkpoint, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_object_id: Option<ObjectId>,
+    /// Receipt lineage head referenced by the checkpoint, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_head: Option<ObjectId>,
+    /// Lease object bound to the checkpoint.
+    pub lease_object_id: LeaseId,
+    /// Lease fencing token bound to the checkpoint.
+    pub lease_fencing_token: u64,
+    /// Capability token JTI proving the authority context under which the checkpoint was taken.
+    pub capability_token_jti: Uuid,
+}
+
+impl ResumeBoundary {
+    /// Build a durable resume boundary from a canonical checkpoint.
+    ///
+    /// # Errors
+    /// Returns a [`ComputationMigrationError`] when the provided object id does not match the
+    /// checkpoint's canonical bytes.
+    pub fn from_checkpoint(
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+        state_object_id: Option<ObjectId>,
+        receipt_head: Option<ObjectId>,
+    ) -> Result<Self, ComputationMigrationError> {
+        let derived_object_id = checkpoint.object_id()?;
+        if derived_object_id != checkpoint_object_id {
+            return Err(ComputationMigrationError::CheckpointObjectMismatch {
+                expected: Some(derived_object_id),
+                got: checkpoint_object_id,
+            });
+        }
+
+        Ok(Self {
+            subject_id: checkpoint.computation_id,
+            checkpoint_object_id,
+            checkpoint_seq: checkpoint.checkpoint_seq,
+            state_object_id,
+            receipt_head,
+            lease_object_id: checkpoint.lease_id,
+            lease_fencing_token: checkpoint.lease_fencing_token,
+            capability_token_jti: checkpoint.capability_context.capability_token_jti,
+        })
+    }
+
+    /// Assess whether this boundary is stale relative to the current durable lineage.
+    #[must_use]
+    pub fn assess_freshness(
+        &self,
+        current_checkpoint_seq: u64,
+        current_lease_id: LeaseId,
+        current_lease_fencing_token: u64,
+    ) -> CheckpointFreshness {
+        if self.checkpoint_seq < current_checkpoint_seq {
+            return CheckpointFreshness::StaleCheckpoint {
+                candidate_checkpoint_seq: self.checkpoint_seq,
+                current_checkpoint_seq,
+            };
+        }
+
+        if self.lease_fencing_token < current_lease_fencing_token {
+            return CheckpointFreshness::StaleLease {
+                candidate_lease_id: self.lease_object_id,
+                current_lease_id,
+                candidate_fencing_token: self.lease_fencing_token,
+                current_fencing_token: current_lease_fencing_token,
+            };
+        }
+
+        if self.lease_fencing_token == current_lease_fencing_token
+            && self.lease_object_id != current_lease_id
+        {
+            return CheckpointFreshness::EvidenceConflict {
+                checkpoint_lease_id: self.lease_object_id,
+                current_lease_id,
+                checkpoint_fencing_token: self.lease_fencing_token,
+                current_fencing_token: current_lease_fencing_token,
+            };
+        }
+
+        CheckpointFreshness::Fresh
+    }
+}
+
+/// Freshness classification for a checkpoint boundary before resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CheckpointFreshness {
+    /// The checkpoint is current enough to participate in resume.
+    Fresh,
+    /// A newer checkpoint sequence exists and this checkpoint would roll progress back.
+    StaleCheckpoint {
+        /// Candidate checkpoint sequence.
+        candidate_checkpoint_seq: u64,
+        /// Current durable checkpoint sequence.
+        current_checkpoint_seq: u64,
+    },
+    /// The checkpoint was taken under a superseded lease lineage.
+    StaleLease {
+        /// Lease bound to the candidate checkpoint.
+        candidate_lease_id: LeaseId,
+        /// Lease currently considered authoritative.
+        current_lease_id: LeaseId,
+        /// Fencing token bound to the candidate checkpoint.
+        candidate_fencing_token: u64,
+        /// Current authoritative fencing token.
+        current_fencing_token: u64,
+    },
+    /// The checkpoint and current lease lineage disagree in a way that cannot be ordered safely.
+    EvidenceConflict {
+        /// Lease bound to the candidate checkpoint.
+        checkpoint_lease_id: LeaseId,
+        /// Lease currently considered authoritative.
+        current_lease_id: LeaseId,
+        /// Fencing token bound to the candidate checkpoint.
+        checkpoint_fencing_token: u64,
+        /// Current authoritative fencing token.
+        current_fencing_token: u64,
+    },
+}
+
+impl CheckpointFreshness {
+    /// Whether this freshness result allows resume to proceed.
+    #[must_use]
+    pub const fn allows_resume(&self) -> bool {
+        matches!(self, Self::Fresh)
+    }
+
+    /// Human-readable explanation of this freshness result.
+    #[must_use]
+    pub fn explanation(&self) -> String {
+        match self {
+            Self::Fresh => {
+                "checkpoint boundary is fresh relative to the current lineage".to_string()
+            }
+            Self::StaleCheckpoint {
+                candidate_checkpoint_seq,
+                current_checkpoint_seq,
+            } => format!(
+                "checkpoint sequence {candidate_checkpoint_seq} is stale; current sequence is {current_checkpoint_seq}"
+            ),
+            Self::StaleLease {
+                candidate_lease_id,
+                current_lease_id,
+                candidate_fencing_token,
+                current_fencing_token,
+            } => format!(
+                "checkpoint lease {candidate_lease_id} fence {candidate_fencing_token} is stale; current lease {current_lease_id} fence {current_fencing_token}"
+            ),
+            Self::EvidenceConflict {
+                checkpoint_lease_id,
+                current_lease_id,
+                checkpoint_fencing_token,
+                current_fencing_token,
+            } => format!(
+                "checkpoint lease {checkpoint_lease_id} fence {checkpoint_fencing_token} conflicts with current lease {current_lease_id} fence {current_fencing_token}"
+            ),
+        }
+    }
+}
+
+/// Why a computation is being resumed on the current node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeCause {
+    /// Source node intentionally drained and handed control to the target.
+    PlannedHandoff,
+    /// Another node is taking over after a failure or placement change.
+    Failover,
+    /// The same node is recovering after a local crash or restart.
+    CrashRecovery,
+    /// An operator forced a repair or resume attempt.
+    OperatorRepair,
+}
+
+impl ResumeCause {
+    /// Stable label for logs and evidence.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PlannedHandoff => "planned_handoff",
+            Self::Failover => "failover",
+            Self::CrashRecovery => "crash_recovery",
+            Self::OperatorRepair => "operator_repair",
+        }
+    }
+}
+
+/// Duplicate-delivery classification that constrains replay behavior after resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateDeliveryClass {
+    /// No conflicting prior effect has been observed.
+    Fresh,
+    /// Prior work already committed and resume must attach to it.
+    DuplicateCommitted,
+    /// Retry is safe because prior work did not commit.
+    ReplaySafeRetry,
+    /// External state may have advanced without enough proof to replay safely.
+    AmbiguousExternal,
+    /// Durable evidence objects disagree and require operator attention.
+    EvidenceConflict,
+}
+
+impl DuplicateDeliveryClass {
+    /// Stable label for logs and evidence.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::DuplicateCommitted => "duplicate_committed",
+            Self::ReplaySafeRetry => "replay_safe_retry",
+            Self::AmbiguousExternal => "ambiguous_external",
+            Self::EvidenceConflict => "evidence_conflict",
+        }
+    }
+}
+
+/// Chosen disposition once prior work has been classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeDisposition {
+    /// Attach to an already-committed result.
+    Attach,
+    /// Retry execution safely.
+    Retry,
+    /// Deny automatic continuation.
+    Deny,
+    /// Perform a repair or reconciliation flow first.
+    Reconcile,
+}
+
+impl ResumeDisposition {
+    /// Stable label for logs and evidence.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Attach => "attach",
+            Self::Retry => "retry",
+            Self::Deny => "deny",
+            Self::Reconcile => "reconcile",
+        }
+    }
+}
+
+/// Final outcome of a resume attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeOutcome {
+    /// Resume completed and execution may continue.
+    Accepted,
+    /// Resume was rejected and execution must remain stopped.
+    Denied,
+}
+
+/// Export mode used to carry a checkpoint between nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointExportEncoding {
+    /// Checkpoint bytes are carried inline.
+    Inline,
+    /// Checkpoint bytes are carried as ordered chunks.
+    Chunked,
+}
+
+impl CheckpointExportEncoding {
+    /// Stable label for logs and evidence.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Chunked => "chunked",
+        }
+    }
+}
+
+/// Lease lineage spanning the source and resumed execution sites.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeLeaseLineage {
+    /// Holder that produced the checkpoint.
+    pub prior_holder: TailscaleNodeId,
+    /// Holder that attempted or completed the resume.
+    pub resumed_holder: TailscaleNodeId,
+    /// Lease that authorized the checkpoint.
+    pub prior_lease_id: LeaseId,
+    /// Lease under which the target attempted or completed resume.
+    pub resumed_lease_id: LeaseId,
+    /// Fencing token bound to the checkpoint.
+    pub prior_fencing_token: u64,
+    /// Fencing token under which the target attempted or completed resume.
+    pub resumed_fencing_token: u64,
+}
+
+/// Reason code for timeline events emitted during checkpoint export, handoff, and resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeReasonCode {
+    /// Checkpoint bytes were exported into a transfer encoding.
+    CheckpointExported,
+    /// A lease handoff was authorized for the exported checkpoint.
+    HandoffAuthorized,
+    /// The checkpoint boundary is current enough for resume.
+    CheckpointFresh,
+    /// The checkpoint boundary is stale and cannot be trusted as-is.
+    CheckpointStale,
+    /// Prior work classification completed.
+    DuplicateClassified,
+    /// Resume completed successfully.
+    ResumeAccepted,
+    /// Resume was denied due to lease or state validation.
+    ResumeDenied,
+    /// Durable evidence objects disagree and require reconciliation.
+    EvidenceConflict,
+}
+
+/// Deterministic timeline event emitted for handoff and resume artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeTimelineEvent {
+    /// Observation timestamp in milliseconds since epoch.
+    pub observed_at_ms: u64,
+    /// Event operation label.
+    pub operation: String,
+    /// Explanation category.
+    pub reason_code: ResumeReasonCode,
+    /// Canonical checkpoint object under discussion.
+    pub checkpoint_object_id: ObjectId,
+    /// Checkpoint sequence under discussion.
+    pub checkpoint_seq: u64,
+    /// Holder associated with the event when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<TailscaleNodeId>,
+    /// Lease associated with the event when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_object_id: Option<LeaseId>,
+    /// Fencing token associated with the event when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_fencing_token: Option<u64>,
+    /// Human-readable explanation.
+    pub explanation: String,
+}
+
+/// Canonical metadata for a checkpoint that has been prepared for transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointExportArtifact {
+    /// Boundary that the target must validate before resuming.
+    pub boundary: ResumeBoundary,
+    /// Holder that produced the exported checkpoint.
+    pub current_holder: TailscaleNodeId,
+    /// Transfer encoding used to carry the checkpoint.
+    pub encoding: CheckpointExportEncoding,
+    /// Canonical payload length in bytes.
+    pub total_bytes: u64,
+    /// Number of payload chunks represented by the export.
+    pub chunk_count: usize,
+    /// Audit lineage bound to the checkpoint when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_event_id: Option<ObjectId>,
+}
+
+impl CheckpointExportArtifact {
+    /// Capture canonical export metadata from a checkpoint and transfer encoding.
+    ///
+    /// # Errors
+    /// Returns a [`ComputationMigrationError`] when the checkpoint object id or transfer encoding
+    /// disagree with the canonical checkpoint bytes.
+    pub fn from_transfer_encoding(
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+        transfer_encoding: &CheckpointTransferEncoding,
+        state_object_id: Option<ObjectId>,
+        receipt_head: Option<ObjectId>,
+    ) -> Result<Self, ComputationMigrationError> {
+        let boundary = ResumeBoundary::from_checkpoint(
+            checkpoint,
+            checkpoint_object_id,
+            state_object_id,
+            receipt_head,
+        )?;
+        if transfer_encoding.object_id() != checkpoint_object_id {
+            return Err(ComputationMigrationError::CheckpointObjectMismatch {
+                expected: Some(transfer_encoding.object_id()),
+                got: checkpoint_object_id,
+            });
+        }
+
+        let (encoding, total_bytes, chunk_count) = match transfer_encoding {
+            CheckpointTransferEncoding::Inline {
+                canonical_bytes, ..
+            } => (
+                CheckpointExportEncoding::Inline,
+                u64::try_from(canonical_bytes.len()).unwrap_or(u64::MAX),
+                1,
+            ),
+            CheckpointTransferEncoding::Chunked(chunked) => (
+                CheckpointExportEncoding::Chunked,
+                chunked.manifest.total_bytes,
+                chunked.manifest.chunk_count(),
+            ),
+        };
+
+        Ok(Self {
+            boundary,
+            current_holder: checkpoint.current_holder.clone(),
+            encoding,
+            total_bytes,
+            chunk_count,
+            audit_event_id: checkpoint.capability_context.audit_event_id,
+        })
+    }
+}
+
+/// Inputs required to capture a handoff artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffArtifactInputs {
+    /// Durable state object referenced by the checkpoint, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_object_id: Option<ObjectId>,
+    /// Receipt lineage head referenced by the checkpoint, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_head: Option<ObjectId>,
+    /// Why the target will be resuming this computation.
+    pub resume_cause: ResumeCause,
+    /// Timestamp in milliseconds used for deterministic timeline emission.
+    pub observed_at_ms: u64,
+}
+
+/// Canonical artifact emitted once a checkpoint is exported and paired with a lease handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointHandoffArtifact {
+    /// Zone in which the handoff is valid.
+    pub zone_id: ZoneId,
+    /// Subject being migrated.
+    pub subject_id: ObjectId,
+    /// Exported checkpoint metadata.
+    pub export: CheckpointExportArtifact,
+    /// Lease lineage from source holder to target holder.
+    pub lease_lineage: ResumeLeaseLineage,
+    /// Why the target is expected to resume this computation.
+    pub resume_cause: ResumeCause,
+    /// Unix timestamp when the handoff was authorized.
+    pub transferred_at: u64,
+    /// Deterministic event timeline for later assertions.
+    pub timeline: Vec<ResumeTimelineEvent>,
+}
+
+impl CheckpointHandoffArtifact {
+    /// Capture a canonical handoff artifact after a computation enters the transferring state.
+    ///
+    /// # Errors
+    /// Returns a [`ComputationMigrationError`] when the checkpoint binding, transfer encoding, or
+    /// handoff lineage do not match the current migration state.
+    #[allow(clippy::too_many_lines)]
+    pub fn capture(
+        computation: &MigratableComputation,
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+        transfer_encoding: &CheckpointTransferEncoding,
+        handoff: &LeaseHandoff,
+        inputs: HandoffArtifactInputs,
+    ) -> Result<Self, ComputationMigrationError> {
+        computation.validate_checkpoint_binding(checkpoint, checkpoint_object_id)?;
+        let export = CheckpointExportArtifact::from_transfer_encoding(
+            checkpoint,
+            checkpoint_object_id,
+            transfer_encoding,
+            inputs.state_object_id,
+            inputs.receipt_head,
+        )?;
+
+        if handoff.previous_lease_id != computation.execution_lease_id {
+            return Err(ComputationMigrationError::UnexpectedPriorLeaseId {
+                expected: computation.execution_lease_id,
+                got: handoff.previous_lease_id,
+            });
+        }
+        if handoff.checkpoint_object_id != Some(checkpoint_object_id) {
+            return Err(ComputationMigrationError::HandoffCheckpointMismatch {
+                expected: checkpoint_object_id,
+                got: handoff.checkpoint_object_id,
+            });
+        }
+
+        let (target_holder, next_lease_id, next_fencing_token) = match &computation.state {
+            MigratableComputationState::Transferring {
+                target_holder,
+                next_lease_id,
+                next_fencing_token,
+            } => (target_holder, next_lease_id, next_fencing_token),
+            state => {
+                return Err(ComputationMigrationError::InvalidStateTransition {
+                    state: state.clone(),
+                    action: "capture_handoff_artifact",
+                });
+            }
+        };
+
+        if handoff.to_holder != *target_holder {
+            return Err(ComputationMigrationError::HandoffTargetMismatch {
+                expected: target_holder.clone(),
+                got: handoff.to_holder.clone(),
+            });
+        }
+        if handoff.next_lease_id != *next_lease_id {
+            return Err(ComputationMigrationError::HandoffNextLeaseMismatch {
+                expected: *next_lease_id,
+                got: handoff.next_lease_id,
+            });
+        }
+        if handoff.next_fencing_token != *next_fencing_token {
+            return Err(ComputationMigrationError::HandoffNextFenceMismatch {
+                expected: *next_fencing_token,
+                got: handoff.next_fencing_token,
+            });
+        }
+
+        let timeline = vec![
+            ResumeTimelineEvent {
+                observed_at_ms: inputs.observed_at_ms,
+                operation: "checkpoint.exported".to_string(),
+                reason_code: ResumeReasonCode::CheckpointExported,
+                checkpoint_object_id,
+                checkpoint_seq: checkpoint.checkpoint_seq,
+                holder: Some(computation.current_holder.clone()),
+                lease_object_id: Some(computation.execution_lease_id),
+                lease_fencing_token: Some(computation.lease_fencing_token),
+                explanation: format!(
+                    "checkpoint exported as {} payload ({} bytes across {} chunk(s))",
+                    export.encoding.label(),
+                    export.total_bytes,
+                    export.chunk_count,
+                ),
+            },
+            ResumeTimelineEvent {
+                observed_at_ms: inputs.observed_at_ms,
+                operation: "handoff.authorized".to_string(),
+                reason_code: ResumeReasonCode::HandoffAuthorized,
+                checkpoint_object_id,
+                checkpoint_seq: checkpoint.checkpoint_seq,
+                holder: Some(handoff.to_holder.clone()),
+                lease_object_id: Some(handoff.next_lease_id),
+                lease_fencing_token: Some(handoff.next_fencing_token),
+                explanation: format!(
+                    "handoff authorized from {} to {} for resume cause {}",
+                    handoff.from_holder.as_str(),
+                    handoff.to_holder.as_str(),
+                    inputs.resume_cause.label(),
+                ),
+            },
+        ];
+
+        Ok(Self {
+            zone_id: computation.zone_id.clone(),
+            subject_id: computation.computation_id,
+            export,
+            lease_lineage: ResumeLeaseLineage {
+                prior_holder: computation.current_holder.clone(),
+                resumed_holder: handoff.to_holder.clone(),
+                prior_lease_id: computation.execution_lease_id,
+                resumed_lease_id: handoff.next_lease_id,
+                prior_fencing_token: computation.lease_fencing_token,
+                resumed_fencing_token: handoff.next_fencing_token,
+            },
+            resume_cause: inputs.resume_cause,
+            transferred_at: handoff.transferred_at,
+            timeline,
+        })
+    }
+}
+
+/// Inputs required to evaluate a resume attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeEvidenceInputs {
+    /// Durable state object referenced by the checkpoint, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_object_id: Option<ObjectId>,
+    /// Receipt lineage head referenced by the checkpoint, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_head: Option<ObjectId>,
+    /// Why this resume attempt is happening.
+    pub resume_cause: ResumeCause,
+    /// Duplicate-delivery classification consulted before reissuing work.
+    pub duplicate_delivery_class: DuplicateDeliveryClass,
+    /// Intended disposition if resume succeeds.
+    pub disposition: ResumeDisposition,
+    /// Timestamp in milliseconds used for deterministic timeline emission.
+    pub observed_at_ms: u64,
+}
+
+/// Durable evidence emitted for a resume decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeEvidence {
+    /// Zone in which the resume was attempted.
+    pub zone_id: ZoneId,
+    /// Subject being resumed.
+    pub subject_id: ObjectId,
+    /// Boundary that anchored the resume decision.
+    pub boundary: ResumeBoundary,
+    /// Lease lineage from the checkpoint producer to the attempted or successful resume site.
+    pub lease_lineage: ResumeLeaseLineage,
+    /// Why the resume attempt was performed.
+    pub resume_cause: ResumeCause,
+    /// Freshness assessment for the checkpoint boundary.
+    pub freshness: CheckpointFreshness,
+    /// Duplicate-delivery classification consulted before reissuing work.
+    pub duplicate_delivery_class: DuplicateDeliveryClass,
+    /// Final disposition selected for this attempt.
+    pub disposition: ResumeDisposition,
+    /// Whether the resume was accepted or denied.
+    pub outcome: ResumeOutcome,
+    /// Audit lineage bound to the checkpoint when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_event_id: Option<ObjectId>,
+    /// Validation error captured when resume is denied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_error: Option<String>,
+    /// Deterministic event timeline for later assertions.
+    pub timeline: Vec<ResumeTimelineEvent>,
+}
+
+impl ResumeEvidence {
+    /// Evaluate a resume attempt and emit durable evidence for the outcome.
+    ///
+    /// # Errors
+    /// Returns a [`ComputationMigrationError`] when the checkpoint does not bind to the current
+    /// computation state at all. Lease validation failures are encoded into the returned evidence.
+    #[allow(clippy::too_many_lines)]
+    pub fn evaluate(
+        computation: &MigratableComputation,
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+        resumed_lease_id: LeaseId,
+        resumed_lease: &Lease,
+        now: u64,
+        inputs: ResumeEvidenceInputs,
+    ) -> Result<Self, ComputationMigrationError> {
+        computation.validate_checkpoint_binding(checkpoint, checkpoint_object_id)?;
+        let boundary = ResumeBoundary::from_checkpoint(
+            checkpoint,
+            checkpoint_object_id,
+            inputs.state_object_id,
+            inputs.receipt_head,
+        )?;
+        let freshness = boundary.assess_freshness(
+            computation.capability_context.checkpoint_seq,
+            computation.execution_lease_id,
+            computation.lease_fencing_token,
+        );
+
+        let mut attempt = computation.clone();
+        let resume_result = attempt.resume(
+            checkpoint,
+            checkpoint_object_id,
+            resumed_lease_id,
+            resumed_lease,
+            now,
+        );
+
+        let (outcome, disposition, validation_error, outcome_reason_code, outcome_explanation) =
+            match resume_result {
+                Ok(()) => (
+                    ResumeOutcome::Accepted,
+                    inputs.disposition,
+                    None,
+                    ResumeReasonCode::ResumeAccepted,
+                    format!(
+                        "resume accepted for holder {} under disposition {}",
+                        attempt.current_holder.as_str(),
+                        inputs.disposition.label(),
+                    ),
+                ),
+                Err(err) => {
+                    let reason_code =
+                        if matches!(freshness, CheckpointFreshness::EvidenceConflict { .. }) {
+                            ResumeReasonCode::EvidenceConflict
+                        } else {
+                            ResumeReasonCode::ResumeDenied
+                        };
+                    (
+                        ResumeOutcome::Denied,
+                        ResumeDisposition::Deny,
+                        Some(err.to_string()),
+                        reason_code,
+                        err.to_string(),
+                    )
+                }
+            };
+
+        let freshness_reason_code = match freshness {
+            CheckpointFreshness::Fresh => ResumeReasonCode::CheckpointFresh,
+            CheckpointFreshness::EvidenceConflict { .. } => ResumeReasonCode::EvidenceConflict,
+            CheckpointFreshness::StaleCheckpoint { .. }
+            | CheckpointFreshness::StaleLease { .. } => ResumeReasonCode::CheckpointStale,
+        };
+
+        let timeline = vec![
+            ResumeTimelineEvent {
+                observed_at_ms: inputs.observed_at_ms,
+                operation: "checkpoint.freshness_checked".to_string(),
+                reason_code: freshness_reason_code,
+                checkpoint_object_id,
+                checkpoint_seq: checkpoint.checkpoint_seq,
+                holder: Some(computation.current_holder.clone()),
+                lease_object_id: Some(computation.execution_lease_id),
+                lease_fencing_token: Some(computation.lease_fencing_token),
+                explanation: freshness.explanation(),
+            },
+            ResumeTimelineEvent {
+                observed_at_ms: inputs.observed_at_ms,
+                operation: "resume.classified".to_string(),
+                reason_code: ResumeReasonCode::DuplicateClassified,
+                checkpoint_object_id,
+                checkpoint_seq: checkpoint.checkpoint_seq,
+                holder: Some(resumed_lease.holder.clone()),
+                lease_object_id: Some(resumed_lease_id),
+                lease_fencing_token: Some(resumed_lease.fencing_token()),
+                explanation: format!(
+                    "duplicate classification {} with intended disposition {}",
+                    inputs.duplicate_delivery_class.label(),
+                    inputs.disposition.label(),
+                ),
+            },
+            ResumeTimelineEvent {
+                observed_at_ms: inputs.observed_at_ms,
+                operation: match outcome {
+                    ResumeOutcome::Accepted => "resume.accepted".to_string(),
+                    ResumeOutcome::Denied => "resume.denied".to_string(),
+                },
+                reason_code: outcome_reason_code,
+                checkpoint_object_id,
+                checkpoint_seq: checkpoint.checkpoint_seq,
+                holder: Some(resumed_lease.holder.clone()),
+                lease_object_id: Some(resumed_lease_id),
+                lease_fencing_token: Some(resumed_lease.fencing_token()),
+                explanation: outcome_explanation,
+            },
+        ];
+
+        Ok(Self {
+            zone_id: computation.zone_id.clone(),
+            subject_id: computation.computation_id,
+            boundary,
+            lease_lineage: ResumeLeaseLineage {
+                prior_holder: computation.current_holder.clone(),
+                resumed_holder: resumed_lease.holder.clone(),
+                prior_lease_id: computation.execution_lease_id,
+                resumed_lease_id,
+                prior_fencing_token: computation.lease_fencing_token,
+                resumed_fencing_token: resumed_lease.fencing_token(),
+            },
+            resume_cause: inputs.resume_cause,
+            freshness,
+            duplicate_delivery_class: inputs.duplicate_delivery_class,
+            disposition,
+            outcome,
+            audit_event_id: checkpoint.capability_context.audit_event_id,
+            validation_error,
+            timeline,
+        })
+    }
+}
+
 /// Errors produced while advancing the computation migration state machine.
 #[derive(Debug, Error)]
 pub enum ComputationMigrationError {
@@ -892,6 +1664,20 @@ pub enum ComputationMigrationError {
     },
     #[error("handoff referenced prior lease {got}, expected {expected}")]
     UnexpectedPriorLeaseId { expected: LeaseId, got: LeaseId },
+    #[error("handoff checkpoint mismatch: expected {expected}, got {got:?}")]
+    HandoffCheckpointMismatch {
+        expected: ObjectId,
+        got: Option<ObjectId>,
+    },
+    #[error("handoff target holder mismatch: expected {expected:?}, got {got:?}")]
+    HandoffTargetMismatch {
+        expected: TailscaleNodeId,
+        got: TailscaleNodeId,
+    },
+    #[error("handoff next lease mismatch: expected {expected}, got {got}")]
+    HandoffNextLeaseMismatch { expected: LeaseId, got: LeaseId },
+    #[error("handoff next fencing token mismatch: expected {expected}, got {got}")]
+    HandoffNextFenceMismatch { expected: u64, got: u64 },
     #[error("resume holder mismatch: expected {expected:?}, got {got:?}")]
     ResumeHolderMismatch {
         expected: TailscaleNodeId,
@@ -4662,5 +5448,212 @@ mod tests {
         .unwrap();
         assert_eq!(comp.zone_id, zone);
         assert_eq!(comp.computation_id, test_object_id("computation"));
+    }
+
+    #[test]
+    fn resume_boundary_detects_stale_checkpoint_sequence() {
+        let lease_id = test_object_id("lease");
+        let checkpoint = test_computation_checkpoint("holder", lease_id, 7, 3);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let boundary = ResumeBoundary::from_checkpoint(
+            &checkpoint,
+            checkpoint_object_id,
+            Some(test_object_id("state")),
+            Some(test_object_id("receipt")),
+        )
+        .unwrap();
+
+        let freshness = boundary.assess_freshness(4, lease_id, 7);
+        assert!(matches!(
+            freshness,
+            CheckpointFreshness::StaleCheckpoint {
+                candidate_checkpoint_seq: 3,
+                current_checkpoint_seq: 4,
+            }
+        ));
+        assert!(!freshness.allows_resume());
+    }
+
+    #[test]
+    fn checkpoint_handoff_artifact_captures_export_and_timeline() {
+        let source_lease_id = test_object_id("lease-source");
+        let target_lease_id = test_object_id("lease-target");
+        let checkpoint = test_computation_checkpoint("node-source", source_lease_id, 7, 4);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut comp = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("node-source"),
+            source_lease_id,
+            7,
+            test_migration_context(4),
+        );
+        comp.suspend(&checkpoint, checkpoint_object_id).unwrap();
+        let active_lease = test_migration_lease("node-source", 7, 2_000);
+        let handoff = test_migration_handoff(
+            source_lease_id,
+            target_lease_id,
+            "node-source",
+            "node-target",
+            7,
+            8,
+        );
+        comp.begin_transfer(&active_lease, &handoff, 1_500).unwrap();
+
+        let transfer_encoding = checkpoint.to_transfer_encoding(usize::MAX, 512).unwrap();
+        let artifact = CheckpointHandoffArtifact::capture(
+            &comp,
+            &checkpoint,
+            checkpoint_object_id,
+            &transfer_encoding,
+            &handoff,
+            HandoffArtifactInputs {
+                state_object_id: Some(test_object_id("state")),
+                receipt_head: Some(test_object_id("receipt")),
+                resume_cause: ResumeCause::PlannedHandoff,
+                observed_at_ms: 42,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(artifact.subject_id, test_object_id("computation"));
+        assert_eq!(
+            artifact.export.boundary.checkpoint_object_id,
+            checkpoint_object_id
+        );
+        assert_eq!(artifact.export.chunk_count, 1);
+        assert_eq!(artifact.export.encoding, CheckpointExportEncoding::Inline);
+        assert_eq!(
+            artifact
+                .timeline
+                .iter()
+                .map(|event| event.operation.as_str())
+                .collect::<Vec<_>>(),
+            vec!["checkpoint.exported", "handoff.authorized"]
+        );
+
+        let json = serde_json::to_string(&artifact).unwrap();
+        let decoded: CheckpointHandoffArtifact = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, artifact);
+    }
+
+    #[test]
+    fn resume_evidence_accepts_target_resume_after_handoff() {
+        let source_lease_id = test_object_id("lease-source");
+        let target_lease_id = test_object_id("lease-target");
+        let checkpoint = test_computation_checkpoint("node-source", source_lease_id, 7, 6);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut comp = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("node-source"),
+            source_lease_id,
+            7,
+            test_migration_context(6),
+        );
+        comp.suspend(&checkpoint, checkpoint_object_id).unwrap();
+        let active_lease = test_migration_lease("node-source", 7, 2_000);
+        let handoff = test_migration_handoff(
+            source_lease_id,
+            target_lease_id,
+            "node-source",
+            "node-target",
+            7,
+            8,
+        );
+        comp.begin_transfer(&active_lease, &handoff, 1_500).unwrap();
+
+        let target_lease = test_migration_lease("node-target", 8, 2_500);
+        let evidence = ResumeEvidence::evaluate(
+            &comp,
+            &checkpoint,
+            checkpoint_object_id,
+            target_lease_id,
+            &target_lease,
+            1_600,
+            ResumeEvidenceInputs {
+                state_object_id: Some(test_object_id("state")),
+                receipt_head: Some(test_object_id("receipt")),
+                resume_cause: ResumeCause::Failover,
+                duplicate_delivery_class: DuplicateDeliveryClass::ReplaySafeRetry,
+                disposition: ResumeDisposition::Retry,
+                observed_at_ms: 55,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.outcome, ResumeOutcome::Accepted);
+        assert_eq!(evidence.disposition, ResumeDisposition::Retry);
+        assert!(matches!(evidence.freshness, CheckpointFreshness::Fresh));
+        assert_eq!(evidence.lease_lineage.prior_lease_id, source_lease_id);
+        assert_eq!(evidence.lease_lineage.resumed_lease_id, target_lease_id);
+        assert_eq!(
+            evidence
+                .timeline
+                .iter()
+                .map(|event| event.operation.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "checkpoint.freshness_checked",
+                "resume.classified",
+                "resume.accepted",
+            ]
+        );
+        assert!(evidence.validation_error.is_none());
+    }
+
+    #[test]
+    fn resume_evidence_denies_stale_source_holder_after_handoff() {
+        let source_lease_id = test_object_id("lease-source");
+        let target_lease_id = test_object_id("lease-target");
+        let checkpoint = test_computation_checkpoint("node-source", source_lease_id, 7, 6);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut comp = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("node-source"),
+            source_lease_id,
+            7,
+            test_migration_context(6),
+        );
+        comp.suspend(&checkpoint, checkpoint_object_id).unwrap();
+        let active_lease = test_migration_lease("node-source", 7, 2_000);
+        let handoff = test_migration_handoff(
+            source_lease_id,
+            target_lease_id,
+            "node-source",
+            "node-target",
+            7,
+            8,
+        );
+        comp.begin_transfer(&active_lease, &handoff, 1_500).unwrap();
+
+        let stale_source_lease = test_migration_lease("node-source", 7, 2_500);
+        let evidence = ResumeEvidence::evaluate(
+            &comp,
+            &checkpoint,
+            checkpoint_object_id,
+            source_lease_id,
+            &stale_source_lease,
+            1_600,
+            ResumeEvidenceInputs {
+                state_object_id: None,
+                receipt_head: None,
+                resume_cause: ResumeCause::Failover,
+                duplicate_delivery_class: DuplicateDeliveryClass::EvidenceConflict,
+                disposition: ResumeDisposition::Reconcile,
+                observed_at_ms: 89,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.outcome, ResumeOutcome::Denied);
+        assert_eq!(evidence.disposition, ResumeDisposition::Deny);
+        assert!(matches!(evidence.freshness, CheckpointFreshness::Fresh));
+        assert!(evidence.validation_error.is_some());
+        assert_eq!(
+            evidence.timeline.last().unwrap().operation,
+            "resume.denied".to_string()
+        );
     }
 }

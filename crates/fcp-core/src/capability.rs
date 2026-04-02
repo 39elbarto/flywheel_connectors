@@ -1090,7 +1090,10 @@ impl CapabilityVerifier {
 
         // 2. Validate timing
         let now = Utc::now();
-        CoseToken::validate_timing(&claims, now).map_err(|_| FcpError::TokenExpired)?;
+        CoseToken::validate_timing(&claims, now).map_err(|e| match e {
+            fcp_crypto::CryptoError::TokenNotYetValid => FcpError::TokenNotYetValid,
+            _ => FcpError::TokenExpired,
+        })?;
 
         // 3. Check zone binding
         if let Some(iss) = claims.get_zone_id() {

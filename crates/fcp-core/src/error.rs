@@ -48,6 +48,9 @@ pub enum FcpError {
     #[error("Token expired")]
     TokenExpired,
 
+    #[error("Token not yet valid")]
+    TokenNotYetValid,
+
     #[error("Invalid signature")]
     InvalidSignature,
 
@@ -246,9 +249,10 @@ impl FcpError {
             | Self::VersionMismatch { .. }
             | Self::MissingField { .. } => ErrorCategory::Protocol,
 
-            Self::Unauthorized { .. } | Self::TokenExpired | Self::InvalidSignature => {
-                ErrorCategory::Auth
-            }
+            Self::Unauthorized { .. }
+            | Self::TokenExpired
+            | Self::TokenNotYetValid
+            | Self::InvalidSignature => ErrorCategory::Auth,
 
             Self::CapabilityDenied { .. }
             | Self::RateLimited { .. }
@@ -297,6 +301,7 @@ impl FcpError {
             Self::VersionMismatch { .. } => 1005,
 
             Self::TokenExpired => 2002,
+            Self::TokenNotYetValid => 2005,
             Self::InvalidSignature => 2003,
 
             Self::CapabilityDenied { .. } => 3001,
@@ -393,6 +398,10 @@ impl FcpError {
             Self::TokenExpired => (
                 "FCP-2002".into(),
                 Some("Request a new capability token from the issuing node. Tokens have limited validity periods.".into()),
+            ),
+            Self::TokenNotYetValid => (
+                "FCP-2005".into(),
+                Some("The capability token's not-before (nbf) claim is in the future. Wait until the token becomes valid, or request a token with an earlier nbf.".into()),
             ),
             Self::InvalidSignature => (
                 "FCP-2003".into(),

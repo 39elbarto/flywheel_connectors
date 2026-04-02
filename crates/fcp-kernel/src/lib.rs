@@ -79,6 +79,13 @@ pub use fcp_core::{
     AgentHint, ApprovalMode, EventInfo, Introspection, OperationInfo, ResourceTypeInfo,
 };
 
+// ── Descriptor / Readiness Contracts ─────────────────────────────
+
+pub use fcp_core::{
+    AuthDescriptor, CapabilityId, ConnectorDescriptor, DescriptorCheck, DescriptorStatus,
+    PrerequisiteCatalog, ReadinessDescriptor, RiskLevel, SafetyTier,
+};
+
 // ── Lifecycle State Machine ──────────────────────────────────────
 
 pub use fcp_core::{
@@ -137,10 +144,14 @@ pub use fcp_core::{
 // ── Computation Migration & State ──────────────────────────────────
 
 pub use fcp_core::{
-    ComputationMigrationError, ConnectorStateDelta, ConnectorStateModel, ConnectorStateObject,
-    ConnectorStateRoot, ConnectorStateSnapshot, CrdtType, CursorState, ForkEvent, ForkResolution,
-    ForkResolutionOutcome, MigratableComputation, MigratableComputationState,
-    StateForkDetectionResult, StateForkDetector,
+    CheckpointExportArtifact, CheckpointExportEncoding, CheckpointFreshness,
+    CheckpointHandoffArtifact, ComputationMigrationError, ConnectorStateDelta, ConnectorStateModel,
+    ConnectorStateObject, ConnectorStateRoot, ConnectorStateSnapshot, CrdtType, CursorState,
+    DuplicateDeliveryClass, ForkEvent, ForkResolution, ForkResolutionOutcome,
+    HandoffArtifactInputs, MigratableComputation, MigratableComputationState, ResumeBoundary,
+    ResumeCause, ResumeDisposition, ResumeEvidence, ResumeEvidenceInputs, ResumeLeaseLineage,
+    ResumeOutcome, ResumeReasonCode, ResumeTimelineEvent, StateForkDetectionResult,
+    StateForkDetector,
 };
 
 // ── Budget & Resource Accounting ───────────────────────────────────
@@ -235,6 +246,29 @@ mod tests {
         let _: BudgetEnforcement = BudgetEnforcement::Warn;
         let _: BudgetEnforcement = BudgetEnforcement::Deny;
         let _: BudgetStatus = BudgetStatus::Ok;
+    }
+
+    #[test]
+    fn kernel_exports_descriptor_contract_types() {
+        let capability = CapabilityId::new("mesh.readiness").expect("valid capability id");
+        assert_eq!(capability.as_str(), "mesh.readiness");
+
+        let status = DescriptorStatus::Ready.combine(DescriptorStatus::Degraded);
+        assert_eq!(status, DescriptorStatus::Degraded);
+
+        let check = DescriptorCheck::new("readiness", DescriptorStatus::Ready, "ready");
+        assert_eq!(check.id, "readiness");
+        assert_eq!(check.status, DescriptorStatus::Ready);
+
+        let descriptor = ReadinessDescriptor::unverifiable("host evidence unavailable");
+        assert_eq!(descriptor.status, DescriptorStatus::Unverifiable);
+        assert_eq!(
+            descriptor.summary.as_deref(),
+            Some("host evidence unavailable")
+        );
+
+        let _: RiskLevel = RiskLevel::Low;
+        let _: SafetyTier = SafetyTier::Safe;
     }
 
     #[test]

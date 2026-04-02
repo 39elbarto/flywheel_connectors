@@ -10301,6 +10301,8 @@ fn pin_dispatch(args: &PinArgs, explicit_host: Option<&str>) -> Result<DispatchO
         )
     })?;
     let pin = client.pin(connector.summary.id.as_str(), &version)?;
+    let evidence_handles =
+        rollout_pin_evidence_handles(connector.summary.id.as_str(), &host.endpoint, "pin", &pin);
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "pin");
     let mut payload = json!({
@@ -10318,6 +10320,19 @@ fn pin_dispatch(args: &PinArgs, explicit_host: Option<&str>) -> Result<DispatchO
             format!("fwc unpin {} --host {}", connector.slug, host.endpoint),
         ],
     });
+    attach_install_contract(
+        &mut payload,
+        "pin",
+        "host-admin-api",
+        "node-local-root-app",
+        "rollout-pin",
+        Some(&host.endpoint),
+        true,
+        false,
+        false,
+        "Live pin answers are authoritative for the current node's rollout policy mutation, but they do not by themselves prove post-change runtime convergence.",
+        evidence_handles,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -10352,6 +10367,8 @@ fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<Disp
         }
     };
     let pin = client.unpin(connector.summary.id.as_str())?;
+    let evidence_handles =
+        rollout_pin_evidence_handles(connector.summary.id.as_str(), &host.endpoint, "unpin", &pin);
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "unpin");
     let mut payload = json!({
@@ -10369,6 +10386,19 @@ fn unpin_dispatch(args: &TargetArgs, explicit_host: Option<&str>) -> Result<Disp
             format!("fwc pin {} --to <version> --host {}", connector.slug, host.endpoint),
         ],
     });
+    attach_install_contract(
+        &mut payload,
+        "unpin",
+        "host-admin-api",
+        "node-local-root-app",
+        "rollout-unpin",
+        Some(&host.endpoint),
+        true,
+        false,
+        false,
+        "Live unpin answers are authoritative for the current node's rollout policy mutation, but they do not by themselves prove post-change runtime convergence.",
+        evidence_handles,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -10414,6 +10444,12 @@ fn lifecycle_dispatch(
     if args.valid_actions {
         let valid = lifecycle_mutations::valid_actions(current_state);
         let valid_labels: Vec<&str> = valid.iter().map(|a| a.label()).collect();
+        let evidence_handles = lifecycle_evidence_handles(
+            connector.summary.id.as_str(),
+            &host.endpoint,
+            current_state,
+            &valid,
+        );
         let toon = format!(
             "Lifecycle: {}\n  State: {}\n  Valid actions: {}",
             connector.slug,
@@ -10440,6 +10476,19 @@ fn lifecycle_dispatch(
                 format!("fwc lifecycle {} --action {} --preflight --host {}", connector.slug, a.label(), host.endpoint)
             }).collect::<Vec<_>>(),
         });
+        attach_install_contract(
+            &mut payload,
+            "lifecycle",
+            "host-admin-api",
+            "node-local-root-app",
+            "lifecycle-valid-actions",
+            Some(&host.endpoint),
+            false,
+            false,
+            false,
+            "Live lifecycle planning answers are authoritative for the current node's connector summary and policy surface, but they do not mutate state or prove post-change runtime convergence.",
+            evidence_handles,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -10492,6 +10541,22 @@ fn lifecycle_dispatch(
                 .with_force(args.force)
                 .with_dry_run(args.dry_run);
         let check = lifecycle_mutations::preflight(&request, current_state);
+        let mut evidence_handles = lifecycle_evidence_handles(
+            connector.summary.id.as_str(),
+            &host.endpoint,
+            current_state,
+            &[action],
+        );
+        evidence_handles.push(json!({
+            "kind": "lifecycle-preflight",
+            "connector_id": connector.summary.id.as_str(),
+            "endpoint": &host.endpoint,
+            "action": action.label(),
+            "risk_level": check.risk_level.label(),
+            "requires_confirmation": check.requires_confirmation,
+            "is_noop": check.is_noop,
+            "can_proceed": check.can_proceed(),
+        }));
         let toon = lifecycle_mutations::format_preflight_toon(&check);
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "lifecycle");
@@ -10525,6 +10590,19 @@ fn lifecycle_dispatch(
                 ]
             },
         });
+        attach_install_contract(
+            &mut payload,
+            "lifecycle",
+            "host-admin-api",
+            "node-local-root-app",
+            "lifecycle-preflight",
+            Some(&host.endpoint),
+            false,
+            false,
+            false,
+            "Live lifecycle preflight answers are authoritative for the current node's planning state and safety checks, but they do not execute the requested lifecycle change.",
+            evidence_handles,
+        );
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -10535,6 +10613,12 @@ fn lifecycle_dispatch(
     // Default: show current lifecycle state summary
     let valid = lifecycle_mutations::valid_actions(current_state);
     let valid_labels: Vec<&str> = valid.iter().map(|a| a.label()).collect();
+    let evidence_handles = lifecycle_evidence_handles(
+        connector.summary.id.as_str(),
+        &host.endpoint,
+        current_state,
+        &valid,
+    );
     let toon = format!(
         "Lifecycle: {}\n  State: {}\n  Valid actions: {}",
         connector.slug,
@@ -10561,6 +10645,19 @@ fn lifecycle_dispatch(
             format!("fwc lifecycle {} --action start --preflight --host {}", connector.slug, host.endpoint),
         ],
     });
+    attach_install_contract(
+        &mut payload,
+        "lifecycle",
+        "host-admin-api",
+        "node-local-root-app",
+        "lifecycle-summary",
+        Some(&host.endpoint),
+        false,
+        false,
+        false,
+        "Live lifecycle summary answers are authoritative for the current node's connector lifecycle state, but they do not execute any lifecycle transition.",
+        evidence_handles,
+    );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -10659,6 +10756,13 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                 policy,
             };
             let outcome = client.schedule_rollout(&schedule)?;
+            let evidence_handles = rollout_set_evidence_handles(
+                connector.summary.id.as_str(),
+                &host.endpoint,
+                set_args.canary,
+                &pin_state,
+                &outcome,
+            );
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
             let mut payload = json!({
@@ -10683,6 +10787,19 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                     format!("fwc status {} --host {}", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "rollout",
+                "host-admin-api",
+                "node-local-root-app",
+                "rollout-set",
+                Some(&host.endpoint),
+                true,
+                false,
+                false,
+                "Live rollout scheduling answers are authoritative for the current node's rollout policy mutation, but they do not by themselves prove later canary convergence.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -10702,6 +10819,12 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
             };
             let pin = client.pin_status(connector.summary.id.as_str())?;
             let rollout = client.rollout_status(connector.summary.id.as_str())?;
+            let evidence_handles = rollout_status_evidence_handles(
+                connector.summary.id.as_str(),
+                &host.endpoint,
+                &pin,
+                &rollout,
+            );
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
             let mut payload = json!({
@@ -10721,6 +10844,19 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                     format!("fwc rollout rollback {} --to <version> --host {}", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "rollout",
+                "host-admin-api",
+                "node-local-root-app",
+                "rollout-status",
+                Some(&host.endpoint),
+                false,
+                false,
+                false,
+                "Live rollout status answers are authoritative for the current node's rollout state snapshot, but they do not mutate rollout policy or prove future promotion outcomes.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -10744,6 +10880,11 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                 )
             })?;
             let response = client.rollback(connector.summary.id.as_str(), &version)?;
+            let evidence_handles = rollout_rollback_evidence_handles(
+                connector.summary.id.as_str(),
+                &host.endpoint,
+                &response,
+            );
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "rollout");
             let mut payload = json!({
@@ -10765,6 +10906,19 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                     format!("fwc status {} --host {}", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "rollout",
+                "host-admin-api",
+                "node-local-root-app",
+                "rollout-rollback",
+                Some(&host.endpoint),
+                true,
+                false,
+                false,
+                "Live rollout rollback answers are authoritative for the current node's rollback mutation, but they do not by themselves prove post-rollback runtime stabilization.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -11803,6 +11957,12 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
             let snapshot = client.config_snapshot(connector.summary.id.as_str())?;
             let replayable = snapshot.current.is_replayable();
             let config = snapshot.current.payload.clone();
+            let evidence_handles = config_snapshot_evidence_handles(
+                connector.summary.id.as_str(),
+                &host.endpoint,
+                &snapshot,
+                replayable,
+            );
             let message = if replayable {
                 format!(
                     "Loaded the live connector config snapshot for `{}` from `fcp-host`.",
@@ -11831,6 +11991,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                     format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "config",
+                "host-admin-api",
+                "node-local-root-app",
+                "config-get",
+                Some(&host.endpoint),
+                false,
+                !replayable,
+                !replayable,
+                "Live config-get answers are authoritative for the current node's config snapshot. Sanitized snapshots are degraded for replay because inline secrets are intentionally withheld.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -11920,6 +12093,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 },
             )?;
             let config = applied.current.payload.clone();
+            let evidence_handles = vec![
+                config_apply_evidence_handle(
+                    connector.summary.id.as_str(),
+                    &host.endpoint,
+                    &applied,
+                ),
+                config_mutation_target_handle(
+                    connector.summary.id.as_str(),
+                    &host.endpoint,
+                    "set",
+                    json!({ "updated_path": &set_args.key }),
+                ),
+            ];
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
@@ -11940,6 +12126,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                     format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "config",
+                "host-admin-api",
+                "node-local-root-app",
+                "config-set",
+                Some(&host.endpoint),
+                true,
+                false,
+                false,
+                "Live config-set answers are authoritative for the current node's applied connector config mutation and record the exact mutation target for automation.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -12022,6 +12221,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 },
             )?;
             let config = applied.current.payload.clone();
+            let evidence_handles = vec![
+                config_apply_evidence_handle(
+                    connector.summary.id.as_str(),
+                    &host.endpoint,
+                    &applied,
+                ),
+                config_mutation_target_handle(
+                    connector.summary.id.as_str(),
+                    &host.endpoint,
+                    "unset",
+                    json!({ "updated_path": &unset_args.key }),
+                ),
+            ];
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
@@ -12042,6 +12254,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                     format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "config",
+                "host-admin-api",
+                "node-local-root-app",
+                "config-unset",
+                Some(&host.endpoint),
+                true,
+                false,
+                false,
+                "Live config-unset answers are authoritative for the current node's applied connector config mutation and record the exact mutation target for automation.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -12119,6 +12344,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 },
             )?;
             let config = applied.current.payload.clone();
+            let evidence_handles = vec![
+                config_apply_evidence_handle(
+                    connector.summary.id.as_str(),
+                    &host.endpoint,
+                    &applied,
+                ),
+                config_mutation_target_handle(
+                    connector.summary.id.as_str(),
+                    &host.endpoint,
+                    "import",
+                    json!({ "input_file": import_path.display().to_string() }),
+                ),
+            ];
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
@@ -12139,6 +12377,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                     format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "config",
+                "host-admin-api",
+                "node-local-root-app",
+                "config-import",
+                Some(&host.endpoint),
+                true,
+                false,
+                false,
+                "Live config-import answers are authoritative for the current node's applied connector config mutation and record the imported document target for automation.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -12178,6 +12429,12 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
             if let Some(path) = &file_args.file {
                 write_json_file(path, &config)?;
             }
+            let evidence_handles = config_snapshot_evidence_handles(
+                connector.summary.id.as_str(),
+                &host.endpoint,
+                &snapshot,
+                replayable,
+            );
             let message = if replayable {
                 format!(
                     "Exported the live connector config snapshot for `{}`.",
@@ -12224,6 +12481,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "replayable": replayable,
                 "next_actions": next_actions,
             });
+            attach_install_contract(
+                &mut payload,
+                "config",
+                "host-admin-api",
+                "node-local-root-app",
+                "config-export",
+                Some(&host.endpoint),
+                false,
+                !replayable,
+                !replayable,
+                "Live config-export answers are authoritative for the current node's config snapshot. Sanitized exports are degraded for replay because inline secrets are intentionally withheld.",
+                evidence_handles,
+            );
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -12334,6 +12604,21 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 )
             };
             let config = snapshot.current.payload.clone();
+            let mut evidence_handles = config_snapshot_evidence_handles(
+                connector.summary.id.as_str(),
+                &host.endpoint,
+                &snapshot,
+                replayable,
+            );
+            if let Some(validation) = validation.as_ref() {
+                evidence_handles.push(json!({
+                    "kind": "config-validation",
+                    "connector_id": connector.summary.id.as_str(),
+                    "endpoint": &host.endpoint,
+                    "valid": validation.valid,
+                    "error": &validation.error,
+                }));
+            }
 
             let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "config");
             let mut payload = json!({
@@ -12352,6 +12637,19 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                     format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
                 ],
             });
+            attach_install_contract(
+                &mut payload,
+                "config",
+                "host-admin-api",
+                "node-local-root-app",
+                "config-doctor",
+                Some(&host.endpoint),
+                false,
+                !replayable || !valid,
+                !replayable,
+                "Live config-doctor answers are authoritative for the current node's config snapshot and validation preview. Sanitized snapshots and failed validations are explicitly marked as degraded.",
+                evidence_handles,
+            );
             if exit_code.is_success() {
                 envelope.inject_into(&mut payload);
             }
@@ -12427,32 +12725,64 @@ fn config_non_replayable_live_config_dispatch(
     snapshot: &ConnectorConfigSnapshot,
     details: Value,
 ) -> DispatchOutcome {
+    let scope = format!("config-{subcommand}");
+    let evidence_handles = vec![
+        config_snapshot_evidence_handles(
+            connector.summary.id.as_str(),
+            &host.endpoint,
+            snapshot,
+            false,
+        )
+        .into_iter()
+        .next()
+        .unwrap_or(Value::Null),
+        config_mutation_target_handle(
+            connector.summary.id.as_str(),
+            &host.endpoint,
+            subcommand,
+            details.clone(),
+        ),
+    ];
+    let mut payload = json!({
+        "status": "error",
+        "command": "config",
+        "subcommand": subcommand,
+        "source": "host-admin-api",
+        "error": {
+            "type": "non-replayable-live-config",
+            "message": format!(
+                "The live config snapshot for `{}` contains redacted inline secrets, so `fwc config {subcommand}` cannot safely construct a partial mutation from the sanitized payload.",
+                connector.slug
+            ),
+            "recoverable": true,
+        },
+        "connector": host_connector_descriptor_json(connector),
+        "snapshot": snapshot,
+        "details": details,
+        "next_actions": [
+            format!("fwc config get {} --host {}", connector.slug, host.endpoint),
+            format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+            "Construct a complete replacement config document with all required secrets before attempting an import; the redacted live snapshot is intentionally not replayable as-is."
+                .to_owned(),
+            "Move inline secrets into credential references so future incremental edits remain replayable."
+                .to_owned(),
+        ],
+    });
+    attach_install_contract(
+        &mut payload,
+        "config",
+        "host-admin-api",
+        "node-local-root-app",
+        &scope,
+        Some(&host.endpoint),
+        false,
+        true,
+        false,
+        "Live config mutation previews remain authoritative for the current node even when sanitized snapshots make partial mutation unsafe. The rejected mutation target is recorded explicitly for automation.",
+        evidence_handles,
+    );
     DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": "config",
-            "subcommand": subcommand,
-            "source": "host-admin-api",
-            "error": {
-                "type": "non-replayable-live-config",
-                "message": format!(
-                    "The live config snapshot for `{}` contains redacted inline secrets, so `fwc config {subcommand}` cannot safely construct a partial mutation from the sanitized payload.",
-                    connector.slug
-                ),
-                "recoverable": true,
-            },
-            "connector": host_connector_descriptor_json(connector),
-            "snapshot": snapshot,
-            "details": details,
-            "next_actions": [
-                format!("fwc config get {} --host {}", connector.slug, host.endpoint),
-                format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
-                "Construct a complete replacement config document with all required secrets before attempting an import; the redacted live snapshot is intentionally not replayable as-is."
-                    .to_owned(),
-                "Move inline secrets into credential references so future incremental edits remain replayable."
-                    .to_owned(),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Validation,
     }
 }
@@ -12468,26 +12798,54 @@ fn config_live_validation_dispatch(
         "The live host rejected the candidate config during preview, so nothing was written."
             .to_owned()
     });
+    let scope = format!("config-{subcommand}");
+    let evidence_handles = vec![
+        config_validation_evidence_handle(
+            connector.summary.id.as_str(),
+            &host.endpoint,
+            &validation,
+        ),
+        config_mutation_target_handle(
+            connector.summary.id.as_str(),
+            &host.endpoint,
+            subcommand,
+            details.clone(),
+        ),
+    ];
+    let mut payload = json!({
+        "status": "invalid",
+        "command": "config",
+        "subcommand": subcommand,
+        "source": "host-admin-api",
+        "error": {
+            "type": "config-validation-failed",
+            "message": message,
+            "recoverable": true,
+        },
+        "connector": host_connector_descriptor_json(connector),
+        "details": details,
+        "validation": validation,
+        "next_actions": [
+            format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+            format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
+            format!("fwc config import {} --host {} --file <path>", connector.slug, host.endpoint),
+        ],
+    });
+    attach_install_contract(
+        &mut payload,
+        "config",
+        "host-admin-api",
+        "node-local-root-app",
+        &scope,
+        Some(&host.endpoint),
+        false,
+        true,
+        false,
+        "Live config mutation previews are authoritative for the current node even when the candidate is rejected. Validation evidence and the rejected mutation target are recorded explicitly for automation.",
+        evidence_handles,
+    );
     DispatchOutcome {
-        payload: json!({
-            "status": "invalid",
-            "command": "config",
-            "subcommand": subcommand,
-            "source": "host-admin-api",
-            "error": {
-                "type": "config-validation-failed",
-                "message": message,
-                "recoverable": true,
-            },
-            "connector": host_connector_descriptor_json(connector),
-            "details": details,
-            "validation": validation,
-            "next_actions": [
-                format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
-                format!("fwc config export {} --host {} --file <path>", connector.slug, host.endpoint),
-                format!("fwc config import {} --host {} --file <path>", connector.slug, host.endpoint),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Validation,
     }
 }
@@ -12498,30 +12856,51 @@ fn config_redacted_placeholder_import_dispatch(
     import_path: &Path,
     placeholder_paths: Vec<String>,
 ) -> DispatchOutcome {
+    let details = json!({
+        "input_file": import_path.display().to_string(),
+        "placeholder_paths": placeholder_paths,
+    });
+    let evidence_handles = vec![config_mutation_target_handle(
+        connector.summary.id.as_str(),
+        &host.endpoint,
+        "import",
+        details.clone(),
+    )];
+    let mut payload = json!({
+        "status": "invalid",
+        "command": "config",
+        "subcommand": "import",
+        "source": "host-admin-api",
+        "error": {
+            "type": "redacted-placeholder-import",
+            "message": "The import file still contains `[REDACTED]` placeholder values from a sanitized host export. Importing it would overwrite live secrets with placeholders.",
+            "recoverable": true,
+        },
+        "connector": host_connector_descriptor_json(connector),
+        "details": details,
+        "next_actions": [
+            format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
+            format!(
+                "Replace every `[REDACTED]` placeholder in {} with the real secret value or a credential reference before rerunning `fwc config import`.",
+                import_path.display()
+            ),
+        ],
+    });
+    attach_install_contract(
+        &mut payload,
+        "config",
+        "host-admin-api",
+        "node-local-root-app",
+        "config-import",
+        Some(&host.endpoint),
+        false,
+        true,
+        false,
+        "Live config-import preflight remains authoritative for the current node even when sanitized placeholder values make the requested import unsafe. The rejected import target is recorded explicitly for automation.",
+        evidence_handles,
+    );
     DispatchOutcome {
-        payload: json!({
-            "status": "invalid",
-            "command": "config",
-            "subcommand": "import",
-            "source": "host-admin-api",
-            "error": {
-                "type": "redacted-placeholder-import",
-                "message": "The import file still contains `[REDACTED]` placeholder values from a sanitized host export. Importing it would overwrite live secrets with placeholders.",
-                "recoverable": true,
-            },
-            "connector": host_connector_descriptor_json(connector),
-            "details": {
-                "input_file": import_path.display().to_string(),
-                "placeholder_paths": placeholder_paths,
-            },
-            "next_actions": [
-                format!("fwc config doctor {} --host {}", connector.slug, host.endpoint),
-                format!(
-                    "Replace every `[REDACTED]` placeholder in {} with the real secret value or a credential reference before rerunning `fwc config import`.",
-                    import_path.display()
-                ),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Validation,
     }
 }
@@ -12765,6 +13144,171 @@ fn update_evidence_handles(
         "current_version": applied.current.version.clone(),
     }));
     handles
+}
+
+fn rollout_pin_evidence_handles(
+    connector_id: &str,
+    host: &str,
+    action: &str,
+    pin: &HostPinState,
+) -> Vec<Value> {
+    vec![json!({
+        "kind": "rollout-pin-state",
+        "action": action,
+        "connector_id": connector_id,
+        "endpoint": host,
+        "pinned": pin.pinned,
+        "version": pin.version,
+    })]
+}
+
+#[allow(dead_code)] // Will be wired when lifecycle evidence dispatch is implemented
+fn lifecycle_evidence_handles(
+    connector_id: &str,
+    host: &str,
+    current_state: lifecycle_mutations::LifecycleState,
+    valid_actions: &[lifecycle_mutations::LifecycleAction],
+) -> Vec<Value> {
+    vec![json!({
+        "kind": "lifecycle-state",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "current_state": current_state.label(),
+        "valid_actions": valid_actions.iter().map(|action| action.label()).collect::<Vec<_>>(),
+    })]
+}
+
+fn rollout_status_evidence_handles(
+    connector_id: &str,
+    host: &str,
+    pin: &HostPinState,
+    rollout: &HostRolloutStatus,
+) -> Vec<Value> {
+    let mut handles = rollout_pin_evidence_handles(connector_id, host, "status", pin);
+    handles.push(json!({
+        "kind": "rollout-status",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "state": rollout.status.state,
+        "version": rollout.status.version,
+        "pinned": rollout.pinned,
+        "pinned_version": rollout.pinned_version,
+        "canary_percent": rollout.canary_percent,
+    }));
+    handles
+}
+
+fn rollout_set_evidence_handles(
+    connector_id: &str,
+    host: &str,
+    requested_canary_percent: u8,
+    pin: &HostPinState,
+    outcome: &fcp_host::RolloutOutcome,
+) -> Vec<Value> {
+    let mut handles = rollout_pin_evidence_handles(connector_id, host, "set", pin);
+    handles.push(json!({
+        "kind": "rollout-schedule",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "requested_canary_percent": requested_canary_percent,
+        "decision": outcome.decision,
+        "state": outcome.record.state,
+        "version": outcome.record.version,
+        "previous_version": outcome.record.previous_version,
+        "reason_code": &outcome.audit_event.reason_code,
+        "evidence_digest": &outcome.audit_event.evidence_digest,
+    }));
+    handles
+}
+
+fn rollout_rollback_evidence_handles(
+    connector_id: &str,
+    host: &str,
+    response: &HostRollbackResponse,
+) -> Vec<Value> {
+    vec![json!({
+        "kind": "rollout-rollback",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "state": response.state,
+        "from_version": response.from_version,
+        "to_version": response.to_version,
+    })]
+}
+
+fn config_snapshot_evidence_handles(
+    connector_id: &str,
+    host: &str,
+    snapshot: &ConnectorConfigSnapshot,
+    replayable: bool,
+) -> Vec<Value> {
+    vec![json!({
+        "kind": "config-snapshot",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "active_revision_id": snapshot.active_revision_id,
+        "revision_count": snapshot.revision_count,
+        "source": &snapshot.source,
+        "replayable": replayable,
+        "contains_inline_secrets": snapshot.current.contains_inline_secrets,
+    })]
+}
+
+fn config_validation_evidence_handle(
+    connector_id: &str,
+    host: &str,
+    validation: &ConnectorConfigValidateResponse,
+) -> Value {
+    json!({
+        "kind": "config-validation",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "current_active_revision_id": validation.current_active_revision_id,
+        "valid": validation.valid,
+        "error": &validation.error,
+        "previewed_diff_paths": validation
+            .diff
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn config_mutation_target_handle(
+    connector_id: &str,
+    host: &str,
+    action: &str,
+    details: Value,
+) -> Value {
+    json!({
+        "kind": "config-mutation-target",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "action": action,
+        "details": details,
+    })
+}
+
+fn config_apply_evidence_handle(
+    connector_id: &str,
+    host: &str,
+    applied: &ConnectorConfigApplyResponse,
+) -> Value {
+    json!({
+        "kind": "config-apply",
+        "connector_id": connector_id,
+        "endpoint": host,
+        "changed": applied.changed,
+        "previous_active_revision_id": applied.previous_active_revision_id,
+        "current_active_revision_id": applied.current_active_revision_id,
+        "replayable": applied.current.is_replayable(),
+        "contains_inline_secrets": applied.current.contains_inline_secrets,
+        "applied_diff_paths": applied
+            .diff
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn install_unknown_live_source_selection_value(artifact: &PreparedPackageArtifact) -> Value {
@@ -27534,9 +28078,73 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "set");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-set",
+            true,
+            false,
+            false,
+        );
         assert_eq!(payload["updated_path"], "profile");
         assert_eq!(payload["config"]["profile"], "prod");
         assert_eq!(payload["response"]["current_active_revision_id"], 42);
+        assert_evidence_handle(&payload, "config-apply");
+        assert_evidence_handle(&payload, "config-mutation-target");
+    }
+
+    #[test]
+    fn execute_config_unset_applies_live_host_mutation() {
+        let current = json!({ "profile": "work", "region": "us-east-1" });
+        let candidate = json!({ "region": "us-east-1" });
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_config_snapshot_json(current.clone()),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/validate".to_owned(),
+                mock_config_validation_response_json(
+                    true,
+                    current.clone(),
+                    candidate.clone(),
+                    None,
+                ),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/apply".to_owned(),
+                mock_config_apply_response_json(candidate, current),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "config", "unset", "github", "profile",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "unset");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-unset",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["updated_path"], "profile");
+        assert_eq!(payload["config"]["region"], "us-east-1");
+        assert!(payload["config"].get("profile").is_none());
+        assert_evidence_handle(&payload, "config-apply");
+        assert_evidence_handle(&payload, "config-mutation-target");
     }
 
     #[test]
@@ -27564,10 +28172,21 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "set");
         assert_eq!(payload["error"]["type"], "non-replayable-live-config");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-set",
+            false,
+            true,
+            false,
+        );
         assert_eq!(
             payload["snapshot"]["current"]["contains_inline_secrets"],
             true
         );
+        assert_evidence_handle(&payload, "config-snapshot");
+        assert_evidence_handle(&payload, "config-mutation-target");
         assert!(
             payload["next_actions"]
                 .as_array()
@@ -27649,10 +28268,20 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "import");
         assert_eq!(payload["error"]["type"], "redacted-placeholder-import");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-import",
+            false,
+            true,
+            false,
+        );
         assert_eq!(
             payload["details"]["placeholder_paths"][0],
             "$.client_secret"
         );
+        assert_evidence_handle(&payload, "config-mutation-target");
     }
 
     #[test]
@@ -27710,6 +28339,86 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "import");
         assert_eq!(payload["error"]["type"], "config-validation-failed");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-import",
+            false,
+            true,
+            false,
+        );
+        assert_evidence_handle(&payload, "config-validation");
+        assert_evidence_handle(&payload, "config-mutation-target");
+    }
+
+    #[test]
+    fn execute_config_import_applies_live_host_mutation() {
+        let tempdir = tempfile::tempdir().expect("temp config dir");
+        let input_path = tempdir.path().join("github-config.json");
+        std::fs::write(
+            &input_path,
+            "{\n  \"profile\": \"prod\",\n  \"region\": \"us-east-1\"\n}\n",
+        )
+        .expect("config fixture should write");
+        let input_path = input_path.display().to_string();
+        let current = json!({ "profile": "work" });
+        let candidate = json!({ "profile": "prod", "region": "us-east-1" });
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                "POST /rpc/discover".to_owned(),
+                mock_discovery_response_json(),
+            ),
+            (
+                "GET /rpc/connectors/fcp.github:enterprise:v1/config".to_owned(),
+                mock_config_snapshot_json(current.clone()),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/validate".to_owned(),
+                mock_config_validation_response_json(
+                    true,
+                    current.clone(),
+                    candidate.clone(),
+                    None,
+                ),
+            ),
+            (
+                "POST /rpc/connectors/fcp.github:enterprise:v1/config/apply".to_owned(),
+                mock_config_apply_response_json(candidate, current),
+            ),
+        ]);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "config",
+            "import",
+            "github",
+            "--file",
+            &input_path,
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["subcommand"], "import");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-import",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["input_file"], input_path);
+        assert_eq!(payload["config"]["profile"], "prod");
+        assert_eq!(payload["config"]["region"], "us-east-1");
+        assert_evidence_handle(&payload, "config-apply");
+        assert_evidence_handle(&payload, "config-mutation-target");
     }
 
     #[test]
@@ -34313,6 +35022,47 @@ depends_on = ["missing"]
         assert_eq!(payload["error"]["type"], "connector-not-found");
     }
 
+    #[test]
+    fn pin_live_response_reports_rollout_contract() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "PUT /rpc/rollout/pin/fcp.github:enterprise:v1".to_owned(),
+                    json!({
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "pinned": true,
+                        "version": "1.2.3",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "pin", "github", "--to", "1.2.3",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "pin");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "rollout-pin",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["pin"]["pinned"], true);
+        assert_eq!(payload["pin"]["version"], "1.2.3");
+        assert_evidence_handle(&payload, "rollout-pin-state");
+    }
+
     // ── lifecycle commands: install ────────────────────────────
 
     #[test]
@@ -34693,7 +35443,17 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "get");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-get",
+            false,
+            true,
+            true,
+        );
         assert_eq!(payload["replayable"], false);
+        assert_evidence_handle(&payload, "config-snapshot");
         assert!(
             payload["message"]
                 .as_str()
@@ -34740,9 +35500,20 @@ depends_on = ["missing"]
         assert_eq!(payload["subcommand"], "set");
         assert_eq!(payload["status"], "invalid");
         assert_eq!(payload["error"]["type"], "config-validation-failed");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-set",
+            false,
+            true,
+            false,
+        );
         assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
         assert_eq!(payload["details"]["updated_path"], "profile");
         assert_eq!(payload["validation"]["valid"], false);
+        assert_evidence_handle(&payload, "config-validation");
+        assert_evidence_handle(&payload, "config-mutation-target");
     }
 
     #[test]
@@ -34832,8 +35603,19 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "doctor");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-doctor",
+            false,
+            true,
+            false,
+        );
         assert_eq!(payload["status"], "invalid");
         assert_eq!(payload["validation"]["valid"], false);
+        assert_evidence_handle(&payload, "config-snapshot");
+        assert_evidence_handle(&payload, "config-validation");
         let checks = payload["checks"]
             .as_array()
             .expect("checks should be an array");
@@ -34870,8 +35652,18 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "doctor");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-doctor",
+            false,
+            true,
+            true,
+        );
         assert_eq!(payload["status"], "limited");
         assert!(payload["validation"].is_null());
+        assert_evidence_handle(&payload, "config-snapshot");
         let checks = payload["checks"]
             .as_array()
             .expect("checks should be an array");
@@ -34910,7 +35702,17 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "export");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "config-export",
+            false,
+            false,
+            false,
+        );
         assert_eq!(payload["replayable"], true);
+        assert_evidence_handle(&payload, "config-snapshot");
         assert_eq!(payload["config"]["profile"], "work");
         assert_eq!(payload["config"]["api_url"], "https://api.github.com");
         assert!(
@@ -35769,6 +36571,59 @@ depends_on = ["missing"]
         );
     }
 
+    #[test]
+    fn rollout_status_live_reports_contract() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/rollout/pin/fcp.github:enterprise:v1".to_owned(),
+                    json!({
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "pinned": true,
+                        "version": "1.2.3",
+                    }),
+                ),
+                (
+                    "GET /rpc/rollout/fcp.github:enterprise:v1".to_owned(),
+                    json!({
+                        "state": "canary",
+                        "version": "1.2.3",
+                        "pinned": true,
+                        "pinned_version": "1.2.3",
+                        "canary_percent": 10,
+                    }),
+                ),
+            ]),
+            3,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "rollout", "status", "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "rollout");
+        assert_eq!(payload["subcommand"], "status");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "rollout-status",
+            false,
+            false,
+            false,
+        );
+        assert_eq!(payload["pin"]["pinned"], true);
+        assert_eq!(payload["rollout"]["state"], "canary");
+        assert_evidence_handle(&payload, "rollout-pin-state");
+        assert_evidence_handle(&payload, "rollout-status");
+    }
+
     // ── lifecycle command tests ────────────────────────────────
 
     #[test]
@@ -35805,8 +36660,18 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "lifecycle");
         assert_eq!(payload["mode"], "valid-actions");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "lifecycle-valid-actions",
+            false,
+            false,
+            false,
+        );
         assert!(payload["current_state"].is_string());
         assert!(payload["valid_actions"].is_array());
+        assert_evidence_handle(&payload, "lifecycle-state");
         assert!(
             payload["toon"]
                 .as_str()
@@ -35892,8 +36757,19 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "lifecycle");
         assert_eq!(payload["mode"], "preflight");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "lifecycle-preflight",
+            false,
+            false,
+            false,
+        );
         assert!(payload["preflight"]["risk_level"].is_string());
         assert!(payload["preflight"]["can_proceed"].is_boolean());
+        assert_evidence_handle(&payload, "lifecycle-state");
+        assert_evidence_handle(&payload, "lifecycle-preflight");
         assert!(
             payload["toon"]
                 .as_str()
@@ -35917,8 +36793,18 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "lifecycle");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "lifecycle-summary",
+            false,
+            false,
+            false,
+        );
         assert!(payload["current_state"].is_string());
         assert!(payload["valid_actions"].is_array());
+        assert_evidence_handle(&payload, "lifecycle-state");
     }
 
     #[test]
@@ -38891,6 +39777,50 @@ depends_on = ["missing"]
     }
 
     #[test]
+    fn rollout_rollback_live_reports_contract() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "POST /rpc/rollout/rollback".to_owned(),
+                    json!({
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "state": "rolled_back",
+                        "from_version": "1.2.3",
+                        "to_version": "1.2.2",
+                        "message": "connector rolled back to v1.2.2 and pinned",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "rollout", "rollback", "github", "--to", "1.2.2",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "rollout");
+        assert_eq!(payload["subcommand"], "rollback");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "rollout-rollback",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["rollback"]["state"], "rolled_back");
+        assert_eq!(payload["rollback"]["to_version"], "1.2.2");
+        assert_evidence_handle(&payload, "rollout-rollback");
+    }
+
+    #[test]
     fn pin_version_format_validation() {
         // `pin` requires a host to resolve the connector, so without a host
         // we get a missing-host-endpoint error before version validation occurs.
@@ -38916,6 +39846,44 @@ depends_on = ["missing"]
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         // Details should include the connector that was targeted
         assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn unpin_live_response_reports_rollout_contract() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "DELETE /rpc/rollout/pin/fcp.github:enterprise:v1".to_owned(),
+                    json!({
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "pinned": false,
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "unpin", "github"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "unpin");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "rollout-unpin",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["pin"]["pinned"], false);
+        assert_evidence_handle(&payload, "rollout-pin-state");
     }
 
     // ── 1g7z0.27.3 — Auth verify/test/refresh/rotate/revoke/repair ──────

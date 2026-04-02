@@ -62,6 +62,8 @@ const CAPABILITY_REVOCATION_SCENARIO: &str = "capability-revocation";
 const CAPABILITY_REVOCATION_CONTRACT_ID: &str = "contract.capability_revocation_enforced";
 const NODE_REMOVAL_SCENARIO: &str = "node-removal";
 const NODE_REMOVAL_CONTRACT_ID: &str = "contract.node_removal_isolation";
+const HOT_KEY_ROTATION_SCENARIO: &str = "hot-rotation";
+const HOT_KEY_ROTATION_CONTRACT_ID: &str = "contract.zone_key_rotation_continuity";
 const STALE_REJOIN_SCENARIO: &str = "stale-rejoin";
 const STALE_REJOIN_CONTRACT_ID: &str = "contract.stale_node_rejoin_sync";
 const GRACEFUL_SHUTDOWN_SCENARIO: &str = "graceful-shutdown";
@@ -70,6 +72,8 @@ const MULTI_NODE_FAILURE_SCENARIO: &str = "multi-node-failure";
 const MULTI_NODE_FAILURE_CONTRACT_ID: &str = "contract.multi_node_failure_within_tolerance";
 const QUORUM_LOSS_SCENARIO: &str = "quorum-loss";
 const QUORUM_LOSS_CONTRACT_ID: &str = "contract.quorum_loss_fail_closed";
+const LEASE_CONTENTION_SCENARIO: &str = "lease-contention";
+const LEASE_CONTENTION_CONTRACT_ID: &str = "contract.singleton_writer_lease_contention";
 
 /// Create a deterministic test object ID from a name.
 fn test_object_id(name: &str) -> ObjectId {
@@ -699,6 +703,68 @@ fn build_node_removal_artifact_bundle(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HotKeyRotationReplayEvidence {
+    seed: u64,
+    zone_id: String,
+    pre_rotation_object_id: String,
+    post_rotation_object_id: String,
+    rotation_advance_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HotKeyRotationStateEvidence {
+    pre_rotation_propagated: bool,
+    post_rotation_propagated: bool,
+    pre_rotation_still_known: bool,
+    no_data_loss: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HotKeyRotationArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: HotKeyRotationReplayEvidence,
+    state: HotKeyRotationStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_hot_key_rotation_artifact_bundle(
+    logs: &[LogEntry],
+    zone: &ZoneId,
+    pre_rotation_object_id: &ObjectId,
+    post_rotation_object_id: &ObjectId,
+    rotation_advance_secs: u64,
+    pre_rotation_propagated: bool,
+    post_rotation_propagated: bool,
+    pre_rotation_still_known: bool,
+    no_data_loss: bool,
+    log_jsonl_valid: bool,
+) -> HotKeyRotationArtifactBundle {
+    HotKeyRotationArtifactBundle {
+        scenario_key: "hot_key_rotation".to_string(),
+        contract_id: HOT_KEY_ROTATION_CONTRACT_ID.to_string(),
+        replay: HotKeyRotationReplayEvidence {
+            seed: 0x0080_1A7E,
+            zone_id: zone.to_string(),
+            pre_rotation_object_id: pre_rotation_object_id.to_string(),
+            post_rotation_object_id: post_rotation_object_id.to_string(),
+            rotation_advance_secs,
+        },
+        state: HotKeyRotationStateEvidence {
+            pre_rotation_propagated,
+            post_rotation_propagated,
+            pre_rotation_still_known,
+            no_data_loss,
+        },
+        assertions: scenario_assertions(logs, HOT_KEY_ROTATION_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StaleRejoinReplayEvidence {
     seed: u64,
     zone_id: String,
@@ -948,6 +1014,77 @@ fn build_quorum_loss_artifact_bundle(
             operations_halted,
         },
         assertions: scenario_assertions(logs, QUORUM_LOSS_SCENARIO),
+        log_entry_count: logs.len(),
+        log_jsonl_valid,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LeaseContentionReplayEvidence {
+    seed: u64,
+    contested_object_id: String,
+    lease_holder_node_id: String,
+    contender_node_id: String,
+    connector_id: String,
+    lease_expires_in_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LeaseContentionStateEvidence {
+    candidate_count: u8,
+    lease_holder_candidate_present: bool,
+    contender_candidate_present: bool,
+    contender_eligible: bool,
+    lease_holder_preferred: bool,
+    singleton_writer_enforced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LeaseContentionArtifactBundle {
+    scenario_key: String,
+    contract_id: String,
+    replay: LeaseContentionReplayEvidence,
+    state: LeaseContentionStateEvidence,
+    assertions: Vec<ScenarioAssertionEvidence>,
+    log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+fn build_lease_contention_artifact_bundle(
+    logs: &[LogEntry],
+    contested_object_id: &ObjectId,
+    lease_holder_node_id: &NodeId,
+    contender_node_id: &NodeId,
+    connector_id: &str,
+    lease_expires_in_secs: u64,
+    candidate_count: usize,
+    lease_holder_candidate_present: bool,
+    contender_candidate_present: bool,
+    contender_eligible: bool,
+    lease_holder_preferred: bool,
+    singleton_writer_enforced: bool,
+    log_jsonl_valid: bool,
+) -> LeaseContentionArtifactBundle {
+    LeaseContentionArtifactBundle {
+        scenario_key: "lease_contention".to_string(),
+        contract_id: LEASE_CONTENTION_CONTRACT_ID.to_string(),
+        replay: LeaseContentionReplayEvidence {
+            seed: 0xC0FF_EE42,
+            contested_object_id: contested_object_id.to_string(),
+            lease_holder_node_id: lease_holder_node_id.as_str().to_string(),
+            contender_node_id: contender_node_id.as_str().to_string(),
+            connector_id: connector_id.to_string(),
+            lease_expires_in_secs,
+        },
+        state: LeaseContentionStateEvidence {
+            candidate_count: u8::try_from(candidate_count).expect("candidate count fits in u8"),
+            lease_holder_candidate_present,
+            contender_candidate_present,
+            contender_eligible,
+            lease_holder_preferred,
+            singleton_writer_enforced,
+        },
+        assertions: scenario_assertions(logs, LEASE_CONTENTION_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
     }
@@ -2252,7 +2389,7 @@ async fn scenario_lease_contention() {
 
     emit_scenario_log(
         &harness.logs,
-        "lease-contention",
+        LEASE_CONTENTION_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "contention_scenario",
@@ -2264,9 +2401,11 @@ async fn scenario_lease_contention() {
     harness.register_all_peers();
     let contested_obj = test_object_id("lease-contention-resource");
     let now_ms = harness.now_ms();
+    let lease_expires_in_secs = 3600;
+    let connector_id = "test:basic:1.0.0";
 
     let test_connector = fcp_mesh::InstalledConnector {
-        connector_id: "test:basic:1.0.0".parse().expect("valid connector ID"),
+        connector_id: connector_id.parse().expect("valid connector ID"),
         version: "1.0.0".to_string(),
         binary_hash: test_object_id("test-connector-binary"),
         capabilities: Vec::new(),
@@ -2276,7 +2415,7 @@ async fn scenario_lease_contention() {
     let held_lease = fcp_mesh::HeldLease {
         subject_id: contested_obj,
         purpose: fcp_mesh::LeasePurpose::SingletonWriter,
-        expires_at: now_ms / 1000 + 3600, // expires in 1 hour
+        expires_at: now_ms / 1000 + lease_expires_in_secs,
     };
 
     // Update node A's state with the held lease
@@ -2313,7 +2452,7 @@ async fn scenario_lease_contention() {
 
     // Plan execution with singleton_writer constraint from node B's perspective
     let planner_ctx = fcp_mesh::PlannerContext {
-        connector_id: "test:basic:1.0.0".parse().expect("valid connector ID"),
+        connector_id: connector_id.parse().expect("valid connector ID"),
         min_connector_version: None,
         min_memory_mb: None,
         requires_gpu: false,
@@ -2335,26 +2474,130 @@ async fn scenario_lease_contention() {
     // In singleton_writer mode, the lease holder (node A) should be prioritized
     let candidate_for_node_a = candidates.iter().find(|c| c.node_id == node_a_id);
     let candidate_for_node_b = candidates.iter().find(|c| c.node_id == peer_b_id);
+    let contender_candidate_present = candidate_for_node_b.is_some();
+    let contender_eligible = candidate_for_node_b.is_some_and(|candidate| candidate.eligible);
+    let lease_holder_candidate_present = candidate_for_node_a.is_some();
+    let lease_holder_preferred = match (candidate_for_node_a, candidate_for_node_b) {
+        (Some(lease_holder), Some(contender)) => lease_holder.score >= contender.score,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let singleton_writer_enforced =
+        lease_holder_candidate_present && lease_holder_preferred && !contender_eligible;
 
     emit_scenario_log(
         &harness.logs,
-        "lease-contention",
+        LEASE_CONTENTION_SCENARIO,
         "verify",
         &["A", "B"],
         "single_winner",
-        "pass",
+        if singleton_writer_enforced {
+            "pass"
+        } else {
+            "fail"
+        },
         json!({
             "candidates": candidates.len(),
             "node_a_score": candidate_for_node_a.map(|c| c.score),
             "node_b_eligible": candidate_for_node_b.map(|c| c.eligible),
-            "singleton_writer_enforced": true,
+            "lease_holder_preferred": lease_holder_preferred,
+            "singleton_writer_enforced": singleton_writer_enforced,
         }),
     );
 
-    // The lease holder should be among the candidates
+    let lease_contention_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == LEASE_CONTENTION_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lease_contention_logs.len(),
+        2,
+        "expected 2 lease-contention log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
     assert!(
-        !candidates.is_empty(),
-        "planner should produce candidates for singleton_writer"
+        log_jsonl_valid,
+        "lease-contention logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_lease_contention_artifact_bundle(
+        &lease_contention_logs,
+        &contested_obj,
+        &node_a_id,
+        &peer_b_id,
+        connector_id,
+        lease_expires_in_secs,
+        candidates.len(),
+        lease_holder_candidate_present,
+        contender_candidate_present,
+        contender_eligible,
+        lease_holder_preferred,
+        singleton_writer_enforced,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, LEASE_CONTENTION_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "pass",
+            if singleton_writer_enforced {
+                "pass"
+            } else {
+                "fail"
+            }
+        ]
+    );
+    assert_eq!(
+        artifact_bundle.state.candidate_count,
+        u8::try_from(candidates.len()).expect("candidate count fits in u8")
+    );
+    assert_eq!(
+        artifact_bundle.state.lease_holder_candidate_present,
+        lease_holder_candidate_present
+    );
+    assert_eq!(
+        artifact_bundle.state.contender_candidate_present,
+        contender_candidate_present
+    );
+    assert_eq!(artifact_bundle.state.contender_eligible, contender_eligible);
+    assert_eq!(
+        artifact_bundle.state.lease_holder_preferred,
+        lease_holder_preferred
+    );
+    assert_eq!(
+        artifact_bundle.state.singleton_writer_enforced,
+        singleton_writer_enforced
+    );
+    assert_eq!(artifact_bundle.log_entry_count, lease_contention_logs.len());
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize lease-contention artifact bundle");
+    let roundtrip: LeaseContentionArtifactBundle = serde_json::from_value(artifact_json)
+        .expect("deserialize lease-contention artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
+
+    assert!(
+        lease_holder_candidate_present,
+        "lease holder should be among singleton-writer candidates"
+    );
+    assert!(
+        singleton_writer_enforced,
+        "singleton-writer planning should prefer the current lease holder"
     );
 
     harness.stop_all().expect("stop all nodes");
@@ -3075,7 +3318,7 @@ async fn scenario_hot_key_rotation() {
 
     emit_scenario_log(
         &harness.logs,
-        "hot-rotation",
+        HOT_KEY_ROTATION_SCENARIO,
         "setup",
         &["A", "B", "C"],
         "rotation_scenario",
@@ -3107,7 +3350,8 @@ async fn scenario_hot_key_rotation() {
         .has_object(&zone, &obj_pre_rotation);
 
     // Simulate rotation: advance time, prune stale state, re-register peers
-    harness.advance_time(Duration::from_secs(60));
+    let rotation_advance = Duration::from_secs(60);
+    harness.advance_time(rotation_advance);
     let now_ms = harness.now_ms();
     for node in &mut harness.nodes {
         if let Some(mesh) = node.mesh_mut() {
@@ -3139,10 +3383,11 @@ async fn scenario_hot_key_rotation() {
         .unwrap()
         .gossip_mut()
         .has_object(&zone, &obj_pre_rotation);
+    let no_data_loss = pre_still_known && post_rotation_ok;
 
     emit_scenario_log(
         &harness.logs,
-        "hot-rotation",
+        HOT_KEY_ROTATION_SCENARIO,
         "verify",
         &["A", "B", "C"],
         "rotation_seamless",
@@ -3155,9 +3400,84 @@ async fn scenario_hot_key_rotation() {
             "pre_rotation_propagated": pre_rotation_ok,
             "post_rotation_propagated": post_rotation_ok,
             "pre_rotation_still_known": pre_still_known,
-            "no_data_loss": pre_still_known && post_rotation_ok,
+            "no_data_loss": no_data_loss,
         }),
     );
+
+    let hot_rotation_logs = harness
+        .log_entries()
+        .into_iter()
+        .filter(|entry| entry.test_name == HOT_KEY_ROTATION_SCENARIO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hot_rotation_logs.len(),
+        2,
+        "expected 2 hot-key-rotation log entries"
+    );
+
+    let log_jsonl_validation = harness.logs.validate_jsonl();
+    let log_jsonl_valid = log_jsonl_validation.is_ok();
+    assert!(
+        log_jsonl_valid,
+        "hot-key-rotation logs should validate against schema: {log_jsonl_validation:?}"
+    );
+
+    let artifact_bundle = build_hot_key_rotation_artifact_bundle(
+        &hot_rotation_logs,
+        &zone,
+        &obj_pre_rotation,
+        &obj_post_rotation,
+        rotation_advance.as_secs(),
+        pre_rotation_ok,
+        post_rotation_ok,
+        pre_still_known,
+        no_data_loss,
+        log_jsonl_valid,
+    );
+    assert_eq!(artifact_bundle.contract_id, HOT_KEY_ROTATION_CONTRACT_ID);
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["setup", "verify"]
+    );
+    assert_eq!(
+        artifact_bundle
+            .assertions
+            .iter()
+            .map(|assertion| assertion.result.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "pass",
+            if pre_rotation_ok && post_rotation_ok && pre_still_known {
+                "pass"
+            } else {
+                "fail"
+            }
+        ]
+    );
+    assert_eq!(artifact_bundle.log_entry_count, hot_rotation_logs.len());
+    assert_eq!(
+        artifact_bundle.state.pre_rotation_propagated,
+        pre_rotation_ok
+    );
+    assert_eq!(
+        artifact_bundle.state.post_rotation_propagated,
+        post_rotation_ok
+    );
+    assert_eq!(
+        artifact_bundle.state.pre_rotation_still_known,
+        pre_still_known
+    );
+    assert_eq!(artifact_bundle.state.no_data_loss, no_data_loss);
+
+    let artifact_json =
+        serde_json::to_value(&artifact_bundle).expect("serialize hot-key-rotation artifact bundle");
+    let roundtrip: HotKeyRotationArtifactBundle = serde_json::from_value(artifact_json)
+        .expect("deserialize hot-key-rotation artifact bundle");
+    assert_eq!(roundtrip, artifact_bundle);
 
     assert!(pre_rotation_ok, "pre-rotation gossip should work");
     assert!(post_rotation_ok, "post-rotation gossip should work");

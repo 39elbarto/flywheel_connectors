@@ -618,9 +618,10 @@ fn signature_message_different_inputs_differ() {
 #[test]
 fn signature_message_empty_inputs() {
     let msg = fcp_registry::signature_message(b"", "");
-    // With empty inputs, message contains length prefixes and/or domain separator.
-    // The exact size depends on the signing format version.
-    assert!(msg.len() >= 8, "signature message should contain at least length prefixes");
+    // Two u64 LE length prefixes (8 bytes each) + zero payload bytes = 16.
+    assert_eq!(msg.len(), 16);
+    assert_eq!(&msg[..8], &[0u8; 8], "signing_bytes length prefix should be zero");
+    assert_eq!(&msg[8..16], &[0u8; 8], "binary_hash length prefix should be zero");
 }
 
 // ── manifest_signing_bytes ──

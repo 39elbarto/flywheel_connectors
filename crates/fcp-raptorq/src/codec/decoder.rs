@@ -524,7 +524,7 @@ impl DenseFactorCache {
             .find(|entry| entry.signature == signature)
         {
             existing.artifact = artifact;
-            return DenseFactorCacheResult::MissInserted;
+            return DenseFactorCacheResult::Hit;
         }
 
         let result = if self.entries.len() >= DENSE_FACTOR_CACHE_CAPACITY {

@@ -730,27 +730,12 @@ impl MeshNode {
     pub fn plan_execution(&self, context: &PlannerContext, now_ms: u64) -> Vec<CandidateNode> {
         let mut input = self.build_planner_input(now_ms);
         if context.singleton_writer {
-            input.singleton_lease_holder =
-                self.preferred_singleton_holder(context.authority_subject.as_ref(), now_ms);
-            if input.singleton_lease_holder.is_none() && context.authority_subject.is_some() {
-                let default_zone = context
-                    .target_zone
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(ZoneId::work);
-                if let Some(subject_id) = context.authority_subject.as_ref() {
-                    input.singleton_lease_holder = self
-                        .authority_view(
-                            &default_zone,
-                            subject_id,
-                            LeasePurpose::SingletonWriter,
-                            now_ms,
-                        )
-                        .active_holder
-                        .as_ref()
-                        .map(|holder| holder.as_str().to_string());
-                }
-            }
+            // Do not apply singleton enforcement from an unrelated lease when the
+            // caller has not bound the request to a specific leased subject.
+            input.singleton_lease_holder = context
+                .authority_subject
+                .as_ref()
+                .and_then(|subject_id| self.preferred_singleton_holder(Some(subject_id), now_ms));
         }
         self.planner.plan(&input, context)
     }
@@ -3178,6 +3163,58 @@ mod tests {
         assert_eq!(
             authority.coordinator.as_ref(),
             authority.failover_order.first()
+        );
+    }
+
+    #[test]
+    fn plan_execution_requires_subject_for_singleton_enforcement() {
+        use crate::device::{DeviceProfileBuilder, InstalledConnector};
+
+        let mut node = test_node("node-1");
+        let connector_id =
+            fcp_core::ConnectorId::new("fcp.test", "test", "v1").expect("valid connector id");
+        let installed = InstalledConnector::new(
+            connector_id.clone(),
+            "1.0.0",
+            ObjectId::from_bytes([0xBA; 32]),
+        );
+
+        let local_profile = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .add_connector(installed.clone())
+            .build();
+        let peer_profile = DeviceProfileBuilder::new(NodeId::new("peer-1"))
+            .add_connector(installed)
+            .build();
+
+        node.update_local_state(local_profile, HashSet::new(), Vec::new());
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            peer_profile,
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id: ObjectId::from_bytes([0xBB; 32]),
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+                fencing_token: 42,
+            }],
+            1_000,
+        );
+
+        let context = PlannerContext::new(connector_id).with_singleton_writer();
+        let candidates = node.plan_execution(&context, 1_000);
+
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.node_id.as_str() == "node-1"),
+            "local node should remain eligible without a bound authority subject"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.node_id.as_str() == "peer-1"),
+            "peer node should remain eligible without a bound authority subject"
         );
     }
 

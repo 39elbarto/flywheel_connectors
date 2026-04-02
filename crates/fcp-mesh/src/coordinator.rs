@@ -21,12 +21,12 @@
 //! 5. **Audit trail**: Every authority change produces a durable
 //!    timeline event for post-incident analysis.
 
+use std::cmp::Ordering;
+
 use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, select_coordinator};
 use serde::{Deserialize, Serialize};
 
-use crate::authority::{
-    AuthorityReasonCode, AuthorityTimelineEvent, ObservedLeaseAuthority,
-};
+use crate::authority::{AuthorityReasonCode, AuthorityTimelineEvent, ObservedLeaseAuthority};
 use crate::planner::{HeldLease, LeasePurpose};
 
 // ── Configuration ───────────────────────────────────────────────────────
@@ -51,9 +51,9 @@ pub struct LeaseCoordinatorConfig {
 impl Default for LeaseCoordinatorConfig {
     fn default() -> Self {
         Self {
-            default_ttl_secs: 300,    // 5 minutes
-            min_ttl_secs: 10,         // 10 seconds minimum
-            max_ttl_secs: 3600,       // 1 hour maximum
+            default_ttl_secs: 300,     // 5 minutes
+            min_ttl_secs: 10,          // 10 seconds minimum
+            max_ttl_secs: 3600,        // 1 hour maximum
             renew_threshold_bps: 2000, // renew at 20% remaining
             max_leases_per_node: 64,
             escalate_dangerous_conflicts: true,
@@ -68,10 +68,7 @@ impl Default for LeaseCoordinatorConfig {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum AcquireOutcome {
     /// Lease granted to the requester.
-    Granted {
-        fencing_token: u64,
-        expires_at: u64,
-    },
+    Granted { fencing_token: u64, expires_at: u64 },
     /// Lease denied because another node holds it.
     Denied {
         current_holder: TailscaleNodeId,
@@ -151,9 +148,10 @@ pub struct ConflictingHolder {
 
 /// Lease coordinator for managing execution authority across mesh nodes.
 ///
-/// The coordinator is stateless — it computes outcomes from observed lease
-/// state and returns decisions. Actual lease storage is managed by the
-/// caller (mesh node or host).
+/// The coordinator computes outcomes from observed lease state and returns
+/// decisions. It keeps a local next-token cursor, but rebases that cursor
+/// against observed fencing tokens before issuing a new lease. Actual lease
+/// storage is managed by the caller (mesh node or host).
 #[derive(Debug, Clone)]
 pub struct LeaseCoordinator {
     config: LeaseCoordinatorConfig,
@@ -195,6 +193,7 @@ impl LeaseCoordinator {
     ) -> (AcquireOutcome, Vec<AuthorityTimelineEvent>) {
         let mut timeline = Vec::new();
         let ttl = self.clamp_ttl(requested_ttl.unwrap_or(self.config.default_ttl_secs));
+        self.rebase_next_seq(existing_leases);
 
         // Filter to active leases for this subject/purpose
         let active: Vec<&ObservedLeaseAuthority> = existing_leases
@@ -254,7 +253,7 @@ impl LeaseCoordinator {
                 purpose: purpose.clone(),
                 holder: None,
                 coordinator: select_coordinator(zone_id, subject_id, eligible_nodes),
-                reason_code: AuthorityReasonCode::SupersededByPreferredLease,
+                reason_code: AuthorityReasonCode::LeaseConflictDetected,
                 fencing_token: None,
                 expires_at: None,
                 explanation: format!(
@@ -277,8 +276,14 @@ impl LeaseCoordinator {
         let current = &active[0];
         if current.holder == *requester {
             // Already holds it — treat as renewal
-            let (renew_outcome, renew_events) =
-                self.renew(requester, subject_id, purpose, current.lease.fencing_token, now_secs, Some(ttl));
+            let (renew_outcome, renew_events) = self.renew(
+                requester,
+                subject_id,
+                purpose,
+                current.lease.fencing_token,
+                now_secs,
+                Some(ttl),
+            );
             timeline.extend(renew_events);
             match renew_outcome {
                 RenewOutcome::Renewed { expires_at } => {
@@ -328,10 +333,7 @@ impl LeaseCoordinator {
                 current_holder: current.holder.clone(),
                 current_fencing_token: current.lease.fencing_token,
                 expires_at: current.lease.expires_at,
-                reason: format!(
-                    "Active lease held by {}",
-                    current.holder.as_str()
-                ),
+                reason: format!("Active lease held by {}", current.holder.as_str()),
             },
             timeline,
         )
@@ -367,7 +369,12 @@ impl LeaseCoordinator {
             ),
         });
 
-        (RenewOutcome::Renewed { expires_at: new_expires }, timeline)
+        (
+            RenewOutcome::Renewed {
+                expires_at: new_expires,
+            },
+            timeline,
+        )
     }
 
     /// Release a lease voluntarily.
@@ -387,6 +394,7 @@ impl LeaseCoordinator {
                 && obs.lease.subject_id == *subject_id
                 && obs.lease.purpose == *purpose
                 && obs.lease.fencing_token == held_fencing_token
+                && obs.lease.is_active(now_secs)
         });
 
         let holder = requester.as_str();
@@ -398,7 +406,7 @@ impl LeaseCoordinator {
                 purpose: purpose.clone(),
                 holder: Some(requester.clone()),
                 coordinator: None,
-                reason_code: AuthorityReasonCode::LeaseExpired,
+                reason_code: AuthorityReasonCode::LeaseReleased,
                 fencing_token: Some(held_fencing_token),
                 expires_at: None,
                 explanation: format!(
@@ -414,12 +422,10 @@ impl LeaseCoordinator {
                 purpose: purpose.clone(),
                 holder: Some(requester.clone()),
                 coordinator: None,
-                reason_code: AuthorityReasonCode::LeaseExpired,
+                reason_code: AuthorityReasonCode::LeaseNotHeld,
                 fencing_token: Some(held_fencing_token),
                 expires_at: None,
-                explanation: format!(
-                    "Release failed: {holder} does not hold matching lease"
-                ),
+                explanation: format!("Release failed: {holder} does not hold matching lease"),
             });
             (
                 ReleaseOutcome::NotHeld {
@@ -476,7 +482,7 @@ impl LeaseCoordinator {
         // Resolution: highest fencing token wins
         let winner = active
             .iter()
-            .max_by_key(|obs| obs.lease.fencing_token)
+            .max_by(|left, right| compare_conflicting_leases(left, right))
             .unwrap();
 
         Some(LeaseConflict {
@@ -522,13 +528,41 @@ impl LeaseCoordinator {
 
     fn next_fencing_token(&mut self) -> u64 {
         let token = self.next_seq;
-        self.next_seq += 1;
+        self.next_seq = self
+            .next_seq
+            .checked_add(1)
+            .expect("fencing token space exhausted");
         token
+    }
+
+    fn rebase_next_seq(&mut self, existing_leases: &[ObservedLeaseAuthority]) {
+        if let Some(max_observed) = existing_leases
+            .iter()
+            .map(|observed| observed.lease.fencing_token)
+            .max()
+        {
+            self.next_seq = self.next_seq.max(
+                max_observed
+                    .checked_add(1)
+                    .expect("fencing token space exhausted"),
+            );
+        }
     }
 
     fn clamp_ttl(&self, ttl: u32) -> u32 {
         ttl.clamp(self.config.min_ttl_secs, self.config.max_ttl_secs)
     }
+}
+
+fn compare_conflicting_leases(
+    left: &&ObservedLeaseAuthority,
+    right: &&ObservedLeaseAuthority,
+) -> Ordering {
+    left.lease
+        .fencing_token
+        .cmp(&right.lease.fencing_token)
+        .then_with(|| left.lease.expires_at.cmp(&right.lease.expires_at))
+        .then_with(|| right.holder.as_str().cmp(left.holder.as_str()))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -584,7 +618,11 @@ mod tests {
         );
 
         assert!(matches!(outcome, AcquireOutcome::Granted { .. }));
-        if let AcquireOutcome::Granted { fencing_token, expires_at } = outcome {
+        if let AcquireOutcome::Granted {
+            fencing_token,
+            expires_at,
+        } = outcome
+        {
             assert!(fencing_token > 0);
             assert!(expires_at > 1000);
         }
@@ -640,10 +678,7 @@ mod tests {
     fn acquire_detects_conflict_with_multiple_holders() {
         let mut coord = LeaseCoordinator::with_defaults();
         let eligible = vec![node("a"), node("b"), node("c")];
-        let existing = vec![
-            held_lease("a", 1, 2000),
-            held_lease("b", 2, 2000),
-        ];
+        let existing = vec![held_lease("a", 1, 2000), held_lease("b", 2, 2000)];
 
         let (outcome, timeline) = coord.acquire(
             &node("c"),
@@ -657,7 +692,42 @@ mod tests {
         );
 
         assert!(matches!(outcome, AcquireOutcome::Conflict { .. }));
-        assert!(timeline.iter().any(|e| e.operation == "lease.conflict_detected"));
+        assert!(
+            timeline
+                .iter()
+                .any(|e| e.operation == "lease.conflict_detected")
+        );
+        assert!(
+            timeline
+                .iter()
+                .any(|e| e.reason_code == AuthorityReasonCode::LeaseConflictDetected)
+        );
+    }
+
+    #[test]
+    fn acquire_rebases_fencing_token_above_observed_history() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible = vec![node("a"), node("b")];
+        let existing = vec![held_lease("a", 99, 500)]; // expired but still observed
+
+        let (outcome, _) = coord.acquire(
+            &node("b"),
+            &zone(),
+            &subject(),
+            &purpose(),
+            &existing,
+            &eligible,
+            1000,
+            None,
+        );
+
+        assert!(matches!(
+            outcome,
+            AcquireOutcome::Granted {
+                fencing_token: 100,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -677,7 +747,13 @@ mod tests {
             None,
         );
 
-        assert!(matches!(outcome, AcquireOutcome::Granted { fencing_token: 5, .. }));
+        assert!(matches!(
+            outcome,
+            AcquireOutcome::Granted {
+                fencing_token: 5,
+                ..
+            }
+        ));
         assert!(timeline.iter().any(|e| e.operation == "lease.renewed"));
     }
 
@@ -701,7 +777,10 @@ mod tests {
                 None,
             );
             if let AcquireOutcome::Granted { fencing_token, .. } = outcome {
-                assert!(fencing_token > prev_token, "fencing tokens must be monotonic");
+                assert!(
+                    fencing_token > prev_token,
+                    "fencing tokens must be monotonic"
+                );
                 prev_token = fencing_token;
             }
         }
@@ -712,14 +791,8 @@ mod tests {
     #[test]
     fn renew_extends_expiry() {
         let coord = LeaseCoordinator::with_defaults();
-        let (outcome, timeline) = coord.renew(
-            &node("a"),
-            &subject(),
-            &purpose(),
-            42,
-            1000,
-            Some(300),
-        );
+        let (outcome, timeline) =
+            coord.renew(&node("a"), &subject(), &purpose(), 42, 1000, Some(300));
 
         if let RenewOutcome::Renewed { expires_at } = outcome {
             assert_eq!(expires_at, 1300);
@@ -737,17 +810,16 @@ mod tests {
         let coord = LeaseCoordinator::with_defaults();
         let existing = vec![held_lease("a", 1, 2000)];
 
-        let (outcome, timeline) = coord.release(
-            &node("a"),
-            &subject(),
-            &purpose(),
-            1,
-            &existing,
-            1000,
-        );
+        let (outcome, timeline) =
+            coord.release(&node("a"), &subject(), &purpose(), 1, &existing, 1000);
 
         assert!(matches!(outcome, ReleaseOutcome::Released));
         assert!(timeline.iter().any(|e| e.operation == "lease.released"));
+        assert!(
+            timeline
+                .iter()
+                .any(|e| e.reason_code == AuthorityReasonCode::LeaseReleased)
+        );
     }
 
     #[test]
@@ -755,16 +827,31 @@ mod tests {
         let coord = LeaseCoordinator::with_defaults();
         let existing = vec![held_lease("a", 1, 2000)];
 
-        let (outcome, _) = coord.release(
-            &node("b"),
-            &subject(),
-            &purpose(),
-            1,
-            &existing,
-            1000,
-        );
+        let (outcome, timeline) =
+            coord.release(&node("b"), &subject(), &purpose(), 1, &existing, 1000);
 
         assert!(matches!(outcome, ReleaseOutcome::NotHeld { .. }));
+        assert!(
+            timeline
+                .iter()
+                .any(|e| e.reason_code == AuthorityReasonCode::LeaseNotHeld)
+        );
+    }
+
+    #[test]
+    fn release_fails_for_expired_lease() {
+        let coord = LeaseCoordinator::with_defaults();
+        let existing = vec![held_lease("a", 1, 500)];
+
+        let (outcome, timeline) =
+            coord.release(&node("a"), &subject(), &purpose(), 1, &existing, 1000);
+
+        assert!(matches!(outcome, ReleaseOutcome::NotHeld { .. }));
+        assert!(
+            timeline
+                .iter()
+                .any(|e| e.reason_code == AuthorityReasonCode::LeaseNotHeld)
+        );
     }
 
     // ── Conflict Detection ──────────────────────────────────────
@@ -774,13 +861,7 @@ mod tests {
         let coord = LeaseCoordinator::with_defaults();
         let existing = vec![held_lease("a", 1, 2000)];
 
-        let conflict = coord.detect_conflicts(
-            &zone(),
-            &subject(),
-            &purpose(),
-            &existing,
-            1000,
-        );
+        let conflict = coord.detect_conflicts(&zone(), &subject(), &purpose(), &existing, 1000);
 
         assert!(conflict.is_none());
     }
@@ -788,24 +869,27 @@ mod tests {
     #[test]
     fn detect_conflicts_finds_overlapping_leases() {
         let coord = LeaseCoordinator::with_defaults();
-        let existing = vec![
-            held_lease("a", 1, 2000),
-            held_lease("b", 2, 2000),
-        ];
+        let existing = vec![held_lease("a", 1, 2000), held_lease("b", 2, 2000)];
 
-        let conflict = coord.detect_conflicts(
-            &zone(),
-            &subject(),
-            &purpose(),
-            &existing,
-            1000,
-        );
+        let conflict = coord.detect_conflicts(&zone(), &subject(), &purpose(), &existing, 1000);
 
         assert!(conflict.is_some());
         let conflict = conflict.unwrap();
         assert_eq!(conflict.holders.len(), 2);
         assert_eq!(conflict.severity, ConflictSeverity::Critical);
         assert!(conflict.resolution.contains("b")); // higher token wins
+    }
+
+    #[test]
+    fn detect_conflicts_breaks_ties_deterministically() {
+        let coord = LeaseCoordinator::with_defaults();
+        let existing = vec![held_lease("b", 7, 2000), held_lease("a", 7, 2000)];
+
+        let conflict = coord
+            .detect_conflicts(&zone(), &subject(), &purpose(), &existing, 1000)
+            .expect("conflict should be detected");
+
+        assert!(conflict.resolution.contains("a"));
     }
 
     #[test]
@@ -816,13 +900,7 @@ mod tests {
             held_lease("b", 2, 2000), // active
         ];
 
-        let conflict = coord.detect_conflicts(
-            &zone(),
-            &subject(),
-            &purpose(),
-            &existing,
-            1000,
-        );
+        let conflict = coord.detect_conflicts(&zone(), &subject(), &purpose(), &existing, 1000);
 
         assert!(conflict.is_none());
     }
@@ -889,8 +967,8 @@ mod tests {
     #[test]
     fn ttl_clamped_to_bounds() {
         let coord = LeaseCoordinator::with_defaults();
-        assert_eq!(coord.clamp_ttl(5), 10);    // below min
-        assert_eq!(coord.clamp_ttl(300), 300);  // within range
+        assert_eq!(coord.clamp_ttl(5), 10); // below min
+        assert_eq!(coord.clamp_ttl(300), 300); // within range
         assert_eq!(coord.clamp_ttl(9999), 3600); // above max
     }
 

@@ -77,11 +77,15 @@ struct OfflineRepairStateEvidence {
     root_id: ObjectId,
     payload_id: ObjectId,
     expired_id: ObjectId,
-    repair_queue_depth_before: usize,
-    repair_queue_depth_after: usize,
-    repair_reason_before: RepairEvaluationReasonCode,
-    repair_reason_after: RepairEvaluationReasonCode,
-    repair_plan_reason_before: RepairReasonCode,
+    repair_evaluation_before_queue_depth_before: usize,
+    repair_evaluation_before_queue_depth_after: usize,
+    repair_evaluation_after_queue_depth_before: usize,
+    repair_evaluation_after_queue_depth_after: usize,
+    repair_evaluation_before_action: RepairQueueAction,
+    repair_evaluation_after_action: RepairQueueAction,
+    repair_evaluation_before_reason_code: RepairEvaluationReasonCode,
+    repair_evaluation_after_reason_code: RepairEvaluationReasonCode,
+    repair_plan_before_reason_code: RepairReasonCode,
     plan_action_count_before: usize,
     plan_action_count_after: usize,
     reconstructable_before: bool,
@@ -149,6 +153,18 @@ fn build_offline_repair_artifact_bundle(
         .iter()
         .find(|action| action.object_id == payload_id)
         .expect("payload plan action before repair");
+    let payload_before_reconstructable = payload_before
+        .reconstructable
+        .expect("payload before snapshot should expose reconstructable state");
+    let payload_after_reconstructable = payload_after
+        .reconstructable
+        .expect("payload after snapshot should expose reconstructable state");
+    let payload_before_meets_placement = payload_before
+        .meets_placement_policy
+        .expect("payload before snapshot should expose placement state");
+    let payload_after_meets_placement = payload_after
+        .meets_placement_policy
+        .expect("payload after snapshot should expose placement state");
 
     let phase_assertions = vec![
         OfflineRepairPhaseAssertion {
@@ -165,12 +181,14 @@ fn build_offline_repair_artifact_bundle(
         },
         OfflineRepairPhaseAssertion {
             phase: "evaluate_before_repair".to_string(),
-            passed: repair_evaluation_before.queue_depth_after == 1
+            passed: repair_evaluation_before.queue_depth_before == 0
+                && repair_evaluation_before.queue_depth_after == 1
                 && before_decision.action == RepairQueueAction::Queue
                 && before_decision.reason_code == RepairEvaluationReasonCode::PolicySloDeficit
                 && plan_action_before.reason_code == RepairReasonCode::PolicySloDeficit,
             detail: format!(
-                "queue_depth_after={} action={:?} reason={:?}",
+                "queue_depth_before={} queue_depth_after={} action={:?} reason={:?}",
+                repair_evaluation_before.queue_depth_before,
                 repair_evaluation_before.queue_depth_after,
                 before_decision.action,
                 before_decision.reason_code
@@ -178,26 +196,28 @@ fn build_offline_repair_artifact_bundle(
         },
         OfflineRepairPhaseAssertion {
             phase: "repair".to_string(),
-            passed: payload_before.reconstructable == Some(false)
-                && payload_before.meets_placement_policy == Some(false)
-                && payload_after.reconstructable == Some(true)
-                && payload_after.meets_placement_policy == Some(true),
+            passed: !payload_before_reconstructable
+                && !payload_before_meets_placement
+                && payload_after_reconstructable
+                && payload_after_meets_placement,
             detail: format!(
-                "reconstructable_before={:?} reconstructable_after={:?} placement_before={:?} placement_after={:?}",
-                payload_before.reconstructable,
-                payload_after.reconstructable,
-                payload_before.meets_placement_policy,
-                payload_after.meets_placement_policy
+                "reconstructable_before={} reconstructable_after={} placement_before={} placement_after={}",
+                payload_before_reconstructable,
+                payload_after_reconstructable,
+                payload_before_meets_placement,
+                payload_after_meets_placement
             ),
         },
         OfflineRepairPhaseAssertion {
             phase: "evaluate_after_repair".to_string(),
-            passed: repair_evaluation_after.queue_depth_after == 0
+            passed: repair_evaluation_after.queue_depth_before == 1
+                && repair_evaluation_after.queue_depth_after == 0
                 && repair_plan_after.actions.is_empty()
                 && after_decision.action == RepairQueueAction::Remove
                 && after_decision.reason_code == RepairEvaluationReasonCode::Healthy,
             detail: format!(
-                "queue_depth_after={} action={:?} reason={:?} remaining_actions={}",
+                "queue_depth_before={} queue_depth_after={} action={:?} reason={:?} remaining_actions={}",
+                repair_evaluation_after.queue_depth_before,
                 repair_evaluation_after.queue_depth_after,
                 after_decision.action,
                 after_decision.reason_code,
@@ -237,17 +257,21 @@ fn build_offline_repair_artifact_bundle(
         root_id,
         payload_id,
         expired_id,
-        repair_queue_depth_before: repair_evaluation_before.queue_depth_after,
-        repair_queue_depth_after: repair_evaluation_after.queue_depth_after,
-        repair_reason_before: before_decision.reason_code,
-        repair_reason_after: after_decision.reason_code,
-        repair_plan_reason_before: plan_action_before.reason_code,
+        repair_evaluation_before_queue_depth_before: repair_evaluation_before.queue_depth_before,
+        repair_evaluation_before_queue_depth_after: repair_evaluation_before.queue_depth_after,
+        repair_evaluation_after_queue_depth_before: repair_evaluation_after.queue_depth_before,
+        repair_evaluation_after_queue_depth_after: repair_evaluation_after.queue_depth_after,
+        repair_evaluation_before_action: before_decision.action,
+        repair_evaluation_after_action: after_decision.action,
+        repair_evaluation_before_reason_code: before_decision.reason_code,
+        repair_evaluation_after_reason_code: after_decision.reason_code,
+        repair_plan_before_reason_code: plan_action_before.reason_code,
         plan_action_count_before: repair_plan_before.actions.len(),
         plan_action_count_after: repair_plan_after.actions.len(),
-        reconstructable_before: payload_before.reconstructable.unwrap_or(false),
-        reconstructable_after: payload_after.reconstructable.unwrap_or(false),
-        placement_before: payload_before.meets_placement_policy.unwrap_or(false),
-        placement_after: payload_after.meets_placement_policy.unwrap_or(false),
+        reconstructable_before: payload_before_reconstructable,
+        reconstructable_after: payload_after_reconstructable,
+        placement_before: payload_before_meets_placement,
+        placement_after: payload_after_meets_placement,
         gc_root_count: gc_report.transcript.root_count,
         gc_evicted: gc_report.result.evicted,
         gc_expired_leases: gc_report.result.expired_leases,
@@ -1584,12 +1608,44 @@ async fn offline_repair_artifact_bundle_captures_lifecycle_and_gc_evidence() {
         artifact_bundle.phase_assertions
     );
     assert_eq!(
-        artifact_bundle.state.repair_reason_before,
+        artifact_bundle.state.repair_evaluation_before_reason_code,
         RepairEvaluationReasonCode::PolicySloDeficit
     );
     assert_eq!(
-        artifact_bundle.state.repair_reason_after,
+        artifact_bundle.state.repair_evaluation_after_reason_code,
         RepairEvaluationReasonCode::Healthy
+    );
+    assert_eq!(
+        artifact_bundle
+            .state
+            .repair_evaluation_before_queue_depth_before,
+        0
+    );
+    assert_eq!(
+        artifact_bundle
+            .state
+            .repair_evaluation_before_queue_depth_after,
+        1
+    );
+    assert_eq!(
+        artifact_bundle
+            .state
+            .repair_evaluation_after_queue_depth_before,
+        1
+    );
+    assert_eq!(
+        artifact_bundle
+            .state
+            .repair_evaluation_after_queue_depth_after,
+        0
+    );
+    assert_eq!(
+        artifact_bundle.state.repair_evaluation_before_action,
+        RepairQueueAction::Queue
+    );
+    assert_eq!(
+        artifact_bundle.state.repair_evaluation_after_action,
+        RepairQueueAction::Remove
     );
     assert_eq!(artifact_bundle.state.plan_action_count_before, 1);
     assert_eq!(artifact_bundle.state.plan_action_count_after, 0);

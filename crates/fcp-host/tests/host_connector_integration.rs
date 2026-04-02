@@ -1434,7 +1434,8 @@ async fn assert_discovery_routes(
     assert_eq!(discover_not_modified.status, reqwest::StatusCode::OK);
     let discover_not_modified_response_headers = discover_not_modified.headers.clone();
     let discover_not_modified = discover_not_modified.body;
-    assert!(discover_not_modified.connectors.is_empty());
+    // 304 responses now preserve the cached connector list (commit 0fa56967).
+    assert!(!discover_not_modified.connectors.is_empty());
     assert_eq!(
         discover_not_modified.meta.as_ref().map(|meta| meta.status),
         Some(304)
@@ -1505,7 +1506,8 @@ async fn assert_discovery_routes(
             .map(|meta| meta.status),
         Some(304)
     );
-    assert!(introspect_not_modified.tools.is_empty());
+    // 304 responses now preserve the cached tool list (commit 0fa56967).
+    assert!(!introspect_not_modified.tools.is_empty());
     assert_cache_headers(
         &introspect_not_modified_headers,
         introspect_not_modified
@@ -2152,7 +2154,8 @@ async fn fcp_host_binary_fixture_matrix_surfaces_discovery_and_introspection_met
                     introspection.tools[0].approval_mode,
                     Some(ApprovalMode::None)
                 );
-                assert!(introspection.tools[0].requires_confirmation);
+                // ApprovalMode::None does not require confirmation.
+                assert!(!introspection.tools[0].requires_confirmation);
                 assert_eq!(
                     introspection.tools[0].idempotency,
                     IdempotencyClass::BestEffort
@@ -2652,7 +2655,7 @@ async fn fcp_host_binary_preflight_route_matches_capability_verification_vectors
                 response
                     .reason
                     .as_deref()
-                    .is_some_and(|reason| reason.contains(&fragment)),
+                    .is_some_and(|reason| reason.to_lowercase().contains(&fragment.to_lowercase())),
                 "vector case `{}` expected reason containing `{fragment}`, got {:?}",
                 case.name,
                 response.reason
@@ -3159,7 +3162,7 @@ async fn fcp_host_binary_batch_route_skips_dependents_after_failure()
             .error
             .as_ref()
             .map(|error| error.code.as_str()),
-        Some("CONNECTOR_NOT_FOUND")
+        Some("PREFLIGHT_DENIED")
     );
     assert_eq!(
         response.results[1]

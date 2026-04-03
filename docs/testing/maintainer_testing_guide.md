@@ -45,7 +45,7 @@
 
 3. Validate any evidence artifacts:
    ```bash
-   bash scripts/ci/validate_e2e_artifacts.sh --artifact-dir /path/to/artifacts
+   bash scripts/ci/validate_e2e_artifacts.sh --bundle-dir /path/to/bundle
    ```
 
 ## Rerun Playbook
@@ -124,10 +124,23 @@ A test is flaky if:
 ### What constitutes valid evidence
 
 - JSONL entries with required fields (timestamp, test_name, phase, correlation_id)
+- Stable `scenario_id` plus a machine-readable layer tag
 - No raw secrets or PII in artifacts
-- Replay bundle with summary.json and replay.sh
+- Replay bundle with canonical artifact labels and validation command metadata
+- Replay bundle with `summary.json` or `report.json` plus `replay.sh`
 - Budget tracking showing spending within limits
 - Cleanup results showing all resources cleaned
+
+### Canonical bundle contract
+
+Treat the following as the shared evidence baseline for placeholder-eradication
+and operator-proof beads:
+
+- `docs/testing/e2e_log_schema.md` is the normative cross-suite contract
+- `crates/fcp-e2e/src/evidence.rs` carries the machine-readable `EvidenceBundle`
+- `crates/fwc/src/test_observability.rs` carries the machine-readable `ArtifactManifest`
+- CPU-heavy reruns and Cargo-backed replay commands should preserve `rch exec --`
+- Bundle validation should use `bash scripts/ci/validate_e2e_artifacts.sh --bundle-dir ...`
 
 ### Promoting evidence to the coverage inventory
 

@@ -51,6 +51,13 @@ For this program, the repository currently has two materially different kinds of
 
 The most important conclusion from the live scan is that connector coverage is still overwhelmingly in the first bucket.
 
+For the shared replay-bundle, rerun-command, and redaction contract consumed by
+placeholder-eradication beads, treat
+`docs/testing/e2e_log_schema.md` as the normative cross-suite reference and the
+typed carriers in `crates/fcp-e2e/src/evidence.rs` plus
+`crates/fwc/src/test_observability.rs` as the machine-usable implementation
+anchors.
+
 ## Closed Suite Reclassification Addendum
 
 This addendum is the current planning source of truth for `pure_unit`,

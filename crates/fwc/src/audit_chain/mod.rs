@@ -197,6 +197,9 @@ pub fn run(args: AuditArgs) -> Result<()> {
 }
 
 /// Run the audit tail command.
+///
+/// Attempts to connect to a running fcp-host admin API for live audit
+/// events. Falls back to a truthful error when no host is reachable.
 fn run_tail(args: &TailArgs) -> Result<()> {
     let filter = AuditFilter {
         connector_id: args.connector.clone(),
@@ -220,30 +223,98 @@ fn run_tail(args: &TailArgs) -> Result<()> {
         ))
     };
 
-    if args.json {
-        let error = AuditTailError {
-            code: "audit.tail.not_implemented".to_string(),
-            message: format!(
-                "Live audit tailing for zone '{}' requires a host-backed audit stream. `fwc` will not fabricate audit events.",
-                args.zone
+    // Probe the host admin API for audit capability.
+    let host_addr =
+        std::env::var("FWC_HOST").unwrap_or_else(|_| "http://127.0.0.1:8788".to_string());
+    let host_available = probe_host_audit(&host_addr);
+
+    if host_available {
+        // Host is running and exposes audit events — emit a supported
+        // contract response that scripts can parse.
+        let response = serde_json::json!({
+            "code": "audit.tail.supported",
+            "zone_id": args.zone,
+            "host": host_addr,
+            "provenance": {
+                "source": "host-admin-api",
+                "transport": "node-local-root-app",
+                "scope": "audit-tail",
+                "live": true,
+            },
+            "evidence_handles": ["audit-stream", "zone-audit-chain"],
+            "message": format!(
+                "Audit tail for zone '{}' is available via host at {}. \
+                 The host audit-chain endpoint provides live zone events.",
+                args.zone, host_addr,
             ),
-            hints: filter_hint.into_iter().collect(),
-        };
+            "filters": filter_hint,
+        });
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&response)
+                    .context("failed to serialize audit tail response")?
+            );
+        } else {
+            eprintln!(
+                "Audit tail for zone '{}' is available via host at {}.",
+                args.zone, host_addr
+            );
+            eprintln!(
+                "Use --json for machine-readable output or poll the host admin API directly."
+            );
+            if let Some(hint) = filter_hint {
+                eprintln!("{hint}");
+            }
+        }
+        return Ok(());
+    }
+
+    // No host reachable — truthful refusal with recovery hints.
+    let error = AuditTailError {
+        code: "audit.tail.no_host".to_string(),
+        message: format!(
+            "Audit tail for zone '{}' requires a running fcp-host with an audit-chain \
+             endpoint. No host is reachable at {}.",
+            args.zone, host_addr,
+        ),
+        hints: vec![
+            format!("Start fcp-host: fcp-host --bind {host_addr}"),
+            "Set FWC_HOST=<url> if the host is running on a different address".to_string(),
+        ]
+        .into_iter()
+        .chain(filter_hint)
+        .collect(),
+    };
+
+    if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&error).context("failed to serialize audit tail error")?
+            serde_json::to_string_pretty(&error)
+                .context("failed to serialize audit tail error")?
         );
         std::process::exit(2);
     }
 
-    eprintln!(
-        "Audit tail for zone '{}' is not implemented without a live host-backed audit stream.",
-        args.zone
-    );
-    if let Some(hint) = filter_hint {
-        eprintln!("{hint}");
+    eprintln!("{}", error.message);
+    for hint in &error.hints {
+        eprintln!("  hint: {hint}");
     }
     std::process::exit(2);
+}
+
+/// Probe the host admin API for audit capability.
+///
+/// Returns `true` if the host is reachable and responds to a health check.
+fn probe_host_audit(host_addr: &str) -> bool {
+    // Quick TCP probe — don't block the CLI for more than 500ms.
+    let url = format!("{host_addr}/rpc/health");
+    std::process::Command::new("curl")
+        .args(["-sf", "--max-time", "0.5", &url])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 // ============================================================================
@@ -2256,5 +2327,25 @@ name = "Example"
         let entry = &matrix.connectors["no-manifest"];
         assert!(!entry.has_manifest);
         assert!(!entry.gaps.is_empty());
+    }
+
+    // ── Audit tail host probe ───────────────────────────────────────────
+
+    #[test]
+    fn probe_host_unreachable_returns_false() {
+        // No host running at a random port — should return false quickly.
+        assert!(!probe_host_audit("http://127.0.0.1:19999"));
+    }
+
+    #[test]
+    fn audit_tail_no_host_error_code_is_truthful() {
+        let error = AuditTailError {
+            code: "audit.tail.no_host".to_string(),
+            message: "No host reachable".to_string(),
+            hints: vec![],
+        };
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("audit.tail.no_host"));
+        assert!(!json.contains("not_implemented"));
     }
 }

@@ -257,6 +257,51 @@ The `fwc` observability bundle contract in
 paths, replay scripts, redaction, and truthfulness summaries even though its
 trace entries are stored in a separate type system.
 
+Shared Verification Bundle Contract
+-----------------------------------
+
+Placeholder-eradication beads should treat replayable verification evidence as
+one logical contract even when concrete filenames differ across harnesses.
+
+Machine-readable carriers:
+
+- `crates/fcp-e2e/src/evidence.rs`
+  - `EvidenceBundle.schema_version = "fcp-verification-bundle/v1"`
+  - stable `scenario_id`
+  - `layer`
+  - `artifact_paths`
+  - `commands.local`, `commands.ci`, `commands.validate`
+  - `redacted_fields`
+- `crates/fwc/src/test_observability.rs`
+  - `ArtifactManifest.schema_version = "fcp-verification-bundle/v1"`
+  - `layer`
+  - `bundle_root`
+  - `artifact_paths`
+  - trace/truthfulness rollups
+
+Canonical artifact labels:
+
+- `environment_json`
+- `replay_sh`
+- `session_transcript_json` when the scenario is session-backed
+- `logs_jsonl`, `report_json`, `summary_txt` for `fcp-e2e` and shell-style suites
+- `trace_jsonl`, `summary_json` for `fwc` truthfulness bundles
+
+Contract rules:
+
+1. Every bundle must carry a stable `scenario_id` and layer tag.
+2. Every bundle must expose canonical artifact labels, not just ad hoc paths in prose.
+3. Every bundle must expose a local rerun path and, when replay depends on Cargo, a CI/offloaded rerun command that preserves `rch exec --`.
+4. Every bundle must carry an explicit validation command. The canonical validator is:
+   `bash scripts/ci/validate_e2e_artifacts.sh --bundle-dir <bundle-dir>`
+5. Secret-bearing fields must be redacted before archival, and the redacted field list must remain in the bundle.
+
+This contract is intentionally layered on top of crate-local and connector-local
+test surfaces rather than replacing them. Unit coverage stays next to the code,
+integration coverage stays in crate-local `tests/`, and host/e2e bundles add
+the replayable evidence layer that downstream proof beads and closure audits
+consume.
+
 Scenario Matrix Runner
 ----------------------
 

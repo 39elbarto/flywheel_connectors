@@ -287,11 +287,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use fcp_core::{
-    AgentHint, ApprovalToken, CapabilityToken, CapabilityUsageKey, ConnectorId, InvokeRequest,
-    InvokeResponse, InvokeStatus, LifecycleStatus, OperationId, OperationInfo, RequestId,
-    SafetyTier, ZoneId,
-};
+use fcp_core::{ApprovalToken, CapabilityToken, CapabilityUsageKey, ZoneId};
 use fcp_crypto::{canonicalize::to_deterministic_cbor, cose::CoseToken};
 use fcp_host::{
     BatchInvokeResponse as HostBatchInvokeResponse, BatchOptions as HostBatchOptions,
@@ -314,6 +310,11 @@ use fcp_host::{
     IntrospectionResponse as HostIntrospectionResponse, LifecycleTransitionRequest,
     LifecycleTransitionResponse, ManagedConnectorConfig,
     PreflightResponse as HostPreflightResponse, ToolDescriptor as HostToolDescriptor,
+};
+use fcp_kernel::{
+    AgentHint, ApprovalMode, BudgetStatus, CapabilityId, ConnectorHealth, ConnectorId,
+    InvokeRequest, InvokeResponse, InvokeStatus, LifecycleState, LifecycleStatus, OperationId,
+    OperationInfo, RateLimitDeclarations, RequestId, RolloutPolicy, SafetyTier, SelfCheckStatus,
 };
 use fcp_manifest::ConnectorManifest;
 use fcp_telemetry::{
@@ -3766,7 +3767,7 @@ struct HostRolloutStatus {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct HostRollbackResponse {
     connector_id: String,
-    state: fcp_core::LifecycleState,
+    state: LifecycleState,
     from_version: semver::Version,
     to_version: semver::Version,
     message: String,
@@ -3778,7 +3779,7 @@ struct HostRolloutScheduleRequest {
     version: semver::Version,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_version: Option<semver::Version>,
-    policy: fcp_core::RolloutPolicy,
+    policy: RolloutPolicy,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -4549,7 +4550,7 @@ fn host_metadata_gaps(introspection: &HostIntrospectionResponse) -> Vec<Value> {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-fn host_connector_state_label(health: &fcp_core::ConnectorHealth) -> &'static str {
+fn host_connector_state_label(health: &ConnectorHealth) -> &'static str {
     if health.is_healthy() {
         "ready"
     } else if health.is_available() {
@@ -4576,7 +4577,7 @@ fn human_window_duration(window: std::time::Duration) -> String {
 }
 
 fn host_rate_limit_summaries(
-    declarations: &fcp_core::RateLimitDeclarations,
+    declarations: &RateLimitDeclarations,
     pool_ids: impl IntoIterator<Item = String>,
 ) -> Vec<RateLimitSummary> {
     let mut seen = BTreeSet::new();
@@ -4634,12 +4635,10 @@ fn host_live_boolean_field(value: Option<bool>) -> MetadataField<bool> {
 
 const fn host_tool_requires_approval(tool: &HostToolDescriptor) -> bool {
     match tool.approval_mode {
-        Some(fcp_core::ApprovalMode::None) => false,
-        Some(
-            fcp_core::ApprovalMode::Policy
-            | fcp_core::ApprovalMode::Interactive
-            | fcp_core::ApprovalMode::ElevationToken,
-        ) => true,
+        Some(ApprovalMode::None) => false,
+        Some(ApprovalMode::Policy | ApprovalMode::Interactive | ApprovalMode::ElevationToken) => {
+            true
+        }
         None => tool.requires_confirmation,
     }
 }
@@ -4661,7 +4660,7 @@ fn host_live_event_field(introspection: &HostIntrospectionResponse) -> MetadataF
 #[allow(clippy::single_option_map)]
 fn host_operation_rate_limits(
     tool: &HostToolDescriptor,
-    declarations: Option<&fcp_core::RateLimitDeclarations>,
+    declarations: Option<&RateLimitDeclarations>,
 ) -> Option<Vec<RateLimitSummary>> {
     declarations.map(|declarations| {
         let declared_pool_ids = declarations
@@ -4744,12 +4743,12 @@ fn host_tool_related(tool: &HostToolDescriptor) -> Vec<String> {
     })
 }
 
-const fn host_approval_mode_label(mode: fcp_core::ApprovalMode) -> &'static str {
+const fn host_approval_mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
-        fcp_core::ApprovalMode::None => "none",
-        fcp_core::ApprovalMode::Policy => "policy",
-        fcp_core::ApprovalMode::Interactive => "interactive",
-        fcp_core::ApprovalMode::ElevationToken => "elevation_token",
+        ApprovalMode::None => "none",
+        ApprovalMode::Policy => "policy",
+        ApprovalMode::Interactive => "interactive",
+        ApprovalMode::ElevationToken => "elevation_token",
     }
 }
 
@@ -4859,7 +4858,7 @@ fn host_mcp_tool_definitions(
 
 fn host_discovered_operation(
     tool: &HostToolDescriptor,
-    connector_rate_limits: Option<&fcp_core::RateLimitDeclarations>,
+    connector_rate_limits: Option<&RateLimitDeclarations>,
 ) -> DiscoveredOperation {
     let local_id = tool.name.rsplit('.').next().unwrap_or(tool.name.as_str());
     let summary = if tool.description.trim().is_empty() {
@@ -5248,7 +5247,7 @@ fn tool_inventory_surface_state(source: &catalog::ToolInventorySource) -> catalo
 }
 
 fn exported_tool_name(
-    operation: &fcp_core::OperationInfo,
+    operation: &OperationInfo,
     format: export_tools::ToolSchemaFormat,
     options: &export_tools::ExportOptions,
 ) -> String {
@@ -5268,7 +5267,7 @@ fn exported_tool_name(
 }
 
 fn tool_inventory_provenance(
-    operations: &[fcp_core::OperationInfo],
+    operations: &[OperationInfo],
     format: export_tools::ToolSchemaFormat,
     options: &export_tools::ExportOptions,
     source: catalog::ToolInventorySource,
@@ -9635,7 +9634,7 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                 Some(msg.to_owned())
             },
             rate_limit_percent: None,
-            last_op_success: Some(matches!(sc.report.status, fcp_core::SelfCheckStatus::Ok)),
+            last_op_success: Some(matches!(sc.report.status, SelfCheckStatus::Ok)),
         };
         // Avoid duplicating if --all already produced a report for this id.
         if !diagnostic_reports
@@ -9716,24 +9715,21 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
     })
 }
 
-/// Map `fcp_core::ConnectorHealth` into `doctor::Symptoms` for local diagnosis.
-fn symptoms_from_connector_health(
-    health: &fcp_core::ConnectorHealth,
-    enabled: bool,
-) -> doctor::Symptoms {
+/// Map `ConnectorHealth` into `doctor::Symptoms` for local diagnosis.
+fn symptoms_from_connector_health(health: &ConnectorHealth, enabled: bool) -> doctor::Symptoms {
     match health {
-        fcp_core::ConnectorHealth::Healthy => doctor::Symptoms {
+        ConnectorHealth::Healthy => doctor::Symptoms {
             installed: true,
             has_credentials: enabled,
             ..Default::default()
         },
-        fcp_core::ConnectorHealth::Degraded { reason } => doctor::Symptoms {
+        ConnectorHealth::Degraded { reason } => doctor::Symptoms {
             installed: true,
             has_credentials: enabled,
             error_message: Some(reason.clone()),
             ..Default::default()
         },
-        fcp_core::ConnectorHealth::Unavailable { reason, .. } => doctor::Symptoms {
+        ConnectorHealth::Unavailable { reason, .. } => doctor::Symptoms {
             installed: true,
             has_credentials: enabled,
             error_message: Some(reason.clone()),
@@ -10218,7 +10214,7 @@ fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<Dis
         .zones
         .iter()
         .flat_map(|zone| zone.budgets.iter())
-        .filter(|budget| budget.status == fcp_core::BudgetStatus::Exceeded)
+        .filter(|budget| budget.status == BudgetStatus::Exceeded)
         .count();
     let next_actions = args.zone.as_ref().map_or_else(
         || {
@@ -10765,7 +10761,7 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
                     .status
                     .version,
             );
-            let policy = fcp_core::RolloutPolicy::builder()
+            let policy = RolloutPolicy::builder()
                 .canary_percent(set_args.canary)
                 .build();
             policy.validate()?;
@@ -18724,7 +18720,7 @@ fn approvals_dispatch(args: &ApprovalsArgs) -> Result<DispatchOutcome> {
 #[derive(Clone, Debug)]
 struct CapabilityOperationMetadata {
     connector_slug: String,
-    capability_id: fcp_core::CapabilityId,
+    capability_id: CapabilityId,
     risk_tier: SafetyTier,
 }
 
@@ -19675,10 +19671,10 @@ fn live_pipeline_operation_metadata(
                     approval_mode: resolved.operation.approval_mode.as_ref().map_or_else(
                         || "none".to_owned(),
                         |mode| match mode {
-                            fcp_core::ApprovalMode::None => "none".to_owned(),
-                            fcp_core::ApprovalMode::Policy => "policy".to_owned(),
-                            fcp_core::ApprovalMode::Interactive => "interactive".to_owned(),
-                            fcp_core::ApprovalMode::ElevationToken => "elevation_token".to_owned(),
+                            ApprovalMode::None => "none".to_owned(),
+                            ApprovalMode::Policy => "policy".to_owned(),
+                            ApprovalMode::Interactive => "interactive".to_owned(),
+                            ApprovalMode::ElevationToken => "elevation_token".to_owned(),
                         },
                     ),
                     rate_limits: resolved.rate_limits.clone(),
@@ -23935,8 +23931,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog, LiveAuthArgs,
-        MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
+        ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog,
+        LiveAuthArgs, MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
         PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog, execute,
         host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
         host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
@@ -27471,7 +27467,7 @@ deny_ptrace = true
     #[test]
     fn doctor_all_includes_local_diagnosis() {
         // Mock host with a degraded connector so diagnosis engine produces fix-it recipes.
-        let degraded_health = serde_json::to_value(fcp_core::ConnectorHealth::Degraded {
+        let degraded_health = serde_json::to_value(ConnectorHealth::Degraded {
             reason: "Connection refused to api.github.com".to_owned(),
         })
         .expect("health should serialize");
@@ -27573,7 +27569,7 @@ deny_ptrace = true
 
     #[test]
     fn doctor_toon_output_present_with_all() {
-        let degraded_health = serde_json::to_value(fcp_core::ConnectorHealth::Degraded {
+        let degraded_health = serde_json::to_value(ConnectorHealth::Degraded {
             reason: "SSL certificate verify failed".to_owned(),
         })
         .expect("health should serialize");
@@ -27637,7 +27633,7 @@ deny_ptrace = true
 
     #[test]
     fn doctor_auto_fixes_collected_for_degraded() {
-        let degraded_health = serde_json::to_value(fcp_core::ConnectorHealth::Unavailable {
+        let degraded_health = serde_json::to_value(ConnectorHealth::Unavailable {
             reason: "Connection refused".to_owned(),
             since: chrono::Utc::now(),
         })
@@ -32601,7 +32597,7 @@ depends_on = ["missing"]
         let mut introspection: HostIntrospectionResponse =
             serde_json::from_value(mock_introspection_response_json())
                 .expect("mock introspection response should deserialize");
-        introspection.introspection.event_caps = Some(fcp_core::EventCaps::default());
+        introspection.introspection.event_caps = Some(fcp_kernel::EventCaps::default());
 
         let discovered = host_discovered_connector(connector, &introspection);
 
@@ -32624,18 +32620,18 @@ depends_on = ["missing"]
         let mut introspection: HostIntrospectionResponse =
             serde_json::from_value(mock_introspection_response_json())
                 .expect("mock introspection response should deserialize");
-        introspection.rate_limits = Some(fcp_core::RateLimitDeclarations {
-            limits: vec![fcp_core::RateLimitPool {
+        introspection.rate_limits = Some(fcp_kernel::RateLimitDeclarations {
+            limits: vec![fcp_kernel::RateLimitPool {
                 id: "core".to_owned(),
                 description: "GitHub primary API limit".to_owned(),
-                config: fcp_core::RateLimitConfig {
+                config: fcp_kernel::RateLimitConfig {
                     requests: 5_000,
                     window: std::time::Duration::from_secs(3_600),
                     burst: None,
-                    unit: fcp_core::RateLimitUnit::Requests,
+                    unit: fcp_kernel::RateLimitUnit::Requests,
                 },
-                enforcement: fcp_core::RateLimitEnforcement::Hard,
-                scope: fcp_core::RateLimitScope::Instance,
+                enforcement: fcp_kernel::RateLimitEnforcement::Hard,
+                scope: fcp_kernel::RateLimitScope::Instance,
             }],
             tool_pool_map: std::collections::HashMap::from([(
                 "github.create_issue".to_owned(),
@@ -32678,7 +32674,7 @@ depends_on = ["missing"]
             .find(|tool| tool.name == "github.get_issue")
             .expect("get_issue tool should exist")
             .clone();
-        tool.approval_mode = Some(fcp_core::ApprovalMode::None);
+        tool.approval_mode = Some(ApprovalMode::None);
         tool.requires_confirmation = false;
 
         let summary_entry = host_tool_summary_entry(&tool);
@@ -32739,7 +32735,7 @@ depends_on = ["missing"]
             .find(|tool| tool.name == "github.get_issue")
             .expect("get_issue tool should exist")
             .clone();
-        tool.approval_mode = Some(fcp_core::ApprovalMode::Policy);
+        tool.approval_mode = Some(ApprovalMode::Policy);
         tool.requires_confirmation = false;
 
         let summary_entry = host_tool_summary_entry(&tool);
@@ -32770,7 +32766,7 @@ depends_on = ["missing"]
             .find(|tool| tool.name == "github.get_issue")
             .expect("get_issue tool should exist")
             .clone();
-        tool.approval_mode = Some(fcp_core::ApprovalMode::None);
+        tool.approval_mode = Some(ApprovalMode::None);
         tool.requires_confirmation = false;
 
         assert!(pipeline_dry_run_can_materialize_output(&tool));
@@ -34147,7 +34143,7 @@ depends_on = ["missing"]
         let capability_token = test_capability_token_arg();
         let error_response = serde_json::to_value(InvokeResponse::error(
             RequestId::random(),
-            fcp_core::FcpError::ConnectorUnavailable {
+            fcp_kernel::FcpError::ConnectorUnavailable {
                 code: 5001,
                 message: "upstream API returned 500".to_owned(),
             },
@@ -36855,8 +36851,22 @@ depends_on = ["missing"]
                 (
                     "GET /rpc/rollout/fcp.github:enterprise:v1".to_owned(),
                     json!({
+                        "connector_id": "fcp.github:enterprise:v1",
                         "state": "canary",
                         "version": "1.2.3",
+                        "health": {
+                            "successes": 100,
+                            "failures": 0,
+                            "samples": 100,
+                            "success_rate": 100,
+                            "total_latency_ms": 500,
+                            "latency_samples": 100,
+                            "max_latency_ms": 10,
+                            "last_updated": "2026-03-12T00:00:00Z",
+                        },
+                        "auto_promote_pending": false,
+                        "auto_rollback_pending": false,
+                        "crash_loop_detected": false,
                         "pinned": true,
                         "pinned_version": "1.2.3",
                         "canary_percent": 10,

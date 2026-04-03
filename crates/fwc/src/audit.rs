@@ -4,10 +4,10 @@
 //! contract and produces a deterministic, machine-readable matrix of metadata
 //! completeness.  Later cohort beads reference this matrix to drive remediation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::readiness::{ConnectorCohort, GapCategory, GapSeverity, ReadinessGap, ReadinessLevel};
 
@@ -625,6 +625,366 @@ pub fn run_audit(connectors_root: &Path) -> anyhow::Result<AuditMatrix> {
         connectors,
         summary,
     })
+}
+
+// ── Production Placeholder Inventory ────────────────────────────────────
+
+/// High-confidence runtime placeholder classification used by the placeholder
+/// inventory and later scanner/gating beads.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaceholderFindingKind {
+    RuntimeBlocker,
+    StatusDrift,
+    OperatorGap,
+    ScaffoldGap,
+    ApprovedException,
+}
+
+/// Narrow approved exception classes for placeholder-like markers that are
+/// intentionally quarantined away from runtime paths.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ApprovedPlaceholderExceptionClass {
+    /// Stable exception-class identifier.
+    pub id: String,
+    /// Why this class is allowed to carry placeholder/stub terminology.
+    pub description: String,
+    /// Narrow path globs the later scanner may treat as in-class.
+    pub allowed_path_globs: Vec<String>,
+    /// Condition that must stay true for the class to remain approved.
+    pub closure_rule: String,
+    /// Bead that owns continued enforcement for this class.
+    pub owner_bead: String,
+}
+
+/// One machine-checkable anchor proving a placeholder finding still exists in
+/// the current workspace.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PlaceholderFindingAnchor {
+    /// Repository-relative text file path.
+    pub path: String,
+    /// Literal snippet that should exist at the anchored path.
+    pub needle: String,
+}
+
+/// One audited placeholder finding, mapped to an owner bead and closure rule.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PlaceholderInventoryFinding {
+    /// Stable finding identifier.
+    pub id: String,
+    /// Human-readable title.
+    pub title: String,
+    /// Category of the gap.
+    pub classification: PlaceholderFindingKind,
+    /// Whether this could eventually remain as a narrow, truthful scaffold-only
+    /// surface once a later bead hardens the quarantine.
+    pub allowed_scaffold_candidate: bool,
+    /// Approved exception class when the finding is already intentionally
+    /// quarantined and allowed.
+    pub approved_exception_class: Option<String>,
+    /// Bead responsible for closure or quarantine.
+    pub owner_bead: String,
+    /// Why the current surface is incomplete or misleading.
+    pub rationale: String,
+    /// Expected exit path for closing or quarantining the finding.
+    pub exit_strategy: String,
+    /// Expected verification proof for the owning bead.
+    pub verification_expectation: String,
+    /// Concrete anchors that should remain detectable until the owning bead
+    /// resolves the gap.
+    pub anchors: Vec<PlaceholderFindingAnchor>,
+}
+
+/// The committed production-placeholder inventory consumed by this bead's scan
+/// artifact and by later scanner/gating work.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProductionPlaceholderInventory {
+    /// Document version for future evolution.
+    pub version: u32,
+    /// Timestamp when this inventory snapshot was locked.
+    pub generated_at: String,
+    /// Short explanation of the artifact's purpose.
+    pub purpose: String,
+    /// Explicit exception classes that later scanners may allow.
+    pub approved_exception_classes: Vec<ApprovedPlaceholderExceptionClass>,
+    /// High-confidence findings that must not be lost by mere wording changes.
+    pub findings: Vec<PlaceholderInventoryFinding>,
+}
+
+/// Human-facing reduction of the inventory disposition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceholderFindingDisposition {
+    RuntimeBlocker,
+    AllowedScaffoldCandidate,
+    ApprovedException,
+}
+
+/// Enforcement policy for a placeholder finding during repo-wide scans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceholderFindingGate {
+    FailUntilCleared,
+    AllowlistedException,
+}
+
+/// Repository-relative path of the committed placeholder inventory.
+#[must_use]
+pub fn placeholder_inventory_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("docs/testing/placeholder-inventory.json")
+}
+
+/// Classify a finding into the narrow disposition the initiative cares about:
+/// runtime blocker, allowed scaffold candidate, or approved exception.
+#[must_use]
+pub fn placeholder_finding_disposition(
+    finding: &PlaceholderInventoryFinding,
+) -> PlaceholderFindingDisposition {
+    if finding.approved_exception_class.is_some() {
+        PlaceholderFindingDisposition::ApprovedException
+    } else if finding.allowed_scaffold_candidate {
+        PlaceholderFindingDisposition::AllowedScaffoldCandidate
+    } else {
+        PlaceholderFindingDisposition::RuntimeBlocker
+    }
+}
+
+/// Determine whether a finding should still fail scans or is an explicitly
+/// allowlisted exception class.
+#[must_use]
+pub fn placeholder_finding_gate(finding: &PlaceholderInventoryFinding) -> PlaceholderFindingGate {
+    if finding.approved_exception_class.is_some() {
+        PlaceholderFindingGate::AllowlistedException
+    } else {
+        PlaceholderFindingGate::FailUntilCleared
+    }
+}
+
+fn placeholder_glob_matches(pattern: &str, text: &str) -> bool {
+    placeholder_glob_match_bytes(pattern.as_bytes(), text.as_bytes())
+}
+
+fn placeholder_glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
+    match (pattern.first(), text.first()) {
+        (None, None) => true,
+        (Some(b'*'), _) => {
+            placeholder_glob_match_bytes(&pattern[1..], text)
+                || (!text.is_empty() && placeholder_glob_match_bytes(pattern, &text[1..]))
+        }
+        (Some(b'?'), Some(_)) => placeholder_glob_match_bytes(&pattern[1..], &text[1..]),
+        (Some(&expected), Some(&actual)) if expected == actual => {
+            placeholder_glob_match_bytes(&pattern[1..], &text[1..])
+        }
+        _ => false,
+    }
+}
+
+/// Check whether a repo-relative path stays inside the approved exception class
+/// attached to this finding.
+#[must_use]
+pub fn placeholder_path_is_allowlisted(
+    inventory: &ProductionPlaceholderInventory,
+    finding: &PlaceholderInventoryFinding,
+    path: &str,
+) -> bool {
+    let Some(class_id) = finding.approved_exception_class.as_deref() else {
+        return false;
+    };
+    inventory
+        .approved_exception_classes
+        .iter()
+        .find(|class| class.id == class_id)
+        .is_some_and(|class| {
+            class
+                .allowed_path_globs
+                .iter()
+                .any(|pattern| placeholder_glob_matches(pattern, path))
+        })
+}
+
+/// Load and structurally validate the committed production-placeholder
+/// inventory.
+///
+/// # Errors
+///
+/// Returns an error if the JSON cannot be parsed or if the document fails the
+/// structural invariants expected by the scanner/gating workflow.
+pub fn load_placeholder_inventory(
+    repo_root: &Path,
+) -> anyhow::Result<ProductionPlaceholderInventory> {
+    let path = placeholder_inventory_path(repo_root);
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to read placeholder inventory `{}`: {error}",
+            path.display()
+        )
+    })?;
+    let inventory: ProductionPlaceholderInventory =
+        serde_json::from_str(&raw).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to parse placeholder inventory `{}`: {error}",
+                path.display()
+            )
+        })?;
+    validate_placeholder_inventory_structure(&inventory)?;
+    Ok(inventory)
+}
+
+fn validate_non_empty(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    Ok(())
+}
+
+/// Validate the committed inventory against structural invariants.
+///
+/// # Errors
+///
+/// Returns an error if the inventory is malformed, too broad, or internally
+/// inconsistent.
+fn validate_placeholder_inventory_structure(
+    inventory: &ProductionPlaceholderInventory,
+) -> anyhow::Result<()> {
+    if inventory.version != 1 {
+        anyhow::bail!(
+            "unsupported placeholder inventory version {}; expected 1",
+            inventory.version
+        );
+    }
+    validate_non_empty("inventory.generated_at", &inventory.generated_at)?;
+    validate_non_empty("inventory.purpose", &inventory.purpose)?;
+    if inventory.findings.is_empty() {
+        anyhow::bail!("placeholder inventory must contain at least one finding");
+    }
+    if inventory.approved_exception_classes.len() > 5 {
+        anyhow::bail!(
+            "approved exception classes must stay intentionally narrow; found {}",
+            inventory.approved_exception_classes.len()
+        );
+    }
+
+    let mut exception_class_ids = BTreeSet::new();
+    for class in &inventory.approved_exception_classes {
+        validate_non_empty("approved_exception_classes.id", &class.id)?;
+        validate_non_empty("approved_exception_classes.description", &class.description)?;
+        validate_non_empty(
+            "approved_exception_classes.closure_rule",
+            &class.closure_rule,
+        )?;
+        validate_non_empty("approved_exception_classes.owner_bead", &class.owner_bead)?;
+        if class.allowed_path_globs.is_empty() {
+            anyhow::bail!(
+                "approved exception class `{}` must declare at least one allowed path glob",
+                class.id
+            );
+        }
+        for glob in &class.allowed_path_globs {
+            validate_non_empty("approved_exception_classes.allowed_path_globs", glob)?;
+        }
+        if !exception_class_ids.insert(class.id.clone()) {
+            anyhow::bail!("duplicate approved exception class `{}`", class.id);
+        }
+    }
+
+    let mut finding_ids = BTreeSet::new();
+    let mut anchor_pairs = BTreeSet::new();
+
+    for finding in &inventory.findings {
+        validate_non_empty("findings.id", &finding.id)?;
+        validate_non_empty("findings.title", &finding.title)?;
+        validate_non_empty("findings.owner_bead", &finding.owner_bead)?;
+        validate_non_empty("findings.rationale", &finding.rationale)?;
+        validate_non_empty("findings.exit_strategy", &finding.exit_strategy)?;
+        validate_non_empty(
+            "findings.verification_expectation",
+            &finding.verification_expectation,
+        )?;
+        if !finding.owner_bead.starts_with("flywheel_connectors-") {
+            anyhow::bail!(
+                "finding `{}` has unexpected owner bead `{}`",
+                finding.id,
+                finding.owner_bead
+            );
+        }
+        if !finding_ids.insert(finding.id.clone()) {
+            anyhow::bail!("duplicate placeholder finding `{}`", finding.id);
+        }
+        if finding.anchors.is_empty() {
+            anyhow::bail!("finding `{}` must declare at least one anchor", finding.id);
+        }
+        if let Some(class_id) = &finding.approved_exception_class {
+            if !finding.allowed_scaffold_candidate {
+                anyhow::bail!(
+                    "finding `{}` declares approved exception class `{class_id}` but is not marked as an allowed scaffold candidate",
+                    finding.id
+                );
+            }
+            if !exception_class_ids.contains(class_id) {
+                anyhow::bail!(
+                    "finding `{}` references unknown approved exception class `{class_id}`",
+                    finding.id
+                );
+            }
+        }
+
+        for anchor in &finding.anchors {
+            validate_non_empty("anchors.path", &anchor.path)?;
+            validate_non_empty("anchors.needle", &anchor.needle)?;
+            let key = format!("{}::{}", anchor.path, anchor.needle);
+            if !anchor_pairs.insert(key) {
+                anyhow::bail!(
+                    "duplicate anchor path/needle pair for finding `{}` at `{}`",
+                    finding.id,
+                    anchor.path
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate the committed inventory against both structural and workspace-local
+/// invariants.
+///
+/// # Errors
+///
+/// Returns an error if the inventory is malformed, too broad, or points at
+/// anchors that no longer exist in the repository.
+pub fn validate_placeholder_inventory(
+    repo_root: &Path,
+    inventory: &ProductionPlaceholderInventory,
+) -> anyhow::Result<()> {
+    validate_placeholder_inventory_structure(inventory)?;
+
+    for finding in &inventory.findings {
+        for anchor in &finding.anchors {
+            let absolute_path = repo_root.join(&anchor.path);
+            if !absolute_path.is_file() {
+                anyhow::bail!(
+                    "finding `{}` points at missing anchor path `{}`",
+                    finding.id,
+                    anchor.path
+                );
+            }
+            let contents = std::fs::read_to_string(&absolute_path).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to read anchor `{}` for finding `{}`: {error}",
+                    anchor.path,
+                    finding.id
+                )
+            })?;
+            if !contents.contains(&anchor.needle) {
+                anyhow::bail!(
+                    "finding `{}` anchor `{}` no longer contains expected needle `{}`",
+                    finding.id,
+                    anchor.path,
+                    anchor.needle
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -3319,5 +3679,208 @@ migration_hint = ""
         }
         let summary = compute_summary(&map);
         assert_eq!(summary.by_cohort.get("messaging"), Some(&4));
+    }
+
+    fn placeholder_inventory_repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn placeholder_inventory_fixture() -> PlaceholderInventoryFinding {
+        PlaceholderInventoryFinding {
+            id: "fixture".to_string(),
+            title: "Fixture".to_string(),
+            classification: PlaceholderFindingKind::RuntimeBlocker,
+            allowed_scaffold_candidate: false,
+            approved_exception_class: None,
+            owner_bead: "flywheel_connectors-24llg.1.1".to_string(),
+            rationale: "Fixture rationale".to_string(),
+            exit_strategy: "Fixture exit".to_string(),
+            verification_expectation: "Fixture verification".to_string(),
+            anchors: vec![PlaceholderFindingAnchor {
+                path: "crates/fwc/src/audit.rs".to_string(),
+                needle: "PlaceholderFindingKind".to_string(),
+            }],
+        }
+    }
+
+    fn placeholder_inventory_temp_root(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fwc_placeholder_inventory_{label}_{}_{}",
+            std::process::id(),
+            unique
+        ))
+    }
+
+    #[test]
+    fn placeholder_inventory_document_is_well_formed() {
+        let root = placeholder_inventory_repo_root();
+        let inventory = load_placeholder_inventory(&root).unwrap();
+        assert!(inventory.findings.len() >= 10);
+        assert!(!inventory.approved_exception_classes.is_empty());
+    }
+
+    #[test]
+    fn placeholder_inventory_approved_exception_classes_stay_narrow() {
+        let root = placeholder_inventory_repo_root();
+        let inventory = load_placeholder_inventory(&root).unwrap();
+        assert!(inventory.approved_exception_classes.len() <= 5);
+
+        let class_ids = inventory
+            .approved_exception_classes
+            .iter()
+            .map(|class| class.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(class_ids.contains("test_only"));
+        assert!(class_ids.contains("mock_infrastructure"));
+        assert!(class_ids.contains("offline_template_generation"));
+    }
+
+    #[test]
+    fn placeholder_inventory_anchor_validation_accepts_matching_fixture() {
+        let temp_root = placeholder_inventory_temp_root("anchor_match");
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(temp_root.join("fixtures")).unwrap();
+        std::fs::write(
+            temp_root.join("fixtures/present.txt"),
+            "placeholder anchor fixture\n",
+        )
+        .unwrap();
+
+        let inventory = ProductionPlaceholderInventory {
+            version: 1,
+            generated_at: "2026-04-03T00:00:00Z".to_string(),
+            purpose: "Synthetic anchor validation fixture".to_string(),
+            approved_exception_classes: vec![],
+            findings: vec![PlaceholderInventoryFinding {
+                anchors: vec![PlaceholderFindingAnchor {
+                    path: "fixtures/present.txt".to_string(),
+                    needle: "placeholder anchor fixture".to_string(),
+                }],
+                ..placeholder_inventory_fixture()
+            }],
+        };
+
+        validate_placeholder_inventory(&temp_root, &inventory).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn placeholder_inventory_anchor_validation_reports_missing_needle() {
+        let temp_root = placeholder_inventory_temp_root("anchor_missing");
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(temp_root.join("fixtures")).unwrap();
+        std::fs::write(temp_root.join("fixtures/present.txt"), "truthful runtime code\n").unwrap();
+
+        let inventory = ProductionPlaceholderInventory {
+            version: 1,
+            generated_at: "2026-04-03T00:00:00Z".to_string(),
+            purpose: "Synthetic anchor validation fixture".to_string(),
+            approved_exception_classes: vec![],
+            findings: vec![PlaceholderInventoryFinding {
+                id: "missing-anchor".to_string(),
+                title: "Missing anchor".to_string(),
+                classification: PlaceholderFindingKind::RuntimeBlocker,
+                allowed_scaffold_candidate: false,
+                approved_exception_class: None,
+                owner_bead: "flywheel_connectors-24llg.1.2".to_string(),
+                rationale: "Synthetic missing-anchor fixture".to_string(),
+                exit_strategy: "Update the anchor or remove the finding".to_string(),
+                verification_expectation: "Validator must report the missing needle".to_string(),
+                anchors: vec![PlaceholderFindingAnchor {
+                    path: "fixtures/present.txt".to_string(),
+                    needle: "placeholder anchor fixture".to_string(),
+                }],
+            }],
+        };
+
+        let error = validate_placeholder_inventory(&temp_root, &inventory).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no longer contains expected needle"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn placeholder_finding_disposition_classifies_candidates_and_exceptions() {
+        let mut finding = placeholder_inventory_fixture();
+        assert_eq!(
+            placeholder_finding_disposition(&finding),
+            PlaceholderFindingDisposition::RuntimeBlocker
+        );
+
+        finding.allowed_scaffold_candidate = true;
+        assert_eq!(
+            placeholder_finding_disposition(&finding),
+            PlaceholderFindingDisposition::AllowedScaffoldCandidate
+        );
+
+        finding.approved_exception_class = Some("test_only".to_string());
+        assert_eq!(
+            placeholder_finding_disposition(&finding),
+            PlaceholderFindingDisposition::ApprovedException
+        );
+    }
+
+    #[test]
+    fn placeholder_finding_gate_requires_closure_until_exception_is_approved() {
+        let mut finding = placeholder_inventory_fixture();
+        finding.allowed_scaffold_candidate = true;
+        assert_eq!(
+            placeholder_finding_gate(&finding),
+            PlaceholderFindingGate::FailUntilCleared
+        );
+
+        finding.approved_exception_class = Some("offline_template_generation".to_string());
+        assert_eq!(
+            placeholder_finding_gate(&finding),
+            PlaceholderFindingGate::AllowlistedException
+        );
+    }
+
+    #[test]
+    fn placeholder_path_is_allowlisted_checks_exception_globs() {
+        let mut finding = placeholder_inventory_fixture();
+        finding.allowed_scaffold_candidate = true;
+        finding.approved_exception_class = Some("offline_template_generation".to_string());
+
+        let inventory = ProductionPlaceholderInventory {
+            version: 1,
+            generated_at: "2026-04-03T00:00:00Z".to_string(),
+            purpose: "fixture".to_string(),
+            approved_exception_classes: vec![ApprovedPlaceholderExceptionClass {
+                id: "offline_template_generation".to_string(),
+                description: "Fixture".to_string(),
+                allowed_path_globs: vec![
+                    "crates/fcp-google-discovery/src/generated/*.rs".to_string(),
+                    "crates/fwc/src/new_cmd.rs".to_string(),
+                ],
+                closure_rule: "fixture".to_string(),
+                owner_bead: "flywheel_connectors-24llg.7.3".to_string(),
+            }],
+            findings: vec![finding.clone()],
+        };
+
+        assert!(placeholder_path_is_allowlisted(
+            &inventory,
+            &finding,
+            "crates/fcp-google-discovery/src/generated/gmail.rs"
+        ));
+        assert!(placeholder_path_is_allowlisted(
+            &inventory,
+            &finding,
+            "crates/fwc/src/new_cmd.rs"
+        ));
+        assert!(!placeholder_path_is_allowlisted(
+            &inventory,
+            &finding,
+            "connectors/tlon/src/connector.rs"
+        ));
     }
 }

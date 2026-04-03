@@ -1,7 +1,7 @@
 # FCP V3 Connector Acceptance Contract
 
 > **Status**: NORMATIVE
-> **Version**: 1.1.0
+> **Version**: 1.2.0
 > **Date**: 2026-03-23
 > **Bead Reference**: `flywheel_connectors-j05nu.11.1`, `flywheel_connectors-49z0b.2`
 > **Supersedes**: `STANDARD_Connector_Compliance.md` (legacy V2)
@@ -392,7 +392,75 @@ These requirements are additive to the base contract above.
 
 ---
 
-## 11. Reference Implementations
+## 11. Planned-Only Connector Graduation Rubric
+
+This section is normative for any connector whose manifest still says `status = "stub"` or whose runtime surfaces expose `surface_status = "planned_only"`, including freshly generated connector skeletons. A connector does not graduate by changing strings alone. Graduation requires a truthful target state, a bounded capability/auth slice, and the verification matrix that proves the advertised state is real.
+
+### 11.1 Allowed Target Truth States
+
+| Target State | When Allowed | Manifest + Runtime Contract | `fwc` / Catalog Contract | Graduation Rule |
+|--------------|--------------|-----------------------------|--------------------------|-----------------|
+| `live` | A real auth path exists and the advertised operations execute against the upstream boundary | Manifest must move off `stub`; handshake/introspect must report `surface_status = "live"`; health may set `live_requests_supported = true` only when the live invoke path is actually available | Discovery and `show` must surface host-backed or explicit offline provenance, never a preview disguised as live | All required verification-matrix rows pass for the advertised capability slice |
+| `incubating` / `quarantined` | The contract shape is useful, but the runtime path is incomplete, safety-sensitive, or lacks honest non-mock evidence | Manifest may remain `stub` until a dedicated incubating status exists, but runtime must not claim `live`; health must keep `live_requests_supported = false`; invoke must stay preview-only, denied, or explicitly unsupported | `fwc` must label the surface `planned`, `unsupported`, or explicit quarantine text; no live-looking success envelopes | Allowed only with an owner bead, an exit strategy, and a documented verification plan that blocks live graduation until the missing evidence exists |
+| `unsupported` | The workspace intentionally does not plan to make the connector live in the current cycle | Manifest/runtime must stop implying near-term live support; planned capability lists must be removed or clearly marked as historical only | `fwc` and catalog surfaces must show unsupported rather than planned/live | Closure requires a de-scope note explaining why the connector stays unsupported |
+
+Hard rules:
+
+- `status = "stub"` plus `surface_status = "live"` is non-compliant.
+- `planned_only` connectors must not set `live_requests_supported = true`.
+- A connector may advertise only the smallest capability slice that the current verification matrix can prove.
+- If a connector cannot satisfy the live verification matrix yet, it must stay incubating/quarantined rather than claiming live capability.
+
+### 11.2 Mandatory Graduation Matrix Fields
+
+Every planned-only graduation bead MUST define and satisfy a verification matrix with these rows:
+
+| Matrix Row | Required Proof |
+|------------|----------------|
+| Auth bootstrapping | Truthful credential shape, validation failure behavior, and zone/policy boundaries |
+| Capability slice | Exact operations and capabilities that are safe to advertise now; no speculative future operations |
+| Runtime truth | `configure -> handshake -> health -> doctor/self_check -> introspect -> invoke/simulate` all agree on live, planned, unsupported, or denied state |
+| Error semantics | Rate limit, auth failure, malformed input, upstream failure, and unsupported/preview paths map to distinct truthful outcomes |
+| Acceptance boundary | Required suite classes from Section 6e are present for the connector archetype; CLI/catalog truth surfaces are exercised where they are part of the advertised contract; mock-only evidence is never the sole graduation proof |
+| Transcript / evidence | Structured logs and replay artifacts prove command mode, availability, provenance, auth mode, connector id, operation id, zone, and receipt or correlation IDs when applicable |
+
+For graduation beads, the transcript/evidence bundle MUST include at least these fields in human-readable or machine-readable form:
+
+- `connector_id`
+- `operation_id`
+- `suite_class`
+- `command_mode`
+- `availability`
+- `surface_status`
+- `auth_mode`
+- `zone`
+- `correlation_id`
+- `artifact_root`
+- `redaction_status`
+
+### 11.3 Connector-Specific Target Matrix
+
+| Connector | Current Truth Problem | Target Truth State | Target Capability + Auth Model | Required Verification Matrix |
+|-----------|-----------------------|--------------------|--------------------------------|------------------------------|
+| `tlon` | Manifest is `stub`; handshake/introspect still advertise `planned_only`; no live proof for DM/channel send | Stay `incubating` until live write evidence exists; graduate to `live` only after the first authenticated ship-backed slice is real | Community-zone connector with one SSRF-safe ship/base-URL binding plus authenticated ship/session credentials. Minimum live slice: `tlon.target.resolve`, `tlon.dm.send`, and `tlon.channel.send` only | `pure_unit` + `deterministic_contract` + `host_e2e` for truthful host/catalog labeling + `live` coverage against a dedicated test ship (Tier E `live_write_required`) for DM send, channel send, denial, and transcript logging |
+| `zalo` | Manifest is `stub`; runtime is `planned_only`; no truthful bot identity, send, poll, or webhook evidence | Stay `incubating` until dedicated-account write/read ingress coverage exists; then graduate directly to `live` for the bot slice | Community-zone bot connector with explicit Bot API token plus webhook secret. Minimum live slice: `zalo.self.get_me`, `zalo.messages.send`, `zalo.messages.send_photo`, `zalo.updates.poll`, and `zalo.webhook.{set,delete,info,verify}` | `pure_unit` + `deterministic_contract` + `host_e2e` for lifecycle/truth boundaries + `live` coverage against a dedicated test bot/account (Tier E `live_write_required`) for outbound send, polling/webhook ingress, auth failure, and cleanup-safe transcript capture |
+| `zalouser` | Manifest is `stub`; runtime is `planned_only`; helper-process surface is risky and owner-only, but no honest helper/runtime evidence exists | Default target is `incubating` / `quarantined`; do not claim `live` until the helper boundary is mechanically constrained and proven | Owner-zone helper connector with explicit command allowlist, approval-gated `system.exec`, and externally supplied session material; no bundled opaque automation runtime. Minimum supported slice: one guarded helper exec contract with truthful denial/approval semantics | `pure_unit` + `deterministic_contract` + `local_non_mock` for the real helper process boundary + `host_e2e` for receipts/policy/logging + dedicated-account `live` coverage before any live graduation. If that matrix is not achievable, the connector must remain quarantined rather than live |
+| `huggingface` | Runtime already claims `live`, but manifest still says `stub`; no explicit graduation rubric ties discovery and inference to a truthful auth model | Align to `live` now, but only for the capability slice that real token/public behavior can prove | Work-zone request-response connector. Model discovery may support an explicit public/read-only mode; gated inference requires an API token. Minimum live slice: `huggingface.models.info`, `huggingface.inference.text_generation`, and `huggingface.inference.summarization` with no hidden tokenless fallback for gated inference | `pure_unit` + `deterministic_contract` + `host_e2e` for lifecycle/provenance + `live` or provider-sandbox coverage for public model discovery and token-backed inference success/failure. Manifest status, handshake, introspect, and health must all agree on the same live state before closure |
+
+### 11.4 Graduation Is Not A String Swap
+
+The following changes alone are insufficient and must not close a bead:
+
+- changing `status = "stub"` to another manifest value without new evidence
+- swapping `surface_status` from `planned_only` to `live`
+- flipping `live_requests_supported` to `true`
+- marking operations `implemented = true` without the matching acceptance matrix
+
+Graduation is complete only when the connector's declared state, runtime state, and evidence bundle all converge on the same truth.
+
+---
+
+## 12. Reference Implementations
 
 These connectors are the canonical exemplars for their archetypes:
 
@@ -406,7 +474,7 @@ New connector authors should study the exemplar for their archetype before start
 
 ---
 
-## 12. V3 Implementation Checklist (Quick Reference)
+## 13. V3 Implementation Checklist (Quick Reference)
 
 ```
 [ ] fcp-sdk dependency in Cargo.toml
@@ -455,6 +523,7 @@ New connector authors should study the exemplar for their archetype before start
 | `STANDARD_Connector_Compliance.md` | Legacy V2 checklist; superseded by this contract for all new and audit work |
 | `STANDARD_Connector_Testing.md` | Legacy V2 testing requirements; this contract defines the V3 testing bar |
 | `docs/testing/coverage-inventory.md` | Live inventory of the current workspace test surface; use it to plan remediation against this policy |
+| `docs/testing/live-suite-classification.md` | Live/non-mock suite availability and risk tiers for connectors that need real upstream proof |
 | `FCP3_Retirement_Kill_List.md` | Compatibility abstractions scheduled for removal; connectors must not depend on them |
 | `FWC_Host_First_Truthfulness_Playbook.md` | Host-side truthfulness requirements; complementary to this connector-side contract |
 
@@ -462,5 +531,6 @@ New connector authors should study the exemplar for their archetype before start
 
 ## Changelog
 
+- **1.2.0** (2026-04-03): Added the planned-only connector graduation rubric, connector-specific target truth states for `tlon`, `zalo`, `zalouser`, and `huggingface`, and the mandatory graduation verification matrix and transcript fields.
 - **1.1.0** (2026-03-23): Added explicit testing taxonomy, archetype-specific acceptance minimums, non-mock exception rules, and E2E logging/redaction requirements. Clarifies that mock-backed suites are supplemental confidence, not final acceptance evidence.
 - **1.0.0** (2026-03-18): Initial V3 acceptance contract. Codifies non-negotiables from V3 spec, README, and implemented exemplar patterns. Defines done-definitions for new-connector and audit-remediation beads. Retroactively binding on all workspace connectors.

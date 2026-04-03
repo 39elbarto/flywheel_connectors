@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
     de::{self, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -1020,12 +1020,26 @@ impl ArtifactBundle {
     }
 }
 
+/// Shared verification bundle schema version used by replayable test artifacts.
+pub const VERIFICATION_BUNDLE_SCHEMA_VERSION: &str = "fcp-verification-bundle/v1";
+
+fn default_verification_bundle_schema_version() -> String {
+    VERIFICATION_BUNDLE_SCHEMA_VERSION.to_string()
+}
+
 /// Metadata manifest for an artifact bundle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArtifactManifest {
+    #[serde(default = "default_verification_bundle_schema_version")]
+    pub schema_version: String,
     pub scenario_id: ScenarioId,
     pub trace_id: TraceId,
     pub created_at: SystemTime,
+    pub layer: ScenarioLayer,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bundle_root: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifact_paths: BTreeMap<String, String>,
     pub file_count: usize,
     pub total_bytes: u64,
     pub outcome: BundleOutcome,
@@ -1046,15 +1060,31 @@ impl ArtifactManifest {
         outcome: BundleOutcome,
     ) -> Self {
         Self {
+            schema_version: default_verification_bundle_schema_version(),
+            layer: scenario_id.layer,
             scenario_id,
             trace_id,
             created_at: SystemTime::now(),
+            bundle_root: String::new(),
+            artifact_paths: BTreeMap::new(),
             file_count,
             total_bytes,
             outcome,
             log_summary: TraceLogSummary::default(),
             truthfulness: TruthfulnessSummary::default(),
         }
+    }
+
+    /// Attach bundle-path metadata so downstream tooling can locate canonical artifacts.
+    #[must_use]
+    pub fn with_bundle(mut self, bundle: &ArtifactBundle) -> Self {
+        self.bundle_root = bundle.root.display().to_string();
+        self.artifact_paths = bundle
+            .report_artifact_paths()
+            .into_iter()
+            .map(|(label, path)| (label, path.display().to_string()))
+            .collect();
+        self
     }
 
     /// Attach trace-derived summaries to the manifest.
@@ -1701,6 +1731,7 @@ pub fn create_bundle(
         0, // no actual bytes written in-memory
         outcome,
     )
+    .with_bundle(&bundle)
     .with_trace_log(log);
     (bundle, manifest)
 }
@@ -2425,11 +2456,9 @@ mod tests {
         let sid = ScenarioId::new(ScenarioLayer::Snapshot, "s", "c");
         let tid = TraceId::from_string("t");
         let bundle = ArtifactBundle::new(&base, &sid, &tid);
-        assert!(
-            bundle
-                .session_transcript_path()
-                .ends_with("session_transcript.json")
-        );
+        assert!(bundle
+            .session_transcript_path()
+            .ends_with("session_transcript.json"));
     }
 
     #[test]
@@ -2469,10 +2498,14 @@ mod tests {
         let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
         let tid = TraceId::from_string("t");
         let m = ArtifactManifest::new(sid.clone(), tid, 4, 1024, BundleOutcome::Pass);
+        assert_eq!(m.schema_version, VERIFICATION_BUNDLE_SCHEMA_VERSION);
         assert_eq!(m.scenario_id, sid);
+        assert_eq!(m.layer, ScenarioLayer::Unit);
         assert_eq!(m.file_count, 4);
         assert_eq!(m.total_bytes, 1024);
         assert!(m.outcome.is_pass());
+        assert!(m.bundle_root.is_empty());
+        assert!(m.artifact_paths.is_empty());
         assert_eq!(m.log_summary.total_entries, 0);
         assert!(m.truthfulness.command_availabilities.is_empty());
     }
@@ -2492,6 +2525,8 @@ mod tests {
         );
         let json = serde_json::to_string(&m).unwrap();
         let back: ArtifactManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, VERIFICATION_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(back.layer, ScenarioLayer::Unit);
         assert_eq!(back.file_count, 3);
         assert!(back.outcome.is_fail());
     }
@@ -2798,19 +2833,15 @@ mod tests {
         assert!(instructions.steps[0].contains("/home/user"));
         assert!(instructions.steps.iter().any(|s| s.contains("abc123")));
         assert!(instructions.steps.iter().any(|s| s.contains("FWC_HOST")));
-        assert!(
-            instructions
-                .steps
-                .iter()
-                .any(|s| s.contains("github.list_repos"))
-        );
+        assert!(instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("github.list_repos")));
         assert!(instructions.prerequisites.iter().any(|p| p.contains("git")));
-        assert!(
-            instructions
-                .prerequisites
-                .iter()
-                .any(|p| p.contains("1.85.0"))
-        );
+        assert!(instructions
+            .prerequisites
+            .iter()
+            .any(|p| p.contains("1.85.0")));
     }
 
     #[test]
@@ -2819,18 +2850,14 @@ mod tests {
         let tid = TraceId::from_string("t");
         let env = ReplayEnvelope::new(sid, tid, "cargo test", "/project");
         let instructions = ReplayInstructions::from_envelope(&env);
-        assert!(
-            !instructions
-                .steps
-                .iter()
-                .any(|s| s.contains("git checkout"))
-        );
-        assert!(
-            instructions
-                .steps
-                .iter()
-                .any(|s| s.contains("'rch' 'exec' '--' bash -lc 'cargo test'"))
-        );
+        assert!(!instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("git checkout")));
+        assert!(instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("'rch' 'exec' '--' bash -lc 'cargo test'")));
         assert!(instructions.prerequisites.iter().any(|p| p == "rch"));
     }
 
@@ -2842,12 +2869,10 @@ mod tests {
             .with_command_runner("custom-runner --");
         let instructions = ReplayInstructions::from_envelope(&env);
         assert!(!instructions.prerequisites.iter().any(|p| p == "rch"));
-        assert!(
-            instructions
-                .steps
-                .iter()
-                .any(|s| s.contains("'custom-runner' '--' bash -lc 'cargo test'"))
-        );
+        assert!(instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("'custom-runner' '--' bash -lc 'cargo test'")));
     }
 
     #[test]
@@ -2858,12 +2883,10 @@ mod tests {
             .with_command_runner("\"/opt/custom tools/bin/run\" --flag");
         let instructions = ReplayInstructions::from_envelope(&env);
 
-        assert!(
-            instructions
-                .steps
-                .iter()
-                .any(|s| s.contains("'/opt/custom tools/bin/run' '--flag' bash -lc 'cargo test'"))
-        );
+        assert!(instructions
+            .steps
+            .iter()
+            .any(|s| s.contains("'/opt/custom tools/bin/run' '--flag' bash -lc 'cargo test'")));
     }
 
     #[test]
@@ -2888,24 +2911,18 @@ mod tests {
         let env = ReplayEnvelope::new(sid, tid, "cargo test -p fwc", "/repo")
             .with_truthfulness(truthfulness);
         let instructions = ReplayInstructions::from_envelope(&env);
-        assert!(
-            instructions
-                .notes
-                .iter()
-                .any(|n| n.contains("Observed availability states"))
-        );
-        assert!(
-            instructions
-                .notes
-                .iter()
-                .any(|n| n.contains("Provenance markers"))
-        );
-        assert!(
-            instructions
-                .notes
-                .iter()
-                .any(|n| n.contains("Host request ids"))
-        );
+        assert!(instructions
+            .notes
+            .iter()
+            .any(|n| n.contains("Observed availability states")));
+        assert!(instructions
+            .notes
+            .iter()
+            .any(|n| n.contains("Provenance markers")));
+        assert!(instructions
+            .notes
+            .iter()
+            .any(|n| n.contains("Host request ids")));
         assert!(instructions.notes.iter().any(|n| n.contains("Receipt ids")));
     }
 
@@ -2941,10 +2958,8 @@ mod tests {
 
         assert_eq!(instructions.steps[0], "cd -- '/tmp/replay dir'");
         assert!(instructions.steps[1].contains("env -- 'FWC_TOKEN=abc $(rm -rf /)' bash -lc"));
-        assert!(
-            instructions.steps[1]
-                .contains("'printf '\"'\"'%s'\"'\"' \"$HOME\"; touch /tmp/should-not-inline'")
-        );
+        assert!(instructions.steps[1]
+            .contains("'printf '\"'\"'%s'\"'\"' \"$HOME\"; touch /tmp/should-not-inline'"));
     }
 
     #[test]
@@ -2970,6 +2985,15 @@ mod tests {
         assert!(bundle.bundle_id.starts_with("unit:routing:alias_test@"));
         assert!(manifest.outcome.is_pass());
         assert_eq!(manifest.file_count, 5);
+        assert_eq!(manifest.layer, ScenarioLayer::Unit);
+        assert!(manifest
+            .bundle_root
+            .contains("/tmp/obs/artifacts/unit/routing/alias_test/"));
+        let expected_replay_path = bundle.replay_script_path().to_string_lossy().to_string();
+        assert_eq!(
+            manifest.artifact_paths.get("replay_sh"),
+            Some(&expected_replay_path)
+        );
         assert_eq!(manifest.log_summary.total_entries, 0);
         assert!(manifest.truthfulness.command_availabilities.is_empty());
     }
@@ -3536,36 +3560,24 @@ mod tests {
             truth.command_availability,
             Some(CommandAvailability::LiveRuntime)
         );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"fixture:github_issue_workflow".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"archetype:request_response".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"coverage-mode:mock_host".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"risk-level:medium".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"live-host-discovery".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"mock-host-sequence".to_string())
-        );
+        assert!(truth
+            .provenance_markers
+            .contains(&"fixture:github_issue_workflow".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"archetype:request_response".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"coverage-mode:mock_host".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"risk-level:medium".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"live-host-discovery".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"mock-host-sequence".to_string()));
     }
 
     #[test]
@@ -3587,36 +3599,24 @@ mod tests {
             truth.command_availability,
             Some(CommandAvailability::LiveRuntime)
         );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"existing-marker".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"fixture:fixture-1".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"archetype:streaming".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"coverage-mode:real_host".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"risk-level:high".to_string())
-        );
-        assert!(
-            truth
-                .provenance_markers
-                .contains(&"artifact-bundle".to_string())
-        );
+        assert!(truth
+            .provenance_markers
+            .contains(&"existing-marker".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"fixture:fixture-1".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"archetype:streaming".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"coverage-mode:real_host".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"risk-level:high".to_string()));
+        assert!(truth
+            .provenance_markers
+            .contains(&"artifact-bundle".to_string()));
     }
 
     #[test]

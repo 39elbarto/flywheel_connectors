@@ -46,7 +46,8 @@ impl ZalouserConnector {
             "protocol_version": "2.0",
             "capabilities": [],
             "planned_capabilities": ["zalouser.helper"],
-            "surface_status": "planned_only"
+            "surface_status": "quarantined",
+            "surface_status_rationale": "High-risk surface requiring explicit operator approval"
         }))
     }
 
@@ -101,7 +102,8 @@ impl ZalouserConnector {
             "operations": [
                 { "id": "zalouser.helper.exec", "summary": "Execute one guarded helper operation", "capability": "zalouser.helper", "risk_level": "high", "safety_tier": "risky", "idempotency": "none", "implemented": false }
             ],
-            "surface_status": "planned_only",
+            "surface_status": "quarantined",
+            "surface_status_rationale": "High-risk surface requiring explicit operator approval",
             "events": [],
             "resource_types": []
         }))
@@ -198,7 +200,7 @@ mod tests {
             .handle_introspect()
             .await
             .expect("introspect should succeed");
-        assert_eq!(introspect["surface_status"], "planned_only");
+        assert_eq!(introspect["surface_status"], "quarantined");
         assert!(
             introspect["operations"]
                 .as_array()

@@ -46,7 +46,8 @@ impl ZaloConnector {
             "protocol_version": "2.0",
             "capabilities": [],
             "planned_capabilities": ["zalo.messages", "zalo.updates", "zalo.webhook"],
-            "surface_status": "planned_only"
+            "surface_status": "incubating",
+            "surface_status_rationale": "Runtime path is incomplete or lacks production evidence"
         }))
     }
 
@@ -108,7 +109,8 @@ impl ZaloConnector {
                 { "id": "zalo.webhook.info", "summary": "Get Zalo webhook info", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
                 { "id": "zalo.webhook.verify", "summary": "Verify a webhook secret token against local config", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false }
             ],
-            "surface_status": "planned_only",
+            "surface_status": "incubating",
+            "surface_status_rationale": "Runtime path is incomplete or lacks production evidence",
             "events": [],
             "resource_types": []
         }))
@@ -225,7 +227,7 @@ mod tests {
             .handle_introspect()
             .await
             .expect("introspect should succeed");
-        assert_eq!(introspect["surface_status"], "planned_only");
+        assert_eq!(introspect["surface_status"], "incubating");
         assert!(
             introspect["operations"]
                 .as_array()

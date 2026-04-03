@@ -135,7 +135,8 @@ impl HuggingfaceConnector {
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
             "capabilities": ["huggingface.inference", "huggingface.models"],
-            "surface_status": "live"
+            "surface_status": "incubating",
+            "surface_status_rationale": "Runtime path is incomplete or lacks production evidence"
         }))
     }
 
@@ -268,7 +269,8 @@ impl HuggingfaceConnector {
                     "implemented": true
                 }
             ],
-            "surface_status": "live",
+            "surface_status": "incubating",
+            "surface_status_rationale": "Runtime path is incomplete or lacks production evidence",
             "events": [],
             "resource_types": []
         }))
@@ -511,7 +513,7 @@ mod tests {
             .handle_handshake(json!({}))
             .await
             .expect("handshake should succeed");
-        assert_eq!(hs["surface_status"], "live");
+        assert_eq!(hs["surface_status"], "incubating");
         assert_eq!(hs["connector_version"], CONNECTOR_VERSION);
     }
 

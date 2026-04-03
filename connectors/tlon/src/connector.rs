@@ -46,7 +46,8 @@ impl TlonConnector {
             "protocol_version": "2.0",
             "capabilities": [],
             "planned_capabilities": ["tlon.dm", "tlon.channel"],
-            "surface_status": "planned_only"
+            "surface_status": "incubating",
+            "surface_status_rationale": "Runtime path is incomplete or lacks production evidence"
         }))
     }
 
@@ -103,7 +104,8 @@ impl TlonConnector {
                 { "id": "tlon.channel.send", "summary": "Send a Tlon channel message", "capability": "tlon.channel", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
                 { "id": "tlon.target.resolve", "summary": "Resolve a Tlon DM or channel target", "capability": "tlon.channel", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false }
             ],
-            "surface_status": "planned_only",
+            "surface_status": "incubating",
+            "surface_status_rationale": "Runtime path is incomplete or lacks production evidence",
             "events": [],
             "resource_types": []
         }))
@@ -210,7 +212,7 @@ mod tests {
             .handle_introspect()
             .await
             .expect("introspect should succeed");
-        assert_eq!(introspect["surface_status"], "planned_only");
+        assert_eq!(introspect["surface_status"], "incubating");
         assert!(
             introspect["operations"]
                 .as_array()

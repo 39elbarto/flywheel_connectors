@@ -21,7 +21,7 @@ use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
 use serde_json::json;
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{header_exists, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OP_S3_DELETE_OBJECT: &str = "aws.s3.delete_object";
@@ -116,6 +116,24 @@ async fn setup_connector(mock_url: &str) -> (AwsConnector, Ed25519SigningKey) {
     (connector, signing_key)
 }
 
+fn assert_sigv4_headers(request: &wiremock::Request) {
+    let authorization = request
+        .headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .expect("authorization header should be present");
+    assert!(
+        authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"),
+        "unexpected authorization header: {authorization}"
+    );
+    assert!(authorization.contains("SignedHeaders="));
+    assert!(authorization.contains("Signature="));
+    assert!(request.headers.get("x-amz-date").is_some());
+    assert!(request.headers.get("x-amz-content-sha256").is_some());
+    assert!(request.headers.get("x-aws-access-key-id").is_none());
+    assert!(request.headers.get("x-aws-secret-access-key").is_none());
+}
+
 #[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured_includes_guidance() {
     let connector = AwsConnector::new();
@@ -167,11 +185,9 @@ async fn self_check_ready_with_custom_sts_override_and_evidence() {
         .and(path("/"))
         .and(query_param("Action", "GetCallerIdentity"))
         .and(query_param("Version", "2011-06-15"))
-        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
-        .and(header(
-            "X-Aws-Secret-Access-Key",
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        ))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "account": "123456789012",
             "arn": "arn:aws:sts::123456789012:assumed-role/test/AwsConnector",
@@ -196,6 +212,9 @@ async fn self_check_ready_with_custom_sts_override_and_evidence() {
         value["details"]["provisioning"]["sts_self_check_supported"],
         true
     );
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
     println!(
         "aws_self_check_evidence={}",
         serde_json::to_string_pretty(&value).unwrap()
@@ -222,11 +241,39 @@ async fn self_check_retryable_sts_failure_reports_degraded() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn self_check_auth_failure_reports_auth_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(query_param("Action", "GetCallerIdentity"))
+        .and(query_param("Version", "2011-06-15"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("SignatureDoesNotMatch"))
+        .mount(&server)
+        .await;
+
+    let (connector, _signing_key) = setup_connector(&server.uri()).await;
+    let report = connector.self_check().await.unwrap();
+    let value = serde_json::to_value(&report).unwrap();
+    assert_eq!(value["status"], "failed");
+    assert_eq!(value["reason_code"], "self_check_failed");
+    let report_text = serde_json::to_string(&value).unwrap();
+    assert!(report_text.contains("Authentication failed (HTTP 403)"));
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_dangerous_s3_delete_preserves_artifact_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/test-bucket/object.txt"))
-        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "delete_marker": true,
             "version_id": "ver-123"
@@ -249,6 +296,9 @@ async fn invoke_dangerous_s3_delete_preserves_artifact_evidence() {
 
     let result = response.result.expect("s3 delete result");
     assert_eq!(result["delete_marker"], true);
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
     println!(
         "aws_risky_mutation_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
@@ -263,7 +313,9 @@ async fn invoke_ec2_terminate_preserves_state_transition_evidence() {
         .and(query_param("Action", "TerminateInstances"))
         .and(query_param("InstanceId.1", "i-0123456789abcdef0"))
         .and(query_param("Version", "2016-11-15"))
-        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "instance_id": "i-0123456789abcdef0",
             "previous_state": "running",
@@ -287,6 +339,9 @@ async fn invoke_ec2_terminate_preserves_state_transition_evidence() {
     let result = response.result.expect("ec2 terminate result");
     assert_eq!(result["previous_state"], "running");
     assert_eq!(result["current_state"], "shutting-down");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
     println!(
         "aws_ec2_terminate_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
@@ -298,7 +353,9 @@ async fn invoke_lambda_list_functions_preserves_artifact_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2015-03-31/functions"))
-        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {
                 "function_name": "sync-orders",
@@ -326,6 +383,9 @@ async fn invoke_lambda_list_functions_preserves_artifact_evidence() {
     let result = response.result.expect("lambda list result");
     assert_eq!(result.as_array().unwrap().len(), 1);
     assert_eq!(result[0]["function_name"], "sync-orders");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
     println!(
         "aws_lambda_list_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
@@ -339,7 +399,9 @@ async fn invoke_sts_identity_preserves_artifact_evidence() {
         .and(path("/"))
         .and(query_param("Action", "GetCallerIdentity"))
         .and(query_param("Version", "2011-06-15"))
-        .and(header("X-Aws-Access-Key-Id", "AKIAIOSFODNN7EXAMPLE"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "account": "123456789012",
             "arn": "arn:aws:sts::123456789012:assumed-role/test/AwsConnector",
@@ -360,6 +422,9 @@ async fn invoke_sts_identity_preserves_artifact_evidence() {
 
     let result = response.result.expect("sts identity result");
     assert_eq!(result["account"], "123456789012");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
     println!(
         "aws_sts_identity_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()

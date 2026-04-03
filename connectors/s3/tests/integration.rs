@@ -799,7 +799,56 @@ async fn invoke_generate_presigned_url_through_connector() {
 
     let url = result["url"].as_str().unwrap();
     assert!(url.contains("my-bucket"));
+    assert!(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+    assert!(url.contains("X-Amz-Credential="));
+    assert!(url.contains("X-Amz-Date="));
     assert!(url.contains("X-Amz-Expires=7200"));
+    assert!(url.contains("X-Amz-Signature="));
+    assert!(url.contains("X-Amz-SignedHeaders=host"));
+    assert!(!url.contains("PLACEHOLDER_SIGNATURE"));
+    assert_eq!(result["audit"]["operation"], "s3.generate_presigned_url");
+    assert_eq!(result["audit"]["dangerous"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_generate_presigned_url_with_credential_id_returns_unsigned_url() {
+    let server = MockServer::start().await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
+    connector
+        .handle_configure(json!({
+            "credential_id": "00000000-0000-0000-0000-000000000001",
+            "base_url": server.uri()
+        }))
+        .await
+        .unwrap();
+
+    let token = generate_valid_token(&signing_key, "s3.generate_presigned_url");
+    let approval = generate_execution_approval("s3.generate_presigned_url");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.generate_presigned_url",
+            "input": {
+                "bucket": "my-bucket",
+                "key": "report.pdf",
+                "expires_in": 7200
+            },
+            "capability_token": token,
+            "approval_token": approval,
+        }))
+        .await
+        .unwrap();
+
+    let url = result["url"].as_str().unwrap();
+    assert!(url.contains("my-bucket"));
+    assert!(!url.contains("X-Amz-Algorithm="));
+    assert!(!url.contains("X-Amz-Credential="));
+    assert!(!url.contains("X-Amz-Date="));
+    assert!(!url.contains("X-Amz-Signature="));
+    assert!(!url.contains("PLACEHOLDER_SIGNATURE"));
     assert_eq!(result["audit"]["operation"], "s3.generate_presigned_url");
     assert_eq!(result["audit"]["dangerous"], true);
 }

@@ -19,6 +19,7 @@ health_guidance_status="pending"
 doctor_guidance_status="pending"
 doctor_self_check_status="pending"
 retryable_self_check_status="pending"
+auth_failure_self_check_status="pending"
 sts_identity_status="pending"
 lambda_list_status="pending"
 ec2_terminate_status="pending"
@@ -203,6 +204,16 @@ else
 fi
 
 if run_logged \
+  auth_failure_self_check_evidence \
+  rch exec -- cargo test -p fcp-aws --test integration self_check_auth_failure_reports_auth_failure -- --nocapture
+then
+  auth_failure_self_check_status="passed"
+else
+  auth_failure_self_check_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
   sts_identity_evidence \
   rch exec -- cargo test -p fcp-aws --test integration invoke_sts_identity_preserves_artifact_evidence -- --nocapture
 then
@@ -299,6 +310,7 @@ rch exec -- cargo test -p fcp-aws --test integration lifecycle_health_unconfigur
 rch exec -- cargo test -p fcp-aws --test integration doctor_unconfigured_reports_remediation -- --nocapture
 rch exec -- cargo test -p fcp-aws --test integration self_check_ready_with_custom_sts_override_and_evidence -- --nocapture
 rch exec -- cargo test -p fcp-aws --test integration self_check_retryable_sts_failure_reports_degraded -- --nocapture
+rch exec -- cargo test -p fcp-aws --test integration self_check_auth_failure_reports_auth_failure -- --nocapture
 rch exec -- cargo test -p fcp-aws --test integration invoke_sts_identity_preserves_artifact_evidence -- --nocapture
 rch exec -- cargo test -p fcp-aws --test integration invoke_lambda_list_functions_preserves_artifact_evidence -- --nocapture
 rch exec -- cargo test -p fcp-aws --test integration invoke_ec2_terminate_preserves_state_transition_evidence -- --nocapture
@@ -326,6 +338,7 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     "doctor_guidance_evidence": "${doctor_guidance_status}",
     "doctor_self_check_evidence": "${doctor_self_check_status}",
     "retryable_self_check_evidence": "${retryable_self_check_status}",
+    "auth_failure_self_check_evidence": "${auth_failure_self_check_status}",
     "sts_identity_evidence": "${sts_identity_status}",
     "lambda_list_evidence": "${lambda_list_status}",
     "ec2_terminate_evidence": "${ec2_terminate_status}",
@@ -342,6 +355,7 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     "doctor_guidance_evidence_log": "${OUT_ROOT}/logs/doctor_guidance_evidence.log",
     "doctor_self_check_evidence_log": "${OUT_ROOT}/logs/doctor_self_check_evidence.log",
     "retryable_self_check_evidence_log": "${OUT_ROOT}/logs/retryable_self_check_evidence.log",
+    "auth_failure_self_check_evidence_log": "${OUT_ROOT}/logs/auth_failure_self_check_evidence.log",
     "sts_identity_evidence_log": "${OUT_ROOT}/logs/sts_identity_evidence.log",
     "lambda_list_evidence_log": "${OUT_ROOT}/logs/lambda_list_evidence.log",
     "ec2_terminate_evidence_log": "${OUT_ROOT}/logs/ec2_terminate_evidence.log",

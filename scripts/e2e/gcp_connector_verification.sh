@@ -20,6 +20,9 @@ doctor_guidance_status="pending"
 doctor_self_check_status="pending"
 retryable_self_check_status="pending"
 risky_mutation_status="pending"
+service_account_token_exchange_status="pending"
+service_account_clock_skew_status="pending"
+service_account_auth_failure_status="pending"
 compliance_status="pending"
 integration_suite_status="pending"
 e2e_suite_status="pending"
@@ -201,6 +204,36 @@ else
 fi
 
 if run_logged \
+  service_account_token_exchange_evidence \
+  rch exec -- cargo test -p fcp-gcp --test integration service_account_jwt_token_exchange_via_wiremock -- --nocapture
+then
+  service_account_token_exchange_status="passed"
+else
+  service_account_token_exchange_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  service_account_clock_skew_evidence \
+  rch exec -- cargo test -p fcp-gcp --test integration service_account_jwt_exchange_clock_skew_error -- --nocapture
+then
+  service_account_clock_skew_status="passed"
+else
+  service_account_clock_skew_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
+  service_account_auth_failure_evidence \
+  rch exec -- cargo test -p fcp-gcp --test integration service_account_jwt_exchange_auth_failure -- --nocapture
+then
+  service_account_auth_failure_status="passed"
+else
+  service_account_auth_failure_status="failed"
+  promote_overall_status failed
+fi
+
+if run_logged \
   risky_mutation_evidence \
   rch exec -- cargo test -p fcp-gcp --test integration invoke_dangerous_storage_delete_preserves_artifact_evidence -- --nocapture
 then
@@ -277,6 +310,9 @@ rch exec -- cargo test -p fcp-gcp --test integration lifecycle_health_unconfigur
 rch exec -- cargo test -p fcp-gcp --test integration doctor_unconfigured_reports_remediation -- --nocapture
 rch exec -- cargo test -p fcp-gcp --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
 rch exec -- cargo test -p fcp-gcp --test integration self_check_retryable_project_api_failure_reports_degraded -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration service_account_jwt_token_exchange_via_wiremock -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration service_account_jwt_exchange_clock_skew_error -- --nocapture
+rch exec -- cargo test -p fcp-gcp --test integration service_account_jwt_exchange_auth_failure -- --nocapture
 rch exec -- cargo test -p fcp-gcp --test integration invoke_dangerous_storage_delete_preserves_artifact_evidence -- --nocapture
 rch exec -- cargo test -p fcp-gcp --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 rch exec -- cargo test -p fcp-gcp --test integration -- --nocapture
@@ -302,6 +338,9 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     "doctor_guidance_evidence": "${doctor_guidance_status}",
     "doctor_self_check_evidence": "${doctor_self_check_status}",
     "retryable_self_check_evidence": "${retryable_self_check_status}",
+    "service_account_token_exchange_evidence": "${service_account_token_exchange_status}",
+    "service_account_clock_skew_evidence": "${service_account_clock_skew_status}",
+    "service_account_auth_failure_evidence": "${service_account_auth_failure_status}",
     "risky_mutation_evidence": "${risky_mutation_status}",
     "compliance_evidence": "${compliance_status}",
     "integration_suite": "${integration_suite_status}",
@@ -316,6 +355,9 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
     "doctor_guidance_evidence_log": "${OUT_ROOT}/logs/doctor_guidance_evidence.log",
     "doctor_self_check_evidence_log": "${OUT_ROOT}/logs/doctor_self_check_evidence.log",
     "retryable_self_check_evidence_log": "${OUT_ROOT}/logs/retryable_self_check_evidence.log",
+    "service_account_token_exchange_evidence_log": "${OUT_ROOT}/logs/service_account_token_exchange_evidence.log",
+    "service_account_clock_skew_evidence_log": "${OUT_ROOT}/logs/service_account_clock_skew_evidence.log",
+    "service_account_auth_failure_evidence_log": "${OUT_ROOT}/logs/service_account_auth_failure_evidence.log",
     "risky_mutation_evidence_log": "${OUT_ROOT}/logs/risky_mutation_evidence.log",
     "compliance_evidence_log": "${OUT_ROOT}/logs/compliance_evidence.log",
     "integration_suite_log": "${OUT_ROOT}/logs/integration_suite.log",

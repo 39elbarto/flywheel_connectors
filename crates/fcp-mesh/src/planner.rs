@@ -773,11 +773,8 @@ impl ExecutionPlanner {
             // Tag, Zone, and AvailabilityProfile exclusions need additional
             // node metadata that isn't available on CandidateNode alone.
             // These will be wired once NodeInfo is threaded through.
-            DevicePattern::Zone { zone } => {
-                candidate.zones.iter().any(|z| z == zone)
-            }
-            DevicePattern::Tag { .. }
-            | DevicePattern::AvailabilityProfile { .. } => false,
+            DevicePattern::Zone { zone } => candidate.zones.iter().any(|z| z == zone),
+            DevicePattern::Tag { .. } | DevicePattern::AvailabilityProfile { .. } => false,
         }
     }
 
@@ -1741,9 +1738,18 @@ mod tests {
             ids.push(alt.node_id.as_str().to_string());
         }
 
-        assert!(ids.iter().any(|id| id.contains("work-node")), "work zone node should pass");
-        assert!(ids.iter().any(|id| id.contains("both-node")), "node in both zones should pass");
-        assert!(!ids.iter().any(|id| id.contains("private-node")), "private-only node should be filtered");
+        assert!(
+            ids.iter().any(|id| id.contains("work-node")),
+            "work zone node should pass"
+        );
+        assert!(
+            ids.iter().any(|id| id.contains("both-node")),
+            "node in both zones should pass"
+        );
+        assert!(
+            !ids.iter().any(|id| id.contains("private-node")),
+            "private-only node should be filtered"
+        );
     }
 
     #[test]
@@ -1773,8 +1779,14 @@ mod tests {
             ids.push(alt.node_id.as_str().to_string());
         }
 
-        assert!(!ids.iter().any(|id| id.contains("unknown-node")), "unknown zone should be rejected");
-        assert!(ids.iter().any(|id| id.contains("work-node")), "matching zone should pass");
+        assert!(
+            !ids.iter().any(|id| id.contains("unknown-node")),
+            "unknown zone should be rejected"
+        );
+        assert!(
+            ids.iter().any(|id| id.contains("work-node")),
+            "matching zone should pass"
+        );
     }
 
     #[test]
@@ -1789,8 +1801,10 @@ mod tests {
         let policy = PlacementPolicy::default(); // empty zones = no restriction
 
         let plan = planner.plan_with_policy(&input, &ctx, &policy);
-        assert!(plan.selected.is_some() || !plan.alternatives.is_empty(),
-            "empty zone policy should not filter anything");
+        assert!(
+            plan.selected.is_some() || !plan.alternatives.is_empty(),
+            "empty zone policy should not filter anything"
+        );
     }
 
     #[test]
@@ -1820,8 +1834,14 @@ mod tests {
             ids.push(alt.node_id.as_str().to_string());
         }
 
-        assert!(!ids.iter().any(|id| id.contains("public-node")), "public zone should be excluded");
-        assert!(ids.iter().any(|id| id.contains("work-node")), "work zone should pass");
+        assert!(
+            !ids.iter().any(|id| id.contains("public-node")),
+            "public zone should be excluded"
+        );
+        assert!(
+            ids.iter().any(|id| id.contains("work-node")),
+            "work zone should pass"
+        );
     }
 
     #[test]

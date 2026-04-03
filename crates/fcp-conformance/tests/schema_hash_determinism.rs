@@ -16,12 +16,12 @@ use std::time::Instant;
 
 use chrono::Utc;
 use fcp_cbor::{CanonicalSerializer, SchemaId};
+use fcp_conformance::LogCapture;
 use fcp_conformance::schemas::validate_e2e_log_jsonl;
 use fcp_conformance::vecgen::{
     GeneratedVector, SchemaRegistration, core_schema_registrations, generate_schema_hash,
     generate_vector, serialize_to_canonical_cbor,
 };
-use fcp_conformance::LogCapture;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

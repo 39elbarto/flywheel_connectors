@@ -1424,11 +1424,7 @@ mod tests {
 
         let batch2 = enc.emit_repair(5);
         assert_eq!(enc.next_repair_esi(), kp + 8);
-        assert_eq!(
-            batch2[0].esi,
-            kp + 3,
-            "second batch continues from cursor"
-        );
+        assert_eq!(batch2[0].esi, kp + 3, "second batch continues from cursor");
         assert_eq!(batch2[4].esi, kp + 7);
     }
 

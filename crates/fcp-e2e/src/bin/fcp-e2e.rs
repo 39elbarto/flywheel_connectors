@@ -1,11 +1,7 @@
 //! Minimal CLI for fcp-e2e JSONL output.
 
 #![forbid(unsafe_code)]
-#![allow(
-    clippy::too_many_arguments,
-    clippy::or_fun_call,
-    clippy::manual_map,
-)]
+#![allow(clippy::too_many_arguments, clippy::or_fun_call, clippy::manual_map)]
 
 use std::fs::File;
 use std::io::{self, BufRead};

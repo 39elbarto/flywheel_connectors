@@ -620,8 +620,16 @@ fn signature_message_empty_inputs() {
     let msg = fcp_registry::signature_message(b"", "");
     // Two u64 LE length prefixes (8 bytes each) + zero payload bytes = 16.
     assert_eq!(msg.len(), 16);
-    assert_eq!(&msg[..8], &[0u8; 8], "signing_bytes length prefix should be zero");
-    assert_eq!(&msg[8..16], &[0u8; 8], "binary_hash length prefix should be zero");
+    assert_eq!(
+        &msg[..8],
+        &[0u8; 8],
+        "signing_bytes length prefix should be zero"
+    );
+    assert_eq!(
+        &msg[8..16],
+        &[0u8; 8],
+        "binary_hash length prefix should be zero"
+    );
 }
 
 // ── manifest_signing_bytes ──

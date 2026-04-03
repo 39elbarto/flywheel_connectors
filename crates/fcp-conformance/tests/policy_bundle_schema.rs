@@ -3,8 +3,8 @@
 use std::time::Instant;
 
 use chrono::Utc;
-use fcp_conformance::schemas::validate_policy_bundle;
 use fcp_conformance::LogCapture;
+use fcp_conformance::schemas::validate_policy_bundle;
 use serde_json::{Value, json};
 use uuid::Uuid;
 

@@ -1040,7 +1040,7 @@ mod tests {
             .subject("tagged-subject")
             .capability_id("cap:test");
         let token = CoseToken::sign(&sk, &claims).unwrap();
-        let tagged = token.inner.clone().to_tagged_vec().unwrap();
+        let tagged = token.inner.to_tagged_vec().unwrap();
 
         let parsed = CoseToken::from_cbor(&tagged).unwrap();
         let claims = parsed.claims_unverified().unwrap();

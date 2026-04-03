@@ -1935,13 +1935,13 @@ pub fn merge_crdt_states(
 ) -> Result<Vec<u8>, CrdtMergeError> {
     match crdt_type {
         CrdtType::LwwMap => {
-            let mut a: crate::LwwMap<String, serde_json::Value> =
-                ciborium::from_reader(state_a).map_err(|e| CrdtMergeError::Deserialization {
+            let mut a: crate::LwwMap<String, serde_json::Value> = ciborium::from_reader(state_a)
+                .map_err(|e| CrdtMergeError::Deserialization {
                     crdt_type,
                     message: format!("branch_a: {e}"),
                 })?;
-            let b: crate::LwwMap<String, serde_json::Value> =
-                ciborium::from_reader(state_b).map_err(|e| CrdtMergeError::Deserialization {
+            let b: crate::LwwMap<String, serde_json::Value> = ciborium::from_reader(state_b)
+                .map_err(|e| CrdtMergeError::Deserialization {
                     crdt_type,
                     message: format!("branch_b: {e}"),
                 })?;
@@ -2174,12 +2174,7 @@ impl StateForkDetector {
                 // We return a "success" outcome to signal that CrdtMerge is
                 // the resolved strategy. The caller picks either branch as
                 // the merge base (branch_a by convention) and merges into it.
-                ForkResolutionOutcome::success(
-                    fork.clone(),
-                    strategy,
-                    fork.branch_a,
-                    now,
-                )
+                ForkResolutionOutcome::success(fork.clone(), strategy, fork.branch_a, now)
             }
         }
     }
@@ -3060,7 +3055,7 @@ mod tests {
 
     #[test]
     fn merge_crdt_states_or_set() {
-        use crate::{OrSet, OrSetTag, CrdtActorId};
+        use crate::{CrdtActorId, OrSet, OrSetTag};
 
         let mut set_a = OrSet::<String>::default();
         set_a.add("item1".into(), OrSetTag::new(CrdtActorId::new("a"), 1));
@@ -3103,9 +3098,9 @@ mod tests {
         let obj1 = test_object_id("crdt_branch_a");
         let obj2 = test_object_id("crdt_branch_b");
 
-        detector.register(genesis.clone(), None, 0, 0);
-        detector.register(obj1.clone(), Some(genesis.clone()), 1, 0);
-        detector.register(obj2.clone(), Some(genesis), 1, 0);
+        detector.register(genesis, None, 0, 0);
+        detector.register(obj1, Some(genesis), 1, 0);
+        detector.register(obj2, Some(genesis), 1, 0);
 
         let detection = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
         assert!(detection.is_fork());

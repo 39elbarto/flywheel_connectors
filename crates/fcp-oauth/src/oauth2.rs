@@ -606,7 +606,12 @@ impl AuthorizationCallback {
             .as_ref()
             .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing state parameter".into()))?;
 
-        if state.as_bytes().ct_eq(expected_state.as_bytes()).unwrap_u8() == 0 {
+        if state
+            .as_bytes()
+            .ct_eq(expected_state.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
             return Err(OAuthError::StateMismatch {
                 expected: expected_state.to_string(),
                 actual: state.clone(),

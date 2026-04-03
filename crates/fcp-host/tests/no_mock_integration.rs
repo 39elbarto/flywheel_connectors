@@ -2594,90 +2594,89 @@ async fn connector_summary_serde_roundtrip() {
         assert_eq!(orig.max_safety_tier, parsed.max_safety_tier);
         assert_eq!(orig.enabled, parsed.enabled);
     }
+}
 
-    // ── Execution Form Neutrality ─────────────────────────────────────────
-    // Verify that lifecycle vocabulary is consistent regardless of whether
-    // a connector runs as native binary or WASI sandbox.
+// ── Execution Form Neutrality ─────────────────────────────────────────
+// Verify that lifecycle vocabulary is consistent regardless of whether
+// a connector runs as native binary or WASI sandbox.
 
-    #[test]
-    fn execution_form_health_vocabulary_is_unified() {
-        use fcp_kernel::HealthState;
+#[test]
+fn execution_form_health_vocabulary_is_unified() {
+    use fcp_kernel::HealthState;
 
-        let variants: Vec<HealthState> = vec![
-            HealthState::Starting,
-            HealthState::Ready,
-            HealthState::Degraded {
-                reason: "test".into(),
-            },
-            HealthState::Error {
-                reason: "test".into(),
-            },
-            HealthState::Stopping,
-        ];
+    let variants: Vec<HealthState> = vec![
+        HealthState::Starting,
+        HealthState::Ready,
+        HealthState::Degraded {
+            reason: "test".into(),
+        },
+        HealthState::Error {
+            reason: "test".into(),
+        },
+        HealthState::Stopping,
+    ];
 
-        for state in &variants {
-            let json = serde_json::to_string(state).unwrap();
-            let roundtrip: HealthState = serde_json::from_str(&json).unwrap();
-            assert_eq!(
-                serde_json::to_string(&roundtrip).unwrap(),
-                json,
-                "HealthState serde roundtrip must be deterministic"
-            );
-        }
+    for state in &variants {
+        let json = serde_json::to_string(state).unwrap();
+        let roundtrip: HealthState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            serde_json::to_string(&roundtrip).unwrap(),
+            json,
+            "HealthState serde roundtrip must be deterministic"
+        );
+    }
+}
+
+#[test]
+fn execution_form_self_check_vocabulary_is_unified() {
+    let ok = SelfCheckReport::ok();
+    let degraded = SelfCheckReport::degraded("rate_limit_near", "API rate near threshold");
+    let failed = SelfCheckReport::failed("auth_expired", "OAuth token expired");
+
+    for report in [&ok, &degraded, &failed] {
+        let json = serde_json::to_string(report).unwrap();
+        let roundtrip: SelfCheckReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            serde_json::to_string(&roundtrip).unwrap(),
+            json,
+            "SelfCheckReport serde roundtrip must be deterministic"
+        );
     }
 
-    #[test]
-    fn execution_form_self_check_vocabulary_is_unified() {
-        let ok = SelfCheckReport::ok();
-        let degraded =
-            SelfCheckReport::degraded("rate_limit_near", "API rate near threshold");
-        let failed = SelfCheckReport::failed("auth_expired", "OAuth token expired");
+    assert!(matches!(ok.status, SelfCheckStatus::Ok));
+    assert!(matches!(degraded.status, SelfCheckStatus::Degraded));
+    assert!(matches!(failed.status, SelfCheckStatus::Failed));
+}
 
-        for report in [&ok, &degraded, &failed] {
-            let json = serde_json::to_string(report).unwrap();
-            let roundtrip: SelfCheckReport = serde_json::from_str(&json).unwrap();
-            assert_eq!(
-                serde_json::to_string(&roundtrip).unwrap(),
-                json,
-                "SelfCheckReport serde roundtrip must be deterministic"
-            );
-        }
+#[test]
+fn execution_form_doctor_report_schema_stable() {
+    let report = DoctorReport::baseline("z:work");
+    let json = serde_json::to_value(&report).unwrap();
 
-        assert!(matches!(ok.status, SelfCheckStatus::Ok));
-        assert!(matches!(degraded.status, SelfCheckStatus::Degraded));
-        assert!(matches!(failed.status, SelfCheckStatus::Failed));
-    }
+    // Doctor report schema is the same regardless of execution form.
+    assert!(json.get("status").is_some());
+    assert!(json.get("version").is_some());
+    assert!(json.get("zone_id").is_some());
+    assert!(json.get("checkpoint").is_some());
+    assert!(json.get("revocation").is_some());
+    assert!(json.get("audit").is_some());
+}
 
-    #[test]
-    fn execution_form_doctor_report_schema_stable() {
-        let report = DoctorReport::baseline("z:work");
-        let json = serde_json::to_value(&report).unwrap();
+#[test]
+fn execution_form_connector_health_variants_cover_both_forms() {
+    // ConnectorHealth vocabulary works for both native and WASI.
+    let healthy = ConnectorHealth::Healthy;
+    let degraded = ConnectorHealth::Degraded {
+        reason: "sandbox memory pressure".into(),
+    };
+    let unavailable = ConnectorHealth::Unavailable {
+        reason: "WASI module failed to load".into(),
+        since: Utc::now(),
+    };
 
-        // Doctor report schema is the same regardless of execution form.
-        assert!(json.get("status").is_some());
-        assert!(json.get("version").is_some());
-        assert!(json.get("zone_id").is_some());
-        assert!(json.get("checkpoint").is_some());
-        assert!(json.get("revocation").is_some());
-        assert!(json.get("audit").is_some());
-    }
-
-    #[test]
-    fn execution_form_connector_health_variants_cover_both_forms() {
-        // ConnectorHealth vocabulary works for both native and WASI.
-        let healthy = ConnectorHealth::Healthy;
-        let degraded = ConnectorHealth::Degraded {
-            reason: "sandbox memory pressure".into(),
-        };
-        let unavailable = ConnectorHealth::Unavailable {
-            reason: "WASI module failed to load".into(),
-            since: Utc::now(),
-        };
-
-        for health in [&healthy, &degraded, &unavailable] {
-            let json = serde_json::to_string(health).unwrap();
-            let roundtrip: ConnectorHealth = serde_json::from_str(&json).unwrap();
-            assert_eq!(serde_json::to_string(&roundtrip).unwrap(), json);
-        }
+    for health in [&healthy, &degraded, &unavailable] {
+        let json = serde_json::to_string(health).unwrap();
+        let roundtrip: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&roundtrip).unwrap(), json);
     }
 }

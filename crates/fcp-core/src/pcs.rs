@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn create_group_too_large_fails() {
-        let members: Vec<_> = (0..PCS_MAX_GROUP_SIZE + 1)
+        let members: Vec<_> = (0..=PCS_MAX_GROUP_SIZE)
             .map(|i| make_member(&format!("node-{i}"), u32::try_from(i).unwrap_or(0)))
             .collect();
         let result = PcsGroupState::new(test_zone_id(), members, random_secret());
@@ -877,7 +877,9 @@ mod tests {
     #[test]
     fn add_member_at_capacity_fails() {
         let mut group = make_group(PCS_MAX_GROUP_SIZE);
-        let new_member = make_member("overflow-node", PCS_MAX_GROUP_SIZE as u32);
+        let max_group_size =
+            u32::try_from(PCS_MAX_GROUP_SIZE).expect("PCS_MAX_GROUP_SIZE must fit in u32");
+        let new_member = make_member("overflow-node", max_group_size);
 
         let result = group.add_member(new_member);
         assert!(matches!(
@@ -1173,7 +1175,7 @@ mod tests {
         let mut group = make_group(4);
 
         for i in 1..4 {
-            let node = TailscaleNodeId::new(&format!("node-{i}"));
+            let node = TailscaleNodeId::new(format!("node-{i}"));
             group.remove_member(&node).unwrap();
         }
 

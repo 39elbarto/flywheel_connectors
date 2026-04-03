@@ -543,11 +543,6 @@ mod tests {
 
     use crate::{ConnectorArchetype, ConnectorRegistry, ConnectorSummary};
 
-    fn test_zone_id(raw: &str) -> ZoneId {
-        raw.parse()
-            .expect("doctor tests must use canonical zone identifiers")
-    }
-
     fn test_connector_id(raw: &str) -> ConnectorId {
         raw.parse()
             .expect("doctor tests must use canonical connector identifiers")

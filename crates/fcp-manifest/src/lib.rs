@@ -809,8 +809,12 @@ impl ConnectorStatus {
             Self::Ready | Self::Deprecated => None,
             Self::Experimental => Some("Stabilize API surface and complete production testing"),
             Self::Stub => Some("Implement all declared operations with real API integration"),
-            Self::Incubating => Some("Complete runtime implementation, add production evidence, pass compliance suite"),
-            Self::Quarantined => Some("Resolve architectural concerns, complete safety review, pass security audit"),
+            Self::Incubating => Some(
+                "Complete runtime implementation, add production evidence, pass compliance suite",
+            ),
+            Self::Quarantined => {
+                Some("Resolve architectural concerns, complete safety review, pass security audit")
+            }
         }
     }
 }
@@ -9259,7 +9263,11 @@ schema_version = "2.1"
         assert!(ConnectorStatus::Incubating.graduation_guidance().is_some());
         assert!(ConnectorStatus::Quarantined.graduation_guidance().is_some());
         assert!(ConnectorStatus::Stub.graduation_guidance().is_some());
-        assert!(ConnectorStatus::Experimental.graduation_guidance().is_some());
+        assert!(
+            ConnectorStatus::Experimental
+                .graduation_guidance()
+                .is_some()
+        );
     }
 
     #[test]
@@ -9286,8 +9294,14 @@ schema_version = "2.1"
         let result = StatusConsistencyResult::check(ConnectorStatus::Stub, "live");
         assert!(!result.consistent);
         let reason = result.mismatch_reason.unwrap();
-        assert!(reason.contains("stub"), "should mention manifest status: {reason}");
-        assert!(reason.contains("live"), "should mention runtime status: {reason}");
+        assert!(
+            reason.contains("stub"),
+            "should mention manifest status: {reason}"
+        );
+        assert!(
+            reason.contains("live"),
+            "should mention runtime status: {reason}"
+        );
     }
 
     #[test]

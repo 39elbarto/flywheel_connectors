@@ -284,7 +284,8 @@ fn test_zero_timeout() {
 
     let err = CompiledPolicy::from_manifest(&manifest, None).unwrap_err();
     assert!(
-        err.to_string().contains("wall_clock_timeout_ms must be > 0"),
+        err.to_string()
+            .contains("wall_clock_timeout_ms must be > 0"),
         "expected zero-timeout rejection, got: {err}"
     );
 }

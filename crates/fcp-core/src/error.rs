@@ -2498,6 +2498,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn details_none_for_simple_variants() {
         assert!(FcpError::ChecksumMismatch.details().is_none());
         assert!(FcpError::TokenExpired.details().is_none());
@@ -3178,6 +3179,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn to_response_message_matches_display_all_variants() {
         let errors: Vec<FcpError> = vec![
             FcpError::InvalidRequest {

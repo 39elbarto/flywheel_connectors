@@ -155,18 +155,18 @@ impl SigV4Signer {
         let date_stamp = now.format("%Y%m%d").to_string();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
 
-        let credential_scope =
-            format!("{date_stamp}/{}/{}/aws4_request", self.scope.region, self.scope.service);
+        let credential_scope = format!(
+            "{date_stamp}/{}/{}/aws4_request",
+            self.scope.region, self.scope.service
+        );
 
         // Step 1: Canonical request
-        let (canonical_request, signed_headers) =
-            self.build_canonical_request(request, &amz_date);
+        let (canonical_request, signed_headers) = self.build_canonical_request(request, &amz_date);
 
         // Step 2: String to sign
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-        let string_to_sign = format!(
-            "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}"
-        );
+        let string_to_sign =
+            format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}");
 
         // Step 3: Signing key
         let signing_key = self.derive_signing_key(&date_stamp);
@@ -195,10 +195,11 @@ impl SigV4Signer {
         let date_stamp = now.format("%Y%m%d").to_string();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
 
-        let credential_scope =
-            format!("{date_stamp}/{}/{}/aws4_request", self.scope.region, self.scope.service);
-        let credential =
-            format!("{}/{credential_scope}", self.credentials.access_key_id);
+        let credential_scope = format!(
+            "{date_stamp}/{}/{}/aws4_request",
+            self.scope.region, self.scope.service
+        );
+        let credential = format!("{}/{credential_scope}", self.credentials.access_key_id);
 
         // Build query params for presigning
         let mut query = request.query_params.clone();
@@ -226,9 +227,8 @@ impl SigV4Signer {
         );
 
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-        let string_to_sign = format!(
-            "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}"
-        );
+        let string_to_sign =
+            format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}");
 
         let signing_key = self.derive_signing_key(&date_stamp);
         let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
@@ -264,7 +264,9 @@ impl SigV4Signer {
 
         // Canonical headers (sorted, lowercase, trimmed)
         let mut headers = request.headers.clone();
-        headers.entry("x-amz-date".into()).or_insert_with(|| amz_date.into());
+        headers
+            .entry("x-amz-date".into())
+            .or_insert_with(|| amz_date.into());
         headers
             .entry("x-amz-content-sha256".into())
             .or_insert_with(|| request.payload_hash.clone());
@@ -308,8 +310,7 @@ impl SigV4Signer {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
@@ -401,11 +402,17 @@ mod tests {
     fn signing_key_differs_by_region() {
         let signer1 = SigV4Signer::new(
             test_credentials(),
-            SigningScope { region: "us-east-1".into(), service: "s3".into() },
+            SigningScope {
+                region: "us-east-1".into(),
+                service: "s3".into(),
+            },
         );
         let signer2 = SigV4Signer::new(
             test_credentials(),
-            SigningScope { region: "eu-west-1".into(), service: "s3".into() },
+            SigningScope {
+                region: "eu-west-1".into(),
+                service: "s3".into(),
+            },
         );
         assert_ne!(
             signer1.derive_signing_key("20130524"),
@@ -417,11 +424,17 @@ mod tests {
     fn signing_key_differs_by_service() {
         let signer1 = SigV4Signer::new(
             test_credentials(),
-            SigningScope { region: "us-east-1".into(), service: "s3".into() },
+            SigningScope {
+                region: "us-east-1".into(),
+                service: "s3".into(),
+            },
         );
         let signer2 = SigV4Signer::new(
             test_credentials(),
-            SigningScope { region: "us-east-1".into(), service: "ec2".into() },
+            SigningScope {
+                region: "us-east-1".into(),
+                service: "ec2".into(),
+            },
         );
         assert_ne!(
             signer1.derive_signing_key("20130524"),
@@ -445,12 +458,12 @@ mod tests {
             payload_hash: EMPTY_PAYLOAD_HASH.into(),
         };
 
-        let (canonical, signed) =
+        let (canonical, signed_headers) =
             signer.build_canonical_request(&request, "20130524T000000Z");
 
         assert!(canonical.contains("host:example.amazonaws.com"));
-        assert!(signed.contains("host"));
-        assert!(signed.contains("x-amz-date"));
+        assert!(signed_headers.contains("host"));
+        assert!(signed_headers.contains("x-amz-date"));
     }
 
     #[test]
@@ -473,20 +486,22 @@ mod tests {
             method: "GET".into(),
             uri: "/test.txt".into(),
             query_params: BTreeMap::new(),
-            headers: BTreeMap::from([
-                ("host".into(), "examplebucket.s3.amazonaws.com".into()),
-            ]),
+            headers: BTreeMap::from([("host".into(), "examplebucket.s3.amazonaws.com".into())]),
             payload_hash: EMPTY_PAYLOAD_HASH.into(),
         };
 
-        let signed = signer.sign(&request);
+        let signed_request = signer.sign(&request);
 
-        assert!(signed.authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"));
-        assert!(signed.authorization.contains("SignedHeaders="));
-        assert!(signed.authorization.contains("Signature="));
-        assert_eq!(signed.x_amz_date, "20130524T000000Z");
-        assert_eq!(signed.x_amz_content_sha256, EMPTY_PAYLOAD_HASH);
-        assert!(signed.x_amz_security_token.is_none());
+        assert!(
+            signed_request
+                .authorization
+                .starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/")
+        );
+        assert!(signed_request.authorization.contains("SignedHeaders="));
+        assert!(signed_request.authorization.contains("Signature="));
+        assert_eq!(signed_request.x_amz_date, "20130524T000000Z");
+        assert_eq!(signed_request.x_amz_content_sha256, EMPTY_PAYLOAD_HASH);
+        assert!(signed_request.x_amz_security_token.is_none());
     }
 
     #[test]
@@ -496,9 +511,7 @@ mod tests {
             method: "GET".into(),
             uri: "/".into(),
             query_params: BTreeMap::new(),
-            headers: BTreeMap::from([
-                ("host".into(), "example.amazonaws.com".into()),
-            ]),
+            headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
             payload_hash: EMPTY_PAYLOAD_HASH.into(),
         };
 
@@ -514,22 +527,23 @@ mod tests {
             secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
             session_token: Some("FwoGZXIvYXdzEBYaDHqa0AF".into()),
         };
-        let signer =
-            SigV4Signer::new(creds, test_scope()).with_fixed_time(fixed_time());
+        let signer = SigV4Signer::new(creds, test_scope()).with_fixed_time(fixed_time());
 
         let request = SignableRequest {
             method: "GET".into(),
             uri: "/".into(),
             query_params: BTreeMap::new(),
-            headers: BTreeMap::from([
-                ("host".into(), "example.amazonaws.com".into()),
-            ]),
+            headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
             payload_hash: EMPTY_PAYLOAD_HASH.into(),
         };
 
-        let signed = signer.sign(&request);
-        assert!(signed.x_amz_security_token.is_some());
-        assert!(signed.authorization.contains("x-amz-security-token"));
+        let signed_request = signer.sign(&request);
+        assert!(signed_request.x_amz_security_token.is_some());
+        assert!(
+            signed_request
+                .authorization
+                .contains("x-amz-security-token")
+        );
     }
 
     // ── Presigning ───────────────────────────────────────────────
@@ -541,9 +555,7 @@ mod tests {
             method: "GET".into(),
             uri: "/test-bucket/test-key.txt".into(),
             query_params: BTreeMap::new(),
-            headers: BTreeMap::from([
-                ("host".into(), "s3.amazonaws.com".into()),
-            ]),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
             payload_hash: UNSIGNED_PAYLOAD.into(),
         };
 
@@ -565,9 +577,7 @@ mod tests {
             method: "GET".into(),
             uri: "/bucket/key".into(),
             query_params: BTreeMap::new(),
-            headers: BTreeMap::from([
-                ("host".into(), "s3.amazonaws.com".into()),
-            ]),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
             payload_hash: UNSIGNED_PAYLOAD.into(),
         };
 

@@ -12,10 +12,10 @@
 mod tests {
     use fcp_cbor::SchemaId;
     use fcp_core::{
-        AuditEvent, ConnectorId, CorrelationId, Decision, DecisionReceipt, EpochId,
-        IntentStatus, NodeId, NodeSignature, ObjectHeader, ObjectId, OperationId,
-        OperationIntent, OperationReceipt, PrincipalId, Provenance, SignatureSet,
-        TailscaleNodeId, TraceContext, ZoneCheckpoint, ZoneId,
+        AuditEvent, ConnectorId, CorrelationId, Decision, DecisionReceipt, EpochId, IntentStatus,
+        NodeId, NodeSignature, ObjectHeader, ObjectId, OperationId, OperationIntent,
+        OperationReceipt, PrincipalId, Provenance, SignatureSet, TailscaleNodeId, TraceContext,
+        ZoneCheckpoint, ZoneId,
     };
     use semver::Version;
     use uuid::Uuid;

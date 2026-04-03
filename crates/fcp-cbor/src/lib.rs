@@ -337,12 +337,13 @@ fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), Serial
         });
     }
 
-    match v {
-        Value::Float(f) => {
-            if f.is_nan() || f.is_infinite() {
-                return Err(SerializationError::NonFiniteFloat);
-            }
+    if let Value::Float(f) = v {
+        if f.is_nan() || f.is_infinite() {
+            return Err(SerializationError::NonFiniteFloat);
         }
+    }
+
+    match v {
         Value::Array(items) => {
             for item in items {
                 canonicalize_value_in_place(item, depth + 1)?;

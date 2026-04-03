@@ -42,10 +42,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::evidence::{
-    canonical_e2e_artifact_paths, default_e2e_validation_command, EvidenceBundle, EvidenceItem,
-    EvidenceLayer, ScenarioEnvironment, ScenarioMeta, ScenarioOutcome, ScenarioScript,
-    ScenarioStep, StepAssertion, StepKind, VerificationCommands,
-    VERIFICATION_BUNDLE_SCHEMA_VERSION,
+    EvidenceBundle, EvidenceItem, EvidenceLayer, ScenarioEnvironment, ScenarioMeta,
+    ScenarioOutcome, ScenarioScript, ScenarioStep, StepAssertion, StepKind,
+    VERIFICATION_BUNDLE_SCHEMA_VERSION, VerificationCommands, canonical_e2e_artifact_paths,
+    default_e2e_validation_command,
 };
 use crate::{SessionScript, SessionTranscript, StepOutcome, TranscriptEntry, TranscriptSummary};
 
@@ -1215,15 +1215,19 @@ mod tests {
             .last()
             .expect("checkpoint step should exist");
         assert_eq!(checkpoint.kind, StepKind::Checkpoint);
-        assert!(checkpoint
-            .evidence
-            .iter()
-            .any(|item| matches!(item, EvidenceItem::Log { lines } if !lines.is_empty())));
+        assert!(
+            checkpoint
+                .evidence
+                .iter()
+                .any(|item| matches!(item, EvidenceItem::Log { lines } if !lines.is_empty()))
+        );
         assert!(checkpoint.evidence.iter().any(|item| {
             matches!(
                 item,
                 EvidenceItem::Metric { name, value, unit }
-                    if name == "transcript_duration_ms" && *value == 65.0 && unit == "ms"
+                    if name == "transcript_duration_ms"
+                        && (*value - 65.0).abs() < f64::EPSILON
+                        && unit == "ms"
             )
         }));
         assert!(checkpoint.evidence.iter().any(|item| {

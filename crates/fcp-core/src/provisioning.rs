@@ -1530,6 +1530,7 @@ mod tests {
             };
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn log_step(
             &mut self,
             step_id: &StepId,
@@ -1565,6 +1566,7 @@ mod tests {
             self.state.clone()
         }
 
+        #[allow(clippy::too_many_lines)]
         async fn execute_step(
             &mut self,
             step_id: StepId,

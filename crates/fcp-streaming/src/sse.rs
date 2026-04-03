@@ -186,10 +186,8 @@ impl SseParser {
                     self.data_bytes_len += val_len;
                 }
             }
-            "id" => {
-                if !value.contains('\0') {
-                    self.event_id = Some(value.to_string());
-                }
+            "id" if !value.contains('\0') => {
+                self.event_id = Some(value.to_string());
             }
             "retry" => {
                 if let Ok(ms) = value.parse() {

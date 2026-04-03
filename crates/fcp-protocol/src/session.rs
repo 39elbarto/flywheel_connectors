@@ -956,8 +956,7 @@ impl FcpsDatagram {
         session_id.copy_from_slice(&bytes[0..16]);
 
         let seq = u64::from_le_bytes([
-            bytes[16], bytes[17], bytes[18], bytes[19],
-            bytes[20], bytes[21], bytes[22], bytes[23],
+            bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
         ]);
 
         let mut mac = [0u8; SESSION_MAC_SIZE];

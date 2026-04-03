@@ -535,7 +535,9 @@ impl WebhookIngressHarness {
         for attempt in 1..=max_attempts {
             let record = self.send_once(payload, attempt).await;
             let should_retry = attempt < max_attempts
-                && record.status.is_none_or(|status| policy.retry_statuses.contains(&status));
+                && record
+                    .status
+                    .is_none_or(|status| policy.retry_statuses.contains(&status));
             transcript.attempts.push(record);
 
             if !should_retry {

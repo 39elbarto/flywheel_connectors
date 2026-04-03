@@ -12,7 +12,7 @@ const E2E_LOG_V2_SCHEMA: &str =
     include_str!("../../fcp-conformance/src/schemas/E2E_Log_v2.schema.json");
 
 #[derive(Debug, Clone)]
-pub(crate) struct SchemaValidationError {
+pub struct SchemaValidationError {
     message: String,
 }
 
@@ -90,18 +90,18 @@ fn validate_e2e_log_jsonl(input: &str) -> Result<(), SchemaValidationError> {
 
 /// Minimal JSONL capture for `fcp-core` integration tests.
 #[derive(Clone, Default)]
-pub(crate) struct LogCapture {
+pub struct LogCapture {
     bytes: Arc<Mutex<Vec<u8>>>,
 }
 
 impl LogCapture {
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     #[must_use]
-    pub(crate) fn jsonl(&self) -> String {
+    pub fn jsonl(&self) -> String {
         let guard = self
             .bytes
             .lock()
@@ -109,7 +109,7 @@ impl LogCapture {
         String::from_utf8_lossy(&guard).into_owned()
     }
 
-    pub(crate) fn push_line(&self, line: &str) {
+    pub fn push_line(&self, line: &str) {
         let mut guard = self
             .bytes
             .lock()
@@ -118,17 +118,17 @@ impl LogCapture {
         guard.push(b'\n');
     }
 
-    pub(crate) fn push_value(&self, value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    pub fn push_value(&self, value: &serde_json::Value) -> Result<(), serde_json::Error> {
         let line = serde_json::to_string(value)?;
         self.push_line(&line);
         Ok(())
     }
 
-    pub(crate) fn validate_jsonl(&self) -> Result<(), SchemaValidationError> {
+    pub fn validate_jsonl(&self) -> Result<(), SchemaValidationError> {
         validate_e2e_log_jsonl(&self.jsonl())
     }
 
-    pub(crate) fn assert_valid(&self) {
+    pub fn assert_valid(&self) {
         self.validate_jsonl()
             .expect("expected JSONL logs to match the E2E schema");
     }

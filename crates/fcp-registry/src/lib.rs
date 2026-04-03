@@ -1679,7 +1679,11 @@ sig = "{sig}"
                 let trust = RegistryTrustPolicy::default();
                 let err = verify_publishers(&trust, sigs, &signing_bytes, "sha256:dead")
                     .expect_err("unknown kid");
-                assert!(matches!(err, RegistryError::UnknownKid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
+                assert!(matches!(
+                    err,
+                    RegistryError::UnknownKid { .. }
+                        | RegistryError::PublisherThresholdUnmet { .. }
+                ));
 
                 RegistryLogData {
                     connector_id: Some(manifest.connector.id.to_string()),
@@ -1883,7 +1887,11 @@ sig = "{sig}"
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("unknown kid");
                 assert!(
-                    matches!(err, RegistryError::UnknownKid { .. } | RegistryError::PublisherThresholdUnmet { .. }),
+                    matches!(
+                        err,
+                        RegistryError::UnknownKid { .. }
+                            | RegistryError::PublisherThresholdUnmet { .. }
+                    ),
                     "expected UnknownKid or PublisherThresholdUnmet, got: {err}"
                 );
 
@@ -1928,7 +1936,11 @@ sig = "{sig}"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("binary mismatch");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
+                assert!(matches!(
+                    err,
+                    RegistryError::SignatureInvalid { .. }
+                        | RegistryError::PublisherThresholdUnmet { .. }
+                ));
 
                 RegistryLogData {
                     reason_code: Some("checksum_mismatch".to_string()),
@@ -2510,7 +2522,11 @@ trusted_builders = ["trusted-builder"]
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("invalid signature");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
+                assert!(matches!(
+                    err,
+                    RegistryError::SignatureInvalid { .. }
+                        | RegistryError::PublisherThresholdUnmet { .. }
+                ));
 
                 RegistryLogData {
                     reason_code: Some("signature_invalid".to_string()),
@@ -2590,7 +2606,10 @@ min_protocol = "fcp2-sym/2.0"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("malformed signature");
-                assert!(matches!(err, RegistryError::SignatureBytes | RegistryError::PublisherThresholdUnmet { .. }));
+                assert!(matches!(
+                    err,
+                    RegistryError::SignatureBytes | RegistryError::PublisherThresholdUnmet { .. }
+                ));
 
                 RegistryLogData {
                     reason_code: Some("signature_bytes_malformed".to_string()),
@@ -2684,7 +2703,11 @@ min_protocol = "fcp2-sym/2.0"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("truncated binary");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
+                assert!(matches!(
+                    err,
+                    RegistryError::SignatureInvalid { .. }
+                        | RegistryError::PublisherThresholdUnmet { .. }
+                ));
 
                 RegistryLogData {
                     reason_code: Some("binary_truncated".to_string()),
@@ -2729,7 +2752,11 @@ min_protocol = "fcp2-sym/2.0"
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("extra bytes");
-                assert!(matches!(err, RegistryError::SignatureInvalid { .. } | RegistryError::PublisherThresholdUnmet { .. }));
+                assert!(matches!(
+                    err,
+                    RegistryError::SignatureInvalid { .. }
+                        | RegistryError::PublisherThresholdUnmet { .. }
+                ));
 
                 RegistryLogData {
                     reason_code: Some("binary_extra_bytes".to_string()),
@@ -4677,14 +4704,24 @@ sig = "base64:{sig_b64}"
                 // valid=0 against required=1, even with a valid registry signature.
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
-                    .expect_err("unknown publisher should fail threshold even with valid registry sig");
+                    .expect_err(
+                        "unknown publisher should fail threshold even with valid registry sig",
+                    );
                 assert!(
-                    matches!(err, RegistryError::PublisherThresholdUnmet { required: 1, valid: 0 }),
+                    matches!(
+                        err,
+                        RegistryError::PublisherThresholdUnmet {
+                            required: 1,
+                            valid: 0
+                        }
+                    ),
                     "expected PublisherThresholdUnmet, got {err:?}"
                 );
 
                 RegistryLogData {
-                    reason_code: Some("registry_valid_unknown_publisher_threshold_enforced".to_string()),
+                    reason_code: Some(
+                        "registry_valid_unknown_publisher_threshold_enforced".to_string(),
+                    ),
                     ..RegistryLogData::default()
                 }
             },
@@ -4744,7 +4781,9 @@ sig = "{reg_sig}"
                 // when a valid registry signature is present.
                 let _err = verifier
                     .verify_bundle(&bundle, None, None, None)
-                    .expect_err("publisher threshold unmet should reject even with valid registry sig");
+                    .expect_err(
+                        "publisher threshold unmet should reject even with valid registry sig",
+                    );
 
                 RegistryLogData {
                     reason_code: Some("registry_valid_publisher_threshold_unmet".to_string()),
@@ -7529,7 +7568,10 @@ trusted_builders = ["trusted-ci"]
                 let short_sig =
                     Base64Bytes::try_from("base64:AAAA".to_string()).expect("base64 parse");
                 let err = signature_from_entry(&short_sig).expect_err("too short");
-                assert!(matches!(err, RegistryError::SignatureBytes | RegistryError::PublisherThresholdUnmet { .. }));
+                assert!(matches!(
+                    err,
+                    RegistryError::SignatureBytes | RegistryError::PublisherThresholdUnmet { .. }
+                ));
 
                 RegistryLogData {
                     reason_code: Some("signature_too_short".to_string()),

@@ -541,8 +541,8 @@ mod tests {
 
     use std::fmt::Write as _;
 
-    use chrono::Utc;
     use crate::LogCapture;
+    use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
 

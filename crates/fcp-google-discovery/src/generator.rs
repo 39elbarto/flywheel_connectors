@@ -907,8 +907,9 @@ mod tests {
     const UNKNOWN_SERVICE_FIXTURE: &str = include_str!("../data/fixtures/unknown_service.v1.json");
 
     /// Recursively sort all JSON object keys for deterministic serialization.
-    /// serde_json's Map ordering depends on whether `preserve_order` is enabled
-    /// (BTreeMap vs IndexMap), which varies across workspace feature unification.
+    /// `serde_json`'s `Map` ordering depends on whether `preserve_order` is
+    /// enabled (`BTreeMap` vs `IndexMap`), which varies across workspace
+    /// feature unification.
     fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => {
@@ -916,14 +917,10 @@ mod tests {
                     .into_iter()
                     .map(|(k, v)| (k, canonicalize_json_value(v)))
                     .collect();
-                serde_json::Value::Object(
-                    sorted.into_iter().collect(),
-                )
+                serde_json::Value::Object(sorted.into_iter().collect())
             }
             serde_json::Value::Array(arr) => {
-                serde_json::Value::Array(
-                    arr.into_iter().map(canonicalize_json_value).collect(),
-                )
+                serde_json::Value::Array(arr.into_iter().map(canonicalize_json_value).collect())
             }
             other => other,
         }
@@ -1051,8 +1048,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::to_value(&generated).expect("serialize to Value");
         let canonical = canonicalize_json_value(value);
-        let serialized =
-            serde_json::to_vec(&canonical).expect("serialize canonical Value");
+        let serialized = serde_json::to_vec(&canonical).expect("serialize canonical Value");
         let actual_digest = blake3::hash(&serialized).to_hex().to_string();
         let expected_digest = GMAIL_GOLDEN_DIGEST.trim();
 

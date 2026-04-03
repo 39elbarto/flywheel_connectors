@@ -730,9 +730,10 @@ fn token_detector_report_surfaces_load_failure_for_plain_file() {
 
 #[test]
 fn token_detector_env_report_emits_json() {
-    let provider = std::env::var_os("FCP_BOOTSTRAP_PKCS11_PROVIDER")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/definitely/missing/fcp-bootstrap-provider.so"));
+    let provider = std::env::var_os("FCP_BOOTSTRAP_PKCS11_PROVIDER").map_or_else(
+        || PathBuf::from("/definitely/missing/fcp-bootstrap-provider.so"),
+        PathBuf::from,
+    );
     let expect_token = std::env::var("FCP_BOOTSTRAP_EXPECT_TOKEN").ok().as_deref() == Some("1");
 
     let detector = TokenDetector::from_provider_paths(vec![provider.clone()]);

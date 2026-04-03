@@ -1274,7 +1274,7 @@ mod tests {
                 .and_then(|summary| summary.get("session"))
                 .and_then(|session| session.get("summary"))
                 .and_then(|summary| summary.get("total"))
-                .and_then(|value| value.as_u64()),
+                .and_then(serde_json::Value::as_u64),
             Some(1)
         );
     }

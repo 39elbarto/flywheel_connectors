@@ -172,7 +172,10 @@ mod tests {
         let policy = TimePolicy::default();
         // Max skew should be reasonable (≤ 10 minutes)
         assert!(policy.max_skew_secs > 0);
-        assert!(policy.max_skew_secs <= 600, "max skew should be at most 10 minutes");
+        assert!(
+            policy.max_skew_secs <= 600,
+            "max skew should be at most 10 minutes"
+        );
         // Skew events should be logged by default
         assert!(policy.log_skew_events);
     }

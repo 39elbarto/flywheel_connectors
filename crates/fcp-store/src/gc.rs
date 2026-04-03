@@ -1206,6 +1206,7 @@ mod tests {
         });
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn gc_collect_with_transcript_records_deterministic_reasons() {
         run_store_test(

@@ -174,9 +174,7 @@ impl FcpsGoldenVector {
         Ok(())
     }
 
-    fn decode_and_verify_symbols(
-        &self,
-    ) -> Result<Vec<fcp_protocol::SymbolRecord>, String> {
+    fn decode_and_verify_symbols(&self) -> Result<Vec<fcp_protocol::SymbolRecord>, String> {
         let mut symbols = Vec::new();
         for (i, sv) in self.symbols.iter().enumerate() {
             let data =

@@ -173,7 +173,10 @@ mod tests {
 
         assert!(config.max_concurrent_repairs > 0);
         assert!(config.max_repairs_per_minute > 0);
-        assert!(config.min_deficit_bps > 0, "zero deficit threshold would trigger unnecessary repairs");
+        assert!(
+            config.min_deficit_bps > 0,
+            "zero deficit threshold would trigger unnecessary repairs"
+        );
         assert!(config.repair_interval.as_secs() > 0);
     }
 
@@ -235,7 +238,10 @@ mod tests {
 
         for reason in &reasons {
             let s = format!("{reason:?}");
-            assert!(!s.is_empty(), "reason code should have a debug representation");
+            assert!(
+                !s.is_empty(),
+                "reason code should have a debug representation"
+            );
         }
     }
 

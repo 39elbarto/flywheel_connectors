@@ -63,10 +63,17 @@ mod tests {
         // an idempotency_key. Operations with SafetyTier::Risky or higher
         // MUST use Strict idempotency.
         use fcp_core::SafetyTier;
-        let risky_tiers = [SafetyTier::Risky, SafetyTier::Dangerous, SafetyTier::Critical];
+        let risky_tiers = [
+            SafetyTier::Risky,
+            SafetyTier::Dangerous,
+            SafetyTier::Critical,
+        ];
         for tier in &risky_tiers {
             assert!(
-                matches!(tier, SafetyTier::Risky | SafetyTier::Dangerous | SafetyTier::Critical),
+                matches!(
+                    tier,
+                    SafetyTier::Risky | SafetyTier::Dangerous | SafetyTier::Critical
+                ),
                 "risky tiers must require idempotency"
             );
         }

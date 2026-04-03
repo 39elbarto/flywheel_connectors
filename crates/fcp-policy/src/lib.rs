@@ -29,9 +29,7 @@
 
 pub use fcp_core::{ZoneId, ZoneIdError, ZoneIdHash};
 
-pub use fcp_core::{
-    TransportMode, ZoneDefinitionObject, ZonePolicyObject, ZoneTransportPolicy,
-};
+pub use fcp_core::{TransportMode, ZoneDefinitionObject, ZonePolicyObject, ZoneTransportPolicy};
 
 // ── Zone Keys ──────────────────────────────────────────────────────
 
@@ -49,9 +47,7 @@ pub use fcp_core::{
 
 // ── Identity & Trust ───────────────────────────────────────────────
 
-pub use fcp_core::{
-    Principal, PrincipalId, SafetyTier, TailscaleNodeId, TaintLevel, TrustLevel,
-};
+pub use fcp_core::{Principal, PrincipalId, SafetyTier, TailscaleNodeId, TaintLevel, TrustLevel};
 
 // ── Provenance & Taint Tracking ────────────────────────────────────
 

@@ -1773,15 +1773,17 @@ mod tests {
         let l = params.l;
 
         // Grab encoder's intermediate symbols
-        let encoder_intermediate: Vec<Vec<u8>> =
-            (0..l).map(|i| encoder.intermediate_symbol(i).to_vec()).collect();
+        let encoder_intermediate: Vec<Vec<u8>> = (0..l)
+            .map(|i| encoder.intermediate_symbol(i).to_vec())
+            .collect();
 
         // Generate symbols
         let mut all_symbols: Vec<(u32, Vec<u8>)> = Vec::new();
         for i in 0..k {
             all_symbols.push((i as u32, source_data[i].clone()));
         }
-        let repair_count = (u64::from(k as u32) * u64::from(repair_ratio_bps) / 10000).max(1) as u32;
+        let repair_count =
+            (u64::from(k as u32) * u64::from(repair_ratio_bps) / 10000).max(1) as u32;
         for i in 0..repair_count {
             let esi = k_prime as u32 + i;
             all_symbols.push((esi, encoder.repair_symbol(esi)));
@@ -1844,14 +1846,10 @@ mod tests {
 
                 // Also verify source reconstruction
                 for i in 0..k {
-                    assert_eq!(
-                        decoded.source[i], source_data[i],
-                        "source[{i}] mismatch"
-                    );
+                    assert_eq!(decoded.source[i], source_data[i], "source[{i}] mismatch");
                 }
             }
             Err(e) => panic!("decode failed: {e:?}"),
         }
     }
-
 }

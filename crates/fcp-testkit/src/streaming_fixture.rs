@@ -274,7 +274,7 @@ impl StreamingFixtureServer {
         self.state.running.store(false, Ordering::SeqCst);
     }
 
-    #[allow(clippy::needless_pass_by_value)]  // called from thread::spawn move closure
+    #[allow(clippy::needless_pass_by_value)] // called from thread::spawn move closure
     fn accept_loop(listener: TcpListener, state: Arc<FixtureState>) {
         while state.running.load(Ordering::SeqCst) {
             match listener.accept() {
@@ -293,7 +293,7 @@ impl StreamingFixtureServer {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]  // called from thread::spawn move closure
+    #[allow(clippy::needless_pass_by_value)] // called from thread::spawn move closure
     fn handle_connection(mut stream: TcpStream, state: Arc<FixtureState>) {
         // Read the HTTP request (we don't parse it fully, just consume it)
         let mut buf = [0u8; 4096];
@@ -314,7 +314,9 @@ impl StreamingFixtureServer {
         // Play back scripted actions
         loop {
             let action = {
-                let Ok(mut queue) = state.actions.lock() else { return };
+                let Ok(mut queue) = state.actions.lock() else {
+                    return;
+                };
                 queue.pop_front()
             };
 

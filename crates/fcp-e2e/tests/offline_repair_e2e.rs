@@ -114,6 +114,7 @@ struct OfflineRepairArtifactBundle {
     gc_report: GcRunReport,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_offline_repair_artifact_bundle(
     root_id: ObjectId,
     payload_id: ObjectId,

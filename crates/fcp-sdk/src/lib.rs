@@ -235,6 +235,7 @@ pub mod prelude;
 pub mod ratelimit;
 pub mod retry;
 pub mod runtime;
+pub mod sigv4;
 pub mod streaming;
 
 /// Execution-form-neutral connector app contract types.

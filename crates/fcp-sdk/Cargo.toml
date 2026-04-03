@@ -13,6 +13,10 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
+hex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-core = { path = "../fcp-core" }
 fcp-kernel = { path = "../fcp-kernel" }
@@ -23,6 +27,7 @@ jsonschema.workspace = true
 reqwest = { workspace = true, optional = true }
 semver = { workspace = true, optional = true }
 serde.workspace = true
+percent-encoding = "2"
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

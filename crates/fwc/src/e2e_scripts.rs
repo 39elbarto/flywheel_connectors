@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn plan_linear_chain() {
-        let mut a = make_scenario(
+        let a = make_scenario(
             "a",
             "A",
             ScenarioCategory::Smoke,

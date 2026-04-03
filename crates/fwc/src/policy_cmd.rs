@@ -22,7 +22,7 @@ use fcp_crypto::ed25519::{Ed25519SigningKey, SECRET_KEY_SIZE};
 use fcp_kernel::{CapabilityId, InvokeRequest, ObjectId, SafetyTier};
 use fcp_policy::{
     CapabilityObject, CapabilityToken, ConfidentialityLevel, DecisionReceiptPolicy, IntegrityLevel,
-    PolicyBundle, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,
+    PolicyBundle, PolicyBundleError, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,
     PolicyBundleSignature, PolicyPattern, Provenance, ResourceObject, RoleObject, TransportMode,
     ZoneDefinitionObject, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
 };
@@ -743,7 +743,9 @@ fn load_policy_refs(path: &PathBuf) -> Result<Vec<PolicyBundlePolicyRef>> {
     for (idx, policy_ref) in refs.iter().enumerate() {
         policy_ref
             .validate()
-            .map_err(|err| anyhow::anyhow!("invalid policy ref at index {idx}: {err}"))?;
+            .map_err(|err: PolicyBundleError| {
+                anyhow::anyhow!("invalid policy ref at index {idx}: {err}")
+            })?;
     }
     Ok(refs)
 }

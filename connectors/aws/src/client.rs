@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
 use tracing::debug;
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::sigv4::{AwsCredentials, EMPTY_PAYLOAD_HASH, SignableRequest, SigningScope, SigV4Signer};
 
 use crate::error::{AwsError, AwsResult};
 use crate::types::*;
@@ -63,8 +65,7 @@ fn normalize_base_url_override(base_url: Option<String>) -> Option<String> {
     })
 }
 
-/// AWS API client with retry support.
-/// Uses simplified REST without SigV4 signing (placeholder for future auth).
+/// AWS API client with retry support and real SigV4 request signing.
 pub struct AwsClient {
     client: Client,
     auth: AwsAuth,
@@ -157,9 +158,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, "S3 list buckets");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = sign_request(client.get(&url), &auth, &region, "s3", "GET", &url, &[]);
                 handle_json_response::<Vec<S3Bucket>>(req, attempt).await
             }
         })
@@ -187,9 +189,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, bucket, "S3 list objects");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = sign_request(client.get(&url), &auth, &region, "s3", "GET", &url, &[]);
                 handle_json_response::<Vec<S3Object>>(req, attempt).await
             }
         })
@@ -212,10 +215,11 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             let key = key.to_string();
             async move {
                 debug!(attempt, bucket, key = %key, "S3 get object");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = sign_request(client.get(&url), &auth, &region, "s3", "GET", &url, &[]);
                 let resp = match req.send().await {
                     Ok(r) => r,
                     Err(e) => {
@@ -281,11 +285,12 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             let body = body_owned.clone();
             let ct = ct.clone();
             async move {
                 debug!(attempt, bucket, key, "S3 put object");
-                let req = authenticate_request(client.put(&url), &auth)
+                let req = sign_request(client.put(&url), &auth, &region, "s3", "PUT", &url, body.as_bytes())
                     .header("Content-Type", ct)
                     .body(body);
                 handle_json_response::<S3PutObjectResponse>(req, attempt).await
@@ -310,9 +315,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, bucket, key, "S3 delete object");
-                let req = authenticate_request(client.delete(&url), &auth);
+                let req = sign_request(client.delete(&url), &auth, &region, "s3", "DELETE", &url, &[]);
                 handle_json_response::<S3DeleteObjectResponse>(req, attempt).await
             }
         })
@@ -336,9 +342,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, "EC2 describe instances");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = sign_request(client.get(&url), &auth, &region, "ec2", "GET", &url, &[]);
                 handle_json_response::<Vec<Ec2Instance>>(req, attempt).await
             }
         })
@@ -365,9 +372,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, instance_id, "EC2 start instance");
-                let req = authenticate_request(client.post(&url), &auth);
+                let req = sign_request(client.post(&url), &auth, &region, "ec2", "POST", &url, &[]);
                 handle_json_response::<Ec2StateChange>(req, attempt).await
             }
         })
@@ -394,9 +402,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, instance_id, "EC2 stop instance");
-                let req = authenticate_request(client.post(&url), &auth);
+                let req = sign_request(client.post(&url), &auth, &region, "ec2", "POST", &url, &[]);
                 handle_json_response::<Ec2StateChange>(req, attempt).await
             }
         })
@@ -423,9 +432,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, instance_id, "EC2 terminate instance");
-                let req = authenticate_request(client.post(&url), &auth);
+                let req = sign_request(client.post(&url), &auth, &region, "ec2", "POST", &url, &[]);
                 handle_json_response::<Ec2StateChange>(req, attempt).await
             }
         })
@@ -446,9 +456,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, "Lambda list functions");
-                let req = authenticate_request(client.get(&url), &auth);
+                let req = sign_request(client.get(&url), &auth, &region, "lambda", "GET", &url, &[]);
                 handle_json_response::<Vec<LambdaFunction>>(req, attempt).await
             }
         })
@@ -474,10 +485,12 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             let payload = payload.clone();
             async move {
                 debug!(attempt, function_name, "Lambda invoke");
-                let req = authenticate_request(client.post(&url), &auth).json(&payload);
+                let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+                let req = sign_request(client.post(&url), &auth, &region, "lambda", "POST", &url, &payload_bytes).json(&payload);
                 handle_json_response::<LambdaInvokeResponse>(req, attempt).await
             }
         })
@@ -501,9 +514,10 @@ impl AwsClient {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
+            let region = self.region.clone();
             async move {
                 debug!(attempt, "STS get caller identity");
-                let req = authenticate_request(client.post(&url), &auth);
+                let req = sign_request(client.post(&url), &auth, &region, "sts", "POST", &url, &[]);
                 handle_json_response::<CallerIdentity>(req, attempt).await
             }
         })
@@ -526,18 +540,86 @@ impl AwsClient {
 
 // ── Free functions for request handling ──
 
-fn authenticate_request(req: RequestBuilder, auth: &AwsAuth) -> RequestBuilder {
+/// Sign an HTTP request with AWS SigV4 and apply auth headers.
+///
+/// # Arguments
+///
+/// * `req` - The request builder to sign.
+/// * `auth` - AWS credentials.
+/// * `region` - AWS region (e.g., "us-east-1").
+/// * `service` - AWS service (e.g., "s3", "ec2", "lambda", "sts").
+/// * `method` - HTTP method (e.g., "GET", "POST").
+/// * `url` - Full request URL.
+/// * `payload` - Request body bytes (empty for GET).
+fn sign_request(
+    req: RequestBuilder,
+    auth: &AwsAuth,
+    region: &str,
+    service: &str,
+    method: &str,
+    url: &str,
+    payload: &[u8],
+) -> RequestBuilder {
     if auth.access_key_id.is_empty() {
-        return req;
+        return req; // secretless mode — egress proxy injects credentials
     }
-    let req = req
-        .header("X-Aws-Access-Key-Id", auth.access_key_id.as_str())
-        .header("X-Aws-Secret-Access-Key", auth.secret_access_key.as_str());
-    if let Some(token) = &auth.session_token {
-        req.header("X-Aws-Security-Token", token.as_str())
+
+    let credentials = AwsCredentials {
+        access_key_id: auth.access_key_id.clone(),
+        secret_access_key: auth.secret_access_key.clone(),
+        session_token: auth.session_token.clone(),
+    };
+
+    let scope = SigningScope {
+        region: region.to_string(),
+        service: service.to_string(),
+    };
+
+    let signer = SigV4Signer::new(credentials, scope);
+
+    // Parse URL to extract path and query parameters
+    let parsed = url::Url::parse(url).unwrap_or_else(|_| {
+        // Fallback: treat as path-only
+        url::Url::parse(&format!("https://localhost{url}")).unwrap()
+    });
+
+    let uri = parsed.path().to_string();
+    let query_params: BTreeMap<String, String> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+    let mut headers = BTreeMap::new();
+    if let Some(host) = parsed.host_str() {
+        headers.insert("host".to_string(), host.to_string());
+    }
+
+    let payload_hash = if payload.is_empty() {
+        EMPTY_PAYLOAD_HASH.to_string()
     } else {
-        req
+        SignableRequest::hash_payload(payload)
+    };
+
+    let signable = SignableRequest {
+        method: method.to_string(),
+        uri,
+        query_params,
+        headers,
+        payload_hash: payload_hash.clone(),
+    };
+
+    let signed = signer.sign(&signable);
+
+    let mut req = req
+        .header("Authorization", &signed.authorization)
+        .header("X-Amz-Date", &signed.x_amz_date)
+        .header("X-Amz-Content-Sha256", &payload_hash);
+
+    if let Some(token) = &signed.x_amz_security_token {
+        req = req.header("X-Amz-Security-Token", token);
     }
+
+    req
 }
 
 fn check_error_status<T>(status: u16) -> Option<AttemptOutcome<T, AwsError>> {

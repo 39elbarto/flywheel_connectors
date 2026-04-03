@@ -167,7 +167,7 @@ impl AwsConfig {
             auth_mode: self.auth_mode(),
             request_timeout_ms: self.request_timeout_ms,
             endpoint_overrides: endpoint_overrides.clone(),
-            aws_sigv4_supported: false,
+            aws_sigv4_supported: true,
             sts_self_check_supported: endpoint_overrides.sts.is_some(),
         }
     }
@@ -288,29 +288,28 @@ fn operator_guidance() -> OperatorGuidance {
         dedicated_environment: "Use staging-only buckets, instances, Lambda functions, and STS verification endpoints. S3 delete and EC2 terminate operations are destructive and should never target production resources during verification.",
         redaction_rules: vec![
             "Never log access_key_id, secret_access_key, or session_token values.",
-            "Redact X-Aws-Access-Key-Id, X-Aws-Secret-Access-Key, and X-Aws-Security-Token headers from captured request/response artifacts.",
+            "Redact Authorization, X-Amz-Security-Token, and credential headers from captured request/response artifacts.",
             "Treat private account IDs, ARNs, bucket names, instance IDs, function names, and non-public endpoint override URLs as sensitive unless they are already public test fixtures.",
         ],
         limitations: vec![
-            "This connector currently sends placeholder X-Aws-* headers rather than SigV4-signed AWS requests.",
-            "Default AWS production endpoints are expected to reject self_check and invoke traffic until SigV4 support is implemented.",
+            "SigV4 signing is implemented but clock skew between the connector and AWS may cause signature rejection.",
             "A custom sts_base_url is required for deterministic self_check coverage in tests and staging.",
         ],
         common_remediation: vec![
             RemediationHint {
-                code: "request_signing_not_implemented",
-                symptom: "doctor or health reports missing SigV4-compatible overrides",
-                action: "Point s3_base_url, ec2_base_url, lambda_base_url, and sts_base_url at verification stubs or a signing proxy, or implement SigV4 signing before using default AWS endpoints.",
+                code: "signature_mismatch",
+                symptom: "AWS API returns SignatureDoesNotMatch",
+                action: "Check system clock accuracy. SigV4 signatures are time-bound and AWS allows at most 15 minutes of skew.",
             },
             RemediationHint {
                 code: "self_check_unsupported_on_default_sts",
                 symptom: "self_check degrades before making a network call",
-                action: "Set sts_base_url to a verification endpoint that accepts the connector's header-based auth or routes the request through a SigV4 signer.",
+                action: "Set sts_base_url to a verification endpoint that validates SigV4 signatures.",
             },
             RemediationHint {
                 code: "auth_failed",
                 symptom: "self_check returns Unauthorized against a custom STS endpoint",
-                action: "Verify the custom STS verifier accepts X-Aws-Access-Key-Id / X-Aws-Secret-Access-Key / X-Aws-Security-Token headers or inject a signing proxy.",
+                action: "Verify credentials are valid and the STS endpoint accepts SigV4-signed requests.",
             },
         ],
         rerun_commands: VERIFY_COMMANDS.to_vec(),
@@ -470,17 +469,11 @@ impl AwsConnector {
             });
             checks.push(DoctorCheck {
                 name: "request_signing".into(),
-                passed: readiness.endpoint_overrides.fully_overridden(),
-                message: Some(if readiness.endpoint_overrides.fully_overridden() {
-                    "All supported AWS service families are routed through custom verification endpoints".into()
+                passed: readiness.aws_sigv4_supported,
+                message: Some(if readiness.aws_sigv4_supported {
+                    "SigV4 request signing is active for all AWS API calls".into()
                 } else {
-                    format!(
-                        "SigV4 request signing is not implemented; default AWS endpoints remain active for {}",
-                        readiness
-                            .endpoint_overrides
-                            .missing_sigv4_overrides
-                            .join(", ")
-                    )
+                    "SigV4 request signing is not configured".into()
                 }),
                 critical: true,
             });
@@ -490,7 +483,7 @@ impl AwsConnector {
                 message: Some(if let Some(sts_url) = &readiness.endpoint_overrides.sts {
                     format!("Self-check will probe custom STS endpoint: {sts_url}")
                 } else {
-                    "Self-check cannot safely probe default STS because SigV4 signing is not implemented; set sts_base_url to a verification endpoint or signing proxy".into()
+                    "Self-check will probe default STS with SigV4-signed requests; set sts_base_url for deterministic testing".into()
                 }),
                 critical: false,
             });
@@ -1398,19 +1391,20 @@ mod tests {
             c.doctor()
         })
         .unwrap();
-        assert!(!doctor.passed);
+        // With SigV4 signing implemented, doctor should pass for configured connectors
+        assert!(doctor.passed);
         let signing = doctor
             .checks
             .iter()
             .find(|check| check.name == "request_signing")
             .unwrap();
-        assert!(!signing.passed);
+        assert!(signing.passed);
         assert!(
             signing
                 .message
                 .as_deref()
                 .unwrap()
-                .contains("SigV4 request signing is not implemented")
+                .contains("SigV4 request signing is active")
         );
     }
 

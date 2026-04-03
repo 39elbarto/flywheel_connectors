@@ -364,3 +364,174 @@ async fn introspection_emits_v3_compliance_evidence() {
         serde_json::to_string_pretty(&evidence).unwrap()
     );
 }
+
+// ── JWT Service-Account Auth Tests ──
+
+/// Generate a test RSA private key in PKCS#8 PEM format.
+fn test_rsa_private_key_pem() -> String {
+    use rsa::pkcs8::EncodePrivateKey;
+    let mut rng = rand::thread_rng();
+    let key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("RSA key gen");
+    key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+        .expect("PEM encode")
+        .to_string()
+}
+
+#[test]
+fn service_account_configure_with_valid_key() {
+    let pem = test_rsa_private_key_pem();
+    let result = fcp_async_core::runtime::block_on_sync(async {
+        let mut connector = GcpConnector::new();
+        connector
+            .configure(json!({
+                "mode": "service_account",
+                "client_email": "test-sa@my-project.iam.gserviceaccount.com",
+                "private_key": pem,
+                "project_id": "my-project"
+            }))
+            .await
+    })
+    .unwrap();
+    assert!(result.is_ok(), "valid service-account config should succeed");
+}
+
+#[test]
+fn service_account_jwt_token_exchange_via_wiremock() {
+    let pem = test_rsa_private_key_pem();
+
+    fcp_async_core::runtime::block_on_sync(async {
+        let mock_server = MockServer::start().await;
+
+        // Mock the Google OAuth2 token endpoint
+        Mock::given(method("POST"))
+            .and(header("Content-Type", "application/x-www-form-urlencoded"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "ya29.mock-service-account-token",
+                "token_type": "Bearer",
+                "expires_in": 3600
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Build client with mock token endpoint
+        let mut client = fcp_gcp::client::GcpClient::new(
+            "test-project",
+            fcp_gcp::types::GcpAuth::ServiceAccount {
+                client_email: "test@test-project.iam.gserviceaccount.com".into(),
+                private_key: pem,
+            },
+            fcp_sdk::migration::HttpRetryConfig::default(),
+            Some(&mock_server.uri()),
+            Some(&mock_server.uri()),
+            Some(&mock_server.uri()),
+            Some(&mock_server.uri()),
+        )
+        .await
+        .expect("client creation should succeed");
+
+        // Set the mock token endpoint so JWT exchange uses our mock
+        client.set_token_endpoint(mock_server.uri());
+
+        // Get bearer token — should exchange JWT and return the mock token
+        let token = client.get_bearer_token().await.expect("token exchange");
+        assert_eq!(token, "ya29.mock-service-account-token");
+
+        // Second call should return cached token (no additional mock hits needed)
+        let token2 = client.get_bearer_token().await.expect("cached token");
+        assert_eq!(token2, "ya29.mock-service-account-token");
+    })
+    .unwrap();
+}
+
+#[test]
+fn service_account_jwt_exchange_clock_skew_error() {
+    let pem = test_rsa_private_key_pem();
+
+    fcp_async_core::runtime::block_on_sync(async {
+        let mock_server = MockServer::start().await;
+
+        // Mock clock-skew rejection from Google
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_grant",
+                "error_description": "Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut client = fcp_gcp::client::GcpClient::new(
+            "test-project",
+            fcp_gcp::types::GcpAuth::ServiceAccount {
+                client_email: "test@test-project.iam.gserviceaccount.com".into(),
+                private_key: pem,
+            },
+            fcp_sdk::migration::HttpRetryConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("client creation should succeed");
+
+        client.set_token_endpoint(mock_server.uri());
+
+        let err = client
+            .get_bearer_token()
+            .await
+            .expect_err("clock skew should cause error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("clock skew") || msg.contains("time"),
+            "error should mention clock skew: {msg}"
+        );
+    })
+    .unwrap();
+}
+
+#[test]
+fn service_account_jwt_exchange_auth_failure() {
+    let pem = test_rsa_private_key_pem();
+
+    fcp_async_core::runtime::block_on_sync(async {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": "invalid_client",
+                "error_description": "The OAuth client was not found."
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut client = fcp_gcp::client::GcpClient::new(
+            "test-project",
+            fcp_gcp::types::GcpAuth::ServiceAccount {
+                client_email: "test@test-project.iam.gserviceaccount.com".into(),
+                private_key: pem,
+            },
+            fcp_sdk::migration::HttpRetryConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("client creation should succeed");
+
+        client.set_token_endpoint(mock_server.uri());
+
+        let err = client
+            .get_bearer_token()
+            .await
+            .expect_err("auth failure should cause error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid_client") || msg.contains("not found"),
+            "error should describe the auth failure: {msg}"
+        );
+    })
+    .unwrap();
+}

@@ -449,10 +449,7 @@ impl S3Client {
         })
     }
 
-    /// Generate a presigned URL for temporary access.
-    ///
-    /// Note: This generates a placeholder presigned URL. Real AWS SigV4
-    /// signing would require the full AWS SDK or manual SigV4 implementation.
+    /// Generate a presigned URL for temporary access using real SigV4 query signing.
     #[must_use]
     pub fn generate_presigned_url(
         &self,
@@ -460,32 +457,69 @@ impl S3Client {
         key: &str,
         expires_in: u64,
     ) -> PresignedUrlResponse {
-        // Construct a presigned-style URL. In production, this would use
-        // AWS SigV4 query string signing. For now, we construct a URL that
-        // indicates the presigned nature with expiry metadata.
-        let (access_key, region) = match &self.auth {
+        use fcp_sdk::sigv4::{AwsCredentials, SignableRequest, SigningScope, SigV4Signer, EMPTY_PAYLOAD_HASH};
+
+        let (access_key_id, secret_access_key, region) = match &self.auth {
             S3Auth::Keys {
                 access_key_id,
+                secret_access_key,
                 region,
-                ..
-            } => (access_key_id.as_str(), region.as_str()),
-            S3Auth::CredentialId(_) => ("CREDENTIAL_ID_MODE", "proxy"),
+            } => (access_key_id.as_str(), secret_access_key.as_str(), region.as_str()),
+            S3Auth::CredentialId(_) => {
+                // In credential-reference mode, presigning is not possible
+                // because the connector doesn't hold the secret key.
+                let encoded_bucket = Self::encode_bucket(bucket);
+                let encoded_key = percent_encoding::utf8_percent_encode(
+                    key,
+                    percent_encoding::NON_ALPHANUMERIC,
+                );
+                return PresignedUrlResponse {
+                    url: format!("{}/{encoded_bucket}/{encoded_key}", self.base_url),
+                };
+            }
         };
 
+        let credentials = AwsCredentials {
+            access_key_id: access_key_id.to_string(),
+            secret_access_key: secret_access_key.to_string(),
+            session_token: None,
+        };
+
+        let scope = SigningScope {
+            region: region.to_string(),
+            service: "s3".to_string(),
+        };
+
+        let signer = SigV4Signer::new(credentials, scope);
+
         let encoded_bucket = Self::encode_bucket(bucket);
-        let encoded_key =
-            percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC);
-
-        let url = format!(
-            "{base}/{encoded_bucket}/{encoded_key}?X-Amz-Algorithm=AWS4-HMAC-SHA256\
-             &X-Amz-Credential={access_key}%2F{region}%2Fs3%2Faws4_request\
-             &X-Amz-Expires={expires_in}\
-             &X-Amz-SignedHeaders=host\
-             &X-Amz-Signature=PLACEHOLDER_SIGNATURE",
-            base = self.base_url,
+        let encoded_key = percent_encoding::utf8_percent_encode(
+            key,
+            percent_encoding::NON_ALPHANUMERIC,
         );
+        let uri = format!("/{encoded_bucket}/{encoded_key}");
 
-        PresignedUrlResponse { url }
+        let mut headers = std::collections::BTreeMap::new();
+        // Extract host from base URL for the Host header
+        if let Ok(parsed) = url::Url::parse(&self.base_url) {
+            if let Some(host) = parsed.host_str() {
+                headers.insert("host".to_string(), host.to_string());
+            }
+        }
+
+        let signable = SignableRequest {
+            method: "GET".to_string(),
+            uri,
+            query_params: std::collections::BTreeMap::new(),
+            headers,
+            payload_hash: EMPTY_PAYLOAD_HASH.to_string(),
+        };
+
+        let presigned = signer.presign(&signable, expires_in);
+
+        PresignedUrlResponse {
+            url: presigned.url,
+        }
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────

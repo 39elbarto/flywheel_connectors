@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::GcpClient;
-use crate::types::{GcpAuth, SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE};
+use crate::types::GcpAuth;
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/gcp_connector_verification.sh";
@@ -101,9 +101,8 @@ impl GcpConfig {
         if self.request_timeout_ms == 0 {
             return Err("request_timeout_ms must be > 0".into());
         }
-        if self.auth.is_service_account() {
-            return Err(SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE.into());
-        }
+        // Service-account mode is supported via JWT bearer auth.
+        // Key validation happens in GcpClient::new().
         let readiness = self.provisioning_readiness();
         if !readiness.network_ok {
             return Err(readiness.network_message);
@@ -1568,25 +1567,53 @@ mod tests {
     }
 
     #[test]
-    fn service_account_auth_rejected_until_jwt_implemented() {
+    fn service_account_auth_rejects_invalid_pem() {
         let result = fcp_async_core::runtime::block_on_sync(async {
             let mut c = GcpConnector::new();
             c.configure(json!({
                 "mode": "service_account",
                 "client_email": "svc@proj.iam.gserviceaccount.com",
-                "private_key": "key-data",
+                "private_key": "not-a-valid-pem",
                 "project_id": "proj"
             }))
             .await
         })
         .unwrap();
+        // Client init wraps GcpError::Config as FcpError::Internal
         match result {
-            Err(FcpError::InvalidRequest { message, .. }) => {
-                assert!(message.contains("JWT signing"));
-                assert!(!message.contains("credential_id"));
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("private key"),
+                    "error should mention private key: {msg}"
+                );
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => panic!("expected error for bad PEM, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn service_account_auth_accepts_valid_key() {
+        use rsa::pkcs8::EncodePrivateKey;
+        let mut rng = rand::thread_rng();
+        let key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("key gen");
+        let pem = key
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("PEM")
+            .to_string();
+
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = GcpConnector::new();
+            c.configure(json!({
+                "mode": "service_account",
+                "client_email": "svc@proj.iam.gserviceaccount.com",
+                "private_key": pem,
+                "project_id": "proj"
+            }))
+            .await
+        })
+        .unwrap();
+        assert!(result.is_ok(), "valid service-account key should configure successfully");
     }
 
     #[test]

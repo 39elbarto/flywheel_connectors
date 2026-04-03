@@ -1,12 +1,14 @@
+use std::sync::Mutex;
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
 use serde_json::json;
-use tracing::debug;
+use tracing::{debug, info};
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
 
 use crate::error::{GcpError, GcpResult};
+use crate::jwt::{self, CachedToken};
 use crate::types::*;
 
 /// Validate a user-supplied path segment to prevent URL path injection.
@@ -53,12 +55,16 @@ fn sanitize_query_param<'a>(value: &'a str, field: &str) -> GcpResult<&'a str> {
     Ok(value)
 }
 
-/// GCP API client with retry support.
+/// GCP API client with retry support and JWT-based service-account auth.
 pub struct GcpClient {
     client: Client,
     auth: GcpAuth,
     project_id: String,
     retry_config: HttpRetryConfig,
+    /// Cached service-account access token (only used in service_account mode).
+    sa_token_cache: Mutex<Option<CachedToken>>,
+    /// Override token endpoint for testing.
+    token_endpoint: Option<String>,
     /// Base URLs for each GCP service (overridable for testing).
     compute_base: String,
     storage_base: String,
@@ -85,8 +91,18 @@ impl GcpClient {
         run_base: Option<&str>,
         crm_base: Option<&str>,
     ) -> GcpResult<Self> {
-        if auth.is_service_account() {
-            return Err(GcpError::Config(SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE.into()));
+        // Validate service-account credentials early: key must be parseable PEM
+        if let Some((email, key)) = auth.service_account_credentials() {
+            if email.trim().is_empty() {
+                return Err(GcpError::Config(
+                    "service_account client_email must not be empty".into(),
+                ));
+            }
+            if !key.trim().is_empty() {
+                // Validate the PEM is parseable (fail fast, not at first API call)
+                jwt::build_jwt_assertion(email, key, DEFAULT_GCP_SCOPES, None)?;
+                info!(client_email = email, "service-account JWT auth configured");
+            }
         }
 
         let client = Client::builder()
@@ -99,6 +115,8 @@ impl GcpClient {
             auth,
             project_id: project_id.to_string(),
             retry_config,
+            sa_token_cache: Mutex::new(None),
+            token_endpoint: None,
             compute_base: compute_base
                 .unwrap_or("https://compute.googleapis.com")
                 .trim_end_matches('/')
@@ -118,12 +136,80 @@ impl GcpClient {
         })
     }
 
+    /// Set a custom token endpoint (overrides the Google default).
+    /// Intended for testing with mock OAuth2 servers.
+    pub fn set_token_endpoint(&mut self, endpoint: String) {
+        self.token_endpoint = Some(endpoint);
+    }
+
     pub fn project_id(&self) -> &str {
         &self.project_id
     }
 
     pub fn is_secretless(&self) -> bool {
         self.auth.is_secretless()
+    }
+
+    /// Obtain a bearer token for API requests.
+    ///
+    /// - **access_token mode**: returns the configured static token.
+    /// - **service_account mode**: builds a JWT assertion, exchanges it for an
+    ///   access token (caching for the token's lifetime), and returns the access token.
+    /// - **secretless mode**: returns an empty string (egress proxy injects credentials).
+    ///
+    /// # Errors
+    ///
+    /// Returns `GcpError::Config` if the private key is invalid, or
+    /// `GcpError::Unauthorized` if the token exchange fails.
+    pub async fn get_bearer_token(&self) -> GcpResult<String> {
+        // Fast path: access_token mode
+        if let Some(token) = self.auth.static_bearer_token() {
+            return Ok(token.to_string());
+        }
+
+        // Service-account mode: check cache first
+        {
+            let cache = self.sa_token_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cache.as_ref()
+                && !cached.is_expired()
+            {
+                return Ok(cached.access_token.clone());
+            }
+        }
+
+        // Build and exchange JWT
+        let (email, key) = self.auth.service_account_credentials().ok_or_else(|| {
+            GcpError::Config("auth mode has no static token and no service-account credentials".into())
+        })?;
+
+        if key.trim().is_empty() {
+            // Secretless service-account: egress proxy will inject credentials
+            return Ok(String::new());
+        }
+
+        let jwt = jwt::build_jwt_assertion(
+            email,
+            key,
+            DEFAULT_GCP_SCOPES,
+            self.token_endpoint.as_deref(),
+        )?;
+
+        let cached = jwt::exchange_jwt_for_token(
+            &self.client,
+            &jwt,
+            self.token_endpoint.as_deref(),
+        )
+        .await?;
+
+        let token = cached.access_token.clone();
+
+        // Cache the token
+        {
+            let mut cache = self.sa_token_cache.lock().unwrap_or_else(|e| e.into_inner());
+            *cache = Some(cached);
+        }
+
+        Ok(token)
     }
 
     // ── Compute Engine ──
@@ -138,19 +224,17 @@ impl GcpClient {
             "{}/compute/v1/projects/{}/zones/{}/instances",
             self.compute_base, self.project_id, zone
         );
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             async move {
                 debug!(attempt, "Listing compute instances");
-                let req = match authenticate_request(client.get(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                };
+                let req = authenticate_request_static(client.get(&url), &token);
                 handle_list_response::<InstanceList, Instance>(req, attempt, |list| {
                     list.items.unwrap_or_default()
                 })
@@ -229,19 +313,17 @@ impl GcpClient {
     ) -> GcpResult<Vec<StorageObject>> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
         let url = format!("{}/storage/v1/b/{}/o", self.storage_base, bucket);
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             async move {
                 debug!(attempt, "Listing storage objects");
-                let req = match authenticate_request(client.get(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                };
+                let req = authenticate_request_static(client.get(&url), &token);
                 handle_list_response::<ObjectList, StorageObject>(req, attempt, |list| {
                     list.items.unwrap_or_default()
                 })
@@ -283,6 +365,7 @@ impl GcpClient {
             "{}/upload/storage/v1/b/{}/o?uploadType=media&name={}",
             self.storage_base, bucket, object_name
         );
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = content.to_string();
@@ -293,17 +376,14 @@ impl GcpClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             let body = body.clone();
             let ct = ct.clone();
             async move {
                 debug!(attempt, "Uploading storage object");
-                let req = match authenticate_request(client.post(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                }
-                .header("Content-Type", ct)
-                .body(body);
+                let req = authenticate_request_static(client.post(&url), &token)
+                    .header("Content-Type", ct)
+                    .body(body);
                 handle_response::<StorageObject>(req, attempt).await
             }
         })
@@ -337,19 +417,17 @@ impl GcpClient {
             "{}/v2/projects/{}/locations/{}/services",
             self.run_base, self.project_id, location
         );
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             async move {
                 debug!(attempt, "Listing Cloud Run services");
-                let req = match authenticate_request(client.get(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                };
+                let req = authenticate_request_static(client.get(&url), &token);
                 handle_list_response::<CloudRunServiceList, CloudRunService>(req, attempt, |list| {
                     list.services.unwrap_or_default()
                 })
@@ -415,19 +493,17 @@ impl GcpClient {
         url: &str,
     ) -> GcpResult<T> {
         let url = url.to_string();
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             async move {
                 debug!(attempt, url = %url, "GET single");
-                let req = match authenticate_request(client.get(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                };
+                let req = authenticate_request_static(client.get(&url), &token);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -441,6 +517,7 @@ impl GcpClient {
         body: &serde_json::Value,
     ) -> GcpResult<T> {
         let url = url.to_string();
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = body.clone();
@@ -448,15 +525,12 @@ impl GcpClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, url = %url, "POST json");
-                let req = match authenticate_request(client.post(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                }
-                .json(&body);
+                let req = authenticate_request_static(client.post(&url), &token)
+                    .json(&body);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -469,20 +543,18 @@ impl GcpClient {
         url: &str,
     ) -> GcpResult<serde_json::Value> {
         let url = url.to_string();
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             async move {
                 debug!(attempt, url = %url, "POST empty");
-                let req = match authenticate_request(client.post(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                }
-                .header("Content-Length", "0");
+                let req = authenticate_request_static(client.post(&url), &token)
+                    .header("Content-Length", "0");
                 handle_response::<serde_json::Value>(req, attempt).await
             }
         })
@@ -491,19 +563,17 @@ impl GcpClient {
 
     async fn delete(&self, runtime: &ConnectorRuntime, url: &str) -> GcpResult<serde_json::Value> {
         let url = url.to_string();
+        let token = self.get_bearer_token().await?;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let auth = self.auth.clone();
+            let token = token.clone();
             async move {
                 debug!(attempt, url = %url, "DELETE");
-                let req = match authenticate_request(client.delete(&url), &auth) {
-                    Ok(req) => req,
-                    Err(error) => return AttemptOutcome::Terminal(error),
-                };
+                let req = authenticate_request_static(client.delete(&url), &token);
                 handle_response::<serde_json::Value>(req, attempt).await
             }
         })
@@ -513,11 +583,14 @@ impl GcpClient {
 
 // ── Free functions for request handling ──
 
-fn authenticate_request(req: RequestBuilder, auth: &GcpAuth) -> GcpResult<RequestBuilder> {
-    match auth.bearer_token() {
-        Ok(token) if !token.is_empty() => Ok(req.bearer_auth(token)),
-        Ok(_) => Ok(req),
-        Err(error) => Err(error),
+/// Authenticate a request with a static bearer token (access_token mode only).
+/// For service_account mode, the caller must obtain a token via
+/// [`GcpClient::get_bearer_token`] and apply it manually.
+fn authenticate_request_static(req: RequestBuilder, token: &str) -> RequestBuilder {
+    if token.is_empty() {
+        req
+    } else {
+        req.bearer_auth(token)
     }
 }
 
@@ -823,14 +896,11 @@ mod tests {
     }
 
     #[test]
-    fn authenticate_request_adds_bearer_header_for_access_token() {
-        let request = authenticate_request(
+    fn authenticate_request_static_adds_bearer_header() {
+        let request = authenticate_request_static(
             Client::new().get("https://example.com"),
-            &GcpAuth::AccessToken {
-                access_token: "ya29.token".into(),
-            },
+            "ya29.token",
         )
-        .expect("access_token auth should succeed")
         .build()
         .expect("request should build");
 
@@ -843,14 +913,11 @@ mod tests {
     }
 
     #[test]
-    fn authenticate_request_allows_secretless_access_token_mode() {
-        let request = authenticate_request(
+    fn authenticate_request_static_allows_secretless_mode() {
+        let request = authenticate_request_static(
             Client::new().get("https://example.com"),
-            &GcpAuth::AccessToken {
-                access_token: String::new(),
-            },
+            "",
         )
-        .expect("empty access_token should defer to egress proxy injection")
         .build()
         .expect("request should build");
 
@@ -863,13 +930,13 @@ mod tests {
     }
 
     #[test]
-    fn client_new_rejects_service_account_auth() {
+    fn client_new_rejects_invalid_service_account_key() {
         let err = fcp_async_core::runtime::block_on_sync(async {
             GcpClient::new(
                 "proj",
                 GcpAuth::ServiceAccount {
                     client_email: "svc@proj.iam.gserviceaccount.com".into(),
-                    private_key: "private-key".into(),
+                    private_key: "not-a-valid-pem-key".into(),
                 },
                 HttpRetryConfig::default(),
                 None,
@@ -880,14 +947,123 @@ mod tests {
             .await
         })
         .unwrap()
-        .expect_err("service_account auth must be rejected before request execution");
+        .expect_err("invalid PEM key must be rejected at client creation");
 
         match err {
             GcpError::Config(message) => {
-                assert!(message.contains("JWT signing"));
-                assert!(!message.contains("credential_id"));
+                assert!(
+                    message.contains("private key"),
+                    "error should mention private key: {message}"
+                );
             }
             other => panic!("expected Config error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn client_new_accepts_valid_service_account_key() {
+        use rsa::pkcs8::EncodePrivateKey;
+        let mut rng = rand::thread_rng();
+        let key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("key gen");
+        let pem = key
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("PEM encode")
+            .to_string();
+
+        let client = fcp_async_core::runtime::block_on_sync(async {
+            GcpClient::new(
+                "proj",
+                GcpAuth::ServiceAccount {
+                    client_email: "svc@proj.iam.gserviceaccount.com".into(),
+                    private_key: pem,
+                },
+                HttpRetryConfig::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        })
+        .unwrap()
+        .expect("valid service-account key should be accepted");
+
+        assert!(!client.is_secretless());
+        assert_eq!(client.project_id(), "proj");
+    }
+
+    #[test]
+    fn client_new_accepts_empty_service_account_key_secretless() {
+        let client = fcp_async_core::runtime::block_on_sync(async {
+            GcpClient::new(
+                "proj",
+                GcpAuth::ServiceAccount {
+                    client_email: "svc@proj.iam.gserviceaccount.com".into(),
+                    private_key: String::new(),
+                },
+                HttpRetryConfig::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        })
+        .unwrap()
+        .expect("empty private_key (secretless) should be accepted");
+
+        assert!(client.is_secretless());
+    }
+
+    #[test]
+    fn client_new_rejects_empty_service_account_email() {
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            GcpClient::new(
+                "proj",
+                GcpAuth::ServiceAccount {
+                    client_email: String::new(),
+                    private_key: "some-key".into(),
+                },
+                HttpRetryConfig::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        })
+        .unwrap()
+        .expect_err("empty client_email must be rejected");
+
+        match err {
+            GcpError::Config(message) => {
+                assert!(message.contains("client_email"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_bearer_token_returns_static_for_access_token_mode() {
+        let token = fcp_async_core::runtime::block_on_sync(async {
+            let client = GcpClient::new(
+                "proj",
+                GcpAuth::AccessToken {
+                    access_token: "ya29.static-token".into(),
+                },
+                HttpRetryConfig::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            client.get_bearer_token().await
+        })
+        .unwrap()
+        .expect("get_bearer_token should succeed for access_token mode");
+
+        assert_eq!(token, "ya29.static-token");
     }
 }

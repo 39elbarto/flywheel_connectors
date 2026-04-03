@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 
 // ── Auth ──
 
-pub(crate) const SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE: &str = "GCP service_account mode requires JWT signing, which is not implemented yet. \
-     Use access_token mode with a real OAuth token, or leave access_token empty \
-     and rely on egress proxy injection.";
+/// Scopes used for JWT assertion when none are explicitly configured.
+pub(crate) const DEFAULT_GCP_SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 /// GCP authentication mode.
 #[derive(Clone, Deserialize)]
@@ -52,23 +51,28 @@ impl GcpAuth {
         matches!(self, Self::ServiceAccount { .. })
     }
 
-    /// Returns the bearer token for API requests.
+    /// Returns the static bearer token for access_token mode.
     ///
     /// For `access_token` mode, returns the token directly.
-    /// For `service_account` mode, returns an error because JWT signing
-    /// is not yet implemented — sending a raw private key as a Bearer
-    /// token would be both functionally broken (Google rejects it) and
-    /// a security risk (key leakage in transit).
-    ///
-    /// # Errors
-    ///
-    /// Returns `GcpError::Config` if called in service_account mode.
-    pub fn bearer_token(&self) -> Result<&str, crate::error::GcpError> {
+    /// For `service_account` mode, returns `None` — the caller must use
+    /// the JWT-based token exchange flow via [`crate::client::GcpClient`].
+    #[must_use]
+    pub fn static_bearer_token(&self) -> Option<&str> {
         match self {
-            Self::AccessToken { access_token } => Ok(access_token),
-            Self::ServiceAccount { .. } => Err(crate::error::GcpError::Config(
-                SERVICE_ACCOUNT_UNSUPPORTED_MESSAGE.into(),
-            )),
+            Self::AccessToken { access_token } => Some(access_token),
+            Self::ServiceAccount { .. } => None,
+        }
+    }
+
+    /// Returns the service-account credentials if in service_account mode.
+    #[must_use]
+    pub fn service_account_credentials(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::ServiceAccount {
+                client_email,
+                private_key,
+            } => Some((client_email, private_key)),
+            Self::AccessToken { .. } => None,
         }
     }
 }
@@ -350,28 +354,39 @@ mod tests {
     }
 
     #[test]
-    fn auth_bearer_token_access_token_mode() {
+    fn static_bearer_token_access_token_mode() {
         let token_auth = GcpAuth::AccessToken {
             access_token: "ya29.token123".into(),
         };
-        assert_eq!(token_auth.bearer_token().unwrap(), "ya29.token123");
+        assert_eq!(token_auth.static_bearer_token().unwrap(), "ya29.token123");
     }
 
     #[test]
-    fn auth_bearer_token_service_account_returns_error() {
+    fn static_bearer_token_service_account_returns_none() {
         let sa_auth = GcpAuth::ServiceAccount {
             client_email: "test@project.iam.gserviceaccount.com".into(),
             private_key: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
         };
-        let result = sa_auth.bearer_token();
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            crate::error::GcpError::Config(message) => {
-                assert!(message.contains("JWT signing"));
-                assert!(!message.contains("credential_id"));
-            }
-            other => panic!("expected Config error, got {other:?}"),
-        }
+        assert!(sa_auth.static_bearer_token().is_none());
+    }
+
+    #[test]
+    fn service_account_credentials_returns_email_and_key() {
+        let sa_auth = GcpAuth::ServiceAccount {
+            client_email: "svc@project.iam.gserviceaccount.com".into(),
+            private_key: "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----".into(),
+        };
+        let (email, key) = sa_auth.service_account_credentials().unwrap();
+        assert_eq!(email, "svc@project.iam.gserviceaccount.com");
+        assert!(key.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn service_account_credentials_none_for_access_token() {
+        let token_auth = GcpAuth::AccessToken {
+            access_token: "ya29.test".into(),
+        };
+        assert!(token_auth.service_account_credentials().is_none());
     }
 
     #[test]

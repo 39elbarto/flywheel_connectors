@@ -8,24 +8,33 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    CapabilityObject, DecisionReceipt, DecisionReceiptPolicy, InvokeRequest, ObjectId,
-    POLICY_BUNDLE_SIGNED_FIELDS, PolicyBundle, PolicyBundleObject, PolicyBundlePolicyRef,
-    PolicyBundleResolved, PolicyBundleSignature, PolicyPreviewSample, PolicySimulationError,
-    PolicySimulationInput, Provenance, ResourceObject, RoleObject, ZoneDefinitionObject, ZoneId,
-    ZonePolicyObject, compute_policy_bundle_hash, diff_policy_bundles, preview_policy_bundles,
+    compute_policy_bundle_hash, diff_policy_bundles, preview_policy_bundles,
+    simulate_policy_decision, DecisionReceipt, ObjectHeader, PolicyPreviewSample,
+    PolicySimulationError, PolicySimulationInput, POLICY_BUNDLE_SIGNED_FIELDS,
 };
 use fcp_crypto::ed25519::{Ed25519SigningKey, SECRET_KEY_SIZE};
-use fcp_kernel::{CapabilityId, SafetyTier};
+use fcp_kernel::{CapabilityId, InvokeRequest, ObjectId, SafetyTier};
+use fcp_policy::{
+    CapabilityObject, CapabilityToken, ConfidentialityLevel, DecisionReceiptPolicy, IntegrityLevel,
+    PolicyBundle, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,
+    PolicyBundleSignature, PolicyPattern, Provenance, ResourceObject, RoleObject, TransportMode,
+    ZoneDefinitionObject, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
+};
 use hex::decode as hex_decode;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[cfg(test)]
+use fcp_core::NodeId;
+#[cfg(test)]
+use fcp_kernel::{NodeSignature, RequestId};
 
 /// Arguments for the `fcp policy` command.
 #[derive(Args, Debug)]
@@ -270,7 +279,7 @@ pub fn run(args: &PolicyArgs) -> Result<()> {
 fn run_simulate(args: &SimulateArgs) -> Result<()> {
     let raw = read_input(&args.input)?;
     let input = parse_simulation_input(&raw)?;
-    match fcp_core::simulate_policy_decision(&input) {
+    match simulate_policy_decision(&input) {
         Ok(receipt) => output_receipt(&receipt, args.json),
         Err(err) => output_error(&err, args.json),
     }
@@ -989,7 +998,7 @@ fn parse_simulation_input(raw: &str) -> Result<PolicySimulationInput> {
     Ok(PolicySimulationInput {
         zone_policy,
         invoke_request: invoke,
-        transport: fcp_core::TransportMode::Lan,
+        transport: TransportMode::Lan,
         checkpoint_fresh: true,
         revocation_fresh: true,
         execution_approval_required: false,
@@ -1013,7 +1022,7 @@ enum PolicyDocument {
 }
 
 impl PolicyDocument {
-    const fn zone_id(&self) -> &fcp_core::ZoneId {
+    const fn zone_id(&self) -> &ZoneId {
         match self {
             Self::ZonePolicy(policy) => &policy.zone_id,
             Self::ZoneDefinition(definition) => &definition.zone_id,
@@ -1047,8 +1056,8 @@ struct Change<T> {
 
 #[derive(Debug, Serialize)]
 struct TransportPolicyChange {
-    before: fcp_core::ZoneTransportPolicy,
-    after: fcp_core::ZoneTransportPolicy,
+    before: ZoneTransportPolicy,
+    after: ZoneTransportPolicy,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -1389,10 +1398,7 @@ fn diff_json_objects(before: &Value, after: &Value) -> Result<JsonDiff> {
     })
 }
 
-fn diff_patterns(
-    before: &[fcp_core::PolicyPattern],
-    after: &[fcp_core::PolicyPattern],
-) -> (Vec<String>, Vec<String>) {
+fn diff_patterns(before: &[PolicyPattern], after: &[PolicyPattern]) -> (Vec<String>, Vec<String>) {
     let before_set: BTreeSet<String> = before.iter().map(|p| p.pattern.clone()).collect();
     let after_set: BTreeSet<String> = after.iter().map(|p| p.pattern.clone()).collect();
 
@@ -1428,8 +1434,8 @@ fn diff_capability_ids(
 }
 
 const fn transport_policy_changed(
-    before: &fcp_core::ZoneTransportPolicy,
-    after: &fcp_core::ZoneTransportPolicy,
+    before: &ZoneTransportPolicy,
+    after: &ZoneTransportPolicy,
 ) -> bool {
     before.allow_lan != after.allow_lan
         || before.allow_derp != after.allow_derp
@@ -1449,10 +1455,10 @@ fn output_json_or_human<T: Serialize>(payload: &T, json: bool) -> Result<()> {
 
 fn default_zone_policy(invoke: &InvokeRequest) -> ZonePolicyObject {
     let schema = SchemaId::new("fcp.core", "ZonePolicy", Version::new(1, 0, 0));
-    let header = fcp_core::ObjectHeader {
+    let header = ObjectHeader {
         schema,
         zone_id: invoke.zone_id.clone(),
-        created_at: u64::try_from(fcp_core::Utc::now().timestamp()).unwrap_or(0),
+        created_at: u64::try_from(Utc::now().timestamp()).unwrap_or(0),
         provenance: Provenance::new(invoke.zone_id.clone()),
         refs: Vec::new(),
         foreign_refs: Vec::new(),
@@ -1470,7 +1476,7 @@ fn default_zone_policy(invoke: &InvokeRequest) -> ZonePolicyObject {
         capability_allow: Vec::new(),
         capability_deny: Vec::new(),
         capability_ceiling: Vec::new(),
-        transport_policy: fcp_core::ZoneTransportPolicy::default(),
+        transport_policy: ZoneTransportPolicy::default(),
         decision_receipts: DecisionReceiptPolicy::default(),
         usage_budget: None,
         requires_posture: None,
@@ -1519,18 +1525,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    use fcp_core::PolicyPattern;
-
     #[test]
     fn parse_policy_simulation_input_direct() {
         let invoke = InvokeRequest {
             r#type: "invoke".to_string(),
-            id: fcp_core::RequestId::new("req-1"),
+            id: RequestId::new("req-1"),
             connector_id: "fcp.test:base:v1".parse().unwrap(),
             operation: "op".parse().unwrap(),
-            zone_id: fcp_core::ZoneId::work(),
+            zone_id: ZoneId::work(),
             input: serde_json::json!({"k": "v"}),
-            capability_token: fcp_core::CapabilityToken::test_token(),
+            capability_token: CapabilityToken::test_token(),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -1543,18 +1547,18 @@ mod tests {
 
         let raw = serde_json::to_string(&invoke).unwrap();
         let input = parse_simulation_input(&raw).unwrap();
-        assert_eq!(input.invoke_request.zone_id, fcp_core::ZoneId::work());
+        assert_eq!(input.invoke_request.zone_id, ZoneId::work());
     }
 
-    fn base_policy(zone: fcp_core::ZoneId) -> ZonePolicyObject {
+    fn base_policy(zone: ZoneId) -> ZonePolicyObject {
         let invoke = InvokeRequest {
             r#type: "invoke".to_string(),
-            id: fcp_core::RequestId::new("req-1"),
+            id: RequestId::new("req-1"),
             connector_id: "fcp.test:base:v1".parse().unwrap(),
             operation: "op".parse().unwrap(),
             zone_id: zone,
             input: serde_json::json!({"k": "v"}),
-            capability_token: fcp_core::CapabilityToken::test_token(),
+            capability_token: CapabilityToken::test_token(),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -1628,7 +1632,7 @@ mod tests {
 
     #[test]
     fn policy_diff_detects_added_connector_and_transport_risk() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let before = base_policy(zone.clone());
         let mut after = base_policy(zone);
 
@@ -1644,16 +1648,13 @@ mod tests {
             .and_then(Value::as_array)
             .expect("connector_allow array");
 
-        assert!(
-            connector_allow
-                .iter()
-                .any(|v| v.as_str() == Some("fcp.test:*"))
-        );
-        assert!(
-            diff.risk_flags
-                .iter()
-                .any(|flag| flag == "transport_derp_enabled")
-        );
+        assert!(connector_allow
+            .iter()
+            .any(|v| v.as_str() == Some("fcp.test:*")));
+        assert!(diff
+            .risk_flags
+            .iter()
+            .any(|flag| flag == "transport_derp_enabled"));
     }
 
     // ---- parse_simulation_input ----
@@ -1788,13 +1789,13 @@ mod tests {
 
     #[test]
     fn transport_policy_unchanged() {
-        let policy = fcp_core::ZoneTransportPolicy::default();
+        let policy = ZoneTransportPolicy::default();
         assert!(!transport_policy_changed(&policy, &policy));
     }
 
     #[test]
     fn transport_policy_lan_changed() {
-        let before = fcp_core::ZoneTransportPolicy::default();
+        let before = ZoneTransportPolicy::default();
         let mut after = before.clone();
         after.allow_lan = !before.allow_lan;
         assert!(transport_policy_changed(&before, &after));
@@ -1802,7 +1803,7 @@ mod tests {
 
     #[test]
     fn transport_policy_derp_changed() {
-        let before = fcp_core::ZoneTransportPolicy::default();
+        let before = ZoneTransportPolicy::default();
         let mut after = before.clone();
         after.allow_derp = !before.allow_derp;
         assert!(transport_policy_changed(&before, &after));
@@ -1810,7 +1811,7 @@ mod tests {
 
     #[test]
     fn transport_policy_funnel_changed() {
-        let before = fcp_core::ZoneTransportPolicy::default();
+        let before = ZoneTransportPolicy::default();
         let mut after = before.clone();
         after.allow_funnel = !before.allow_funnel;
         assert!(transport_policy_changed(&before, &after));
@@ -1886,11 +1887,11 @@ mod tests {
         let added = PolicyListDiff::default();
         let changed = PolicyChangedFields {
             transport_policy: Some(TransportPolicyChange {
-                before: fcp_core::ZoneTransportPolicy {
+                before: ZoneTransportPolicy {
                     allow_derp: false,
                     ..Default::default()
                 },
-                after: fcp_core::ZoneTransportPolicy {
+                after: ZoneTransportPolicy {
                     allow_derp: true,
                     ..Default::default()
                 },
@@ -1906,11 +1907,11 @@ mod tests {
         let added = PolicyListDiff::default();
         let changed = PolicyChangedFields {
             transport_policy: Some(TransportPolicyChange {
-                before: fcp_core::ZoneTransportPolicy {
+                before: ZoneTransportPolicy {
                     allow_funnel: false,
                     ..Default::default()
                 },
-                after: fcp_core::ZoneTransportPolicy {
+                after: ZoneTransportPolicy {
                     allow_funnel: true,
                     ..Default::default()
                 },
@@ -2009,12 +2010,12 @@ mod tests {
     fn default_zone_policy_structure() {
         let invoke = InvokeRequest {
             r#type: "invoke".to_string(),
-            id: fcp_core::RequestId::new("req-1"),
+            id: RequestId::new("req-1"),
             connector_id: "fcp.test:base:v1".parse().unwrap(),
             operation: "op".parse().unwrap(),
-            zone_id: fcp_core::ZoneId::work(),
+            zone_id: ZoneId::work(),
             input: serde_json::json!({}),
-            capability_token: fcp_core::CapabilityToken::test_token(),
+            capability_token: CapabilityToken::test_token(),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -2025,7 +2026,7 @@ mod tests {
             approval_tokens: Vec::new(),
         };
         let policy = default_zone_policy(&invoke);
-        assert_eq!(policy.zone_id, fcp_core::ZoneId::work());
+        assert_eq!(policy.zone_id, ZoneId::work());
         assert!(policy.principal_allow.is_empty());
         assert!(policy.principal_deny.is_empty());
         assert!(policy.connector_allow.is_empty());
@@ -2271,12 +2272,12 @@ mod tests {
     fn policy_document_zone_policy_type() {
         let invoke = InvokeRequest {
             r#type: "invoke".to_string(),
-            id: fcp_core::RequestId::new("req-1"),
+            id: RequestId::new("req-1"),
             connector_id: "fcp.test:base:v1".parse().unwrap(),
             operation: "op".parse().unwrap(),
-            zone_id: fcp_core::ZoneId::work(),
+            zone_id: ZoneId::work(),
             input: serde_json::json!({}),
-            capability_token: fcp_core::CapabilityToken::test_token(),
+            capability_token: CapabilityToken::test_token(),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -2288,14 +2289,14 @@ mod tests {
         };
         let doc = PolicyDocument::ZonePolicy(default_zone_policy(&invoke));
         assert_eq!(doc.policy_type(), "zone_policy");
-        assert_eq!(*doc.zone_id(), fcp_core::ZoneId::work());
+        assert_eq!(*doc.zone_id(), ZoneId::work());
     }
 
     // ---- diff_zone_policy no changes ----
 
     #[test]
     fn diff_zone_policy_identical() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let policy = base_policy(zone);
         let diff = diff_zone_policy(&policy, &policy).unwrap();
         assert!(diff.risk_flags.is_empty());
@@ -2727,37 +2728,35 @@ mod tests {
 
     #[test]
     fn diff_zone_policy_added_principal_allow() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let before = base_policy(zone.clone());
         let mut after = base_policy(zone);
         after.principal_allow.push(PolicyPattern {
             pattern: "user:admin".to_string(),
         });
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(
-            diff.risk_flags
-                .contains(&"principal_allow_expanded".to_string())
-        );
+        assert!(diff
+            .risk_flags
+            .contains(&"principal_allow_expanded".to_string()));
     }
 
     #[test]
     fn diff_zone_policy_added_capability_allow() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let before = base_policy(zone.clone());
         let mut after = base_policy(zone);
         after.capability_allow.push(PolicyPattern {
             pattern: "cap:admin".to_string(),
         });
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(
-            diff.risk_flags
-                .contains(&"capability_allow_expanded".to_string())
-        );
+        assert!(diff
+            .risk_flags
+            .contains(&"capability_allow_expanded".to_string()));
     }
 
     #[test]
     fn diff_zone_policy_removed_entries_no_risk() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let mut before = base_policy(zone.clone());
         before.connector_allow.push(PolicyPattern {
             pattern: "fcp.test:*".to_string(),
@@ -2770,46 +2769,42 @@ mod tests {
             .get("connector_allow")
             .and_then(Value::as_array)
             .unwrap();
-        assert!(
-            removed_connectors
-                .iter()
-                .any(|v| v.as_str() == Some("fcp.test:*"))
-        );
+        assert!(removed_connectors
+            .iter()
+            .any(|v| v.as_str() == Some("fcp.test:*")));
     }
 
     #[test]
     fn diff_zone_policy_transport_lan_risk() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let mut before = base_policy(zone.clone());
         before.transport_policy.allow_lan = false;
         let mut after = base_policy(zone);
         after.transport_policy.allow_lan = true;
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(
-            diff.risk_flags
-                .contains(&"transport_lan_enabled".to_string())
-        );
+        assert!(diff
+            .risk_flags
+            .contains(&"transport_lan_enabled".to_string()));
     }
 
     #[test]
     fn diff_zone_policy_transport_funnel_risk() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let mut before = base_policy(zone.clone());
         before.transport_policy.allow_funnel = false;
         let mut after = base_policy(zone);
         after.transport_policy.allow_funnel = true;
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(
-            diff.risk_flags
-                .contains(&"transport_funnel_enabled".to_string())
-        );
+        assert!(diff
+            .risk_flags
+            .contains(&"transport_funnel_enabled".to_string()));
     }
 
     // ---- diff_policy_lists ----
 
     #[test]
     fn diff_policy_lists_all_fields() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let before = base_policy(zone.clone());
         let mut after = base_policy(zone);
         after.principal_deny.push(PolicyPattern {
@@ -3210,9 +3205,9 @@ mod tests {
 
     #[test]
     fn policy_document_zone_definition_type() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let schema = SchemaId::new("fcp.core", "ZoneDefinition", Version::new(1, 0, 0));
-        let header = fcp_core::ObjectHeader {
+        let header = ObjectHeader {
             schema,
             zone_id: zone.clone(),
             created_at: 0,
@@ -3226,18 +3221,14 @@ mod tests {
             header,
             zone_id: zone.clone(),
             name: "test-zone".to_string(),
-            integrity_level: fcp_core::IntegrityLevel::Work,
-            confidentiality_level: fcp_core::ConfidentialityLevel::Work,
+            integrity_level: IntegrityLevel::Work,
+            confidentiality_level: ConfidentialityLevel::Work,
             symbol_port: 9000,
             control_port: 9001,
-            transport_policy: fcp_core::ZoneTransportPolicy::default(),
+            transport_policy: ZoneTransportPolicy::default(),
             policy_object_id: ObjectId::from_unscoped_bytes(b"test-oid"),
             prev: None,
-            signature: fcp_core::NodeSignature::new(
-                fcp_core::NodeId::new("test-node"),
-                [0u8; 64],
-                0,
-            ),
+            signature: NodeSignature::new(NodeId::new("test-node"), [0u8; 64], 0),
         };
         let doc = PolicyDocument::ZoneDefinition(def);
         assert_eq!(doc.policy_type(), "zone_definition");
@@ -3251,11 +3242,11 @@ mod tests {
         let added = PolicyListDiff::default();
         let changed = PolicyChangedFields {
             transport_policy: Some(TransportPolicyChange {
-                before: fcp_core::ZoneTransportPolicy {
+                before: ZoneTransportPolicy {
                     allow_lan: false,
                     ..Default::default()
                 },
-                after: fcp_core::ZoneTransportPolicy {
+                after: ZoneTransportPolicy {
                     allow_lan: true,
                     ..Default::default()
                 },
@@ -3273,11 +3264,11 @@ mod tests {
         let added = PolicyListDiff::default();
         let changed = PolicyChangedFields {
             transport_policy: Some(TransportPolicyChange {
-                before: fcp_core::ZoneTransportPolicy {
+                before: ZoneTransportPolicy {
                     allow_derp: true,
                     ..Default::default()
                 },
-                after: fcp_core::ZoneTransportPolicy {
+                after: ZoneTransportPolicy {
                     allow_derp: false,
                     ..Default::default()
                 },
@@ -3324,12 +3315,12 @@ mod tests {
 
     #[test]
     fn transport_policy_all_fields_changed() {
-        let before = fcp_core::ZoneTransportPolicy {
+        let before = ZoneTransportPolicy {
             allow_lan: false,
             allow_derp: false,
             allow_funnel: false,
         };
-        let after = fcp_core::ZoneTransportPolicy {
+        let after = ZoneTransportPolicy {
             allow_lan: true,
             allow_derp: true,
             allow_funnel: true,
@@ -3341,7 +3332,7 @@ mod tests {
 
     #[test]
     fn transport_policy_only_lan_unchanged_others_change() {
-        let before = fcp_core::ZoneTransportPolicy {
+        let before = ZoneTransportPolicy {
             allow_lan: true,
             allow_derp: false,
             allow_funnel: false,
@@ -3353,7 +3344,7 @@ mod tests {
 
     #[test]
     fn transport_policy_funnel_disabled_no_change() {
-        let policy = fcp_core::ZoneTransportPolicy {
+        let policy = ZoneTransportPolicy {
             allow_lan: true,
             allow_derp: true,
             allow_funnel: false,
@@ -3368,12 +3359,12 @@ mod tests {
         let added = PolicyListDiff::default();
         let changed = PolicyChangedFields {
             transport_policy: Some(TransportPolicyChange {
-                before: fcp_core::ZoneTransportPolicy {
+                before: ZoneTransportPolicy {
                     allow_lan: false,
                     allow_derp: false,
                     allow_funnel: false,
                 },
-                after: fcp_core::ZoneTransportPolicy {
+                after: ZoneTransportPolicy {
                     allow_lan: true,
                     allow_derp: true,
                     allow_funnel: true,
@@ -3392,12 +3383,12 @@ mod tests {
         let added = PolicyListDiff::default();
         let changed = PolicyChangedFields {
             transport_policy: Some(TransportPolicyChange {
-                before: fcp_core::ZoneTransportPolicy {
+                before: ZoneTransportPolicy {
                     allow_lan: true,
                     allow_derp: true,
                     allow_funnel: true,
                 },
-                after: fcp_core::ZoneTransportPolicy {
+                after: ZoneTransportPolicy {
                     allow_lan: false,
                     allow_derp: false,
                     allow_funnel: false,
@@ -3488,12 +3479,12 @@ mod tests {
     #[test]
     fn diff_patterns_large_sets_overlap() {
         let before: Vec<_> = (0..5)
-            .map(|i| fcp_core::PolicyPattern {
+            .map(|i| PolicyPattern {
                 pattern: format!("pattern-{i}"),
             })
             .collect();
         let after: Vec<_> = (3..8)
-            .map(|i| fcp_core::PolicyPattern {
+            .map(|i| PolicyPattern {
                 pattern: format!("pattern-{i}"),
             })
             .collect();
@@ -3529,12 +3520,12 @@ mod tests {
     fn parse_simulation_input_valid_invoke_request() {
         let invoke = InvokeRequest {
             r#type: "invoke".to_string(),
-            id: fcp_core::RequestId::new("req-sim"),
+            id: RequestId::new("req-sim"),
             connector_id: "fcp.test:base:v1".parse().unwrap(),
             operation: "op".parse().unwrap(),
-            zone_id: fcp_core::ZoneId::work(),
+            zone_id: ZoneId::work(),
             input: serde_json::json!({"key": "val"}),
-            capability_token: fcp_core::CapabilityToken::test_token(),
+            capability_token: CapabilityToken::test_token(),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -3546,7 +3537,7 @@ mod tests {
         };
         let raw = serde_json::to_string(&invoke).unwrap();
         let input = parse_simulation_input(&raw).unwrap();
-        assert_eq!(input.invoke_request.id, fcp_core::RequestId::new("req-sim"));
+        assert_eq!(input.invoke_request.id, RequestId::new("req-sim"));
     }
 
     // ── PolicyBundleState — zone mismatch in audit events ────────────
@@ -3777,7 +3768,7 @@ mod tests {
 
     #[test]
     fn policy_document_zone_policy_zone_id_accessor() {
-        let zone = fcp_core::ZoneId::work();
+        let zone = ZoneId::work();
         let doc = PolicyDocument::ZonePolicy(base_policy(zone.clone()));
         assert_eq!(*doc.zone_id(), zone);
     }

@@ -32,6 +32,7 @@ fcp-kernel = { path = "../fcp-kernel" }
 fcp-raptorq.workspace = true
 fcp-manifest.workspace = true
 fcp-mesh.workspace = true
+fcp-policy.workspace = true
 fcp-sandbox.workspace = true
 fcp-telemetry.workspace = true
 fcp-testkit.workspace = true
@@ -53,7 +54,7 @@ reqwest = { workspace = true, features = ["blocking"] }
 semver.workspace = true
 toml.workspace = true
 tracing.workspace = true
-toon = { package = "tru", path = "/dp/toon_rust" }
+toon = { package = "tru", path = "../../../toon_rust" }
 url.workspace = true
 uuid.workspace = true
 

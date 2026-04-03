@@ -974,10 +974,22 @@ pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
             )?);
 
             // Real benchmarks for connector, invoke, mesh, and secrets.
-            all_results.push(bench_connector_activate("default", args.iterations, args.warmup));
+            all_results.push(bench_connector_activate(
+                "default",
+                args.iterations,
+                args.warmup,
+            ));
             all_results.push(bench_invoke_local(args.iterations, args.warmup));
-            all_results.push(bench_invoke_mesh(&MeshPath::Direct, args.iterations, args.warmup));
-            all_results.push(bench_invoke_mesh(&MeshPath::Derp, args.iterations, args.warmup));
+            all_results.push(bench_invoke_mesh(
+                &MeshPath::Direct,
+                args.iterations,
+                args.warmup,
+            ));
+            all_results.push(bench_invoke_mesh(
+                &MeshPath::Derp,
+                args.iterations,
+                args.warmup,
+            ));
             all_results.push(bench_secrets(3, 5, args.iterations, args.warmup));
 
             // CUAL benchmarks (search, batch, MCP, pipeline).
@@ -1281,7 +1293,8 @@ fn run_primitives(target: PrimitiveTarget, iterations: u32, warmup: u32) -> Vec<
 
 fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
     use fcp_cbor::SchemaId;
-    use fcp_core::{ObjectId, ObjectIdKey, ZoneId};
+    use fcp_core::ObjectIdKey;
+    use fcp_kernel::{ObjectId, ZoneId};
     use semver::Version;
 
     let zone = ZoneId::work();
@@ -1315,10 +1328,9 @@ fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
 }
 
 fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
-    use fcp_core::{
-        CapabilityToken as CapabilityArtifact, CapabilityVerifier, InstanceId, OperationId, ZoneId,
-    };
     use fcp_crypto::{CapabilityTokenBuilder as CapabilityBuilder, Ed25519SigningKey};
+    use fcp_kernel::{InstanceId, OperationId, ZoneId};
+    use fcp_policy::{CapabilityToken as CapabilityArtifact, CapabilityVerifier};
 
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
@@ -1685,12 +1697,8 @@ fn bench_pipeline_setup(step_count: u32, iterations: u32, warmup: u32) -> Benchm
 
 // ─── Connector Activate Benchmark ──────────────────────────────────────────
 
-fn bench_connector_activate(
-    connector_name: &str,
-    iterations: u32,
-    warmup: u32,
-) -> BenchmarkResult {
-    use fcp_core::{ConnectorId, SessionId, ZoneId};
+fn bench_connector_activate(connector_name: &str, iterations: u32, warmup: u32) -> BenchmarkResult {
+    use fcp_kernel::{ConnectorId, SessionId, ZoneId};
 
     // Benchmark the connector configuration parsing + validation path.
     // This measures the "cold start" cost of parsing a config, constructing
@@ -1727,7 +1735,7 @@ fn bench_connector_activate(
     )
     .with_parameters(serde_json::json!({
         "connector": connector_name,
-        "config_bytes": config.to_string().len(),
+        "config_bytes": config_str.len(),
     }))
     .with_targets(Targets {
         p50_target_ms: 100.0,
@@ -1799,7 +1807,6 @@ fn bench_invoke_local(iterations: u32, warmup: u32) -> BenchmarkResult {
 // ─── Invoke Mesh Benchmark ────────────────────────────────────────────────
 
 fn bench_invoke_mesh(path: &MeshPath, iterations: u32, warmup: u32) -> BenchmarkResult {
-    use fcp_core::{ConnectorId, OperationId, RequestId, ZoneId};
     use fcp_crypto::Ed25519SigningKey;
 
     let path_name = match path {

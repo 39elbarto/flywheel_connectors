@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::{
-    de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, Visitor},
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -2456,9 +2456,11 @@ mod tests {
         let sid = ScenarioId::new(ScenarioLayer::Snapshot, "s", "c");
         let tid = TraceId::from_string("t");
         let bundle = ArtifactBundle::new(&base, &sid, &tid);
-        assert!(bundle
-            .session_transcript_path()
-            .ends_with("session_transcript.json"));
+        assert!(
+            bundle
+                .session_transcript_path()
+                .ends_with("session_transcript.json")
+        );
     }
 
     #[test]
@@ -2833,15 +2835,19 @@ mod tests {
         assert!(instructions.steps[0].contains("/home/user"));
         assert!(instructions.steps.iter().any(|s| s.contains("abc123")));
         assert!(instructions.steps.iter().any(|s| s.contains("FWC_HOST")));
-        assert!(instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("github.list_repos")));
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("github.list_repos"))
+        );
         assert!(instructions.prerequisites.iter().any(|p| p.contains("git")));
-        assert!(instructions
-            .prerequisites
-            .iter()
-            .any(|p| p.contains("1.85.0")));
+        assert!(
+            instructions
+                .prerequisites
+                .iter()
+                .any(|p| p.contains("1.85.0"))
+        );
     }
 
     #[test]
@@ -2850,14 +2856,18 @@ mod tests {
         let tid = TraceId::from_string("t");
         let env = ReplayEnvelope::new(sid, tid, "cargo test", "/project");
         let instructions = ReplayInstructions::from_envelope(&env);
-        assert!(!instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("git checkout")));
-        assert!(instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("'rch' 'exec' '--' bash -lc 'cargo test'")));
+        assert!(
+            !instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("git checkout"))
+        );
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("'rch' 'exec' '--' bash -lc 'cargo test'"))
+        );
         assert!(instructions.prerequisites.iter().any(|p| p == "rch"));
     }
 
@@ -2869,10 +2879,12 @@ mod tests {
             .with_command_runner("custom-runner --");
         let instructions = ReplayInstructions::from_envelope(&env);
         assert!(!instructions.prerequisites.iter().any(|p| p == "rch"));
-        assert!(instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("'custom-runner' '--' bash -lc 'cargo test'")));
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("'custom-runner' '--' bash -lc 'cargo test'"))
+        );
     }
 
     #[test]
@@ -2883,10 +2895,12 @@ mod tests {
             .with_command_runner("\"/opt/custom tools/bin/run\" --flag");
         let instructions = ReplayInstructions::from_envelope(&env);
 
-        assert!(instructions
-            .steps
-            .iter()
-            .any(|s| s.contains("'/opt/custom tools/bin/run' '--flag' bash -lc 'cargo test'")));
+        assert!(
+            instructions
+                .steps
+                .iter()
+                .any(|s| s.contains("'/opt/custom tools/bin/run' '--flag' bash -lc 'cargo test'"))
+        );
     }
 
     #[test]
@@ -2911,18 +2925,24 @@ mod tests {
         let env = ReplayEnvelope::new(sid, tid, "cargo test -p fwc", "/repo")
             .with_truthfulness(truthfulness);
         let instructions = ReplayInstructions::from_envelope(&env);
-        assert!(instructions
-            .notes
-            .iter()
-            .any(|n| n.contains("Observed availability states")));
-        assert!(instructions
-            .notes
-            .iter()
-            .any(|n| n.contains("Provenance markers")));
-        assert!(instructions
-            .notes
-            .iter()
-            .any(|n| n.contains("Host request ids")));
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|n| n.contains("Observed availability states"))
+        );
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|n| n.contains("Provenance markers"))
+        );
+        assert!(
+            instructions
+                .notes
+                .iter()
+                .any(|n| n.contains("Host request ids"))
+        );
         assert!(instructions.notes.iter().any(|n| n.contains("Receipt ids")));
     }
 
@@ -2958,8 +2978,10 @@ mod tests {
 
         assert_eq!(instructions.steps[0], "cd -- '/tmp/replay dir'");
         assert!(instructions.steps[1].contains("env -- 'FWC_TOKEN=abc $(rm -rf /)' bash -lc"));
-        assert!(instructions.steps[1]
-            .contains("'printf '\"'\"'%s'\"'\"' \"$HOME\"; touch /tmp/should-not-inline'"));
+        assert!(
+            instructions.steps[1]
+                .contains("'printf '\"'\"'%s'\"'\"' \"$HOME\"; touch /tmp/should-not-inline'")
+        );
     }
 
     #[test]
@@ -2986,9 +3008,11 @@ mod tests {
         assert!(manifest.outcome.is_pass());
         assert_eq!(manifest.file_count, 5);
         assert_eq!(manifest.layer, ScenarioLayer::Unit);
-        assert!(manifest
-            .bundle_root
-            .contains("/tmp/obs/artifacts/unit/routing/alias_test/"));
+        assert!(
+            manifest
+                .bundle_root
+                .contains("/tmp/obs/artifacts/unit/routing/alias_test/")
+        );
         let expected_replay_path = bundle.replay_script_path().to_string_lossy().to_string();
         assert_eq!(
             manifest.artifact_paths.get("replay_sh"),
@@ -3560,24 +3584,36 @@ mod tests {
             truth.command_availability,
             Some(CommandAvailability::LiveRuntime)
         );
-        assert!(truth
-            .provenance_markers
-            .contains(&"fixture:github_issue_workflow".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"archetype:request_response".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"coverage-mode:mock_host".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"risk-level:medium".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"live-host-discovery".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"mock-host-sequence".to_string()));
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"fixture:github_issue_workflow".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"archetype:request_response".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"coverage-mode:mock_host".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"risk-level:medium".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"live-host-discovery".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"mock-host-sequence".to_string())
+        );
     }
 
     #[test]
@@ -3599,24 +3635,36 @@ mod tests {
             truth.command_availability,
             Some(CommandAvailability::LiveRuntime)
         );
-        assert!(truth
-            .provenance_markers
-            .contains(&"existing-marker".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"fixture:fixture-1".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"archetype:streaming".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"coverage-mode:real_host".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"risk-level:high".to_string()));
-        assert!(truth
-            .provenance_markers
-            .contains(&"artifact-bundle".to_string()));
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"existing-marker".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"fixture:fixture-1".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"archetype:streaming".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"coverage-mode:real_host".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"risk-level:high".to_string())
+        );
+        assert!(
+            truth
+                .provenance_markers
+                .contains(&"artifact-bundle".to_string())
+        );
     }
 
     #[test]

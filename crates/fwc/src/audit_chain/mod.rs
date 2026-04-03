@@ -27,7 +27,7 @@ pub mod types;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clap::{Args, Subcommand};
-use fcp_core::{AuditEvent, AuditHead, ObjectId, ZoneId};
+use fcp_kernel::{AuditEvent, AuditHead, ObjectId, ZoneId};
 use hex::encode as hex_encode;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -290,8 +290,7 @@ fn run_tail(args: &TailArgs) -> Result<()> {
     if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&error)
-                .context("failed to serialize audit tail error")?
+            serde_json::to_string_pretty(&error).context("failed to serialize audit tail error")?
         );
         std::process::exit(2);
     }

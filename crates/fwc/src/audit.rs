@@ -3773,7 +3773,11 @@ migration_hint = ""
         let temp_root = placeholder_inventory_temp_root("anchor_missing");
         let _ = std::fs::remove_dir_all(&temp_root);
         std::fs::create_dir_all(temp_root.join("fixtures")).unwrap();
-        std::fs::write(temp_root.join("fixtures/present.txt"), "truthful runtime code\n").unwrap();
+        std::fs::write(
+            temp_root.join("fixtures/present.txt"),
+            "truthful runtime code\n",
+        )
+        .unwrap();
 
         let inventory = ProductionPlaceholderInventory {
             version: 1,

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use fcp_core::{
+use fcp_kernel::{
     CanonicalEncoding, HashAlgorithm, SoftwareBillOfMaterials, SupplyChainAttestation,
     SupplyChainVerificationPolicy, VerificationDecision, VerificationEvidence,
     VerificationPipeline,

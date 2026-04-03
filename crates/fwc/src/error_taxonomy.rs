@@ -18,6 +18,7 @@
 //!    is safe, so the retry controller (CUAL-N.2) can make decisions
 //!    without heuristic guessing.
 
+use fcp_kernel::FcpError;
 use serde::{Deserialize, Serialize};
 
 // ── Error code enum ─────────────────────────────────────────────────────
@@ -601,60 +602,56 @@ impl StructuredError {
     }
 }
 
-// ── Mapping from fcp-core FcpError ──────────────────────────────────────
+// ── Mapping from kernel-exported FcpError ──────────────────────────────
 
-/// Map an `fcp_core::FcpError` variant to its canonical `FcpErrorCode`.
-pub fn classify_fcp_error(err: &fcp_core::FcpError) -> FcpErrorCode {
+/// Map an `fcp-kernel::FcpError` variant to its canonical `FcpErrorCode`.
+pub fn classify_fcp_error(err: &FcpError) -> FcpErrorCode {
     match err {
-        fcp_core::FcpError::InvalidRequest { .. } | fcp_core::FcpError::MalformedFrame { .. } => {
+        FcpError::InvalidRequest { .. } | FcpError::MalformedFrame { .. } => {
             FcpErrorCode::FcpErrValidationFailed
         }
-        fcp_core::FcpError::MissingField { .. } => FcpErrorCode::FcpErrMissingField,
-        fcp_core::FcpError::ChecksumMismatch | fcp_core::FcpError::VersionMismatch { .. } => {
+        FcpError::MissingField { .. } => FcpErrorCode::FcpErrMissingField,
+        FcpError::ChecksumMismatch | FcpError::VersionMismatch { .. } => {
             FcpErrorCode::FcpErrTransportFailed
         }
-        fcp_core::FcpError::Unauthorized { .. } => FcpErrorCode::FcpErrUnauthorized,
-        fcp_core::FcpError::TokenExpired | fcp_core::FcpError::TokenNotYetValid => {
-            FcpErrorCode::FcpErrTokenExpired
-        }
-        fcp_core::FcpError::InvalidSignature => FcpErrorCode::FcpErrInvalidSignature,
-        fcp_core::FcpError::CapabilityDenied { .. } => FcpErrorCode::FcpErrCapabilityDenied,
-        fcp_core::FcpError::RateLimited { .. } => FcpErrorCode::FcpErrRateLimited,
-        fcp_core::FcpError::OperationNotGranted { .. } => FcpErrorCode::FcpErrOperationNotGranted,
-        fcp_core::FcpError::ResourceNotAllowed { .. } => FcpErrorCode::FcpErrPolicyDenied,
-        fcp_core::FcpError::ZoneViolation { .. } | fcp_core::FcpError::TaintViolation { .. } => {
+        FcpError::Unauthorized { .. } => FcpErrorCode::FcpErrUnauthorized,
+        FcpError::TokenExpired | FcpError::TokenNotYetValid => FcpErrorCode::FcpErrTokenExpired,
+        FcpError::InvalidSignature => FcpErrorCode::FcpErrInvalidSignature,
+        FcpError::CapabilityDenied { .. } => FcpErrorCode::FcpErrCapabilityDenied,
+        FcpError::RateLimited { .. } => FcpErrorCode::FcpErrRateLimited,
+        FcpError::OperationNotGranted { .. } => FcpErrorCode::FcpErrOperationNotGranted,
+        FcpError::ResourceNotAllowed { .. } => FcpErrorCode::FcpErrPolicyDenied,
+        FcpError::ZoneViolation { .. } | FcpError::TaintViolation { .. } => {
             FcpErrorCode::FcpErrZoneViolation
         }
-        fcp_core::FcpError::ElevationRequired { .. } => FcpErrorCode::FcpErrElevationRequired,
-        fcp_core::FcpError::ConnectorUnavailable { .. } => FcpErrorCode::FcpErrConnectorUnavailable,
-        fcp_core::FcpError::NotConfigured => FcpErrorCode::FcpErrConnectorNotConfigured,
-        fcp_core::FcpError::NotHandshaken => FcpErrorCode::FcpErrConnectorNotConfigured,
-        fcp_core::FcpError::HealthCheckFailed { .. } => FcpErrorCode::FcpErrHealthCheckFailed,
-        fcp_core::FcpError::StreamingNotSupported => FcpErrorCode::FcpErrStreamingNotSupported,
-        fcp_core::FcpError::ResourceNotFound { .. } => FcpErrorCode::FcpErrResourceNotFound,
-        fcp_core::FcpError::ResourceExhausted { .. } => FcpErrorCode::FcpErrResourceExhausted,
-        fcp_core::FcpError::BudgetExceeded { .. } => FcpErrorCode::FcpErrBudgetExceeded,
-        fcp_core::FcpError::Conflict { .. } => FcpErrorCode::FcpErrConflict,
-        fcp_core::FcpError::External { .. } => FcpErrorCode::FcpErrExternalService,
-        fcp_core::FcpError::UpstreamTimeout { .. } => FcpErrorCode::FcpErrUpstreamTimeout,
-        fcp_core::FcpError::DependencyUnavailable { .. } => {
-            FcpErrorCode::FcpErrDependencyUnavailable
-        }
-        fcp_core::FcpError::Internal { .. } => FcpErrorCode::FcpErrInternal,
+        FcpError::ElevationRequired { .. } => FcpErrorCode::FcpErrElevationRequired,
+        FcpError::ConnectorUnavailable { .. } => FcpErrorCode::FcpErrConnectorUnavailable,
+        FcpError::NotConfigured => FcpErrorCode::FcpErrConnectorNotConfigured,
+        FcpError::NotHandshaken => FcpErrorCode::FcpErrConnectorNotConfigured,
+        FcpError::HealthCheckFailed { .. } => FcpErrorCode::FcpErrHealthCheckFailed,
+        FcpError::StreamingNotSupported => FcpErrorCode::FcpErrStreamingNotSupported,
+        FcpError::ResourceNotFound { .. } => FcpErrorCode::FcpErrResourceNotFound,
+        FcpError::ResourceExhausted { .. } => FcpErrorCode::FcpErrResourceExhausted,
+        FcpError::BudgetExceeded { .. } => FcpErrorCode::FcpErrBudgetExceeded,
+        FcpError::Conflict { .. } => FcpErrorCode::FcpErrConflict,
+        FcpError::External { .. } => FcpErrorCode::FcpErrExternalService,
+        FcpError::UpstreamTimeout { .. } => FcpErrorCode::FcpErrUpstreamTimeout,
+        FcpError::DependencyUnavailable { .. } => FcpErrorCode::FcpErrDependencyUnavailable,
+        FcpError::Internal { .. } => FcpErrorCode::FcpErrInternal,
     }
 }
 
-/// Build a `StructuredError` from an `fcp_core::FcpError`.
-pub fn structured_from_fcp_error(err: &fcp_core::FcpError) -> StructuredError {
+/// Build a `StructuredError` from an `fcp-kernel::FcpError`.
+pub fn structured_from_fcp_error(err: &FcpError) -> StructuredError {
     let code = classify_fcp_error(err);
     let mut se = StructuredError::new(code, err.to_string());
 
     // Attach error-specific details.
     match err {
-        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
+        FcpError::RateLimited { retry_after_ms, .. } => {
             se.details = Some(serde_json::json!({ "retry_after_ms": retry_after_ms }));
         }
-        fcp_core::FcpError::BudgetExceeded {
+        FcpError::BudgetExceeded {
             metric,
             used,
             limit,
@@ -667,7 +664,7 @@ pub fn structured_from_fcp_error(err: &fcp_core::FcpError) -> StructuredError {
                 "window_seconds": window_seconds,
             }));
         }
-        fcp_core::FcpError::External {
+        FcpError::External {
             service,
             status_code,
             retryable,
@@ -679,7 +676,7 @@ pub fn structured_from_fcp_error(err: &fcp_core::FcpError) -> StructuredError {
                 "retryable": retryable,
             }));
         }
-        fcp_core::FcpError::ZoneViolation {
+        FcpError::ZoneViolation {
             source_zone,
             target_zone,
             ..
@@ -689,7 +686,7 @@ pub fn structured_from_fcp_error(err: &fcp_core::FcpError) -> StructuredError {
                 "target_zone": target_zone,
             }));
         }
-        fcp_core::FcpError::CapabilityDenied { capability, reason } => {
+        FcpError::CapabilityDenied { capability, reason } => {
             se.details = Some(serde_json::json!({
                 "capability": capability,
                 "reason": reason,
@@ -750,6 +747,7 @@ pub static ALL_CODES: &[FcpErrorCode] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_kernel::UsageMetricKind;
 
     #[test]
     fn all_codes_count_matches_constant() {
@@ -1023,7 +1021,7 @@ mod tests {
 
     #[test]
     fn classify_fcp_rate_limited() {
-        let err = fcp_core::FcpError::RateLimited {
+        let err = FcpError::RateLimited {
             retry_after_ms: 5000,
             violation: None,
         };
@@ -1032,7 +1030,7 @@ mod tests {
 
     #[test]
     fn classify_fcp_unauthorized() {
-        let err = fcp_core::FcpError::Unauthorized {
+        let err = FcpError::Unauthorized {
             code: 2001,
             message: "bad token".to_owned(),
         };
@@ -1041,7 +1039,7 @@ mod tests {
 
     #[test]
     fn classify_fcp_zone_violation() {
-        let err = fcp_core::FcpError::ZoneViolation {
+        let err = FcpError::ZoneViolation {
             source_zone: "z:public".to_owned(),
             target_zone: "z:private".to_owned(),
             message: "denied".to_owned(),
@@ -1051,7 +1049,7 @@ mod tests {
 
     #[test]
     fn classify_fcp_internal() {
-        let err = fcp_core::FcpError::Internal {
+        let err = FcpError::Internal {
             message: "panic".to_owned(),
         };
         assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrInternal);
@@ -1059,7 +1057,7 @@ mod tests {
 
     #[test]
     fn structured_from_fcp_error_rate_limited() {
-        let err = fcp_core::FcpError::RateLimited {
+        let err = FcpError::RateLimited {
             retry_after_ms: 3000,
             violation: None,
         };
@@ -1071,7 +1069,7 @@ mod tests {
 
     #[test]
     fn structured_from_fcp_error_capability_denied() {
-        let err = fcp_core::FcpError::CapabilityDenied {
+        let err = FcpError::CapabilityDenied {
             capability: "github.issues.create".to_owned(),
             reason: "not granted".to_owned(),
         };
@@ -1132,94 +1130,94 @@ mod tests {
     #[test]
     fn every_fcp_error_variant_classifies() {
         // Ensure classify_fcp_error covers all FcpError variants
-        let test_errors: Vec<fcp_core::FcpError> = vec![
-            fcp_core::FcpError::InvalidRequest {
+        let test_errors: Vec<FcpError> = vec![
+            FcpError::InvalidRequest {
                 code: 1001,
                 message: "bad".into(),
             },
-            fcp_core::FcpError::MalformedFrame {
+            FcpError::MalformedFrame {
                 code: 1002,
                 message: "bad".into(),
             },
-            fcp_core::FcpError::MissingField { field: "x".into() },
-            fcp_core::FcpError::ChecksumMismatch,
-            fcp_core::FcpError::VersionMismatch {
+            FcpError::MissingField { field: "x".into() },
+            FcpError::ChecksumMismatch,
+            FcpError::VersionMismatch {
                 expected: "2".into(),
                 actual: "1".into(),
             },
-            fcp_core::FcpError::Unauthorized {
+            FcpError::Unauthorized {
                 code: 2001,
                 message: "bad".into(),
             },
-            fcp_core::FcpError::TokenExpired,
-            fcp_core::FcpError::InvalidSignature,
-            fcp_core::FcpError::CapabilityDenied {
+            FcpError::TokenExpired,
+            FcpError::InvalidSignature,
+            FcpError::CapabilityDenied {
                 capability: "x".into(),
                 reason: "no".into(),
             },
-            fcp_core::FcpError::RateLimited {
+            FcpError::RateLimited {
                 retry_after_ms: 1000,
                 violation: None,
             },
-            fcp_core::FcpError::OperationNotGranted {
+            FcpError::OperationNotGranted {
                 operation: "x".into(),
             },
-            fcp_core::FcpError::ResourceNotAllowed {
+            FcpError::ResourceNotAllowed {
                 resource: "x".into(),
             },
-            fcp_core::FcpError::ZoneViolation {
+            FcpError::ZoneViolation {
                 source_zone: "a".into(),
                 target_zone: "b".into(),
                 message: "no".into(),
             },
-            fcp_core::FcpError::TaintViolation {
+            FcpError::TaintViolation {
                 origin_zone: "a".into(),
                 target_zone: "b".into(),
                 capability: "x".into(),
             },
-            fcp_core::FcpError::ElevationRequired {
+            FcpError::ElevationRequired {
                 capability: "x".into(),
                 ttl_seconds: None,
             },
-            fcp_core::FcpError::ConnectorUnavailable {
+            FcpError::ConnectorUnavailable {
                 code: 5001,
                 message: "down".into(),
             },
-            fcp_core::FcpError::NotConfigured,
-            fcp_core::FcpError::NotHandshaken,
-            fcp_core::FcpError::HealthCheckFailed {
+            FcpError::NotConfigured,
+            FcpError::NotHandshaken,
+            FcpError::HealthCheckFailed {
                 reason: "bad".into(),
             },
-            fcp_core::FcpError::StreamingNotSupported,
-            fcp_core::FcpError::ResourceNotFound {
+            FcpError::StreamingNotSupported,
+            FcpError::ResourceNotFound {
                 resource: "x".into(),
             },
-            fcp_core::FcpError::ResourceExhausted {
+            FcpError::ResourceExhausted {
                 resource: "x".into(),
             },
-            fcp_core::FcpError::BudgetExceeded {
-                metric: fcp_core::UsageMetricKind::Requests,
+            FcpError::BudgetExceeded {
+                metric: UsageMetricKind::Requests,
                 used: 100,
                 limit: 50,
                 window_seconds: 60,
             },
-            fcp_core::FcpError::Conflict {
+            FcpError::Conflict {
                 message: "dup".into(),
             },
-            fcp_core::FcpError::External {
+            FcpError::External {
                 service: "github".into(),
                 message: "500".into(),
                 status_code: Some(500),
                 retryable: true,
                 retry_after: None,
             },
-            fcp_core::FcpError::UpstreamTimeout {
+            FcpError::UpstreamTimeout {
                 service: "github".into(),
             },
-            fcp_core::FcpError::DependencyUnavailable {
+            FcpError::DependencyUnavailable {
                 service: "redis".into(),
             },
-            fcp_core::FcpError::Internal {
+            FcpError::Internal {
                 message: "panic".into(),
             },
         ];
@@ -1371,7 +1369,7 @@ mod tests {
 
     #[test]
     fn structured_error_has_all_required_fields() {
-        let err = fcp_core::FcpError::RateLimited {
+        let err = FcpError::RateLimited {
             retry_after_ms: 5000,
             violation: None,
         };
@@ -1385,7 +1383,7 @@ mod tests {
 
     #[test]
     fn structured_error_json_has_stable_keys() {
-        let err = fcp_core::FcpError::Unauthorized {
+        let err = FcpError::Unauthorized {
             code: 2001,
             message: "bad token".to_owned(),
         };
@@ -1401,7 +1399,7 @@ mod tests {
 
     #[test]
     fn structured_error_round_trip_via_json_value() {
-        let err = fcp_core::FcpError::ConnectorUnavailable {
+        let err = FcpError::ConnectorUnavailable {
             code: 5001,
             message: "down".to_owned(),
         };
@@ -1419,7 +1417,7 @@ mod tests {
 
     #[test]
     fn classify_connector_not_configured() {
-        let err = fcp_core::FcpError::NotConfigured;
+        let err = FcpError::NotConfigured;
         assert_eq!(
             classify_fcp_error(&err),
             FcpErrorCode::FcpErrConnectorNotConfigured
@@ -1428,7 +1426,7 @@ mod tests {
 
     #[test]
     fn classify_connector_not_handshaken() {
-        let err = fcp_core::FcpError::NotHandshaken;
+        let err = FcpError::NotHandshaken;
         assert_eq!(
             classify_fcp_error(&err),
             FcpErrorCode::FcpErrConnectorNotConfigured
@@ -1437,7 +1435,7 @@ mod tests {
 
     #[test]
     fn classify_health_check_failed() {
-        let err = fcp_core::FcpError::HealthCheckFailed {
+        let err = FcpError::HealthCheckFailed {
             reason: "timeout".to_owned(),
         };
         assert_eq!(
@@ -1448,7 +1446,7 @@ mod tests {
 
     #[test]
     fn classify_streaming_not_supported() {
-        let err = fcp_core::FcpError::StreamingNotSupported;
+        let err = FcpError::StreamingNotSupported;
         assert_eq!(
             classify_fcp_error(&err),
             FcpErrorCode::FcpErrStreamingNotSupported
@@ -1457,7 +1455,7 @@ mod tests {
 
     #[test]
     fn classify_resource_not_found() {
-        let err = fcp_core::FcpError::ResourceNotFound {
+        let err = FcpError::ResourceNotFound {
             resource: "issue-123".to_owned(),
         };
         assert_eq!(
@@ -1468,7 +1466,7 @@ mod tests {
 
     #[test]
     fn classify_resource_exhausted() {
-        let err = fcp_core::FcpError::ResourceExhausted {
+        let err = FcpError::ResourceExhausted {
             resource: "memory".to_owned(),
         };
         assert_eq!(
@@ -1479,7 +1477,7 @@ mod tests {
 
     #[test]
     fn classify_conflict() {
-        let err = fcp_core::FcpError::Conflict {
+        let err = FcpError::Conflict {
             message: "duplicate".to_owned(),
         };
         assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrConflict);
@@ -1487,7 +1485,7 @@ mod tests {
 
     #[test]
     fn classify_external_retryable() {
-        let err = fcp_core::FcpError::External {
+        let err = FcpError::External {
             service: "github".to_owned(),
             message: "500".to_owned(),
             status_code: Some(500),
@@ -1504,7 +1502,7 @@ mod tests {
         // FcpErrExternalService is retryable at the error-code level,
         // even when the original External error has retryable=false.
         // The taxonomy classifies by code, not by the original field.
-        let err = fcp_core::FcpError::External {
+        let err = FcpError::External {
             service: "stripe".to_owned(),
             message: "400".to_owned(),
             status_code: Some(400),
@@ -2232,7 +2230,7 @@ mod tests {
 
     #[test]
     fn classify_invalid_request() {
-        let err = fcp_core::FcpError::InvalidRequest {
+        let err = FcpError::InvalidRequest {
             code: 1001,
             message: "bad request".to_owned(),
         };
@@ -2244,7 +2242,7 @@ mod tests {
 
     #[test]
     fn classify_malformed_frame() {
-        let err = fcp_core::FcpError::MalformedFrame {
+        let err = FcpError::MalformedFrame {
             code: 1002,
             message: "corrupt frame".to_owned(),
         };
@@ -2256,7 +2254,7 @@ mod tests {
 
     #[test]
     fn classify_missing_field() {
-        let err = fcp_core::FcpError::MissingField {
+        let err = FcpError::MissingField {
             field: "name".to_owned(),
         };
         assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrMissingField);
@@ -2264,7 +2262,7 @@ mod tests {
 
     #[test]
     fn classify_checksum_mismatch() {
-        let err = fcp_core::FcpError::ChecksumMismatch;
+        let err = FcpError::ChecksumMismatch;
         assert_eq!(
             classify_fcp_error(&err),
             FcpErrorCode::FcpErrTransportFailed
@@ -2273,7 +2271,7 @@ mod tests {
 
     #[test]
     fn classify_version_mismatch() {
-        let err = fcp_core::FcpError::VersionMismatch {
+        let err = FcpError::VersionMismatch {
             expected: "2.0".to_owned(),
             actual: "1.0".to_owned(),
         };
@@ -2285,13 +2283,13 @@ mod tests {
 
     #[test]
     fn classify_token_expired() {
-        let err = fcp_core::FcpError::TokenExpired;
+        let err = FcpError::TokenExpired;
         assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrTokenExpired);
     }
 
     #[test]
     fn classify_invalid_signature() {
-        let err = fcp_core::FcpError::InvalidSignature;
+        let err = FcpError::InvalidSignature;
         assert_eq!(
             classify_fcp_error(&err),
             FcpErrorCode::FcpErrInvalidSignature
@@ -2300,7 +2298,7 @@ mod tests {
 
     #[test]
     fn classify_operation_not_granted() {
-        let err = fcp_core::FcpError::OperationNotGranted {
+        let err = FcpError::OperationNotGranted {
             operation: "issues.delete".to_owned(),
         };
         assert_eq!(
@@ -2311,7 +2309,7 @@ mod tests {
 
     #[test]
     fn classify_resource_not_allowed() {
-        let err = fcp_core::FcpError::ResourceNotAllowed {
+        let err = FcpError::ResourceNotAllowed {
             resource: "secrets".to_owned(),
         };
         assert_eq!(classify_fcp_error(&err), FcpErrorCode::FcpErrPolicyDenied);
@@ -2319,7 +2317,7 @@ mod tests {
 
     #[test]
     fn classify_taint_violation() {
-        let err = fcp_core::FcpError::TaintViolation {
+        let err = FcpError::TaintViolation {
             origin_zone: "z:dev".to_owned(),
             target_zone: "z:prod".to_owned(),
             capability: "deploy".to_owned(),
@@ -2329,7 +2327,7 @@ mod tests {
 
     #[test]
     fn classify_elevation_required() {
-        let err = fcp_core::FcpError::ElevationRequired {
+        let err = FcpError::ElevationRequired {
             capability: "admin.delete".to_owned(),
             ttl_seconds: Some(300),
         };
@@ -2341,7 +2339,7 @@ mod tests {
 
     #[test]
     fn classify_upstream_timeout() {
-        let err = fcp_core::FcpError::UpstreamTimeout {
+        let err = FcpError::UpstreamTimeout {
             service: "slack-api".to_owned(),
         };
         assert_eq!(
@@ -2352,7 +2350,7 @@ mod tests {
 
     #[test]
     fn classify_dependency_unavailable() {
-        let err = fcp_core::FcpError::DependencyUnavailable {
+        let err = FcpError::DependencyUnavailable {
             service: "redis-cache".to_owned(),
         };
         assert_eq!(
@@ -2365,8 +2363,8 @@ mod tests {
 
     #[test]
     fn structured_from_budget_exceeded_has_details() {
-        let err = fcp_core::FcpError::BudgetExceeded {
-            metric: fcp_core::UsageMetricKind::Requests,
+        let err = FcpError::BudgetExceeded {
+            metric: fcp_kernel::UsageMetricKind::Requests,
             used: 1000,
             limit: 500,
             window_seconds: 3600,
@@ -2381,7 +2379,7 @@ mod tests {
 
     #[test]
     fn structured_from_external_has_status_code() {
-        let err = fcp_core::FcpError::External {
+        let err = FcpError::External {
             service: "stripe".to_owned(),
             message: "payment failed".to_owned(),
             status_code: Some(402),
@@ -2396,7 +2394,7 @@ mod tests {
 
     #[test]
     fn structured_from_zone_violation_has_zones() {
-        let err = fcp_core::FcpError::ZoneViolation {
+        let err = FcpError::ZoneViolation {
             source_zone: "z:staging".to_owned(),
             target_zone: "z:production".to_owned(),
             message: "cross-zone denied".to_owned(),
@@ -2409,7 +2407,7 @@ mod tests {
 
     #[test]
     fn structured_from_internal_has_no_details() {
-        let err = fcp_core::FcpError::Internal {
+        let err = FcpError::Internal {
             message: "unexpected state".to_owned(),
         };
         let se = structured_from_fcp_error(&err);
@@ -2418,7 +2416,7 @@ mod tests {
 
     #[test]
     fn structured_from_missing_field_has_no_details() {
-        let err = fcp_core::FcpError::MissingField {
+        let err = FcpError::MissingField {
             field: "id".to_owned(),
         };
         let se = structured_from_fcp_error(&err);
@@ -2427,7 +2425,7 @@ mod tests {
 
     #[test]
     fn structured_from_token_expired_has_no_details() {
-        let err = fcp_core::FcpError::TokenExpired;
+        let err = FcpError::TokenExpired;
         let se = structured_from_fcp_error(&err);
         assert_eq!(se.code, "FCP_ERR_TOKEN_EXPIRED");
         assert!(se.details.is_none());

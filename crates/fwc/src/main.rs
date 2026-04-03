@@ -1210,6 +1210,10 @@ struct ListArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Include connectors hidden from default catalog flows such as incubating or quarantined entries.
+    #[arg(long, default_value_t = false)]
+    include_hidden: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1266,6 +1270,10 @@ struct SearchArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Include connectors hidden from default catalog flows such as incubating or quarantined entries.
+    #[arg(long, default_value_t = false)]
+    include_hidden: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1706,6 +1714,10 @@ struct InstallArgs {
     /// Connector configuration file consumed by `fcp-host`.
     #[arg(long, env = "FCP_HOST_CONNECTORS_FILE")]
     connectors_file: Option<PathBuf>,
+
+    /// Allow hidden-by-default workspace connector selectors such as incubating or quarantined entries.
+    #[arg(long, default_value_t = false)]
+    include_hidden: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2008,6 +2020,10 @@ struct ExportToolsArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Include connectors hidden from default catalog flows such as incubating or quarantined entries.
+    #[arg(long, default_value_t = false)]
+    include_hidden: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -4949,6 +4965,10 @@ fn host_discovered_connector(
             .first()
             .cloned()
             .unwrap_or_else(|| "other".to_owned()),
+        manifest_status: None,
+        hidden_by_default: false,
+        non_live_rationale: None,
+        graduation_guidance: None,
         runtime_format: "host-admin-api".to_owned(),
         state_model: MetadataField::Unknown,
         supported_zones: Vec::new(),
@@ -5814,6 +5834,7 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
                 "filters": {
                     "zone": args.zone,
                     "category": args.category,
+                    "include_hidden": args.include_hidden,
                 },
             }),
             vec![
@@ -5824,14 +5845,27 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
     }
 
     let catalog = DiscoveryCatalog::load()?;
-    let connectors = catalog
-        .list(args.zone.as_deref(), args.category.as_deref())
+    let visible_connectors = catalog.list(
+        args.zone.as_deref(),
+        args.category.as_deref(),
+        args.include_hidden,
+    );
+    let hidden_omitted = if args.include_hidden {
+        0
+    } else {
+        catalog
+            .list(args.zone.as_deref(), args.category.as_deref(), true)
+            .len()
+            .saturating_sub(visible_connectors.len())
+    };
+    let connectors = visible_connectors
         .into_iter()
         .map(connector_list_entry)
         .collect::<Vec<_>>();
     let filters = json!({
         "zone": args.zone.clone(),
         "category": args.category.clone(),
+        "include_hidden": args.include_hidden,
     });
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
@@ -5840,12 +5874,22 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
         "command": "list",
         "source": "workspace-manifests",
         "mode": "offline-artifact",
-        "message": format!("Listed {} connectors from workspace manifests.", connectors.len()),
+        "message": format!(
+            "Listed {} connectors from workspace manifests{}.",
+            connectors.len(),
+            if hidden_omitted == 0 {
+                String::new()
+            } else {
+                format!(" ({hidden_omitted} hidden-by-default connector{} omitted)", if hidden_omitted == 1 { "" } else { "s" })
+            }
+        ),
         "filters": filters,
+        "hidden_by_default_omitted": hidden_omitted,
         "connectors": connectors,
         "next_actions": [
             "Use `fwc show <connector> --offline` to inspect one connector in detail.",
             "Use `fwc ops <connector> --offline` to enumerate operations before asking for schemas.",
+            "Add `--include-hidden` to include incubating, quarantined, or stub connectors in offline catalog results.",
         ],
     });
     attach_discovery_provenance(
@@ -8789,6 +8833,7 @@ fn search_dispatch_host(args: &SearchArgs, host: &str) -> Result<DispatchOutcome
         } else {
             None
         },
+        include_hidden: false,
     };
     let results = search::search_operations(&connectors, &args.query, &filters);
     let total = results.len();
@@ -8866,6 +8911,7 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
                     "archetype": args.archetype,
                     "category": args.category,
                     "idempotent": args.idempotent,
+                    "include_hidden": args.include_hidden,
                 },
             }),
             vec![
@@ -8889,11 +8935,21 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
         category: args.category.clone(),
         idempotent_only: args.idempotent,
         zone: args.zone.clone(),
+        include_hidden: args.include_hidden,
     };
 
     let results = search::search_operations(catalog.connectors(), &args.query, &filters);
     let total = results.len();
     let json_results = search::results_to_json(&results, args.limit);
+    let hidden_connectors_in_catalog = if args.include_hidden {
+        0
+    } else {
+        catalog
+            .connectors()
+            .iter()
+            .filter(|connector| connector.is_hidden_by_default())
+            .count()
+    };
 
     let active_filters: Vec<String> = [
         args.connector.as_deref().map(|v| format!("connector={v}")),
@@ -8907,6 +8963,11 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
         args.zone.as_deref().map(|v| format!("zone={v}")),
         if args.idempotent {
             Some("idempotent=true".to_owned())
+        } else {
+            None
+        },
+        if args.include_hidden {
+            Some("include_hidden=true".to_owned())
         } else {
             None
         },
@@ -8924,12 +8985,14 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
         "message": format!("Found {} matching operations ({} shown).", total, json_results.len()),
         "query": &args.query,
         "filters": active_filters,
+        "hidden_connectors_in_catalog": hidden_connectors_in_catalog,
         "total_results": total,
         "results": json_results,
         "next_actions": [
             "Use `fwc show <connector> --offline` to inspect a connector in more detail.",
             "Use `fwc schema <connector> <operation> --offline` for the input/output schema.",
             "Add --capability, --risk, --safety, --idempotent flags to narrow results.",
+            "Add `--include-hidden` to search incubating, quarantined, or stub connectors too.",
         ],
     });
     attach_discovery_provenance(
@@ -9023,6 +9086,10 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
             "version": &summary.version,
             "description": &summary.description,
             "cohort": &connector.cohort,
+            "status": connector.manifest_status.map(|status| status.to_string()),
+            "hidden_by_default": connector.hidden_by_default,
+            "non_live_rationale": connector.non_live_rationale.clone(),
+            "graduation_guidance": connector.graduation_guidance.clone(),
             "format": &connector.runtime_format,
             "state": summary.state,
             "state_model": connector.state_model.as_known().cloned(),
@@ -13445,7 +13512,22 @@ fn install_unknown_live_offline_readiness_value(artifact: &PreparedPackageArtifa
 }
 
 fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
-    let artifact = match prepare_package_artifact(&args.source, args.version.as_deref()) {
+    if !args.include_hidden && !Path::new(&args.source).exists() {
+        let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.source.as_str()))?;
+        if let Ok(connector) = catalog.resolve_connector(&args.source)
+            && connector.is_hidden_by_default()
+        {
+            return Ok(hidden_connector_requires_opt_in_dispatch(
+                "install", connector,
+            ));
+        }
+    }
+
+    let artifact = match prepare_package_artifact(
+        &args.source,
+        args.version.as_deref(),
+        args.include_hidden,
+    ) {
         Ok(artifact) => artifact,
         Err(error) => {
             return Ok(DispatchOutcome {
@@ -13524,6 +13606,7 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
                 "source": args.source,
                 "version": args.version,
                 "verify_only": args.verify_only,
+                "include_hidden": args.include_hidden,
             }),
             vec![
                 "fwc install <source> --host <endpoint>".to_owned(),
@@ -13717,7 +13800,7 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
         }
     };
     let source = args.source.as_deref().unwrap_or(&args.connector);
-    let artifact = match prepare_package_artifact(source, None) {
+    let artifact = match prepare_package_artifact(source, None, true) {
         Ok(artifact) => artifact,
         Err(error) => {
             return Ok(DispatchOutcome {
@@ -13860,6 +13943,7 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
 fn prepare_package_artifact(
     source: &str,
     requested_version: Option<&str>,
+    include_hidden_workspace_connectors: bool,
 ) -> Result<PreparedPackageArtifact> {
     // Gate 1: Reject sources containing known demo/stub/placeholder markers
     // before any expensive resolution work (bead 29.12).
@@ -13871,7 +13955,7 @@ fn prepare_package_artifact(
         );
     }
 
-    let resolved = resolve_package_output(source)?;
+    let resolved = resolve_package_output(source, include_hidden_workspace_connectors)?;
 
     // Gate 2: Reject resolved artifacts whose identity contains demo markers.
     if catalog::contains_demo_marker(&resolved.source_description) {
@@ -13906,7 +13990,10 @@ fn prepare_package_artifact(
     })
 }
 
-fn resolve_package_output(source: &str) -> Result<ResolvedPackageOutput> {
+fn resolve_package_output(
+    source: &str,
+    include_hidden_workspace_connectors: bool,
+) -> Result<ResolvedPackageOutput> {
     let path = PathBuf::from(source);
     if path.exists() {
         if path.is_file() {
@@ -13965,6 +14052,16 @@ fn resolve_package_output(source: &str) -> Result<ResolvedPackageOutput> {
             }
         )
     })?;
+    if !include_hidden_workspace_connectors && connector.is_hidden_by_default() {
+        bail!(
+            "workspace connector `{}` is `{}` and hidden by default; retry with `--include-hidden` if you intentionally want to package or install this non-live connector",
+            connector.slug,
+            connector
+                .manifest_status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        );
+    }
     let manifest_path = PathBuf::from(&connector.manifest_path);
     let crate_path = manifest_path.parent().with_context(|| {
         format!(
@@ -14278,6 +14375,7 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
                 "connector": args.connector,
                 "risk_max": args.risk_max,
                 "capability": args.capability,
+                "include_hidden": args.include_hidden,
                 "output_file": args.output.as_ref().map(|path| path.display().to_string()),
             }),
             vec![
@@ -14294,7 +14392,15 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
     // Collect connectors (one or all).
     let connectors: Vec<&DiscoveredConnector> = if let Some(selector) = &args.connector {
         match catalog.resolve_connector(selector) {
-            Ok(connector) => vec![connector],
+            Ok(connector) => {
+                if !args.include_hidden && connector.is_hidden_by_default() {
+                    return Ok(hidden_connector_requires_opt_in_dispatch(
+                        "export-tools",
+                        connector,
+                    ));
+                }
+                vec![connector]
+            }
             Err(error) => {
                 return Ok(connector_resolution_dispatch(
                     "export-tools",
@@ -14304,7 +14410,15 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             }
         }
     } else {
-        catalog.list(None, None)
+        catalog.list(None, None, args.include_hidden)
+    };
+    let hidden_omitted = if args.include_hidden || args.connector.is_some() {
+        0
+    } else {
+        catalog
+            .list(None, None, true)
+            .len()
+            .saturating_sub(connectors.len())
     };
 
     // Gather all operations with filters applied.
@@ -14343,11 +14457,17 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             "source": "workspace-manifests",
             "format": args.tool_format.to_string(),
             "message": format!(
-                "Exported {tool_count} tool schemas ({connector_count} connectors) to {} from workspace manifests.",
-                path.display()
+                "Exported {tool_count} tool schemas ({connector_count} connectors) to {} from workspace manifests{}.",
+                path.display(),
+                if hidden_omitted == 0 {
+                    String::new()
+                } else {
+                    format!(" ({hidden_omitted} hidden-by-default connector{} omitted)", if hidden_omitted == 1 { "" } else { "s" })
+                }
             ),
             "tool_count": tool_count,
             "connector_count": connector_count,
+            "hidden_by_default_omitted": hidden_omitted,
             "output_file": path.display().to_string(),
         });
         attach_tool_inventory_provenance(
@@ -14371,16 +14491,23 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
         "source": "workspace-manifests",
         "format": args.tool_format.to_string(),
         "message": format!(
-            "Exported {tool_count} tool schemas from {connector_count} workspace connectors. This is an offline artifact view, not live host inventory.",
+            "Exported {tool_count} tool schemas from {connector_count} workspace connectors{}. This is an offline artifact view, not live host inventory.",
+            if hidden_omitted == 0 {
+                String::new()
+            } else {
+                format!(" ({hidden_omitted} hidden-by-default connector{} omitted)", if hidden_omitted == 1 { "" } else { "s" })
+            }
         ),
         "tool_count": tool_count,
         "connector_count": connector_count,
+        "hidden_by_default_omitted": hidden_omitted,
         "tools": tools_json,
         "next_actions": [
             "Use `fwc export-tools --host <endpoint> --format mcp` for the live host-backed inventory.".to_owned(),
             "Pipe to a file: fwc export-tools --offline --format mcp --json > tools.json",
             "Filter by risk: fwc export-tools --offline --format mcp --risk-max medium",
             "One connector: fwc export-tools --offline --format claude github",
+            "Add `--include-hidden` to export schemas for incubating, quarantined, or stub connectors too.".to_owned(),
         ],
     });
     attach_tool_inventory_provenance(
@@ -14883,7 +15010,7 @@ fn suggest_dispatch(args: &SuggestArgs, host: Option<&str>) -> Result<DispatchOu
             }
         }
     } else {
-        catalog.list(None, None)
+        catalog.list(None, None, true)
     };
 
     let mut by_family: BTreeMap<String, Vec<Value>> = BTreeMap::new();
@@ -21683,6 +21810,10 @@ fn connector_list_entry(connector: &DiscoveredConnector) -> Value {
         "description": &connector.detail.summary.description,
         "version": &connector.detail.summary.version,
         "cohort": &connector.cohort,
+        "status": connector.manifest_status.map(|status| status.to_string()),
+        "hidden_by_default": connector.hidden_by_default,
+        "non_live_rationale": connector.non_live_rationale.clone(),
+        "graduation_guidance": connector.graduation_guidance.clone(),
         "format": &connector.runtime_format,
         "state": connector.detail.summary.state,
         "archetypes": connector.detail.summary.archetypes.as_known().cloned(),
@@ -21695,6 +21826,43 @@ fn connector_list_entry(connector: &DiscoveredConnector) -> Value {
             format!("fwc ops {}", connector.slug),
         ],
     })
+}
+
+fn hidden_connector_requires_opt_in_dispatch(
+    command: &str,
+    connector: &DiscoveredConnector,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": command,
+            "error": {
+                "type": "hidden-connector-requires-opt-in",
+                "message": format!(
+                    "Connector `{}` is `{}` and hidden from default offline catalog/install/export flows.",
+                    connector.slug,
+                    connector
+                        .manifest_status
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "unknown".to_owned())
+                ),
+                "recoverable": true,
+            },
+            "connector": {
+                "slug": &connector.slug,
+                "canonical_id": &connector.detail.summary.id,
+                "status": connector.manifest_status.map(|status| status.to_string()),
+                "hidden_by_default": connector.hidden_by_default,
+                "non_live_rationale": connector.non_live_rationale.clone(),
+                "graduation_guidance": connector.graduation_guidance.clone(),
+            },
+            "next_actions": [
+                "Retry with `--include-hidden` if you intentionally want to inspect or package this non-live connector.".to_owned(),
+                format!("Use `fwc show {} --offline` to inspect the connector detail first.", connector.slug),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
 }
 
 fn operation_summary_entry(operation: &DiscoveredOperation) -> Value {
@@ -26416,6 +26584,43 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_export_tools_offline_hidden_connector_requires_opt_in() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "export-tools",
+            "--offline",
+            "--format",
+            "mcp",
+            "tlon",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "hidden-connector-requires-opt-in");
+    }
+
+    #[test]
+    fn execute_export_tools_offline_include_hidden_allows_non_live_connector() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "export-tools",
+            "--offline",
+            "--include-hidden",
+            "--format",
+            "mcp",
+            "tlon",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(
+            payload["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty())
+        );
+    }
+
+    #[test]
     fn export_tools_options_do_not_disable_examples_when_only_hints_are_disabled() {
         let args = ExportToolsArgs {
             tool_format: export_tools::ToolSchemaFormat::Mcp,
@@ -26428,6 +26633,7 @@ deny_ptrace = true
             no_examples: false,
             output: None,
             offline: true,
+            include_hidden: false,
         };
 
         let options = super::export_tools_options(&args);
@@ -28974,6 +29180,37 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_list_offline_hides_non_live_connectors_by_default() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "list", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["hidden_by_default_omitted"].as_u64().unwrap_or(0) >= 3);
+        assert!(payload["connectors"].as_array().unwrap().iter().all(
+            |connector| connector["slug"] != "tlon"
+                && connector["slug"] != "zalo"
+                && connector["slug"] != "zalouser"
+        ));
+    }
+
+    #[test]
+    fn execute_list_offline_include_hidden_surfaces_status_metadata() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "list", "--offline", "--include-hidden"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        let tlon = payload["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|connector| connector["slug"] == "tlon")
+            .expect("tlon should be included with --include-hidden");
+        assert_eq!(tlon["status"], "incubating");
+        assert_eq!(tlon["hidden_by_default"], true);
+        assert!(tlon["non_live_rationale"].is_string());
+        assert!(tlon["graduation_guidance"].is_string());
+    }
+
+    #[test]
     fn prepare_cli_parses_mesh_status_command() {
         let prepared = prepare_cli(&["fwc".to_owned(), "mesh".to_owned(), "status".to_owned()])
             .expect("mesh status command should parse");
@@ -29963,6 +30200,33 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_search_offline_hides_incubating_connectors_by_default() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "search", "tlon", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["results"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn execute_search_offline_include_hidden_surfaces_incubating_connector() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "search",
+            "tlon",
+            "--offline",
+            "--include-hidden",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(payload["results"].as_array().unwrap().iter().any(|result| {
+            result["connector"] == "tlon"
+                && result["connector_status"] == "incubating"
+                && result["hidden_by_default"] == true
+        }));
+    }
+
+    #[test]
     fn execute_search_with_host_uses_live_introspection() {
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -30007,6 +30271,8 @@ deny_ptrace = true
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
         assert_eq!(payload["connector"]["format"], "wasi");
+        assert_eq!(payload["connector"]["status"], "ready");
+        assert_eq!(payload["connector"]["hidden_by_default"], false);
         assert_eq!(payload["connector"]["state"], "unknown");
         assert_eq!(payload["zones"]["home"], "z:work");
         assert_eq!(payload["shared_descriptor"]["connector_id"], "fcp.github");
@@ -33259,6 +33525,7 @@ depends_on = ["missing"]
         ]);
 
         server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "map");
         assert_eq!(payload["response"]["completed"], 1);
         assert_eq!(payload["response"]["failed"], 1);
@@ -33298,6 +33565,7 @@ depends_on = ["missing"]
         ]);
 
         server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "map");
         assert_eq!(payload["response"]["completed"], 0);
         assert_eq!(payload["response"]["failed"], 2);
@@ -33314,6 +33582,7 @@ depends_on = ["missing"]
             "github.get_issue",
         ]);
 
+        assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "map");
         assert_eq!(payload["error"]["type"], "missing-inputs");
     }
@@ -33538,6 +33807,7 @@ depends_on = ["missing"]
             "number=42",
         ]);
 
+        assert_eq!(exit_code, CliExitCode::Success.into());
         // The number field should be coerced to an integer, not a string
         assert_eq!(payload["input_authoring"]["payload"]["number"], 42);
         assert_eq!(payload["input_authoring"]["payload"]["owner"], "octocat");
@@ -35401,6 +35671,25 @@ depends_on = ["missing"]
                 .as_array()
                 .is_some_and(|arr| !arr.is_empty())
         );
+    }
+
+    #[test]
+    fn install_hidden_workspace_connector_requires_include_hidden() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "install", "tlon"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "hidden-connector-requires-opt-in");
+        assert_eq!(payload["connector"]["slug"], "tlon");
+        assert_eq!(payload["connector"]["status"], "incubating");
+    }
+
+    #[test]
+    fn install_hidden_workspace_connector_with_include_hidden_advances_to_host_check() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "install", "tlon", "--include-hidden"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
     }
 
     #[test]
@@ -38457,7 +38746,7 @@ depends_on = ["missing"]
             .to_owned();
 
         // The task should be in a state that requires approval before execution.
-        let capsule_status = payload["task"]["capsule_status"]
+        let _capsule_status = payload["task"]["capsule_status"]
             .as_str()
             .unwrap_or("unknown");
 
@@ -38520,8 +38809,6 @@ depends_on = ["missing"]
 
         // The run should either fail with a validation error or succeed
         // with a withheld execution (depending on resolution state).
-        let status = run_payload["status"].as_str().unwrap_or("unknown");
-
         if run_exit != CliExitCode::Success.into() {
             // Blocked: the task needs resolution or approval first.
             assert!(

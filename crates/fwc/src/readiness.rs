@@ -19,7 +19,9 @@ use fcp_kernel::{
     DescriptorStatus, IdempotencyClass, OperationId, OperationInfo, PrerequisiteCatalog,
     ReadinessDescriptor, RiskLevel, SafetyTier,
 };
-use fcp_manifest::{ConnectorManifest, ConnectorRuntimeFormat, ManifestApprovalMode};
+use fcp_manifest::{
+    ConnectorManifest, ConnectorRuntimeFormat, ConnectorStatus, ManifestApprovalMode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1631,15 +1633,22 @@ impl DiscoveryCatalog {
     }
 
     #[must_use]
-    pub fn list(&self, zone: Option<&str>, category: Option<&str>) -> Vec<&DiscoveredConnector> {
+    pub fn list(
+        &self,
+        zone: Option<&str>,
+        category: Option<&str>,
+        include_hidden: bool,
+    ) -> Vec<&DiscoveredConnector> {
         let zone = zone.map(normalize_zone_selector);
         let category = category.map(normalize_category_selector);
 
         self.connectors
             .iter()
             .filter(|connector| {
-                zone.as_ref()
-                    .is_none_or(|requested| connector.matches_zone(requested))
+                (include_hidden || !connector.is_hidden_by_default())
+                    && zone
+                        .as_ref()
+                        .is_none_or(|requested| connector.matches_zone(requested))
                     && category
                         .as_ref()
                         .is_none_or(|requested| connector.matches_category(requested))
@@ -1722,6 +1731,10 @@ pub struct DiscoveredConnector {
     pub slug: String,
     pub manifest_path: String,
     pub cohort: String,
+    pub manifest_status: Option<ConnectorStatus>,
+    pub hidden_by_default: bool,
+    pub non_live_rationale: Option<String>,
+    pub graduation_guidance: Option<String>,
     pub runtime_format: String,
     pub state_model: MetadataField<String>,
     pub supported_zones: Vec<String>,
@@ -1785,6 +1798,10 @@ impl DiscoveredConnector {
             .unwrap_or_else(|| manifest.connector.id.as_str())
             .to_owned();
         let runtime_format = runtime_format_label(manifest.connector.format).to_owned();
+        let manifest_status = manifest.connector.status;
+        let hidden_by_default = manifest_status.is_hidden_by_default();
+        let non_live_rationale = manifest_status.non_live_rationale().map(str::to_owned);
+        let graduation_guidance = manifest_status.graduation_guidance().map(str::to_owned);
         let state_model = manifest
             .connector
             .state
@@ -1895,6 +1912,10 @@ impl DiscoveredConnector {
                 "description": &connector_description,
                 "archetypes": connector_archetypes_schema,
                 "format": &runtime_format,
+                "status": manifest_status.to_string(),
+                "hidden_by_default": hidden_by_default,
+                "non_live_rationale": non_live_rationale,
+                "graduation_guidance": graduation_guidance,
                 "state_model": state_model_json,
             },
             "zones": zones,
@@ -1924,6 +1945,10 @@ impl DiscoveredConnector {
             slug: slug.to_owned(),
             manifest_path: relative_to_workspace(manifest_path),
             cohort,
+            manifest_status: Some(manifest_status),
+            hidden_by_default,
+            non_live_rationale,
+            graduation_guidance,
             runtime_format,
             state_model: MetadataField::from_option(state_model),
             supported_zones,
@@ -2019,6 +2044,11 @@ impl DiscoveredConnector {
         descriptor.prerequisites = Some(prerequisites);
         descriptor.readiness = Some(readiness);
         descriptor
+    }
+
+    #[must_use]
+    pub const fn is_hidden_by_default(&self) -> bool {
+        self.hidden_by_default
     }
 
     #[must_use]
@@ -2174,6 +2204,18 @@ fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
         Ok(Some(document))
     } else {
         Ok(None)
+    }
+}
+
+fn parse_connector_status_label(value: &str) -> Option<ConnectorStatus> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "ready" => Some(ConnectorStatus::Ready),
+        "stub" => Some(ConnectorStatus::Stub),
+        "experimental" => Some(ConnectorStatus::Experimental),
+        "deprecated" => Some(ConnectorStatus::Deprecated),
+        "incubating" => Some(ConnectorStatus::Incubating),
+        "quarantined" => Some(ConnectorStatus::Quarantined),
+        _ => None,
     }
 }
 
@@ -2422,6 +2464,14 @@ fn discovered_connector_from_toml(
         .and_then(toml::Value::as_str)
         .unwrap_or("wasi")
         .to_owned();
+    let manifest_status = connector
+        .get("status")
+        .and_then(toml::Value::as_str)
+        .and_then(parse_connector_status_label)
+        .unwrap_or_default();
+    let hidden_by_default = manifest_status.is_hidden_by_default();
+    let non_live_rationale = manifest_status.non_live_rationale().map(str::to_owned);
+    let graduation_guidance = manifest_status.graduation_guidance().map(str::to_owned);
     let state_model = connector
         .get("state")
         .and_then(toml::Value::as_table)
@@ -2545,6 +2595,10 @@ fn discovered_connector_from_toml(
             "description": &connector_description,
             "archetypes": connector_archetypes_schema,
             "format": &runtime_format,
+            "status": manifest_status.to_string(),
+            "hidden_by_default": hidden_by_default,
+            "non_live_rationale": non_live_rationale,
+            "graduation_guidance": graduation_guidance,
             "state_model": state_model_json,
         },
         "zones": zones,
@@ -2574,6 +2628,10 @@ fn discovered_connector_from_toml(
         slug: slug.to_owned(),
         manifest_path: relative_to_workspace(manifest_path),
         cohort,
+        manifest_status: Some(manifest_status),
+        hidden_by_default,
+        non_live_rationale,
+        graduation_guidance,
         runtime_format,
         state_model: MetadataField::from_option(state_model),
         supported_zones,
@@ -7719,9 +7777,16 @@ deny_ptrace = true
             Some(vec!["operational".to_owned()])
         );
         assert_eq!(discovered.detail.rate_limits.status_tag(), "unknown");
+        assert_eq!(discovered.manifest_status, Some(ConnectorStatus::Ready));
+        assert!(!discovered.hidden_by_default);
         assert_eq!(
             discovered.connector_schema["connector"]["archetypes"],
             serde_json::json!(["operational"])
+        );
+        assert_eq!(discovered.connector_schema["connector"]["status"], "ready");
+        assert_eq!(
+            discovered.connector_schema["connector"]["hidden_by_default"],
+            Value::Bool(false)
         );
         assert_eq!(discovered.connector_schema["rate_limits"], Value::Null);
     }
@@ -7782,10 +7847,13 @@ deny_ptrace = true
         assert_eq!(discovered.detail.summary.archetypes.status_tag(), "unknown");
         assert_eq!(discovered.detail.rate_limits.status_tag(), "unknown");
         assert_eq!(discovered.detail.summary.has_events.status_tag(), "unknown");
+        assert_eq!(discovered.manifest_status, Some(ConnectorStatus::Ready));
+        assert!(!discovered.hidden_by_default);
         assert_eq!(
             discovered.connector_schema["connector"]["archetypes"],
             Value::Null
         );
+        assert_eq!(discovered.connector_schema["connector"]["status"], "ready");
         assert_eq!(discovered.connector_schema["rate_limits"], Value::Null);
     }
 

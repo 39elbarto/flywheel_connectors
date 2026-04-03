@@ -4,7 +4,10 @@
 //! tool schemas consumable by external AI agent runtimes.
 
 use anyhow::Result;
-use fcp_core::{OperationInfo, tool_schema::ExportOptions as SharedExportOptions};
+use fcp_kernel::{
+    OperationInfo,
+    tool_schema::{self, ExportOptions as SharedExportOptions},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -200,7 +203,7 @@ fn is_destructive(op: &DiscoveredOperation) -> bool {
 
 /// Convert canonical `OperationInfo` metadata to an MCP tool.
 pub fn to_mcp_tool_info(op: &OperationInfo, opts: &ExportOptions) -> McpTool {
-    let tool = fcp_core::tool_schema::to_mcp_tool(op, &shared_export_options(opts, false));
+    let tool = tool_schema::to_mcp_tool(op, &shared_export_options(opts, false));
     McpTool {
         name: tool.name,
         description: tool.description,
@@ -228,7 +231,7 @@ pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
 
 /// Convert canonical `OperationInfo` metadata to a Claude tool.
 pub fn to_claude_tool_info(op: &OperationInfo, opts: &ExportOptions) -> ClaudeTool {
-    let tool = fcp_core::tool_schema::to_claude_tool(op, &shared_export_options(opts, false));
+    let tool = tool_schema::to_claude_tool(op, &shared_export_options(opts, false));
     ClaudeTool {
         name: tool.name,
         description: tool.description,
@@ -248,7 +251,7 @@ pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeT
 
 /// Convert canonical `OperationInfo` metadata to an `OpenAI` tool.
 pub fn to_openai_tool_info(op: &OperationInfo, opts: &ExportOptions) -> OpenAiTool {
-    let tool = fcp_core::tool_schema::to_openai_tool(op, &shared_export_options(opts, true));
+    let tool = tool_schema::to_openai_tool(op, &shared_export_options(opts, true));
     OpenAiTool {
         tool_type: tool.tool_type,
         function: OpenAiFunction {

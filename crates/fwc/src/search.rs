@@ -55,6 +55,8 @@ pub struct SearchFilters {
     pub idempotent_only: bool,
     /// Zone filter.
     pub zone: Option<String>,
+    /// Include connectors that are hidden from default catalog flows.
+    pub include_hidden: bool,
 }
 
 impl SearchFilters {
@@ -137,6 +139,10 @@ impl SafetyCeiling {
 pub struct SearchResult {
     pub connector_slug: String,
     pub connector_name: String,
+    pub connector_status: Option<String>,
+    pub hidden_by_default: bool,
+    pub non_live_rationale: Option<String>,
+    pub graduation_guidance: Option<String>,
     pub operation_id: String,
     pub selector: String,
     pub summary: String,
@@ -186,6 +192,10 @@ pub fn search_operations(
                 results.push(SearchResult {
                     connector_slug: connector.slug.clone(),
                     connector_name: connector.detail.summary.name.clone(),
+                    connector_status: connector.manifest_status.map(|status| status.to_string()),
+                    hidden_by_default: connector.hidden_by_default,
+                    non_live_rationale: connector.non_live_rationale.clone(),
+                    graduation_guidance: connector.graduation_guidance.clone(),
                     operation_id: operation.actual_id.clone(),
                     selector: operation.preferred_selector.clone(),
                     summary: operation.summary.summary.clone(),
@@ -219,6 +229,10 @@ pub fn results_to_json(results: &[SearchResult], limit: usize) -> Vec<Value> {
             json!({
                 "connector": r.connector_slug,
                 "connector_name": r.connector_name,
+                "connector_status": r.connector_status.clone(),
+                "hidden_by_default": r.hidden_by_default,
+                "non_live_rationale": r.non_live_rationale.clone(),
+                "graduation_guidance": r.graduation_guidance.clone(),
                 "operation": r.operation_id,
                 "selector": r.selector,
                 "summary": r.summary,
@@ -236,6 +250,9 @@ pub fn results_to_json(results: &[SearchResult], limit: usize) -> Vec<Value> {
 // ── Internal scoring ────────────────────────────────────────────────────
 
 fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFilters) -> bool {
+    if !filters.include_hidden && connector.is_hidden_by_default() {
+        return false;
+    }
     if let Some(ref slug) = filters.connector {
         let slug_lower = slug.to_lowercase();
         if connector.search_slug_lower != slug_lower
@@ -475,6 +492,10 @@ mod tests {
             slug: slug.to_owned(),
             manifest_path: format!("connectors/{slug}/manifest.toml"),
             cohort: "dev-tools".to_owned(),
+            manifest_status: Some(fcp_manifest::ConnectorStatus::Ready),
+            hidden_by_default: false,
+            non_live_rationale: None,
+            graduation_guidance: None,
             runtime_format: "wasi".to_owned(),
             state_model: crate::readiness::MetadataField::Unknown,
             supported_zones: vec!["z:work".to_owned()],
@@ -689,6 +710,63 @@ mod tests {
         let results = search_operations(&connectors, "slack", &SearchFilters::default());
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.connector_slug == "slack"));
+    }
+
+    #[test]
+    fn search_excludes_hidden_connectors_by_default() {
+        let mut hidden = stub_connector(
+            "tlon",
+            vec![stub_operation(
+                "tlon.dm.send",
+                "Send a Tlon DM",
+                "tlon.dm",
+                "medium",
+                "safe",
+                "Send a direct message in Tlon",
+            )],
+        );
+        hidden.manifest_status = Some(fcp_manifest::ConnectorStatus::Incubating);
+        hidden.hidden_by_default = true;
+        hidden.non_live_rationale =
+            Some("Runtime path is incomplete or lacks production evidence".to_owned());
+
+        let results = search_operations(&[hidden], "tlon", &SearchFilters::default());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_includes_hidden_connectors_when_requested() {
+        let mut hidden = stub_connector(
+            "tlon",
+            vec![stub_operation(
+                "tlon.dm.send",
+                "Send a Tlon DM",
+                "tlon.dm",
+                "medium",
+                "safe",
+                "Send a direct message in Tlon",
+            )],
+        );
+        hidden.manifest_status = Some(fcp_manifest::ConnectorStatus::Incubating);
+        hidden.hidden_by_default = true;
+        hidden.non_live_rationale =
+            Some("Runtime path is incomplete or lacks production evidence".to_owned());
+        hidden.graduation_guidance = Some(
+            "Complete runtime implementation, add production evidence, pass compliance suite"
+                .to_owned(),
+        );
+
+        let filters = SearchFilters {
+            include_hidden: true,
+            ..SearchFilters::default()
+        };
+        let results = search_operations(&[hidden], "tlon", &filters);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].connector_status.as_deref(), Some("incubating"));
+        assert!(results[0].hidden_by_default);
+        assert!(results[0].non_live_rationale.is_some());
+        assert!(results[0].graduation_guidance.is_some());
     }
 
     // ── Faceted filter tests ────────────────────────────────────────
@@ -2235,6 +2313,7 @@ mod tests {
         assert!(f.category.is_none());
         assert!(!f.idempotent_only);
         assert!(f.zone.is_none());
+        assert!(!f.include_hidden);
     }
 
     #[test]
@@ -2260,6 +2339,7 @@ mod tests {
         assert!(!results.is_empty());
         let json_str = serde_json::to_string(&results[0]).unwrap();
         assert!(json_str.contains("github.create_issue"));
+        assert!(json_str.contains("connector_status"));
         assert!(json_str.contains("score"));
     }
 

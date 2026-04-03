@@ -37,14 +37,22 @@ use fcp_jira::connector::JiraConnector;
 /// Generate a valid COSE capability token signed by the given key.
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
     let cap = match op {
-        "jira.create_issue" | "jira.update_issue" | "jira.transition_issue"
-        | "jira.move_to_sprint" | "jira.add_comment" | "jira.add_attachment"
-        | "jira.worklog.add" | "jira.worklog.update"
-        | "jira.automation.rule.create" | "jira.automation.rule.update"
-        | "jira.automation.rule.enable" | "jira.automation.rule.disable"
+        "jira.create_issue"
+        | "jira.update_issue"
+        | "jira.transition_issue"
+        | "jira.move_to_sprint"
+        | "jira.add_comment"
+        | "jira.add_attachment"
+        | "jira.worklog.add"
+        | "jira.worklog.update"
+        | "jira.automation.rule.create"
+        | "jira.automation.rule.update"
+        | "jira.automation.rule.enable"
+        | "jira.automation.rule.disable"
         | "jira.sync.push_bead" => "jira.write",
-        "jira.delete_issue" | "jira.worklog.delete"
-        | "jira.automation.rule.delete" => "jira.delete",
+        "jira.delete_issue" | "jira.worklog.delete" | "jira.automation.rule.delete" => {
+            "jira.delete"
+        }
         _ => "jira.read",
     };
     let now = Utc::now();

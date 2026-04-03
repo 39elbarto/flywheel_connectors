@@ -31,8 +31,12 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
     let cap = match op {
         "qdrant.create_collection" | "qdrant.delete_collection" => "qdrant.collections.write",
         "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
-        "qdrant.search" | "qdrant.query_points" | "qdrant.batch_query_points"
-        | "qdrant.get_points" | "qdrant.scroll" | "qdrant.count" => "qdrant.points.read",
+        "qdrant.search"
+        | "qdrant.query_points"
+        | "qdrant.batch_query_points"
+        | "qdrant.get_points"
+        | "qdrant.scroll"
+        | "qdrant.count" => "qdrant.points.read",
         _ => "qdrant.collections.read",
     };
     let now = Utc::now();

@@ -36,7 +36,10 @@ impl std::fmt::Debug for TenantAccessTokenResponse {
         f.debug_struct("TenantAccessTokenResponse")
             .field("code", &self.code)
             .field("msg", &self.msg)
-            .field("tenant_access_token", &self.tenant_access_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "tenant_access_token",
+                &self.tenant_access_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("expire", &self.expire)
             .finish()
     }

@@ -104,9 +104,7 @@ impl ConnectorErrorMapping for HueError {
 
     fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => {
-                Some(Duration::from_millis(*retry_after_ms))
-            }
+            Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
         }
     }
@@ -184,7 +182,10 @@ mod tests {
     #[test]
     fn config_error_maps_to_invalid_request() {
         let err = HueError::Config("bad config".into());
-        assert!(matches!(err.to_fcp_error(), FcpError::InvalidRequest { .. }));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { .. }
+        ));
         assert!(!err.is_retryable());
     }
 

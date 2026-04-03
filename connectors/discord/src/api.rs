@@ -1,7 +1,7 @@
 //! Discord REST API client.
 
-use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method, HttpResponse};
 use fcp_async_core::ExecutionContext;
+use fcp_async_core::http::{HttpClient, HttpClientBuilder, HttpResponse, Method};
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig,
     HttpRetryConfig, RetryLoop,

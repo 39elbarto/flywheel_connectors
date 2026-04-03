@@ -105,9 +105,7 @@ impl ConnectorErrorMapping for OpenRouterError {
 
     fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => {
-                Some(Duration::from_millis(*retry_after_ms))
-            }
+            Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
         }
     }
@@ -178,10 +176,7 @@ mod tests {
     #[test]
     fn from_async_cancelled() {
         let err = OpenRouterError::from_async_error(AsyncError::Cancelled);
-        assert!(matches!(
-            err,
-            OpenRouterError::Api { status_code: 0, .. }
-        ));
+        assert!(matches!(err, OpenRouterError::Api { status_code: 0, .. }));
     }
 
     #[test]

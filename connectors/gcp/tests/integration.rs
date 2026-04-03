@@ -392,7 +392,10 @@ fn service_account_configure_with_valid_key() {
             .await
     })
     .unwrap();
-    assert!(result.is_ok(), "valid service-account config should succeed");
+    assert!(
+        result.is_ok(),
+        "valid service-account config should succeed"
+    );
 }
 
 #[test]
@@ -441,13 +444,20 @@ fn service_account_jwt_token_exchange_via_wiremock() {
         assert_eq!(token2, "ya29.mock-service-account-token");
 
         let requests = mock_server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1, "cached token should suppress a second exchange");
+        assert_eq!(
+            requests.len(),
+            1,
+            "cached token should suppress a second exchange"
+        );
         let body = std::str::from_utf8(&requests[0].body).expect("request body utf8");
         assert!(
             body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer"),
             "request should use the JWT bearer grant: {body}"
         );
-        assert!(body.contains("assertion="), "request should carry a JWT assertion: {body}");
+        assert!(
+            body.contains("assertion="),
+            "request should carry a JWT assertion: {body}"
+        );
     })
     .unwrap();
 }

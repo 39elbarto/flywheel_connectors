@@ -107,9 +107,7 @@ impl ConnectorErrorMapping for BlueBubblesError {
 
     fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => {
-                Some(Duration::from_millis(*retry_after_ms))
-            }
+            Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
         }
     }
@@ -178,13 +176,7 @@ mod tests {
     #[test]
     fn from_async_cancelled() {
         let err = BlueBubblesError::from_async_error(AsyncError::Cancelled);
-        assert!(matches!(
-            err,
-            BlueBubblesError::Api {
-                status_code: 0,
-                ..
-            }
-        ));
+        assert!(matches!(err, BlueBubblesError::Api { status_code: 0, .. }));
     }
 
     #[test]
@@ -193,10 +185,7 @@ mod tests {
             status_code: 404,
             message: "Not Found".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "BlueBubbles API error (404): Not Found"
-        );
+        assert_eq!(err.to_string(), "BlueBubbles API error (404): Not Found");
     }
 
     #[test]

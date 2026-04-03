@@ -105,9 +105,7 @@ fn validate_issue_key(key: &str) -> JiraResult<&str> {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         || !key.contains('-')
     {
-        return Err(JiraError::InvalidInput(format!(
-            "Invalid issue key: {key}"
-        )));
+        return Err(JiraError::InvalidInput(format!("Invalid issue key: {key}")));
     }
     Ok(key)
 }

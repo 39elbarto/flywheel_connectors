@@ -354,9 +354,7 @@ impl TwitterApiClient {
                         // Rate-limited is terminal: the caller should handle
                         // retry_after at a higher level rather than burning
                         // through the request deadline with repeated 429s.
-                        Err(e @ TwitterError::RateLimited { .. }) => {
-                            AttemptOutcome::Terminal(e)
-                        }
+                        Err(e @ TwitterError::RateLimited { .. }) => AttemptOutcome::Terminal(e),
                         Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
                             retry_after: e.retry_after(),
                             error: e,
@@ -408,9 +406,7 @@ impl TwitterApiClient {
                 match req.send().await {
                     Ok(response) => match self.handle_response(response).await {
                         Ok(data) => AttemptOutcome::Success(data),
-                        Err(e @ TwitterError::RateLimited { .. }) => {
-                            AttemptOutcome::Terminal(e)
-                        }
+                        Err(e @ TwitterError::RateLimited { .. }) => AttemptOutcome::Terminal(e),
                         Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
                             retry_after: e.retry_after(),
                             error: e,

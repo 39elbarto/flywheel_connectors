@@ -169,7 +169,10 @@ impl GcpClient {
 
         // Service-account mode: check cache first
         {
-            let cache = self.sa_token_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = self
+                .sa_token_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = cache.as_ref()
                 && !cached.is_expired()
             {
@@ -179,7 +182,9 @@ impl GcpClient {
 
         // Build and exchange JWT
         let (email, key) = self.auth.service_account_credentials().ok_or_else(|| {
-            GcpError::Config("auth mode has no static token and no service-account credentials".into())
+            GcpError::Config(
+                "auth mode has no static token and no service-account credentials".into(),
+            )
         })?;
 
         if key.trim().is_empty() {
@@ -194,18 +199,17 @@ impl GcpClient {
             self.token_endpoint.as_deref(),
         )?;
 
-        let cached = jwt::exchange_jwt_for_token(
-            &self.client,
-            &jwt,
-            self.token_endpoint.as_deref(),
-        )
-        .await?;
+        let cached =
+            jwt::exchange_jwt_for_token(&self.client, &jwt, self.token_endpoint.as_deref()).await?;
 
         let token = cached.access_token.clone();
 
         // Cache the token
         {
-            let mut cache = self.sa_token_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = self
+                .sa_token_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *cache = Some(cached);
         }
 
@@ -529,8 +533,7 @@ impl GcpClient {
             let body = body.clone();
             async move {
                 debug!(attempt, url = %url, "POST json");
-                let req = authenticate_request_static(client.post(&url), &token)
-                    .json(&body);
+                let req = authenticate_request_static(client.post(&url), &token).json(&body);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -897,12 +900,10 @@ mod tests {
 
     #[test]
     fn authenticate_request_static_adds_bearer_header() {
-        let request = authenticate_request_static(
-            Client::new().get("https://example.com"),
-            "ya29.token",
-        )
-        .build()
-        .expect("request should build");
+        let request =
+            authenticate_request_static(Client::new().get("https://example.com"), "ya29.token")
+                .build()
+                .expect("request should build");
 
         assert_eq!(
             request.headers().get(reqwest::header::AUTHORIZATION),
@@ -914,12 +915,9 @@ mod tests {
 
     #[test]
     fn authenticate_request_static_allows_secretless_mode() {
-        let request = authenticate_request_static(
-            Client::new().get("https://example.com"),
-            "",
-        )
-        .build()
-        .expect("request should build");
+        let request = authenticate_request_static(Client::new().get("https://example.com"), "")
+            .build()
+            .expect("request should build");
 
         assert!(
             request

@@ -145,9 +145,7 @@ impl ConnectorErrorMapping for TwilioError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_async_core::AsyncError;
     use fcp_core::FcpError;
-    use fcp_sdk::migration::ConnectorErrorMapping;
 
     // ── Display message tests ────────────────────────────────────────────
 

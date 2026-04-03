@@ -105,9 +105,7 @@ impl ConnectorErrorMapping for DeepgramError {
 
     fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => {
-                Some(Duration::from_millis(*retry_after_ms))
-            }
+            Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
         }
     }
@@ -169,7 +167,13 @@ mod tests {
             message: "Service Unavailable".into(),
         };
         assert!(err.is_retryable());
-        assert!(matches!(err.to_fcp_error(), FcpError::External { retryable: true, .. }));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -179,13 +183,25 @@ mod tests {
             message: "Bad Request".into(),
         };
         assert!(!err.is_retryable());
-        assert!(matches!(err.to_fcp_error(), FcpError::External { retryable: false, .. }));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                retryable: false,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn from_async_timeout() {
         let err = DeepgramError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
-        assert!(matches!(err, DeepgramError::Api { status_code: 408, .. }));
+        assert!(matches!(
+            err,
+            DeepgramError::Api {
+                status_code: 408,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -237,7 +253,9 @@ mod tests {
         let fcp_err = err.to_fcp_error();
         match fcp_err {
             FcpError::External {
-                service, status_code, ..
+                service,
+                status_code,
+                ..
             } => {
                 assert_eq!(service, "deepgram");
                 assert_eq!(status_code, Some(408));

@@ -246,7 +246,10 @@ pub struct TelegramConfig {
 impl std::fmt::Debug for TelegramConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelegramConfig")
-            .field("credential", &self.credential.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("credential_id", &self.credential_id)
             .field("base_url", &self.base_url)
             .field("poll_timeout", &self.poll_timeout)

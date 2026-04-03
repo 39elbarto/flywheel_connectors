@@ -113,8 +113,8 @@ mod tests {
 
     #[test]
     fn json_error_is_not_retryable() {
-        let json_err = serde_json::from_str::<serde_json::Value>("{{bad}}")
-            .expect_err("expected parse error");
+        let json_err =
+            serde_json::from_str::<serde_json::Value>("{{bad}}").expect_err("expected parse error");
         let err = MistralError::Json(json_err);
         assert!(!err.is_retryable());
         assert!(err.retry_after().is_none());
@@ -122,8 +122,8 @@ mod tests {
 
     #[test]
     fn json_error_maps_to_internal() {
-        let json_err = serde_json::from_str::<serde_json::Value>("{{bad}}")
-            .expect_err("expected parse error");
+        let json_err =
+            serde_json::from_str::<serde_json::Value>("{{bad}}").expect_err("expected parse error");
         let err = MistralError::Json(json_err);
         let fcp = err.to_fcp_error();
         match fcp {
@@ -251,12 +251,12 @@ mod tests {
 
     #[test]
     fn display_variants() {
+        assert_eq!(MistralError::NotConfigured.to_string(), "Not configured");
         assert_eq!(
-            MistralError::NotConfigured.to_string(),
-            "Not configured"
-        );
-        assert_eq!(
-            MistralError::RateLimited { retry_after_ms: 100 }.to_string(),
+            MistralError::RateLimited {
+                retry_after_ms: 100
+            }
+            .to_string(),
             "Rate limited (retry after 100ms)"
         );
         assert_eq!(

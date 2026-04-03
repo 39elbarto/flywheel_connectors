@@ -457,22 +457,26 @@ impl S3Client {
         key: &str,
         expires_in: u64,
     ) -> PresignedUrlResponse {
-        use fcp_sdk::sigv4::{AwsCredentials, SignableRequest, SigningScope, SigV4Signer, EMPTY_PAYLOAD_HASH};
+        use fcp_sdk::sigv4::{
+            AwsCredentials, EMPTY_PAYLOAD_HASH, SigV4Signer, SignableRequest, SigningScope,
+        };
 
         let (access_key_id, secret_access_key, region) = match &self.auth {
             S3Auth::Keys {
                 access_key_id,
                 secret_access_key,
                 region,
-            } => (access_key_id.as_str(), secret_access_key.as_str(), region.as_str()),
+            } => (
+                access_key_id.as_str(),
+                secret_access_key.as_str(),
+                region.as_str(),
+            ),
             S3Auth::CredentialId(_) => {
                 // In credential-reference mode, presigning is not possible
                 // because the connector doesn't hold the secret key.
                 let encoded_bucket = Self::encode_bucket(bucket);
-                let encoded_key = percent_encoding::utf8_percent_encode(
-                    key,
-                    percent_encoding::NON_ALPHANUMERIC,
-                );
+                let encoded_key =
+                    percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC);
                 return PresignedUrlResponse {
                     url: format!("{}/{encoded_bucket}/{encoded_key}", self.base_url),
                 };
@@ -493,10 +497,8 @@ impl S3Client {
         let signer = SigV4Signer::new(credentials, scope);
 
         let encoded_bucket = Self::encode_bucket(bucket);
-        let encoded_key = percent_encoding::utf8_percent_encode(
-            key,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_key =
+            percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC);
         let uri = format!("/{encoded_bucket}/{encoded_key}");
 
         let mut headers = std::collections::BTreeMap::new();
@@ -517,9 +519,7 @@ impl S3Client {
 
         let presigned = signer.presign(&signable, expires_in);
 
-        PresignedUrlResponse {
-            url: presigned.url,
-        }
+        PresignedUrlResponse { url: presigned.url }
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────

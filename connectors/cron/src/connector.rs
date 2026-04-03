@@ -7,15 +7,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use chrono::Utc;
 use async_trait::async_trait;
+use chrono::Utc;
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -962,7 +962,10 @@ impl FcpConnector for CronConnector {
         if self.configured {
             Ok(SelfCheckReport::ok())
         } else {
-            Ok(SelfCheckReport::degraded("not_configured", "Connector not configured"))
+            Ok(SelfCheckReport::degraded(
+                "not_configured",
+                "Connector not configured",
+            ))
         }
     }
 
@@ -1012,7 +1015,9 @@ impl FcpConnector for CronConnector {
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
-                    message: format!("Operation {operation} requires mutable access; use handle_invoke"),
+                    message: format!(
+                        "Operation {operation} requires mutable access; use handle_invoke"
+                    ),
                 });
             }
         };
@@ -1073,9 +1078,7 @@ impl CronConnector {
         &self,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, CronError> {
-        let schedule_id = input
-            .get("schedule_id")
-            .and_then(serde_json::Value::as_str);
+        let schedule_id = input.get("schedule_id").and_then(serde_json::Value::as_str);
         let limit = input
             .get("limit")
             .and_then(serde_json::Value::as_u64)

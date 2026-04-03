@@ -15,7 +15,8 @@ use fcp_core::{
     HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
     Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
     Principal, ResourceTypeInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    SimulateRequest, SimulateResponse, SubscribeRequest, ThreadInfo, ThreadKind, TrustLevel, ZoneId,
+    SimulateRequest, SimulateResponse, SubscribeRequest, ThreadInfo, ThreadKind, TrustLevel,
+    ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
@@ -481,7 +482,9 @@ impl MattermostConnector {
             "message": if socket_connected { "WebSocket connection is active" } else { "WebSocket not connected (streaming events unavailable)" },
         }));
 
-        let ready = checks.iter().all(|c| c["passed"].as_bool().unwrap_or(false));
+        let ready = checks
+            .iter()
+            .all(|c| c["passed"].as_bool().unwrap_or(false));
         Ok(json!({ "ready": ready, "checks": checks }))
     }
 
@@ -527,10 +530,7 @@ impl MattermostConnector {
     /// # Errors
     ///
     /// Returns `FcpError` if the request is invalid or the response cannot be serialized.
-    pub fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,

@@ -1613,7 +1613,10 @@ mod tests {
             .await
         })
         .unwrap();
-        assert!(result.is_ok(), "valid service-account key should configure successfully");
+        assert!(
+            result.is_ok(),
+            "valid service-account key should configure successfully"
+        );
     }
 
     #[test]

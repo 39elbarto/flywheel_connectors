@@ -857,7 +857,10 @@ impl std::fmt::Debug for ChatMessage {
             .field("markdown", &self.markdown)
             .field("last_edit_actor_type", &self.last_edit_actor_type)
             .field("last_edit_actor_id", &self.last_edit_actor_id)
-            .field("last_edit_actor_display_name", &self.last_edit_actor_display_name)
+            .field(
+                "last_edit_actor_display_name",
+                &self.last_edit_actor_display_name,
+            )
             .field("last_edit_timestamp", &self.last_edit_timestamp)
             .field("silent", &self.silent)
             .finish()

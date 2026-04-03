@@ -98,12 +98,14 @@ pub enum MessageTarget {
 #[must_use]
 pub fn parse_irc_message(line: &str) -> IrcMessage {
     let trimmed = line.trim_end_matches(['\r', '\n']);
-    let (prefix, remainder) = trimmed.strip_prefix(':').map_or((None, trimmed), |stripped| {
-        stripped.split_once(' ').map_or_else(
-            || (Some(stripped.to_string()), ""),
-            |(prefix_str, rest)| (Some(prefix_str.to_string()), rest.trim_start()),
-        )
-    });
+    let (prefix, remainder) = trimmed
+        .strip_prefix(':')
+        .map_or((None, trimmed), |stripped| {
+            stripped.split_once(' ').map_or_else(
+                || (Some(stripped.to_string()), ""),
+                |(prefix_str, rest)| (Some(prefix_str.to_string()), rest.trim_start()),
+            )
+        });
 
     let (command_raw, params_section) = remainder
         .split_once(' ')
@@ -520,7 +522,10 @@ impl IrcPersistentSession {
                 SessionAction::SendPong(payload.to_string())
             }
             "JOIN" => {
-                let joiner_nick = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
+                let joiner_nick = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
                 if joiner_nick
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))
@@ -532,7 +537,10 @@ impl IrcPersistentSession {
                 SessionAction::None
             }
             "PART" => {
-                let parter_nick = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
+                let parter_nick = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
                 if parter_nick
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))
@@ -554,7 +562,10 @@ impl IrcPersistentSession {
                 SessionAction::None
             }
             "NICK" => {
-                let changer = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
+                let changer = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
                 if changer
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))
@@ -566,7 +577,10 @@ impl IrcPersistentSession {
                 SessionAction::None
             }
             "QUIT" => {
-                let quitter = msg.prefix.as_ref().and_then(|p| extract_nick_from_prefix(p));
+                let quitter = msg
+                    .prefix
+                    .as_ref()
+                    .and_then(|p| extract_nick_from_prefix(p));
                 if quitter
                     .as_deref()
                     .is_some_and(|n| n.eq_ignore_ascii_case(&self.current_nick))

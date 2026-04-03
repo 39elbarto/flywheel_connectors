@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use fcp_async_core::http::HttpClientError;
 use fcp_async_core::AsyncError;
+use fcp_async_core::http::HttpClientError;
 use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use fcp_streaming::StreamError;

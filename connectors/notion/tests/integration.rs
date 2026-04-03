@@ -32,8 +32,12 @@ use fcp_notion::{
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
     let cap = match op {
-        "notion.create_page" | "notion.update_page" | "notion.create_database"
-        | "notion.update_database" | "notion.update_block" | "notion.append_blocks"
+        "notion.create_page"
+        | "notion.update_page"
+        | "notion.create_database"
+        | "notion.update_database"
+        | "notion.update_block"
+        | "notion.append_blocks"
         | "notion.add_comment" => "notion.write",
         "notion.delete_page" | "notion.delete_block" => "notion.delete",
         "notion.search" => "notion.search",

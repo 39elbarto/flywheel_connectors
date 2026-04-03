@@ -4,7 +4,7 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method, HttpResponse};
+use fcp_async_core::http::{HttpClient, HttpClientBuilder, HttpResponse, Method};
 use fcp_async_core::time;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,

@@ -49,7 +49,14 @@ pub struct HuggingfaceConfig {
 impl std::fmt::Debug for HuggingfaceConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HuggingfaceConfig")
-            .field("api_token", &if self.api_token.is_empty() { "<empty>" } else { "[REDACTED]" })
+            .field(
+                "api_token",
+                &if self.api_token.is_empty() {
+                    "<empty>"
+                } else {
+                    "[REDACTED]"
+                },
+            )
             .field("inference_url", &self.inference_url)
             .field("hub_url", &self.hub_url)
             .field("retry", &self.retry)

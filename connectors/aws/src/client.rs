@@ -5,7 +5,9 @@ use reqwest::{Client, RequestBuilder};
 use tracing::debug;
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
-use fcp_sdk::sigv4::{AwsCredentials, EMPTY_PAYLOAD_HASH, SignableRequest, SigningScope, SigV4Signer};
+use fcp_sdk::sigv4::{
+    AwsCredentials, EMPTY_PAYLOAD_HASH, SigV4Signer, SignableRequest, SigningScope,
+};
 
 use crate::error::{AwsError, AwsResult};
 use crate::types::*;
@@ -290,9 +292,17 @@ impl AwsClient {
             let ct = ct.clone();
             async move {
                 debug!(attempt, bucket, key, "S3 put object");
-                let req = sign_request(client.put(&url), &auth, &region, "s3", "PUT", &url, body.as_bytes())
-                    .header("Content-Type", ct)
-                    .body(body);
+                let req = sign_request(
+                    client.put(&url),
+                    &auth,
+                    &region,
+                    "s3",
+                    "PUT",
+                    &url,
+                    body.as_bytes(),
+                )
+                .header("Content-Type", ct)
+                .body(body);
                 handle_json_response::<S3PutObjectResponse>(req, attempt).await
             }
         })
@@ -318,7 +328,15 @@ impl AwsClient {
             let region = self.region.clone();
             async move {
                 debug!(attempt, bucket, key, "S3 delete object");
-                let req = sign_request(client.delete(&url), &auth, &region, "s3", "DELETE", &url, &[]);
+                let req = sign_request(
+                    client.delete(&url),
+                    &auth,
+                    &region,
+                    "s3",
+                    "DELETE",
+                    &url,
+                    &[],
+                );
                 handle_json_response::<S3DeleteObjectResponse>(req, attempt).await
             }
         })
@@ -459,7 +477,8 @@ impl AwsClient {
             let region = self.region.clone();
             async move {
                 debug!(attempt, "Lambda list functions");
-                let req = sign_request(client.get(&url), &auth, &region, "lambda", "GET", &url, &[]);
+                let req =
+                    sign_request(client.get(&url), &auth, &region, "lambda", "GET", &url, &[]);
                 handle_json_response::<Vec<LambdaFunction>>(req, attempt).await
             }
         })
@@ -490,7 +509,16 @@ impl AwsClient {
             async move {
                 debug!(attempt, function_name, "Lambda invoke");
                 let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
-                let req = sign_request(client.post(&url), &auth, &region, "lambda", "POST", &url, &payload_bytes).json(&payload);
+                let req = sign_request(
+                    client.post(&url),
+                    &auth,
+                    &region,
+                    "lambda",
+                    "POST",
+                    &url,
+                    &payload_bytes,
+                )
+                .json(&payload);
                 handle_json_response::<LambdaInvokeResponse>(req, attempt).await
             }
         })

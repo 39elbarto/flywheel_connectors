@@ -65,9 +65,9 @@ fn capability_for_operation(op: &str) -> &str {
         "m365.calendar.create_event"
         | "m365.calendar.delete_event"
         | "m365.calendar.update_event" => "m365.calendar.write",
-        "m365.calendar.list_events"
-        | "m365.calendar.get_event"
-        | "m365.calendar.get_freebusy" => "m365.calendar.read",
+        "m365.calendar.list_events" | "m365.calendar.get_event" | "m365.calendar.get_freebusy" => {
+            "m365.calendar.read"
+        }
         "m365.tasks.create_task" => "m365.tasks.write",
         "m365.tasks.list_task_lists" | "m365.tasks.list_tasks" => "m365.tasks.read",
         "m365.subscriptions.create" | "m365.subscriptions.renew" | "m365.subscriptions.delete" => {

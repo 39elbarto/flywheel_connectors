@@ -51,7 +51,10 @@ impl std::fmt::Debug for TwitterConfig {
             .field("consumer_secret", &"[REDACTED]")
             .field("access_token", &"[REDACTED]")
             .field("access_token_secret", &"[REDACTED]")
-            .field("bearer_token", &self.bearer_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("api_url", &self.api_url)
             .field("upload_url", &self.upload_url)
             .field("stream_url", &self.stream_url)

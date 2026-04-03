@@ -29,7 +29,10 @@ impl std::fmt::Debug for ArxivConfig {
         f.debug_struct("ArxivConfig")
             .field("arxiv_base_url", &self.arxiv_base_url)
             .field("scholar_base_url", &self.scholar_base_url)
-            .field("scholar_api_key", &self.scholar_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "scholar_api_key",
+                &self.scholar_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("rate_limit_rps", &self.rate_limit_rps)
             .finish()
     }

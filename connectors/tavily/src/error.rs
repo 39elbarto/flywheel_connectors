@@ -105,9 +105,7 @@ impl ConnectorErrorMapping for TavilyError {
 
     fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => {
-                Some(Duration::from_millis(*retry_after_ms))
-            }
+            Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
         }
     }
@@ -164,7 +162,13 @@ mod tests {
     #[test]
     fn from_async_timeout() {
         let err = TavilyError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
-        assert!(matches!(err, TavilyError::Api { status_code: 408, .. }));
+        assert!(matches!(
+            err,
+            TavilyError::Api {
+                status_code: 408,
+                ..
+            }
+        ));
     }
 
     #[test]

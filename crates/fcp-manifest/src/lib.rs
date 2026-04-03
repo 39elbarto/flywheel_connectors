@@ -753,7 +753,7 @@ pub struct ConnectorSection {
 }
 
 /// Readiness status of a connector.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorStatus {
     /// Fully functional — all declared operations work.
@@ -765,6 +765,55 @@ pub enum ConnectorStatus {
     Experimental,
     /// Connector is deprecated — prefer the listed alternative.
     Deprecated,
+    /// Contract shape is useful but the runtime path is incomplete,
+    /// safety-sensitive, or lacks honest non-mock evidence.
+    /// Hidden from default catalog/install flows; discoverable via
+    /// `--include-incubating` or equivalent operator opt-in.
+    Incubating,
+    /// High-risk or architecturally incomplete surface requiring explicit
+    /// operator approval. May not graduate without significant changes.
+    /// Hidden from all default discovery surfaces.
+    Quarantined,
+}
+
+impl ConnectorStatus {
+    /// Returns `true` if this status represents a live, production-ready connector.
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        matches!(self, Self::Ready | Self::Experimental)
+    }
+
+    /// Returns `true` if this connector should be hidden from default
+    /// catalog, install, and discovery surfaces.
+    #[must_use]
+    pub const fn is_hidden_by_default(&self) -> bool {
+        matches!(self, Self::Incubating | Self::Quarantined | Self::Stub)
+    }
+
+    /// Returns a human-readable rationale for why the connector is non-live.
+    #[must_use]
+    pub const fn non_live_rationale(&self) -> Option<&'static str> {
+        match self {
+            Self::Ready | Self::Experimental => None,
+            Self::Stub => Some("Operations are declared but return not-implemented errors"),
+            Self::Deprecated => Some("Connector is deprecated; prefer the listed alternative"),
+            Self::Incubating => Some("Runtime path is incomplete or lacks production evidence"),
+            Self::Quarantined => Some("High-risk surface requiring explicit operator approval"),
+        }
+    }
+
+    /// Returns guidance for what would be needed to graduate to `Ready`.
+    #[must_use]
+    pub const fn graduation_guidance(&self) -> Option<&'static str> {
+        match self {
+            Self::Ready => None,
+            Self::Experimental => Some("Stabilize API surface and complete production testing"),
+            Self::Stub => Some("Implement all declared operations with real API integration"),
+            Self::Deprecated => None, // Deprecated connectors don't graduate
+            Self::Incubating => Some("Complete runtime implementation, add production evidence, pass compliance suite"),
+            Self::Quarantined => Some("Resolve architectural concerns, complete safety review, pass security audit"),
+        }
+    }
 }
 
 impl std::fmt::Display for ConnectorStatus {
@@ -774,6 +823,8 @@ impl std::fmt::Display for ConnectorStatus {
             Self::Stub => write!(f, "stub"),
             Self::Experimental => write!(f, "experimental"),
             Self::Deprecated => write!(f, "deprecated"),
+            Self::Incubating => write!(f, "incubating"),
+            Self::Quarantined => write!(f, "quarantined"),
         }
     }
 }

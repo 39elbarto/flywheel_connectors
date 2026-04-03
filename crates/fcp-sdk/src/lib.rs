@@ -235,6 +235,16 @@ pub mod prelude;
 pub mod ratelimit;
 pub mod retry;
 pub mod runtime;
+#[allow(
+    missing_docs,
+    clippy::doc_markdown,
+    clippy::missing_docs_in_private_items,
+    clippy::format_push_string,
+    clippy::format_collect,
+    clippy::redundant_closure,
+    clippy::redundant_closure_for_method_calls,
+    clippy::missing_const_for_fn
+)]
 pub mod sigv4;
 pub mod streaming;
 

@@ -1,4 +1,3 @@
-#![allow(clippy::doc_markdown)] // AWS identifier names (SigV4, HMAC-SHA256, etc.) throughout
 //! AWS Signature Version 4 signing for FCP connectors.
 //!
 //! Implements the AWS SigV4 signing process as documented in the

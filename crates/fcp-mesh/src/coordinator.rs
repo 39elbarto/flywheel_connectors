@@ -555,8 +555,8 @@ impl LeaseCoordinator {
 }
 
 fn compare_conflicting_leases(
-    left: &&ObservedLeaseAuthority,
-    right: &&ObservedLeaseAuthority,
+    left: &ObservedLeaseAuthority,
+    right: &ObservedLeaseAuthority,
 ) -> Ordering {
     left.lease
         .fencing_token

@@ -707,6 +707,7 @@ impl MeshNode {
                 profile: profile.clone(),
                 local_symbols: self.local_symbols.clone(),
                 held_leases: self.local_leases.clone(),
+                zones: Vec::new(), // TODO: populate from mesh enrollment data
             });
         }
 
@@ -715,6 +716,7 @@ impl MeshNode {
                 profile: state.profile.clone(),
                 local_symbols: state.local_symbols.clone(),
                 held_leases: state.held_leases.clone(),
+                zones: Vec::new(), // TODO: populate from peer zone advertisements
             });
         }
 

@@ -76,6 +76,8 @@ pub struct CandidateNode {
     pub eligible: bool,
     /// Reasons why this node was selected or rejected.
     pub decision_reasons: Vec<DecisionReason>,
+    /// Zones this node belongs to (threaded from `NodeInfo`).
+    pub zones: Vec<ZoneId>,
 }
 
 impl CandidateNode {
@@ -88,6 +90,7 @@ impl CandidateNode {
             adjustments: Vec::new(),
             eligible: true,
             decision_reasons: Vec::new(),
+            zones: Vec::new(),
         }
     }
 
@@ -343,6 +346,10 @@ pub struct NodeInfo {
     pub local_symbols: HashSet<ObjectId>,
     /// Active leases held by this node.
     pub held_leases: Vec<HeldLease>,
+    /// Zones this node belongs to (from Tailscale tags or mesh enrollment).
+    /// Empty means the node's zone membership is unknown.
+    #[allow(dead_code)]
+    pub zones: Vec<ZoneId>,
 }
 
 impl NodeInfo {
@@ -521,6 +528,7 @@ impl ExecutionPlanner {
         // Get base fitness score
         let fitness = node.profile.compute_fitness(&fitness_ctx);
         let mut candidate = CandidateNode::new(node.profile.node_id.clone(), fitness.score);
+        candidate.zones.clone_from(&node.zones);
 
         // If base fitness already marked as ineligible, return early
         if !fitness.eligible {
@@ -690,13 +698,17 @@ impl ExecutionPlanner {
         let mut candidates = self.plan(input, context);
         let initial_count = candidates.len();
 
-        // Apply zone restrictions from policy
+        // Apply zone restrictions from policy: only retain nodes whose zone
+        // membership intersects with the allowed zones. Nodes with unknown
+        // zones (empty list) are rejected when a zone policy is active.
         if !policy.zones.is_empty() {
             candidates.retain(|c| {
-                // Check if node's zone (from profile tags) matches any allowed zone
-                // For now, all candidates pass (zone checking needs node zone info)
-                let _ = c; // placeholder — needs NodeInfo zone integration
-                true
+                if c.zones.is_empty() {
+                    // Unknown zone membership → reject when zone policy is active
+                    false
+                } else {
+                    c.zones.iter().any(|z| policy.zones.contains(z))
+                }
             });
         }
 
@@ -761,8 +773,10 @@ impl ExecutionPlanner {
             // Tag, Zone, and AvailabilityProfile exclusions need additional
             // node metadata that isn't available on CandidateNode alone.
             // These will be wired once NodeInfo is threaded through.
+            DevicePattern::Zone { zone } => {
+                candidate.zones.iter().any(|z| z == zone)
+            }
             DevicePattern::Tag { .. }
-            | DevicePattern::Zone { .. }
             | DevicePattern::AvailabilityProfile { .. } => false,
         }
     }
@@ -1262,6 +1276,7 @@ mod tests {
             profile: make_profile(suffix, memory_mb, has_connector, connector_version),
             local_symbols: symbols.into_iter().collect(),
             held_leases: Vec::new(),
+            zones: Vec::new(),
         }
     }
 
@@ -1692,6 +1707,121 @@ mod tests {
         let zone: ZoneId = "z:test".parse().unwrap();
         let ctx = PlannerContext::new(test_connector_id()).with_target_zone(zone);
         assert!(ctx.target_zone.is_some());
+    }
+
+    #[test]
+    fn zone_policy_filters_candidates_by_zone() {
+        let planner = ExecutionPlanner::new();
+        let work_zone: ZoneId = "z:work".parse().unwrap();
+        let private_zone: ZoneId = "z:private".parse().unwrap();
+
+        let mut node_work = make_node_info("work-node", 4096, true, "1.0.0", vec![]);
+        node_work.zones = vec![work_zone.clone()];
+
+        let mut node_private = make_node_info("private-node", 4096, true, "1.0.0", vec![]);
+        node_private.zones = vec![private_zone.clone()];
+
+        let mut node_both = make_node_info("both-node", 4096, true, "1.0.0", vec![]);
+        node_both.zones = vec![work_zone.clone(), private_zone.clone()];
+
+        let input = PlannerInput::new(vec![node_work, node_private, node_both], 1000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy {
+            zones: vec![work_zone],
+            ..PlacementPolicy::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        // Collect all candidate node IDs (selected + alternatives)
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(sel) = &plan.selected {
+            ids.push(sel.node_id.as_str().to_string());
+        }
+        for alt in &plan.alternatives {
+            ids.push(alt.node_id.as_str().to_string());
+        }
+
+        assert!(ids.iter().any(|id| id.contains("work-node")), "work zone node should pass");
+        assert!(ids.iter().any(|id| id.contains("both-node")), "node in both zones should pass");
+        assert!(!ids.iter().any(|id| id.contains("private-node")), "private-only node should be filtered");
+    }
+
+    #[test]
+    fn zone_policy_rejects_nodes_with_unknown_zones() {
+        let planner = ExecutionPlanner::new();
+        let work_zone: ZoneId = "z:work".parse().unwrap();
+
+        // Node with empty zones (unknown) should be rejected when zone policy is active
+        let node_unknown = make_node_info("unknown-node", 4096, true, "1.0.0", vec![]);
+
+        let mut node_work = make_node_info("work-node", 4096, true, "1.0.0", vec![]);
+        node_work.zones = vec![work_zone.clone()];
+
+        let input = PlannerInput::new(vec![node_unknown, node_work], 1000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy {
+            zones: vec![work_zone],
+            ..PlacementPolicy::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(sel) = &plan.selected {
+            ids.push(sel.node_id.as_str().to_string());
+        }
+        for alt in &plan.alternatives {
+            ids.push(alt.node_id.as_str().to_string());
+        }
+
+        assert!(!ids.iter().any(|id| id.contains("unknown-node")), "unknown zone should be rejected");
+        assert!(ids.iter().any(|id| id.contains("work-node")), "matching zone should pass");
+    }
+
+    #[test]
+    fn empty_zone_policy_retains_all_candidates() {
+        let planner = ExecutionPlanner::new();
+
+        let mut node = make_node_info("any-node", 4096, true, "1.0.0", vec![]);
+        node.zones = vec!["z:work".parse().unwrap()];
+
+        let input = PlannerInput::new(vec![node], 1000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy::default(); // empty zones = no restriction
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        assert!(plan.selected.is_some() || !plan.alternatives.is_empty(),
+            "empty zone policy should not filter anything");
+    }
+
+    #[test]
+    fn zone_exclusion_pattern_rejects_matching_zones() {
+        let planner = ExecutionPlanner::new();
+        let public_zone: ZoneId = "z:public".parse().unwrap();
+
+        let mut node_public = make_node_info("public-node", 4096, true, "1.0.0", vec![]);
+        node_public.zones = vec![public_zone.clone()];
+
+        let mut node_work = make_node_info("work-node", 4096, true, "1.0.0", vec![]);
+        node_work.zones = vec!["z:work".parse().unwrap()];
+
+        let input = PlannerInput::new(vec![node_public, node_work], 1000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy {
+            excludes: vec![DevicePattern::Zone { zone: public_zone }],
+            ..PlacementPolicy::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(sel) = &plan.selected {
+            ids.push(sel.node_id.as_str().to_string());
+        }
+        for alt in &plan.alternatives {
+            ids.push(alt.node_id.as_str().to_string());
+        }
+
+        assert!(!ids.iter().any(|id| id.contains("public-node")), "public zone should be excluded");
+        assert!(ids.iter().any(|id| id.contains("work-node")), "work zone should pass");
     }
 
     #[test]
@@ -2720,6 +2850,7 @@ mod tests {
                     15.0,
                     "3 of 5 symbols local",
                 )],
+                zones: Vec::new(),
             }),
             alternatives: vec![CandidateNode {
                 node_id: NodeId::new("node-2"),
@@ -2731,6 +2862,7 @@ mod tests {
                     better_count: 1,
                 }],
                 adjustments: vec![],
+                zones: Vec::new(),
             }],
             nodes_considered: 5,
             nodes_excluded: 2,
@@ -2838,6 +2970,7 @@ mod tests {
             profile: builder.build(),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: Vec::new(),
         }
     }
 

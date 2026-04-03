@@ -42,8 +42,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::evidence::{
-    EvidenceBundle, EvidenceItem, ScenarioEnvironment, ScenarioMeta, ScenarioOutcome,
-    ScenarioScript, ScenarioStep, StepAssertion, StepKind,
+    canonical_e2e_artifact_paths, default_e2e_validation_command, EvidenceBundle, EvidenceItem,
+    EvidenceLayer, ScenarioEnvironment, ScenarioMeta, ScenarioOutcome, ScenarioScript,
+    ScenarioStep, StepAssertion, StepKind, VerificationCommands,
+    VERIFICATION_BUNDLE_SCHEMA_VERSION,
 };
 use crate::{SessionScript, SessionTranscript, StepOutcome, TranscriptEntry, TranscriptSummary};
 
@@ -716,16 +718,28 @@ impl SessionE2eRunner {
             outcome,
         };
 
+        let replay_instructions = self.build_replay_command(script);
+
         EvidenceBundle {
+            schema_version: VERIFICATION_BUNDLE_SCHEMA_VERSION.to_string(),
+            scenario_id: self.config.scenario_id.clone(),
+            run_id: Some(self.run_id.clone()),
+            connector_id: Some(self.config.connector_id.clone()),
+            layer: EvidenceLayer::E2e,
+            artifact_paths: canonical_e2e_artifact_paths(),
             script: scenario_script,
             redacted_fields: Vec::new(),
-            replay_instructions: self.build_replay_command(script),
+            replay_instructions,
+            commands: VerificationCommands {
+                local: self.replay_invocation_command(script),
+                ci: self.cargo_replay_command().unwrap_or_default(),
+                validate: default_e2e_validation_command(),
+            },
             retention_days: 90,
         }
     }
 
-    /// Generate a replay command from a session script for debugging.
-    fn build_replay_command(&self, script: &SessionScript) -> String {
+    fn replay_invocation_command(&self, script: &SessionScript) -> String {
         let fixture_arg = self
             .config
             .fixture_address
@@ -738,16 +752,31 @@ impl SessionE2eRunner {
             acc
         });
 
-        let cargo_replay = self.config.replay_test_filter.as_deref().map_or_else(
+        format!(
+            "fwc simulate {} --scenario {}{}{}",
+            self.config.connector_id, script.scenario_id, fixture_arg, env_args,
+        )
+    }
+
+    fn cargo_replay_command(&self) -> Option<String> {
+        self.config
+            .replay_test_filter
+            .as_deref()
+            .map(|filter| format!("rch exec -- cargo test -p fcp-e2e {filter} -- --nocapture"))
+    }
+
+    /// Generate a replay command from a session script for debugging.
+    fn build_replay_command(&self, script: &SessionScript) -> String {
+        let cargo_replay = self.cargo_replay_command().map_or_else(
             || {
                 "# No direct cargo test filter is recorded for this scenario.\n\
                  # Re-run the host-facing simulate command above or supply a concrete cargo test filter."
                     .to_string()
             },
-            |filter| {
+            |command| {
                 format!(
                     "# Re-run the associated fcp-e2e test/filter:\n\
-                     cargo test -p fcp-e2e {filter} -- --nocapture"
+                     {command}"
                 )
             },
         );
@@ -756,14 +785,11 @@ impl SessionE2eRunner {
             "# Replay session E2E:\n\
              # Run ID: {}\n\
              # Correlation: {}\n\
-             fwc simulate {} --scenario {}{}{}\n\
+             {}\n\
              {}",
             self.run_id,
             self.correlation_id,
-            self.config.connector_id,
-            script.scenario_id,
-            fixture_arg,
-            env_args,
+            self.replay_invocation_command(script),
             cargo_replay,
         )
     }
@@ -1050,7 +1076,7 @@ mod tests {
         });
         let cmd = runner.build_replay_command(&SessionScript::new("ws.test"));
         assert!(cmd.contains(
-            "cargo test -p fcp-e2e host_e2e::tests::execute_basic_sse_script_passes -- --nocapture"
+            "rch exec -- cargo test -p fcp-e2e host_e2e::tests::execute_basic_sse_script_passes -- --nocapture"
         ));
         assert!(!cmd.contains("No direct cargo test filter"));
     }
@@ -1083,6 +1109,25 @@ mod tests {
         assert_eq!(result.evidence.script.meta.author, "test-agent");
         assert_eq!(result.evidence.script.meta.tags, vec!["ci", "webhook"]);
         assert!(result.evidence.script.meta.name.contains("github"));
+        assert_eq!(result.evidence.scenario_id, "webhook.push");
+        assert_eq!(
+            result.evidence.run_id.as_deref(),
+            Some(result.run_id.as_str())
+        );
+        assert_eq!(result.evidence.connector_id.as_deref(), Some("github"));
+        assert_eq!(result.evidence.layer, EvidenceLayer::E2e);
+        assert_eq!(
+            result.evidence.commands.validate,
+            "bash scripts/ci/validate_e2e_artifacts.sh --bundle-dir <bundle-dir>"
+        );
+        assert_eq!(
+            result
+                .evidence
+                .artifact_paths
+                .get("session_transcript_json")
+                .map(String::as_str),
+            Some("session_transcript.json")
+        );
     }
 
     #[test]
@@ -1170,12 +1215,10 @@ mod tests {
             .last()
             .expect("checkpoint step should exist");
         assert_eq!(checkpoint.kind, StepKind::Checkpoint);
-        assert!(
-            checkpoint
-                .evidence
-                .iter()
-                .any(|item| matches!(item, EvidenceItem::Log { lines } if !lines.is_empty()))
-        );
+        assert!(checkpoint
+            .evidence
+            .iter()
+            .any(|item| matches!(item, EvidenceItem::Log { lines } if !lines.is_empty())));
         assert!(checkpoint.evidence.iter().any(|item| {
             matches!(
                 item,

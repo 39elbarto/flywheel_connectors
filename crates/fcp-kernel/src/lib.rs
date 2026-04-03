@@ -90,7 +90,8 @@ pub use fcp_core::{
 
 pub use fcp_core::{
     CanaryPolicy, CrashLoopDetector, HealthMetrics, LifecycleError, LifecycleManager,
-    LifecycleRecord, LifecycleState, LifecycleStatus, LifecycleTransition, TransitionReason,
+    LifecycleRecord, LifecycleState, LifecycleStatus, LifecycleTransition, RolloutPolicy,
+    TransitionReason,
 };
 
 // ── Health / Self-Check ──────────────────────────────────────────
@@ -196,6 +197,7 @@ mod tests {
     fn kernel_exports_lifecycle_types() {
         // Verify lifecycle state machine types are accessible
         let _: LifecycleState = LifecycleState::Pending;
+        let _: RolloutPolicy = RolloutPolicy::default();
     }
 
     #[test]

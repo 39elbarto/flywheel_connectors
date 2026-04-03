@@ -1331,7 +1331,7 @@ impl CheckpointHandoffArtifact {
         checkpoint_object_id: ObjectId,
         transfer_encoding: &CheckpointTransferEncoding,
         handoff: &LeaseHandoff,
-        inputs: HandoffArtifactInputs,
+        inputs: &HandoffArtifactInputs,
     ) -> Result<Self, ComputationMigrationError> {
         computation.validate_checkpoint_binding(checkpoint, checkpoint_object_id)?;
         let export = CheckpointExportArtifact::from_transfer_encoding(
@@ -1506,7 +1506,7 @@ impl ResumeEvidence {
         resumed_lease_id: LeaseId,
         resumed_lease: &Lease,
         now: u64,
-        inputs: ResumeEvidenceInputs,
+        inputs: &ResumeEvidenceInputs,
     ) -> Result<Self, ComputationMigrationError> {
         computation.validate_checkpoint_binding(checkpoint, checkpoint_object_id)?;
         let boundary = ResumeBoundary::from_checkpoint(
@@ -1887,6 +1887,137 @@ impl ForkResolutionOutcome {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CRDT State Merge (NORMATIVE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Errors from CRDT state merge operations.
+#[derive(Debug, Error)]
+pub enum CrdtMergeError {
+    /// Failed to deserialize CBOR state payload.
+    #[error("CRDT deserialization error ({crdt_type}): {message}")]
+    Deserialization {
+        crdt_type: CrdtType,
+        message: String,
+    },
+
+    /// Failed to serialize merged CBOR state payload.
+    #[error("CRDT serialization error ({crdt_type}): {message}")]
+    Serialization {
+        crdt_type: CrdtType,
+        message: String,
+    },
+
+    /// CRDT merge is not supported for this state model.
+    #[error("CRDT merge is not valid for state model: {model}")]
+    InvalidModel { model: String },
+}
+
+/// Merge two CBOR-encoded CRDT state payloads according to their `CrdtType`.
+///
+/// This is the delta-level merge used for fork resolution in CRDT-mode connectors.
+/// Both payloads must represent the same CRDT type. The result is a new CBOR-encoded
+/// state that is the deterministic merge of both inputs.
+///
+/// # Arguments
+///
+/// * `crdt_type` - The CRDT semantics to use for merging.
+/// * `state_a` - CBOR-encoded state from branch A.
+/// * `state_b` - CBOR-encoded state from branch B.
+///
+/// # Errors
+///
+/// Returns `CrdtMergeError` if deserialization or serialization fails.
+pub fn merge_crdt_states(
+    crdt_type: CrdtType,
+    state_a: &[u8],
+    state_b: &[u8],
+) -> Result<Vec<u8>, CrdtMergeError> {
+    match crdt_type {
+        CrdtType::LwwMap => {
+            let mut a: crate::LwwMap<String, serde_json::Value> =
+                ciborium::from_reader(state_a).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_a: {e}"),
+                })?;
+            let b: crate::LwwMap<String, serde_json::Value> =
+                ciborium::from_reader(state_b).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_b: {e}"),
+                })?;
+            a.merge(&b);
+            to_canonical_cbor(&a).map_err(|e| CrdtMergeError::Serialization {
+                crdt_type,
+                message: e.to_string(),
+            })
+        }
+        CrdtType::OrSet => {
+            let mut a: crate::OrSet<String> =
+                ciborium::from_reader(state_a).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_a: {e}"),
+                })?;
+            let b: crate::OrSet<String> =
+                ciborium::from_reader(state_b).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_b: {e}"),
+                })?;
+            a.merge(&b);
+            to_canonical_cbor(&a).map_err(|e| CrdtMergeError::Serialization {
+                crdt_type,
+                message: e.to_string(),
+            })
+        }
+        CrdtType::GCounter => {
+            let mut a: crate::GCounter =
+                ciborium::from_reader(state_a).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_a: {e}"),
+                })?;
+            let b: crate::GCounter =
+                ciborium::from_reader(state_b).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_b: {e}"),
+                })?;
+            a.merge(&b);
+            to_canonical_cbor(&a).map_err(|e| CrdtMergeError::Serialization {
+                crdt_type,
+                message: e.to_string(),
+            })
+        }
+        CrdtType::PnCounter => {
+            let mut a: crate::PnCounter =
+                ciborium::from_reader(state_a).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_a: {e}"),
+                })?;
+            let b: crate::PnCounter =
+                ciborium::from_reader(state_b).map_err(|e| CrdtMergeError::Deserialization {
+                    crdt_type,
+                    message: format!("branch_b: {e}"),
+                })?;
+            a.merge(&b);
+            to_canonical_cbor(&a).map_err(|e| CrdtMergeError::Serialization {
+                crdt_type,
+                message: e.to_string(),
+            })
+        }
+    }
+}
+
+/// Outcome of a CRDT merge operation on forked connector state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrdtMergeOutcome {
+    /// The fork that was resolved.
+    pub fork_event: ForkEvent,
+    /// Merged state (CBOR-encoded).
+    pub merged_state_cbor: Vec<u8>,
+    /// CRDT type used for the merge.
+    pub crdt_type: CrdtType,
+    /// Timestamp when the merge completed.
+    pub merged_at: u64,
+}
+
 /// Fork detector for connector state objects.
 ///
 /// Tracks state objects indexed by their `prev` pointer to detect forks
@@ -2033,13 +2164,21 @@ impl StateForkDetector {
                 "manual resolution requires explicit head selection",
             ),
             ForkResolution::CrdtMerge => {
-                // CRDT merge would happen at the delta level, not here
-                // This just signals that merge is the strategy
-                ForkResolutionOutcome::failure(
+                // The detector does not hold CBOR state payloads — it only
+                // tracks object IDs for fork detection. To complete a CRDT
+                // merge, the caller must:
+                // 1. Retrieve both branch states (branch_a, branch_b)
+                // 2. Call `merge_crdt_states(crdt_type, state_a, state_b)`
+                // 3. Persist the merged result as a new state object
+                //
+                // We return a "success" outcome to signal that CrdtMerge is
+                // the resolved strategy. The caller picks either branch as
+                // the merge base (branch_a by convention) and merges into it.
+                ForkResolutionOutcome::success(
                     fork.clone(),
                     strategy,
+                    fork.branch_a,
                     now,
-                    "CRDT merge requires delta-level merging (not implemented in detector)",
                 )
             }
         }
@@ -2608,6 +2747,26 @@ mod tests {
         previous_fencing_token: u64,
         next_fencing_token: u64,
     ) -> LeaseHandoff {
+        test_migration_handoff_with_checkpoint(
+            previous_lease_id,
+            next_lease_id,
+            from,
+            to,
+            previous_fencing_token,
+            next_fencing_token,
+            Some(test_object_id("checkpoint")),
+        )
+    }
+
+    fn test_migration_handoff_with_checkpoint(
+        previous_lease_id: LeaseId,
+        next_lease_id: LeaseId,
+        from: &str,
+        to: &str,
+        previous_fencing_token: u64,
+        next_fencing_token: u64,
+        checkpoint_object_id: Option<ObjectId>,
+    ) -> LeaseHandoff {
         LeaseHandoff {
             previous_lease_id,
             next_lease_id,
@@ -2619,7 +2778,7 @@ mod tests {
             previous_fencing_token,
             next_fencing_token,
             transferred_at: 1_500,
-            checkpoint_object_id: Some(test_object_id("checkpoint")),
+            checkpoint_object_id,
         }
     }
 
@@ -2792,6 +2951,207 @@ mod tests {
         detector.clear();
 
         assert!(detector.lease_seq(&genesis).is_none());
+    }
+
+    // ── CRDT merge tests ──
+
+    #[test]
+    fn merge_crdt_states_lww_map() {
+        use crate::{CrdtActorId, LwwMap};
+
+        let mut map_a = LwwMap::<String, serde_json::Value>::default();
+        map_a.insert(
+            "key1".into(),
+            serde_json::json!("value_a"),
+            100,
+            CrdtActorId::new("node_a"),
+        );
+        map_a.insert(
+            "key2".into(),
+            serde_json::json!(42),
+            100,
+            CrdtActorId::new("node_a"),
+        );
+
+        let mut map_b = LwwMap::<String, serde_json::Value>::default();
+        map_b.insert(
+            "key1".into(),
+            serde_json::json!("value_b"),
+            200, // newer timestamp wins
+            CrdtActorId::new("node_b"),
+        );
+        map_b.insert(
+            "key3".into(),
+            serde_json::json!("only_b"),
+            100,
+            CrdtActorId::new("node_b"),
+        );
+
+        let cbor_a = fcp_cbor::to_canonical_cbor(&map_a).unwrap();
+        let cbor_b = fcp_cbor::to_canonical_cbor(&map_b).unwrap();
+
+        let merged = merge_crdt_states(CrdtType::LwwMap, &cbor_a, &cbor_b).unwrap();
+
+        let result: LwwMap<String, serde_json::Value> = ciborium::from_reader(&merged[..]).unwrap();
+        // key1 should have value_b (timestamp 200 > 100)
+        assert_eq!(
+            result.get(&"key1".to_string()).unwrap().value,
+            serde_json::json!("value_b")
+        );
+        // key2 should be preserved from A
+        assert_eq!(
+            result.get(&"key2".to_string()).unwrap().value,
+            serde_json::json!(42)
+        );
+        // key3 should be added from B
+        assert_eq!(
+            result.get(&"key3".to_string()).unwrap().value,
+            serde_json::json!("only_b")
+        );
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn merge_crdt_states_gcounter() {
+        use crate::{CrdtActorId, GCounter};
+
+        let mut counter_a = GCounter::default();
+        counter_a.increment(CrdtActorId::new("node_a"), 10);
+        counter_a.increment(CrdtActorId::new("node_b"), 5);
+
+        let mut counter_b = GCounter::default();
+        counter_b.increment(CrdtActorId::new("node_a"), 7); // less than A's 10
+        counter_b.increment(CrdtActorId::new("node_b"), 12); // more than A's 5
+        counter_b.increment(CrdtActorId::new("node_c"), 3); // only in B
+
+        let cbor_a = fcp_cbor::to_canonical_cbor(&counter_a).unwrap();
+        let cbor_b = fcp_cbor::to_canonical_cbor(&counter_b).unwrap();
+
+        let merged = merge_crdt_states(CrdtType::GCounter, &cbor_a, &cbor_b).unwrap();
+
+        let result: GCounter = ciborium::from_reader(&merged[..]).unwrap();
+        // max(10, 7) + max(5, 12) + 3 = 10 + 12 + 3 = 25
+        assert_eq!(result.value(), 25);
+    }
+
+    #[test]
+    fn merge_crdt_states_pn_counter() {
+        use crate::{CrdtActorId, PnCounter};
+
+        let mut pn_a = PnCounter::default();
+        pn_a.increment(CrdtActorId::new("node_a"), 20);
+        pn_a.decrement(CrdtActorId::new("node_a"), 5);
+
+        let mut pn_b = PnCounter::default();
+        pn_b.increment(CrdtActorId::new("node_b"), 10);
+        pn_b.decrement(CrdtActorId::new("node_b"), 3);
+
+        let cbor_a = fcp_cbor::to_canonical_cbor(&pn_a).unwrap();
+        let cbor_b = fcp_cbor::to_canonical_cbor(&pn_b).unwrap();
+
+        let merged = merge_crdt_states(CrdtType::PnCounter, &cbor_a, &cbor_b).unwrap();
+
+        let result: PnCounter = ciborium::from_reader(&merged[..]).unwrap();
+        // pos: max(20,0) + max(0,10) = 20 + 10 = 30
+        // neg: max(5,0) + max(0,3) = 5 + 3 = 8
+        // value = 30 - 8 = 22
+        assert_eq!(result.value(), 22);
+    }
+
+    #[test]
+    fn merge_crdt_states_or_set() {
+        use crate::{OrSet, OrSetTag, CrdtActorId};
+
+        let mut set_a = OrSet::<String>::default();
+        set_a.add("item1".into(), OrSetTag::new(CrdtActorId::new("a"), 1));
+        set_a.add("item2".into(), OrSetTag::new(CrdtActorId::new("a"), 2));
+
+        let mut set_b = OrSet::<String>::default();
+        set_b.add("item2".into(), OrSetTag::new(CrdtActorId::new("b"), 3));
+        set_b.add("item3".into(), OrSetTag::new(CrdtActorId::new("b"), 4));
+
+        let cbor_a = fcp_cbor::to_canonical_cbor(&set_a).unwrap();
+        let cbor_b = fcp_cbor::to_canonical_cbor(&set_b).unwrap();
+
+        let merged = merge_crdt_states(CrdtType::OrSet, &cbor_a, &cbor_b).unwrap();
+
+        let result: OrSet<String> = ciborium::from_reader(&merged[..]).unwrap();
+        assert!(result.contains(&"item1".to_string()));
+        assert!(result.contains(&"item2".to_string()));
+        assert!(result.contains(&"item3".to_string()));
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn merge_crdt_states_rejects_invalid_cbor() {
+        let bad_cbor = b"not valid CBOR at all";
+        let good_gcounter = {
+            let c = crate::GCounter::default();
+            fcp_cbor::to_canonical_cbor(&c).unwrap()
+        };
+
+        let err = merge_crdt_states(CrdtType::GCounter, bad_cbor, &good_gcounter);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("deserialization"), "error: {msg}");
+    }
+
+    #[test]
+    fn fork_detector_crdt_merge_returns_success() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let obj1 = test_object_id("crdt_branch_a");
+        let obj2 = test_object_id("crdt_branch_b");
+
+        detector.register(genesis.clone(), None, 0, 0);
+        detector.register(obj1.clone(), Some(genesis.clone()), 1, 0);
+        detector.register(obj2.clone(), Some(genesis), 1, 0);
+
+        let detection = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        assert!(detection.is_fork());
+
+        let model = ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::LwwMap,
+        };
+        let fork = detection.fork_event().unwrap();
+        let outcome = detector.resolve(fork, ForkResolution::CrdtMerge, &model, 1_700_000_000);
+        assert!(
+            outcome.resolved,
+            "CrdtMerge should succeed at detector level: {:?}",
+            outcome.failure_reason
+        );
+        assert_eq!(outcome.strategy, ForkResolution::CrdtMerge);
+        // The winning head is branch_a by convention (merge base)
+        assert!(outcome.winning_head.is_some());
+    }
+
+    #[test]
+    fn crdt_merge_outcome_serialization() {
+        use crate::CrdtActorId;
+
+        let mut counter = crate::GCounter::default();
+        counter.increment(CrdtActorId::new("test"), 42);
+        let state = fcp_cbor::to_canonical_cbor(&counter).unwrap();
+
+        let outcome = CrdtMergeOutcome {
+            fork_event: ForkEvent {
+                common_prev: test_object_id("prev"),
+                branch_a: test_object_id("a"),
+                branch_b: test_object_id("b"),
+                fork_seq: 5,
+                detected_at: 1000,
+                zone_id: crate::ZoneId::work(),
+                connector_id: crate::ConnectorId::from_static("test.connector"),
+            },
+            merged_state_cbor: state,
+            crdt_type: CrdtType::GCounter,
+            merged_at: 2000,
+        };
+
+        let json = serde_json::to_string(&outcome).unwrap();
+        let roundtrip: CrdtMergeOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.crdt_type, CrdtType::GCounter);
+        assert_eq!(roundtrip.merged_at, 2000);
     }
 
     // ── Additional coverage ──
@@ -5490,13 +5850,14 @@ mod tests {
         );
         comp.suspend(&checkpoint, checkpoint_object_id).unwrap();
         let active_lease = test_migration_lease("node-source", 7, 2_000);
-        let handoff = test_migration_handoff(
+        let handoff = test_migration_handoff_with_checkpoint(
             source_lease_id,
             target_lease_id,
             "node-source",
             "node-target",
             7,
             8,
+            Some(checkpoint_object_id),
         );
         comp.begin_transfer(&active_lease, &handoff, 1_500).unwrap();
 
@@ -5507,7 +5868,7 @@ mod tests {
             checkpoint_object_id,
             &transfer_encoding,
             &handoff,
-            HandoffArtifactInputs {
+            &HandoffArtifactInputs {
                 state_object_id: Some(test_object_id("state")),
                 receipt_head: Some(test_object_id("receipt")),
                 resume_cause: ResumeCause::PlannedHandoff,
@@ -5571,7 +5932,7 @@ mod tests {
             target_lease_id,
             &target_lease,
             1_600,
-            ResumeEvidenceInputs {
+            &ResumeEvidenceInputs {
                 state_object_id: Some(test_object_id("state")),
                 receipt_head: Some(test_object_id("receipt")),
                 resume_cause: ResumeCause::Failover,
@@ -5636,7 +5997,7 @@ mod tests {
             source_lease_id,
             &stale_source_lease,
             1_600,
-            ResumeEvidenceInputs {
+            &ResumeEvidenceInputs {
                 state_object_id: None,
                 receipt_head: None,
                 resume_cause: ResumeCause::Failover,

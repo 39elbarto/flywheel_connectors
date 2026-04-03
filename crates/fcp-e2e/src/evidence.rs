@@ -4,7 +4,12 @@
 //! scenarios, individual steps with assertions, and evidence bundles for
 //! archival and replay.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+/// Shared verification bundle schema version used across replayable evidence.
+pub const VERIFICATION_BUNDLE_SCHEMA_VERSION: &str = "fcp-verification-bundle/v1";
 
 // ── Scenario metadata ───────────────────────────────────────────────────
 
@@ -37,6 +42,47 @@ pub enum ScenarioEnvironment {
     Remote,
     /// Mesh-based multi-node execution.
     Mesh,
+}
+
+/// Validation tier that produced an evidence bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceLayer {
+    Unit,
+    Integration,
+    E2e,
+    Snapshot,
+    Benchmark,
+    Live,
+}
+
+impl EvidenceLayer {
+    /// Short machine-readable label for this layer.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unit => "unit",
+            Self::Integration => "integration",
+            Self::E2e => "e2e",
+            Self::Snapshot => "snapshot",
+            Self::Benchmark => "benchmark",
+            Self::Live => "live",
+        }
+    }
+}
+
+/// Stable command slots carried by replayable evidence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationCommands {
+    /// Preferred local rerun command.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local: String,
+    /// Preferred CI or remote-offloaded rerun command.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ci: String,
+    /// Bundle validation command.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub validate: String,
 }
 
 // ── Step taxonomy ───────────────────────────────────────────────────────
@@ -180,12 +226,35 @@ pub enum ScenarioOutcome {
 /// Evidence bundle for archival and replay of a scenario execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceBundle {
+    /// Shared verification-bundle schema version.
+    #[serde(default = "default_bundle_schema_version")]
+    pub schema_version: String,
+    /// Stable scenario identifier for downstream tooling.
+    pub scenario_id: String,
+    /// Optional run identifier when a harness minted one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Optional connector identifier when the bundle is connector-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Validation tier that produced this bundle.
+    #[serde(default = "default_evidence_layer")]
+    pub layer: EvidenceLayer,
+    /// Canonical artifact labels mapped to relative bundle paths.
+    #[serde(
+        default = "canonical_e2e_artifact_paths",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub artifact_paths: BTreeMap<String, String>,
     /// The scenario script with results.
     pub script: ScenarioScript,
     /// Field paths that were redacted before archival.
     pub redacted_fields: Vec<String>,
     /// Instructions for replaying this scenario.
     pub replay_instructions: String,
+    /// Structured rerun and validation commands.
+    #[serde(default)]
+    pub commands: VerificationCommands,
     /// Number of days to retain this bundle.
     pub retention_days: u32,
 }
@@ -194,6 +263,39 @@ pub struct EvidenceBundle {
 
 /// Default retention period for evidence bundles (in days).
 const DEFAULT_RETENTION_DAYS: u32 = 90;
+
+fn default_bundle_schema_version() -> String {
+    VERIFICATION_BUNDLE_SCHEMA_VERSION.to_string()
+}
+
+const fn default_evidence_layer() -> EvidenceLayer {
+    EvidenceLayer::E2e
+}
+
+/// Canonical relative artifact paths expected from an E2E verification bundle.
+#[must_use]
+pub fn canonical_e2e_artifact_paths() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("logs_jsonl".to_string(), "logs.jsonl".to_string()),
+        ("report_json".to_string(), "report.json".to_string()),
+        ("summary_txt".to_string(), "summary.txt".to_string()),
+        (
+            "environment_json".to_string(),
+            "environment.json".to_string(),
+        ),
+        (
+            "session_transcript_json".to_string(),
+            "session_transcript.json".to_string(),
+        ),
+        ("replay_sh".to_string(), "replay.sh".to_string()),
+    ])
+}
+
+/// Canonical validator command for a materialized verification bundle.
+#[must_use]
+pub fn default_e2e_validation_command() -> String {
+    "bash scripts/ci/validate_e2e_artifacts.sh --bundle-dir <bundle-dir>".to_string()
+}
 
 /// Create a new scenario script with sensible defaults.
 #[must_use]
@@ -290,9 +392,19 @@ pub fn finalize_scenario(script: &mut ScenarioScript) {
 #[must_use]
 pub fn bundle_evidence(script: ScenarioScript, redact: &[&str]) -> EvidenceBundle {
     EvidenceBundle {
+        schema_version: default_bundle_schema_version(),
+        scenario_id: script.meta.name.clone(),
+        run_id: None,
+        connector_id: None,
+        layer: default_evidence_layer(),
+        artifact_paths: canonical_e2e_artifact_paths(),
         script,
         redacted_fields: redact.iter().map(|s| (*s).to_string()).collect(),
         replay_instructions: String::new(),
+        commands: VerificationCommands {
+            validate: default_e2e_validation_command(),
+            ..VerificationCommands::default()
+        },
         retention_days: DEFAULT_RETENTION_DAYS,
     }
 }
@@ -423,9 +535,16 @@ mod tests {
     fn evidence_bundle_includes_redaction_list() {
         let script = new_scenario("redact_test", ScenarioEnvironment::Local);
         let bundle = bundle_evidence(script, &["access_token", "secret_key"]);
+        assert_eq!(bundle.schema_version, VERIFICATION_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(bundle.scenario_id, "redact_test");
+        assert_eq!(bundle.layer, EvidenceLayer::E2e);
         assert_eq!(bundle.redacted_fields.len(), 2);
         assert!(bundle.redacted_fields.contains(&"access_token".to_string()));
         assert!(bundle.redacted_fields.contains(&"secret_key".to_string()));
+        assert_eq!(
+            bundle.commands.validate,
+            "bash scripts/ci/validate_e2e_artifacts.sh --bundle-dir <bundle-dir>"
+        );
     }
 
     #[test]
@@ -587,6 +706,12 @@ mod tests {
         let bundle = bundle_evidence(script, &["token"]);
         let json = serde_json::to_string(&bundle).expect("serialize");
         let back: EvidenceBundle = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.schema_version, VERIFICATION_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(back.scenario_id, "bundle_rt");
+        assert_eq!(
+            back.artifact_paths.get("report_json").map(String::as_str),
+            Some("report.json")
+        );
         assert_eq!(back.redacted_fields, vec!["token"]);
         assert_eq!(back.retention_days, 90);
     }

@@ -5242,6 +5242,638 @@ fn attach_install_contract(
     }
 }
 
+#[derive(Debug, Serialize)]
+struct LiveHostAdminProvenance {
+    command: String,
+    source: &'static str,
+    transport: &'static str,
+    scope: String,
+    endpoint: String,
+    authoritative: bool,
+    mesh_backed: bool,
+    fallback_derived: bool,
+    degraded: bool,
+    caveat: &'static str,
+}
+
+impl LiveHostAdminProvenance {
+    fn new(command: &str, endpoint: &str, scope: &str, degraded: bool) -> Self {
+        Self {
+            command: command.to_owned(),
+            source: "host-admin-api",
+            transport: "node-local-root-app",
+            scope: scope.to_owned(),
+            endpoint: endpoint.to_owned(),
+            authoritative: true,
+            mesh_backed: false,
+            fallback_derived: false,
+            degraded,
+            caveat: "Live host-admin API answers are authoritative for the current node, but they do not by themselves prove mesh-wide placement or offline artifact coverage.",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct InstallContractProvenance {
+    command: String,
+    source: String,
+    transport: String,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    authoritative: bool,
+    mesh_backed: bool,
+    live_host_mutated: bool,
+    fallback_derived: bool,
+    degraded: bool,
+    caveat: String,
+}
+
+impl InstallContractProvenance {
+    fn new(
+        command: &str,
+        source: &str,
+        transport: &str,
+        scope: &str,
+        endpoint: Option<&str>,
+        live_host_mutated: bool,
+        degraded: bool,
+        fallback_derived: bool,
+        caveat: &str,
+    ) -> Self {
+        Self {
+            command: command.to_owned(),
+            source: source.to_owned(),
+            transport: transport.to_owned(),
+            scope: scope.to_owned(),
+            endpoint: endpoint.map(ToOwned::to_owned),
+            authoritative: true,
+            mesh_backed: false,
+            live_host_mutated,
+            fallback_derived,
+            degraded,
+            caveat: caveat.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct OperatorTruthShowPayload {
+    status: &'static str,
+    command: &'static str,
+    source: &'static str,
+    mode: String,
+    message: String,
+    connector: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zones: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Value>,
+    rate_limits: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_descriptor: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_gaps: Option<Value>,
+    operations: Value,
+    next_actions: Vec<String>,
+    provenance: catalog::DiscoveryProvenance,
+}
+
+#[derive(Debug, Serialize)]
+struct OperatorTruthStatusPayload {
+    status: &'static str,
+    command: &'static str,
+    scope: &'static str,
+    source: &'static str,
+    message: String,
+    connector: Value,
+    admin: HostConnectorAdminStatus,
+    pin: HostPinState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollout: Option<HostRolloutStatus>,
+    host_health: Value,
+    registry_version: u64,
+    next_actions: Vec<String>,
+    provenance: LiveHostAdminProvenance,
+    evidence_handles: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct OperatorTruthHealthPayload {
+    status: &'static str,
+    command: &'static str,
+    scope: &'static str,
+    source: &'static str,
+    message: String,
+    connector: Value,
+    host_health: Value,
+    next_actions: Vec<String>,
+    provenance: LiveHostAdminProvenance,
+    evidence_handles: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct OperatorTruthMeshPayload {
+    status: &'static str,
+    command: &'static str,
+    subcommand: String,
+    source: &'static str,
+    mode: String,
+    message: String,
+    connector: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inventory: Option<Value>,
+    availability_fact: Value,
+    source_selection: Value,
+    offline_readiness: Value,
+    repair_hints: Vec<String>,
+    evidence_handles: Vec<Value>,
+    next_actions: Vec<String>,
+    provenance: catalog::DiscoveryProvenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explanation: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct OperatorTruthInstallPayload {
+    status: &'static str,
+    command: &'static str,
+    message: String,
+    source: &'static str,
+    host: String,
+    package_source: String,
+    package_source_selection: Value,
+    connectors_file: String,
+    package: Value,
+    installed: Value,
+    availability_fact: Value,
+    source_selection: Value,
+    offline_readiness: Value,
+    repair_hints: Vec<String>,
+    verification: Vec<Value>,
+    activation: Value,
+    admin_state: Value,
+    response: HostConnectorInventoryMutationResponse,
+    next_actions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warnings: Option<Vec<String>>,
+    provenance: InstallContractProvenance,
+    evidence_handles: Vec<Value>,
+}
+
+fn build_offline_show_operator_contract(
+    connector: &DiscoveredConnector,
+    preview: Vec<Value>,
+    preview_truncated: bool,
+    risky_count: usize,
+    example_operation: &str,
+) -> OperatorTruthShowPayload {
+    let summary = &connector.detail.summary;
+    let slug = &connector.slug;
+
+    OperatorTruthShowPayload {
+        status: "ok",
+        command: "show",
+        source: "workspace-manifests",
+        mode: discovery_mode_label(&catalog::DiscoveryDataSource::WorkspaceManifest).to_owned(),
+        message: "Loaded connector detail from the workspace manifest.".to_owned(),
+        connector: json!({
+            "slug": slug,
+            "canonical_id": &summary.id,
+            "name": &summary.name,
+            "version": &summary.version,
+            "description": &summary.description,
+            "cohort": &connector.cohort,
+            "status": connector.manifest_status.map(|status| status.to_string()),
+            "hidden_by_default": connector.hidden_by_default,
+            "non_live_rationale": connector.non_live_rationale.clone(),
+            "graduation_guidance": connector.graduation_guidance.clone(),
+            "format": &connector.runtime_format,
+            "state": summary.state,
+            "state_model": connector.state_model.as_known().cloned(),
+            "archetypes": summary.archetypes.as_known().cloned(),
+            "operation_count": summary.operation_count,
+            "max_risk": &summary.max_risk,
+            "has_events": &summary.has_events,
+            "manifest_path": &connector.manifest_path,
+        }),
+        zones: Some(connector.zones.clone()),
+        capabilities: Some(connector.capabilities.clone()),
+        rate_limits: serde_json::to_value(connector.detail.rate_limits.as_known().cloned())
+            .unwrap_or(Value::Null),
+        shared_descriptor: serde_json::to_value(connector.shared_descriptor()).ok(),
+        metadata_gaps: None,
+        operations: json!({
+            "preview": preview,
+            "preview_truncated": preview_truncated,
+            "risky_count": risky_count,
+            "safe_count": connector.operations.len().saturating_sub(risky_count),
+        }),
+        next_actions: vec![
+            format!("fwc ops {slug} --offline"),
+            format!("fwc schema {slug} {example_operation} --offline"),
+            format!("fwc examples {slug} {example_operation} --offline"),
+            format!("fwc config schema {slug}"),
+        ],
+        provenance: catalog::discovery_provenance(
+            "show",
+            catalog::DiscoveryDataSource::WorkspaceManifest,
+        ),
+    }
+}
+
+fn build_live_show_operator_contract(
+    host: &str,
+    connector: &HostConnectorRecord,
+    inventory: &HostConnectorInventoryResponse,
+    introspection: &HostIntrospectionResponse,
+    preview: Vec<Value>,
+    preview_truncated: bool,
+    risky_count: usize,
+    example_operation: &str,
+) -> OperatorTruthShowPayload {
+    OperatorTruthShowPayload {
+        status: "ok",
+        command: "show",
+        source: "host-admin-api",
+        mode: discovery_mode_label(&catalog::DiscoveryDataSource::LiveHostIntrospection).to_owned(),
+        message: "Loaded connector detail from `fcp-host` inventory and introspection.".to_owned(),
+        connector: json!({
+            "slug": &connector.slug,
+            "canonical_id": inventory.connector.id.as_str(),
+            "name": &inventory.connector.name,
+            "version": inventory.connector.version.to_string(),
+            "description": &inventory.connector.description,
+            "cohort": Value::Null,
+            "categories": &inventory.connector.categories,
+            "format": Value::Null,
+            "state": host_connector_state_label(&inventory.connector.health),
+            "enabled": inventory.connector.enabled,
+            "health": &inventory.connector.health,
+            "last_health_check": inventory.connector.last_health_check,
+            "archetype": introspection.archetype,
+            "operation_count": introspection.tools.len(),
+            "max_risk": safety_tier_label(inventory.connector.max_safety_tier),
+            "has_events": host_live_event_field(introspection),
+            "manifest_path": Value::Null,
+        }),
+        zones: None,
+        capabilities: None,
+        rate_limits: serde_json::to_value(&introspection.rate_limits).unwrap_or(Value::Null),
+        shared_descriptor: None,
+        metadata_gaps: Some(json!(host_metadata_gaps(introspection))),
+        operations: json!({
+            "preview": preview,
+            "preview_truncated": preview_truncated,
+            "risky_count": risky_count,
+            "safe_count": introspection.tools.len().saturating_sub(risky_count),
+        }),
+        next_actions: vec![
+            format!("fwc ops {} --host {host}", connector.slug),
+            format!(
+                "fwc schema {} {} --host {host}",
+                connector.slug, example_operation
+            ),
+            format!(
+                "fwc examples {} {} --host {host}",
+                connector.slug, example_operation
+            ),
+        ],
+        provenance: catalog::discovery_provenance(
+            "show",
+            catalog::DiscoveryDataSource::LiveHostIntrospection,
+        ),
+    }
+}
+
+fn build_connector_status_operator_contract(
+    endpoint: &str,
+    connector: &HostConnectorRecord,
+    admin: HostConnectorAdminStatus,
+    pin: HostPinState,
+    rollout: Option<HostRolloutStatus>,
+    host_health: &HostHealthResponse,
+    registry_version: u64,
+) -> OperatorTruthStatusPayload {
+    let degraded = !connector.summary.health.is_healthy();
+    OperatorTruthStatusPayload {
+        status: "ok",
+        command: "status",
+        scope: "connector",
+        source: "host-admin-api",
+        message: format!(
+            "Loaded live connector admin status for `{}` from `fcp-host`.",
+            connector.slug
+        ),
+        connector: json!({
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+            "version": connector.summary.version.to_string(),
+            "enabled": connector.summary.enabled,
+            "health": &connector.summary.health,
+        }),
+        admin: admin.clone(),
+        pin,
+        rollout,
+        host_health: json!({
+            "status": host_health.status,
+            "timestamp": host_health.timestamp,
+        }),
+        registry_version,
+        next_actions: vec![
+            format!("fwc show {} --host {endpoint}", connector.slug),
+            format!("fwc ops {} --host {endpoint}", connector.slug),
+            format!(
+                "fwc pin {} --to {} --host {endpoint}",
+                connector.slug, connector.summary.version
+            ),
+        ],
+        provenance: LiveHostAdminProvenance::new("status", endpoint, "connector-status", degraded),
+        evidence_handles: vec![
+            json!({
+                "kind": "connector-status",
+                "connector_id": connector.summary.id.as_str(),
+                "evaluated_at": admin.evaluated_at,
+            }),
+            json!({
+                "kind": "host-health-snapshot",
+                "timestamp": host_health.timestamp,
+            }),
+        ],
+    }
+}
+
+fn build_connector_health_operator_contract(
+    entry: &health::ConnectorHealth,
+    host_health: &HostHealthResponse,
+    endpoint: &str,
+) -> OperatorTruthHealthPayload {
+    OperatorTruthHealthPayload {
+        status: "ok",
+        command: "health",
+        scope: "connector",
+        source: "host-admin-api",
+        message: format!("Health detail for `{}`.", entry.connector_id),
+        connector: json!({
+            "id": &entry.connector_id,
+            "health_status": health::status_indicator(entry.status),
+            "auth_status": health::auth_indicator(&entry.auth_status),
+            "latency_ms": entry.latency_ms,
+            "last_check": entry.last_check,
+            "issues": &entry.issues,
+        }),
+        host_health: json!({
+            "status": host_health.status,
+            "uptime_seconds": host_health.uptime_seconds,
+            "active_connections": host_health.active_connections,
+            "timestamp": host_health.timestamp,
+        }),
+        next_actions: vec![
+            format!(
+                "fwc doctor --zone z:work --connector {} --host {endpoint}",
+                entry.connector_id
+            ),
+            format!("fwc status {} --host {endpoint}", entry.connector_id),
+            format!("fwc health --host {endpoint}"),
+        ],
+        provenance: LiveHostAdminProvenance::new(
+            "health",
+            endpoint,
+            "connector-health",
+            entry.status != health::HealthStatus::Healthy,
+        ),
+        evidence_handles: vec![
+            json!({
+                "kind": "connector-health",
+                "connector_id": &entry.connector_id,
+                "last_check": entry.last_check,
+            }),
+            json!({
+                "kind": "host-health-snapshot",
+                "timestamp": host_health.timestamp,
+            }),
+        ],
+    }
+}
+
+fn build_mesh_live_operator_contract(
+    subcommand: &str,
+    endpoint: &str,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+    status: &HostConnectorAdminStatus,
+    message: String,
+    explanation: Option<Vec<String>>,
+) -> OperatorTruthMeshPayload {
+    OperatorTruthMeshPayload {
+        status: "ok",
+        command: "mesh",
+        subcommand: subcommand.to_owned(),
+        source: "host-admin-api",
+        mode: discovery_mode_label(&catalog::DiscoveryDataSource::LiveHostInventory).to_owned(),
+        message,
+        connector: json!({
+            "requested_selector": requested_selector,
+            "slug": &connector.slug,
+            "canonical_id": connector.summary.id.as_str(),
+            "name": &connector.summary.name,
+            "version": connector.summary.version.to_string(),
+        }),
+        inventory: Some(json!({
+            "source": "host-admin-api",
+            "authoritative": true,
+            "per_zone_supported": false,
+            "desired_state": status.desired_state,
+            "observed_state": status.observed_state,
+            "active_config_revision_id": status.active_config_revision_id,
+            "config_revision_count": status.config_revision_count,
+            "last_journal_sequence": status.last_journal_sequence,
+            "drift": &status.drift,
+        })),
+        availability_fact: mesh_live_availability_fact(status),
+        source_selection: mesh_live_source_selection_value(status.artifact.as_ref()),
+        offline_readiness: mesh_live_offline_readiness_value(status.artifact.as_ref()),
+        repair_hints: mesh_live_repair_hints(status, &connector.slug, endpoint),
+        evidence_handles: mesh_live_evidence_handles(
+            connector.summary.id.as_str(),
+            endpoint,
+            status,
+        ),
+        next_actions: vec![
+            format!("fwc show {} --host {endpoint}", connector.slug),
+            format!("fwc doctor --host {endpoint}"),
+            format!("fwc mesh repair-hints {} --host {endpoint}", connector.slug),
+        ],
+        provenance: catalog::discovery_provenance(
+            "mesh",
+            catalog::DiscoveryDataSource::LiveHostInventory,
+        ),
+        explanation,
+    }
+}
+
+fn build_mesh_offline_operator_contract(
+    subcommand: &str,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+    requested_zone: Option<&str>,
+    zone_supported: Option<bool>,
+    has_local_mirror: bool,
+    mirror_path: &str,
+    message: String,
+    explanation: Option<Vec<String>>,
+) -> OperatorTruthMeshPayload {
+    let availability_fact = mesh_offline_availability_fact(zone_supported, has_local_mirror);
+    OperatorTruthMeshPayload {
+        status: "ok",
+        command: "mesh",
+        subcommand: subcommand.to_owned(),
+        source: "workspace-manifests",
+        mode: discovery_mode_label(&catalog::DiscoveryDataSource::WorkspaceManifest).to_owned(),
+        message,
+        connector: json!({
+            "requested_selector": requested_selector,
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+            "version": &connector.detail.summary.version,
+        }),
+        inventory: None,
+        availability_fact,
+        source_selection: json!({
+            "state": if has_local_mirror { "mesh-mirror" } else { "workspace-manifest" },
+            "selection_mode": "offline-artifact",
+            "silent_fallback": false,
+            "provenance_recorded": has_local_mirror,
+            "source_kind": if has_local_mirror { json!("mesh-mirror") } else { Value::Null },
+            "source_uri": if has_local_mirror { json!(mirror_path) } else { Value::Null },
+        }),
+        offline_readiness: json!({
+            "state": match zone_supported {
+                Some(true) => "declared-in-manifest",
+                Some(false) => "zone-not-declared",
+                None => "manifest-declared",
+            },
+            "requested_zone": requested_zone,
+            "supported_by_manifest": zone_supported,
+            "supported_zones": &connector.supported_zones,
+            "manifest_zones": &connector.zones,
+            "explanation": match zone_supported {
+                Some(true) => "The requested zone is declared in the workspace manifest, but this is still an offline planning view rather than proof of live host state.",
+                Some(false) => "The requested zone is not declared in the workspace manifest for this connector.",
+                None => "Workspace manifests describe this connector, but they do not prove live install state or current mesh coverage.",
+            },
+        }),
+        repair_hints: mesh_offline_repair_hints(&connector.slug, zone_supported),
+        evidence_handles: mesh_offline_evidence_handles(
+            &connector.detail.summary.id,
+            &connector.manifest_path,
+            requested_zone,
+            zone_supported,
+            has_local_mirror,
+            mirror_path,
+        ),
+        next_actions: vec![
+            format!("fwc show {} --offline", connector.slug),
+            format!("fwc install {} --verify-only", connector.slug),
+            format!(
+                "fwc mesh explain-availability {} --host <endpoint>",
+                connector.slug
+            ),
+        ],
+        provenance: catalog::discovery_provenance(
+            "mesh",
+            catalog::DiscoveryDataSource::WorkspaceManifest,
+        ),
+        explanation,
+    }
+}
+
+fn build_install_activation_operator_contract(
+    endpoint: &str,
+    artifact: &PreparedPackageArtifact,
+    candidate: &ManagedConnectorConfig,
+    applied: HostConnectorInventoryMutationResponse,
+    post_install_status: Option<&HostConnectorAdminStatus>,
+    warnings: Option<Vec<String>>,
+) -> OperatorTruthInstallPayload {
+    let post_install_availability_fact = post_install_status.map_or_else(
+        || install_unknown_live_availability_fact(artifact),
+        mesh_live_availability_fact,
+    );
+    let post_install_source_selection = post_install_status.map_or_else(
+        || install_unknown_live_source_selection_value(artifact),
+        |status| mesh_live_source_selection_value(status.artifact.as_ref()),
+    );
+    let post_install_offline_readiness = post_install_status.map_or_else(
+        || install_unknown_live_offline_readiness_value(artifact),
+        |status| mesh_live_offline_readiness_value(status.artifact.as_ref()),
+    );
+    let post_install_repair_hints = post_install_status.map_or_else(
+        || install_unknown_live_repair_hints(applied.current.id.as_str(), endpoint),
+        |status| mesh_live_repair_hints(status, applied.current.id.as_str(), endpoint),
+    );
+    let evidence_handles =
+        install_live_evidence_handles(artifact, endpoint, &applied, post_install_status);
+    let degraded = post_install_status.is_none();
+
+    OperatorTruthInstallPayload {
+        status: "ok",
+        command: "install",
+        message: format!(
+            "Installed `{}` into the live host connector inventory and applied it immediately.",
+            applied.current.id
+        ),
+        source: "host-admin-api",
+        host: endpoint.to_owned(),
+        package_source: artifact.source_description.clone(),
+        package_source_selection: package_source_selection_value(artifact),
+        connectors_file: applied.connectors_file.clone(),
+        package: package_output_json(artifact),
+        installed: connector_descriptor_json(&applied.current, None),
+        availability_fact: post_install_availability_fact,
+        source_selection: post_install_source_selection,
+        offline_readiness: post_install_offline_readiness,
+        repair_hints: post_install_repair_hints,
+        verification: artifact.verification.clone(),
+        activation: json!({
+            "inventory_updated": true,
+            "live_reload_applied": true,
+            "registry_version": applied.apply.registry_version,
+            "added": applied.apply.added,
+            "updated": applied.apply.updated,
+            "removed": applied.apply.removed,
+            "unchanged": applied.apply.unchanged,
+        }),
+        admin_state: json!({
+            "tracked_connectors": applied.admin_state.tracked_connectors,
+            "created_connectors": applied.admin_state.created_connectors,
+            "observed_updates": applied.admin_state.observed_updates,
+            "drifted_connectors": applied.admin_state.drifted_connectors,
+        }),
+        response: applied,
+        next_actions: vec![
+            format!("fwc status {} --host {endpoint}", candidate.id),
+            format!("fwc show {} --host {endpoint}", candidate.id),
+            format!("fwc mesh availability {} --host {endpoint}", candidate.id),
+        ],
+        warnings,
+        provenance: InstallContractProvenance::new(
+            "install",
+            "host-admin-api",
+            "node-local-root-app",
+            "install-activation",
+            Some(endpoint),
+            true,
+            degraded,
+            degraded,
+            "Live install answers are authoritative for the current node's inventory mutation. When post-install status readback is unavailable, live runtime truth remains degraded until a later host-backed check succeeds.",
+        ),
+        evidence_handles,
+    }
+}
+
 fn tool_inventory_mode_label(source: &catalog::ToolInventorySource) -> &'static str {
     match source {
         catalog::ToolInventorySource::LiveHostInventory => "live-introspection",
@@ -5427,52 +6059,17 @@ fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
         .tools
         .first()
         .map_or_else(|| "<operation>".to_owned(), |tool| tool.name.clone());
-    let metadata_gaps = host_metadata_gaps(&introspection);
-
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "show");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "show",
-        "source": "host-admin-api",
-        "message": "Loaded connector detail from `fcp-host` inventory and introspection.",
-        "connector": {
-            "slug": &connector.slug,
-            "canonical_id": inventory.connector.id.as_str(),
-            "name": &inventory.connector.name,
-            "version": inventory.connector.version.to_string(),
-            "description": &inventory.connector.description,
-            "cohort": Value::Null,
-            "categories": &inventory.connector.categories,
-            "format": Value::Null,
-            "state": host_connector_state_label(&inventory.connector.health),
-            "enabled": inventory.connector.enabled,
-            "health": &inventory.connector.health,
-            "last_health_check": inventory.connector.last_health_check,
-            "archetype": introspection.archetype,
-            "operation_count": introspection.tools.len(),
-            "max_risk": safety_tier_label(inventory.connector.max_safety_tier),
-            "has_events": host_live_event_field(&introspection),
-            "manifest_path": Value::Null,
-        },
-        "rate_limits": introspection.rate_limits,
-        "metadata_gaps": metadata_gaps,
-        "operations": {
-            "preview": preview,
-            "preview_truncated": preview_truncated,
-            "risky_count": risky_count,
-            "safe_count": introspection.tools.len().saturating_sub(risky_count),
-        },
-        "next_actions": [
-            format!("fwc ops {} --host {host}", connector.slug),
-            format!("fwc schema {} {} --host {host}", connector.slug, example_operation),
-            format!("fwc examples {} {} --host {host}", connector.slug, example_operation),
-        ],
-    });
-    attach_discovery_provenance(
-        &mut payload,
-        "show",
-        catalog::DiscoveryDataSource::LiveHostIntrospection,
-    );
+    let mut payload = serde_json::to_value(build_live_show_operator_contract(
+        host,
+        connector,
+        &inventory,
+        &introspection,
+        preview,
+        preview_truncated,
+        risky_count,
+        &example_operation,
+    ))?;
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -6979,9 +7576,6 @@ fn mesh_availability_dispatch(
             }
         };
         let status = client.connector_status(connector.summary.id.as_str())?;
-        let repair_hints = mesh_live_repair_hints(&status, &connector.slug, &host.endpoint);
-        let evidence_handles =
-            mesh_live_evidence_handles(connector.summary.id.as_str(), &host.endpoint, &status);
 
         let message = if hints_only {
             format!(
@@ -7001,55 +7595,20 @@ fn mesh_availability_dispatch(
         };
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "mesh");
-        let mut payload = json!({
-            "status": "ok",
-            "command": "mesh",
-            "subcommand": subcommand,
-            "source": "host-admin-api",
-            "message": message,
-            "connector": {
-                "requested_selector": &args.connector,
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-                "name": &connector.summary.name,
-                "version": connector.summary.version.to_string(),
-            },
-            "inventory": {
-                "source": "host-admin-api",
-                "authoritative": true,
-                "per_zone_supported": false,
-                "desired_state": status.desired_state,
-                "observed_state": status.observed_state,
-                "active_config_revision_id": status.active_config_revision_id,
-                "config_revision_count": status.config_revision_count,
-                "last_journal_sequence": status.last_journal_sequence,
-                "drift": &status.drift,
-            },
-            "availability_fact": mesh_live_availability_fact(&status),
-            "source_selection": mesh_live_source_selection_value(status.artifact.as_ref()),
-            "offline_readiness": mesh_live_offline_readiness_value(status.artifact.as_ref()),
-            "repair_hints": repair_hints,
-            "evidence_handles": evidence_handles,
-            "next_actions": [
-                format!("fwc show {} --host {}", connector.slug, host.endpoint),
-                format!("fwc doctor --host {}", host.endpoint),
-                format!("fwc mesh repair-hints {} --host {}", connector.slug, host.endpoint),
-            ],
-        });
-
-        if explain {
-            payload["explanation"] = json!([
-                "This answer is authoritative for the current host because it comes from live connector status, not workspace manifests.",
-                "Artifact provenance shows where the installed runtime bundle came from and whether hash/signature checks passed.",
-                "Per-zone mesh inventory is still unavailable on the live host API, so node/zone-specific placement cannot be proven on this route yet.",
-            ]);
-        }
-
-        attach_discovery_provenance(
-            &mut payload,
-            "mesh",
-            catalog::DiscoveryDataSource::LiveHostInventory,
-        );
+        let explanation = explain.then_some(vec![
+            "This answer is authoritative for the current host because it comes from live connector status, not workspace manifests.".to_owned(),
+            "Artifact provenance shows where the installed runtime bundle came from and whether hash/signature checks passed.".to_owned(),
+            "Per-zone mesh inventory is still unavailable on the live host API, so node/zone-specific placement cannot be proven on this route yet.".to_owned(),
+        ]);
+        let mut payload = serde_json::to_value(build_mesh_live_operator_contract(
+            &subcommand,
+            &host.endpoint,
+            connector,
+            &args.connector,
+            &status,
+            message,
+            explanation,
+        ))?;
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -7074,37 +7633,11 @@ fn mesh_availability_dispatch(
             .iter()
             .any(|candidate| candidate == zone)
     });
-    let repair_hints = mesh_offline_repair_hints(&connector.slug, zone_supported);
     // Check if a local mirror exists (e.g., from a mesh peer replication).
     // In offline mode we only have workspace manifests, so mirror detection is
     // based on whether a local artifact path exists for this connector.
     let mirror_path = format!(".fcp/mirrors/{}.wasm", connector.slug);
     let has_local_mirror = std::path::Path::new(&mirror_path).exists();
-    let availability_fact = mesh_offline_availability_fact(zone_supported, has_local_mirror);
-    let evidence_handles = mesh_offline_evidence_handles(
-        &connector.detail.summary.id,
-        &connector.manifest_path,
-        args.zone.as_deref(),
-        zone_supported,
-        has_local_mirror,
-        &mirror_path,
-    );
-    let offline_readiness = json!({
-        "state": match zone_supported {
-            Some(true) => "declared-in-manifest",
-            Some(false) => "zone-not-declared",
-            None => "manifest-declared",
-        },
-        "requested_zone": &args.zone,
-        "supported_by_manifest": zone_supported,
-        "supported_zones": &connector.supported_zones,
-        "manifest_zones": &connector.zones,
-        "explanation": match zone_supported {
-            Some(true) => "The requested zone is declared in the workspace manifest, but this is still an offline planning view rather than proof of live host state.",
-            Some(false) => "The requested zone is not declared in the workspace manifest for this connector.",
-            None => "Workspace manifests describe this connector, but they do not prove live install state or current mesh coverage.",
-        },
-    });
     let message = if hints_only {
         format!(
             "Derived offline repair guidance for `{}` from workspace manifests only.",
@@ -7123,57 +7656,22 @@ fn mesh_availability_dispatch(
     };
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "mesh",
-        "subcommand": subcommand,
-        "source": "workspace-manifests",
-        "message": message,
-        "connector": {
-            "requested_selector": &args.connector,
-            "slug": &connector.slug,
-            "canonical_id": &connector.detail.summary.id,
-            "name": &connector.detail.summary.name,
-            "version": &connector.detail.summary.version,
-        },
-        "inventory": {
-            "source": "workspace-manifests",
-            "authoritative": false,
-            "per_zone_supported": false,
-            "host_installed": Value::Null,
-            "declared_operation_count": connector.detail.summary.operation_count,
-        },
-        "availability_fact": availability_fact,
-        "source_selection": {
-            "state": "workspace-manifest",
-            "selection_mode": "workspace-manifest-planning",
-            "silent_fallback": false,
-            "provenance_recorded": false,
-            "source_uri": &connector.manifest_path,
-        },
-        "offline_readiness": offline_readiness,
-        "repair_hints": repair_hints,
-        "evidence_handles": evidence_handles,
-        "next_actions": [
-            format!("fwc show {} --offline", connector.slug),
-            format!("fwc install {} --verify-only", connector.slug),
-            format!("fwc mesh availability {} --host <endpoint>", connector.slug),
-        ],
-    });
-
-    if explain {
-        payload["explanation"] = json!([
-            "This answer is an offline planning view derived from workspace manifests and local catalog data.",
-            "Workspace manifests can tell you what the connector declares, but not whether a live host has installed it or whether mesh placement currently satisfies offline SLOs.",
-            "Use the same command with `--host <endpoint>` when you need authoritative host-backed runtime truth.",
-        ]);
-    }
-
-    attach_discovery_provenance(
-        &mut payload,
-        "mesh",
-        catalog::DiscoveryDataSource::WorkspaceManifest,
-    );
+    let explanation = explain.then_some(vec![
+        "This answer is an offline planning view derived from workspace manifests and local catalog data.".to_owned(),
+        "Workspace manifests can tell you what the connector declares, but not whether a live host has installed it or whether mesh placement currently satisfies offline SLOs.".to_owned(),
+        "Use the same command with `--host <endpoint>` when you need authoritative host-backed runtime truth.".to_owned(),
+    ]);
+    let mut payload = serde_json::to_value(build_mesh_offline_operator_contract(
+        &subcommand,
+        connector,
+        &args.connector,
+        args.zone.as_deref(),
+        zone_supported,
+        has_local_mirror,
+        &mirror_path,
+        message,
+        explanation,
+    ))?;
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -9069,58 +9567,14 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
         || "<operation>".to_owned(),
         |operation| operation.preferred_selector.clone(),
     );
-    let slug = connector.slug.clone();
-    let summary = &connector.detail.summary;
-
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "show");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "show",
-        "source": "workspace-manifests",
-        "mode": "offline-artifact",
-        "message": "Loaded connector detail from the workspace manifest.",
-        "connector": {
-            "slug": &slug,
-            "canonical_id": &summary.id,
-            "name": &summary.name,
-            "version": &summary.version,
-            "description": &summary.description,
-            "cohort": &connector.cohort,
-            "status": connector.manifest_status.map(|status| status.to_string()),
-            "hidden_by_default": connector.hidden_by_default,
-            "non_live_rationale": connector.non_live_rationale.clone(),
-            "graduation_guidance": connector.graduation_guidance.clone(),
-            "format": &connector.runtime_format,
-            "state": summary.state,
-            "state_model": connector.state_model.as_known().cloned(),
-            "archetypes": summary.archetypes.as_known().cloned(),
-            "operation_count": summary.operation_count,
-            "max_risk": &summary.max_risk,
-            "has_events": &summary.has_events,
-            "manifest_path": &connector.manifest_path,
-        },
-        "zones": connector.zones.clone(),
-        "capabilities": connector.capabilities.clone(),
-        "rate_limits": connector.detail.rate_limits.as_known().cloned(),
-        "shared_descriptor": connector.shared_descriptor(),
-        "operations": {
-            "preview": preview,
-            "preview_truncated": preview_truncated,
-            "risky_count": risky_count,
-            "safe_count": connector.operations.len().saturating_sub(risky_count),
-        },
-        "next_actions": [
-            format!("fwc ops {slug} --offline"),
-            format!("fwc schema {slug} {example_operation} --offline"),
-            format!("fwc examples {slug} {example_operation} --offline"),
-            format!("fwc config schema {slug}"),
-        ],
-    });
-    attach_discovery_provenance(
-        &mut payload,
-        "show",
-        catalog::DiscoveryDataSource::WorkspaceManifest,
-    );
+    let mut payload = serde_json::to_value(build_offline_show_operator_contract(
+        connector,
+        preview,
+        preview_truncated,
+        risky_count,
+        &example_operation,
+    ))?;
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -9835,52 +10289,15 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
         let rollout = client.rollout_status(connector.summary.id.as_str()).ok();
 
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "status");
-        let mut payload = json!({
-            "status": "ok",
-            "command": "status",
-            "scope": "connector",
-            "source": "host-admin-api",
-            "message": format!("Loaded live connector admin status for `{}` from `fcp-host`.", connector.slug),
-            "connector": {
-                "slug": &connector.slug,
-                "canonical_id": connector.summary.id.as_str(),
-                "name": &connector.summary.name,
-                "version": connector.summary.version.to_string(),
-                "enabled": connector.summary.enabled,
-                "health": &connector.summary.health,
-            },
-            "admin": admin,
-            "pin": pin,
-            "rollout": rollout,
-            "host_health": {
-                "status": health.status,
-                "timestamp": health.timestamp,
-            },
-            "registry_version": discovery.registry_version,
-            "next_actions": [
-                format!("fwc show {} --host {}", connector.slug, host.endpoint),
-                format!("fwc ops {} --host {}", connector.slug, host.endpoint),
-                format!("fwc pin {} --to {} --host {}", connector.slug, connector.summary.version, host.endpoint),
-            ],
-        });
-        attach_live_host_admin_contract(
-            &mut payload,
-            "status",
+        let mut payload = serde_json::to_value(build_connector_status_operator_contract(
             &host.endpoint,
-            "connector-status",
-            !connector.summary.health.is_healthy(),
-            vec![
-                json!({
-                    "kind": "connector-status",
-                    "connector_id": connector.summary.id.as_str(),
-                    "evaluated_at": admin.evaluated_at,
-                }),
-                json!({
-                    "kind": "host-health-snapshot",
-                    "timestamp": health.timestamp,
-                }),
-            ],
-        );
+            connector,
+            admin,
+            pin,
+            rollout,
+            &health,
+            discovery.registry_version,
+        ))?;
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -9982,54 +10399,15 @@ fn health_connector_payload(
     entry: &health::ConnectorHealth,
     host_health: &HostHealthResponse,
     endpoint: &str,
-) -> Value {
+) -> Result<Value> {
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "health");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "health",
-        "scope": "connector",
-        "source": "host-admin-api",
-        "message": format!("Health detail for `{}`.", entry.connector_id),
-        "connector": {
-            "id": &entry.connector_id,
-            "health_status": health::status_indicator(entry.status),
-            "auth_status": health::auth_indicator(&entry.auth_status),
-            "latency_ms": entry.latency_ms,
-            "last_check": entry.last_check,
-            "issues": &entry.issues,
-        },
-        "host_health": {
-            "status": host_health.status,
-            "uptime_seconds": host_health.uptime_seconds,
-            "active_connections": host_health.active_connections,
-            "timestamp": host_health.timestamp,
-        },
-        "next_actions": [
-            format!("fwc doctor --zone z:work --connector {} --host {endpoint}", entry.connector_id),
-            format!("fwc status {} --host {endpoint}", entry.connector_id),
-            format!("fwc health --host {endpoint}"),
-        ],
-    });
-    attach_live_host_admin_contract(
-        &mut payload,
-        "health",
+    let mut payload = serde_json::to_value(build_connector_health_operator_contract(
+        entry,
+        host_health,
         endpoint,
-        "connector-health",
-        entry.status != health::HealthStatus::Healthy,
-        vec![
-            json!({
-                "kind": "connector-health",
-                "connector_id": &entry.connector_id,
-                "last_check": entry.last_check,
-            }),
-            json!({
-                "kind": "host-health-snapshot",
-                "timestamp": host_health.timestamp,
-            }),
-        ],
-    );
+    ))?;
     envelope.inject_into(&mut payload);
-    payload
+    Ok(payload)
 }
 
 /// Render the fleet-level health dashboard payload.
@@ -10143,7 +10521,7 @@ fn health_dispatch(args: &HealthArgs, explicit_host: Option<&str>) -> Result<Dis
                 &filtered.connectors[0],
                 &host_health,
                 &host.endpoint,
-            ),
+            )?,
             exit_code: CliExitCode::Success,
         });
     }
@@ -13669,28 +14047,6 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     }
 
     let post_install_status = client.connector_status(applied.current.id.as_str()).ok();
-    let post_install_availability_fact = post_install_status.as_ref().map_or_else(
-        || install_unknown_live_availability_fact(&artifact),
-        mesh_live_availability_fact,
-    );
-    let post_install_source_selection = post_install_status.as_ref().map_or_else(
-        || install_unknown_live_source_selection_value(&artifact),
-        |status| mesh_live_source_selection_value(status.artifact.as_ref()),
-    );
-    let post_install_offline_readiness = post_install_status.as_ref().map_or_else(
-        || install_unknown_live_offline_readiness_value(&artifact),
-        |status| mesh_live_offline_readiness_value(status.artifact.as_ref()),
-    );
-    let post_install_repair_hints = post_install_status.as_ref().map_or_else(
-        || install_unknown_live_repair_hints(applied.current.id.as_str(), &host.endpoint),
-        |status| mesh_live_repair_hints(status, applied.current.id.as_str(), &host.endpoint),
-    );
-    let evidence_handles = install_live_evidence_handles(
-        &artifact,
-        &host.endpoint,
-        &applied,
-        post_install_status.as_ref(),
-    );
     let mut warnings = Vec::new();
     if post_install_status.is_none() {
         warnings.push(
@@ -13700,66 +14056,14 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     }
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "install");
-    let mut payload = json!({
-        "status": "ok",
-        "command": "install",
-        "message": format!(
-            "Installed `{}` into the live host connector inventory and applied it immediately.",
-            applied.current.id
-        ),
-        "source": "host-admin-api",
-        "host": host.endpoint,
-        "package_source": artifact.source_description,
-        "package_source_selection": package_source_selection_value(&artifact),
-        "connectors_file": applied.connectors_file,
-        "package": package_output_json(&artifact),
-        "installed": connector_descriptor_json(&applied.current, None),
-        "availability_fact": post_install_availability_fact,
-        "source_selection": post_install_source_selection,
-        "offline_readiness": post_install_offline_readiness,
-        "repair_hints": post_install_repair_hints,
-        "verification": artifact.verification,
-        "activation": {
-            "inventory_updated": true,
-            "live_reload_applied": true,
-            "registry_version": applied.apply.registry_version,
-            "added": applied.apply.added,
-            "updated": applied.apply.updated,
-            "removed": applied.apply.removed,
-            "unchanged": applied.apply.unchanged,
-        },
-        "admin_state": {
-            "tracked_connectors": applied.admin_state.tracked_connectors,
-            "created_connectors": applied.admin_state.created_connectors,
-            "observed_updates": applied.admin_state.observed_updates,
-            "drifted_connectors": applied.admin_state.drifted_connectors,
-        },
-        "response": applied,
-        "next_actions": [
-            format!("fwc status {} --host {}", candidate.id, host.endpoint),
-            format!("fwc show {} --host {}", candidate.id, host.endpoint),
-            format!(
-                "fwc mesh availability {} --host {}",
-                candidate.id, host.endpoint
-            ),
-        ],
-    });
-    if !warnings.is_empty() {
-        payload["warnings"] = json!(warnings);
-    }
-    attach_install_contract(
-        &mut payload,
-        "install",
-        "host-admin-api",
-        "node-local-root-app",
-        "install-activation",
-        Some(&host.endpoint),
-        true,
-        post_install_status.is_none(),
-        post_install_status.is_none(),
-        "Live install answers are authoritative for the current node's inventory mutation. When post-install status readback is unavailable, live runtime truth remains degraded until a later host-backed check succeeds.",
-        evidence_handles,
-    );
+    let mut payload = serde_json::to_value(build_install_activation_operator_contract(
+        &host.endpoint,
+        &artifact,
+        &candidate,
+        applied,
+        post_install_status.as_ref(),
+        (!warnings.is_empty()).then_some(warnings),
+    ))?;
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,

@@ -23,7 +23,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use fcp_kernel::validate_canonical_id;
 use fcp_manifest::ConnectorManifest;
@@ -4093,10 +4093,12 @@ mod tests {
         )
         .expect("scaffold should succeed");
 
-        assert!(!result
-            .files_created
-            .iter()
-            .any(|f| f.path.as_str() == "tests/e2e_tests.rs"));
+        assert!(
+            !result
+                .files_created
+                .iter()
+                .any(|f| f.path.as_str() == "tests/e2e_tests.rs")
+        );
     }
 
     #[test]

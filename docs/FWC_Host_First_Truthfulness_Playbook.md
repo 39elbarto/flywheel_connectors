@@ -126,6 +126,7 @@ What to look for:
 - resolved mode is `explicit-offline`
 - availability is `offline-artifact`
 - provenance is `workspace-manifest`, `local-catalog-cache`, or `static-schema`
+- manifest lifecycle metadata may still appear on the connector record, but live runtime state must remain `unknown`
 - output carries a caveat that it may not match the running system
 
 ### Example: Denial Is A Real Runtime Answer
@@ -277,6 +278,20 @@ This bead is the documentation layer of a wider evidence stack. The sibling bead
 | `flywheel_connectors-1g7z0.29.8.2` | End-to-end regression scenarios for the no-fakes invariants |
 | `flywheel_connectors-1g7z0.29.8.5` | Transcript scripts, detailed logging, replay bundle contract |
 | `flywheel_connectors-1g7z0.29.8.3` | Operator/agent guide for interpreting the evidence correctly |
+
+### Frozen Operator Contract Matrix
+
+The canonical fixture set for stable operator-truth answers now lives in `crates/fwc/testdata/operator_truth/fixture_matrix.json`.
+
+It freezes five representative answer classes that downstream CLI work can depend on without re-reading implementation details:
+
+- `offline`: manifest-backed `show --offline` answers
+- `node_local`: host-admin `status <connector> --host ...` answers
+- `mesh_backed`: live `mesh explain-availability` answers with placement-backed readiness
+- `degraded`: live `health <connector> --host ...` answers where degradation is explicit
+- `fallback_derived`: live `install` answers where host mutation succeeded but post-install truth is still degraded
+
+`crates/fwc/tests/cual_integration.rs` executes those representative flows against the fixture matrix, so changes to operator-facing truth fields must update both the implementation and the frozen contract fixture set.
 
 ### Fast semantic checks
 

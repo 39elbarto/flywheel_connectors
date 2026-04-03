@@ -15,8 +15,10 @@ use fcp_host::{
     EventQueryRequest as HostEventQueryRequest, HostAdminStateStore, HostEventKind,
     PreflightResponse as HostPreflightResponse,
 };
+use fcp_manifest::ConnectorManifest;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 fn repo_root() -> PathBuf {
@@ -59,6 +61,70 @@ struct HostIntegrationFixture {
     #[serde(default)]
     required_log_fields: Vec<String>,
     notes: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OperatorTruthAnswerClass {
+    Offline,
+    NodeLocal,
+    MeshBacked,
+    Degraded,
+    FallbackDerived,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorTruthFixtureMatrix {
+    fixtures: Vec<OperatorTruthFixture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorTruthFixture {
+    id: String,
+    answer_class: OperatorTruthAnswerClass,
+    command: String,
+    #[serde(default)]
+    subcommand: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    source: String,
+    availability: String,
+    #[serde(default)]
+    connector_status: Option<String>,
+    #[serde(default)]
+    connector_state: Option<String>,
+    provenance: OperatorTruthProvenance,
+    #[serde(default)]
+    response_scope: Option<String>,
+    #[serde(default)]
+    source_selection_state: Option<String>,
+    #[serde(default)]
+    source_selection_kind: Option<String>,
+    #[serde(default)]
+    availability_fact_state: Option<String>,
+    #[serde(default)]
+    offline_readiness_state: Option<String>,
+    #[serde(default)]
+    required_evidence_handles: Vec<String>,
+    #[serde(default)]
+    required_warning_substrings: Vec<String>,
+    notes: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorTruthProvenance {
+    source: String,
+    authoritative: bool,
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    mesh_backed: Option<bool>,
+    #[serde(default)]
+    degraded: Option<bool>,
+    #[serde(default)]
+    fallback_derived: Option<bool>,
 }
 
 fn run_fwc(args: &[&str]) -> Output {
@@ -135,6 +201,20 @@ fn load_host_integration_fixture(id: &str) -> HostIntegrationFixture {
         .unwrap_or_else(|| panic!("missing host integration fixture `{id}`"))
 }
 
+fn load_operator_truth_fixture_matrix() -> OperatorTruthFixtureMatrix {
+    let path = fixture_path("operator_truth/fixture_matrix.json");
+    let content = fs::read_to_string(&path).expect("operator truth fixture matrix should load");
+    serde_json::from_str(&content).expect("operator truth fixture matrix should parse")
+}
+
+fn load_operator_truth_fixture(id: &str) -> OperatorTruthFixture {
+    load_operator_truth_fixture_matrix()
+        .fixtures
+        .into_iter()
+        .find(|fixture| fixture.id == id)
+        .unwrap_or_else(|| panic!("missing operator truth fixture `{id}`"))
+}
+
 fn assert_fixture_has_core_host_bundle(fixture: &HostIntegrationFixture) {
     for artifact in [
         "trace.jsonl",
@@ -159,6 +239,103 @@ fn assert_fixture_has_core_host_bundle(fixture: &HostIntegrationFixture) {
                 .any(|value| value == field),
             "fixture {} missing required log field {field}",
             fixture.id
+        );
+    }
+}
+
+fn payload_has_evidence_handle_kind(payload: &Value, kind: &str) -> bool {
+    payload["evidence_handles"]
+        .as_array()
+        .is_some_and(|handles| {
+            handles.iter().any(|handle| {
+                handle["kind"]
+                    .as_str()
+                    .is_some_and(|candidate| candidate == kind)
+            })
+        })
+}
+
+fn payload_warning_contains(payload: &Value, needle: &str) -> bool {
+    payload["warnings"].as_array().is_some_and(|warnings| {
+        warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains(needle))
+    })
+}
+
+fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTruthFixture) {
+    assert_eq!(payload["command"], fixture.command);
+    assert_eq!(
+        payload["availability"]["availability"],
+        fixture.availability
+    );
+    assert_eq!(payload["source"], fixture.source);
+    assert!(!fixture.notes.trim().is_empty());
+
+    if let Some(subcommand) = fixture.subcommand.as_deref() {
+        assert_eq!(payload["subcommand"], subcommand);
+    }
+    if let Some(mode) = fixture.mode.as_deref() {
+        assert_eq!(payload["mode"], mode);
+    }
+    if let Some(scope) = fixture.response_scope.as_deref() {
+        assert_eq!(payload["scope"], scope);
+    }
+
+    let provenance = &payload["provenance"];
+    assert_eq!(provenance["source"], fixture.provenance.source);
+    assert_eq!(
+        provenance["authoritative"],
+        fixture.provenance.authoritative
+    );
+    if let Some(transport) = fixture.provenance.transport.as_deref() {
+        assert_eq!(provenance["transport"], transport);
+    }
+    if let Some(scope) = fixture.provenance.scope.as_deref() {
+        assert_eq!(provenance["scope"], scope);
+    }
+    if let Some(mesh_backed) = fixture.provenance.mesh_backed {
+        assert_eq!(provenance["mesh_backed"], mesh_backed);
+    }
+    if let Some(degraded) = fixture.provenance.degraded {
+        assert_eq!(provenance["degraded"], degraded);
+    }
+    if let Some(fallback_derived) = fixture.provenance.fallback_derived {
+        assert_eq!(provenance["fallback_derived"], fallback_derived);
+    }
+
+    if let Some(state) = fixture.source_selection_state.as_deref() {
+        assert_eq!(payload["source_selection"]["state"], state);
+    }
+    if let Some(kind) = fixture.source_selection_kind.as_deref() {
+        assert_eq!(payload["source_selection"]["source_kind"], kind);
+    }
+    if let Some(state) = fixture.availability_fact_state.as_deref() {
+        assert_eq!(payload["availability_fact"]["state"], state);
+    }
+    if let Some(state) = fixture.offline_readiness_state.as_deref() {
+        assert_eq!(payload["offline_readiness"]["state"], state);
+    }
+    if let Some(status) = fixture.connector_status.as_deref() {
+        assert_eq!(payload["connector"]["status"], status);
+    }
+    if let Some(state) = fixture.connector_state.as_deref() {
+        assert_eq!(payload["connector"]["state"], state);
+    }
+
+    for kind in &fixture.required_evidence_handles {
+        assert!(
+            payload_has_evidence_handle_kind(payload, kind),
+            "payload missing required evidence handle `{kind}`: {}",
+            serde_json::to_string_pretty(payload).unwrap_or_default()
+        );
+    }
+    for warning in &fixture.required_warning_substrings {
+        assert!(
+            payload_warning_contains(payload, warning),
+            "payload missing warning containing `{warning}`: {}",
+            serde_json::to_string_pretty(payload).unwrap_or_default()
         );
     }
 }
@@ -423,13 +600,14 @@ fn spawn_host_admin_state_server(
     (endpoint, handle)
 }
 
-fn mock_connector_summary_json(
+fn mock_connector_summary_with_health_json(
     id: &str,
     name: &str,
     tool_count: usize,
     max_safety_tier: &str,
+    health: ConnectorHealth,
 ) -> Value {
-    let health = serde_json::to_value(ConnectorHealth::healthy()).expect("health should serialize");
+    let health = serde_json::to_value(health).expect("health should serialize");
     json!({
         "id": id,
         "name": name,
@@ -442,6 +620,21 @@ fn mock_connector_summary_json(
         "health": health,
         "last_health_check": "2026-03-10T00:00:00Z",
     })
+}
+
+fn mock_connector_summary_json(
+    id: &str,
+    name: &str,
+    tool_count: usize,
+    max_safety_tier: &str,
+) -> Value {
+    mock_connector_summary_with_health_json(
+        id,
+        name,
+        tool_count,
+        max_safety_tier,
+        ConnectorHealth::healthy(),
+    )
 }
 
 fn mock_discovery_response_json(connectors: &[Value]) -> Value {
@@ -525,6 +718,210 @@ fn mock_connector_missing_status_json() -> Value {
         },
         "evaluated_at": "2026-03-12T00:00:00Z"
     })
+}
+
+fn mock_host_health_json(status: &str) -> Value {
+    json!({
+        "status": status,
+        "connectors": {},
+        "uptime_seconds": 1,
+        "active_connections": 1,
+        "timestamp": "2026-03-12T00:00:00Z",
+    })
+}
+
+fn mock_pin_status_json(pinned: bool, version: Option<&str>) -> Value {
+    json!({
+        "connector_id": "fcp.github:enterprise:v1",
+        "pinned": pinned,
+        "version": version,
+    })
+}
+
+fn mock_rollout_status_json(
+    state: &str,
+    version: &str,
+    pinned: bool,
+    pinned_version: Option<&str>,
+    canary_percent: u8,
+) -> Value {
+    json!({
+        "connector_id": "fcp.github:enterprise:v1",
+        "state": state,
+        "version": version,
+        "health": {
+            "successes": 100,
+            "failures": 0,
+            "samples": 100,
+            "success_rate": 100,
+            "total_latency_ms": 500,
+            "latency_samples": 100,
+            "max_latency_ms": 10,
+            "last_updated": "2026-03-12T00:00:00Z",
+        },
+        "auto_promote_pending": false,
+        "auto_rollback_pending": false,
+        "crash_loop_detected": false,
+        "pinned": pinned,
+        "pinned_version": pinned_version,
+        "canary_percent": canary_percent,
+    })
+}
+
+fn mock_inventory_mutation_response_json(version: &str) -> Value {
+    json!({
+        "kind": "install",
+        "dry_run": false,
+        "connectors_file": "/tmp/fcp-host-connectors.json",
+        "previous": Value::Null,
+        "current": {
+            "id": "fcp.github:enterprise:v1",
+            "binary": "/opt/fcp/github-enterprise",
+            "name": "GitHub Enterprise",
+            "description": "Live installed GitHub connector",
+            "args": [],
+            "env": BTreeMap::<String, String>::new(),
+            "config": Value::Null,
+            "categories": ["code"],
+            "version": version,
+        },
+        "inventory_size": 1,
+        "apply": {
+            "added": ["fcp.github:enterprise:v1"],
+            "updated": [],
+            "removed": [],
+            "unchanged": [],
+            "registry_version": 11,
+        },
+        "admin_state": {
+            "reconciled_at": "2026-03-12T00:00:00Z",
+            "tracked_connectors": 1,
+            "created_connectors": 0,
+            "observed_updates": 1,
+            "drifted_connectors": 0,
+            "entries": [],
+        },
+    })
+}
+
+fn compute_sha256_hex(path: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(fs::read(path).expect("file bytes"));
+    format!("{:x}", hasher.finalize())
+}
+
+fn write_test_package_output(connector_id: &str, version: &str) -> (tempfile::TempDir, PathBuf) {
+    const PLACEHOLDER_INTERFACE_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+
+    let tempdir = tempfile::tempdir().expect("temp package dir");
+    let package_dir = tempdir.path().join("package");
+    fs::create_dir_all(&package_dir).expect("package dir");
+
+    let manifest_template = format!(
+        r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "{PLACEHOLDER_INTERFACE_HASH}"
+
+[connector]
+id = "{connector_id}"
+name = "Fixture Connector"
+version = "{version}"
+description = "Fixture connector used by fwc operator-truth integration tests"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = ["network.dns"]
+optional = []
+forbidden = ["system.exec"]
+
+[provides.operations.echo]
+description = "Echo fixture operation"
+capability = "fixture.echo"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = {{ type = "object" }}
+output_schema = {{ type = "object" }}
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&manifest_template)
+        .expect("fixture manifest should parse unchecked");
+    let interface_hash = unchecked
+        .compute_interface_hash()
+        .expect("fixture interface hash should compute");
+    let manifest_text =
+        manifest_template.replace(PLACEHOLDER_INTERFACE_HASH, &interface_hash.to_string());
+    let manifest =
+        ConnectorManifest::parse_str(&manifest_text).expect("fixture manifest should validate");
+
+    let binary_path = package_dir.join("fixture-connector");
+    fs::write(&binary_path, format!("fixture:{connector_id}:{version}")).expect("binary");
+    let manifest_path = package_dir.join("manifest.toml");
+    fs::write(&manifest_path, &manifest_text).expect("manifest");
+    let build_metadata_path = package_dir.join("build-metadata.json");
+    fs::write(
+        &build_metadata_path,
+        serde_json::to_vec_pretty(&json!({
+            "rust_version": "1.86.0-nightly",
+            "cargo_version": "1.86.0-nightly",
+            "target_triple": "x86_64-unknown-linux-gnu",
+            "build_timestamp": "2026-03-11T07:00:00Z",
+            "profile": "release",
+            "git_commit": "deadbeef",
+            "git_dirty": false,
+            "features": [],
+            "build_env": BTreeMap::<String, String>::new(),
+            "cargo_flags": ["--release"],
+        }))
+        .expect("build metadata json"),
+    )
+    .expect("build metadata");
+
+    let package_output_path = package_dir.join("package-output.json");
+    fs::write(
+        &package_output_path,
+        serde_json::to_vec_pretty(&json!({
+            "output_dir": package_dir,
+            "binary_path": binary_path,
+            "manifest_path": manifest_path,
+            "build_metadata_path": build_metadata_path,
+            "binary_sha256": compute_sha256_hex(&package_dir.join("fixture-connector")),
+            "connector_id": manifest.connector.id.to_string(),
+            "version": manifest.connector.version.to_string(),
+        }))
+        .expect("package output json"),
+    )
+    .expect("package output");
+
+    (tempdir, package_output_path)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3386,7 +3783,7 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
 // ── P6.5: Offline and node-local trust path acceptance tests ───────────
 
 /// Verify that offline `show` exposes manifest safety metadata without
-/// fabricating runtime state. Trust path: manifest → artifact provenance.
+/// fabricating live runtime state. Trust path: manifest → artifact provenance.
 #[test]
 fn offline_show_exposes_manifest_safety_without_runtime_fabrication() {
     let show = run_json_ok(&["--json", "show", "github", "--offline"]);
@@ -3395,14 +3792,11 @@ fn offline_show_exposes_manifest_safety_without_runtime_fabrication() {
     assert_eq!(show["command"], "show");
     assert!(show["connector"].is_object());
 
-    // No fabricated runtime state
+    // Manifest lifecycle status may be present offline, but runtime state must
+    // remain unknown until a live host answers.
     let connector = &show["connector"];
-    assert!(
-        connector.get("status").is_none()
-            || connector["status"] == "unknown"
-            || connector["status"].is_null(),
-        "Offline show must not fabricate connector status"
-    );
+    assert_eq!(connector["status"], "ready");
+    assert_eq!(connector["state"], "unknown");
 }
 
 /// Verify that offline `ops` lists operations with safety tiers from the
@@ -3412,7 +3806,9 @@ fn offline_ops_lists_operations_from_manifest_trust_path() {
     let ops = run_json_ok(&["--json", "ops", "github", "--offline"]);
     assert_eq!(ops["command"], "ops");
 
-    let operations = ops["operations"].as_array().expect("operations should be an array");
+    let operations = ops["operations"]
+        .as_array()
+        .expect("operations should be an array");
     assert!(
         !operations.is_empty(),
         "GitHub should have operations in offline mode"
@@ -3434,7 +3830,9 @@ fn offline_export_tools_includes_manifest_safety_metadata() {
     let export = run_json_ok(&["--json", "export-tools", "--offline", "--format", "mcp"]);
     assert_eq!(export["command"], "export-tools");
 
-    let tools = export["tools"].as_array().expect("tools should be an array");
+    let tools = export["tools"]
+        .as_array()
+        .expect("tools should be an array");
     assert!(
         !tools.is_empty(),
         "Export-tools should produce tools in offline mode"
@@ -3494,6 +3892,214 @@ fn offline_outputs_carry_availability_provenance() {
             serde_json::to_string_pretty(&result).unwrap_or_default()
         );
     }
+}
+
+#[test]
+fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
+    let matrix = load_operator_truth_fixture_matrix();
+    assert_eq!(
+        matrix.fixtures.len(),
+        5,
+        "operator truth fixture matrix should cover five canonical answer classes"
+    );
+
+    let ids = matrix
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids.len(),
+        matrix.fixtures.len(),
+        "fixture ids must be unique"
+    );
+
+    let answer_classes = matrix
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.answer_class)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        answer_classes,
+        std::collections::BTreeSet::from([
+            OperatorTruthAnswerClass::Offline,
+            OperatorTruthAnswerClass::NodeLocal,
+            OperatorTruthAnswerClass::MeshBacked,
+            OperatorTruthAnswerClass::Degraded,
+            OperatorTruthAnswerClass::FallbackDerived,
+        ])
+    );
+
+    for fixture in &matrix.fixtures {
+        assert!(!fixture.command.trim().is_empty());
+        assert!(!fixture.source.trim().is_empty());
+        assert!(!fixture.availability.trim().is_empty());
+        assert!(!fixture.notes.trim().is_empty());
+    }
+}
+
+#[test]
+fn operator_truth_fixture_offline_show_matches_cli_contract() {
+    let fixture = load_operator_truth_fixture("offline_show_workspace_manifest");
+    let payload = run_json_ok(&["--json", "show", "github", "--offline"]);
+
+    assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert!(
+        payload["connector"]["canonical_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("fcp.github"))
+    );
+}
+
+#[test]
+fn operator_truth_fixture_node_local_status_matches_cli_contract() {
+    let fixture = load_operator_truth_fixture("node_local_status_host_admin");
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector]),
+        ),
+        (
+            "GET /rpc/health".to_owned(),
+            mock_host_health_json("healthy"),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            mock_connector_admin_status_json(
+                "registry",
+                "registry://fcp/github-enterprise/1.2.3",
+                Value::Null,
+            ),
+        ),
+        (
+            "GET /rpc/rollout/pin/fcp.github:enterprise:v1".to_owned(),
+            mock_pin_status_json(false, None),
+        ),
+        (
+            "GET /rpc/rollout/fcp.github:enterprise:v1".to_owned(),
+            mock_rollout_status_json("production", "1.2.3", false, None, 0),
+        ),
+    ]);
+    let payload = run_json_ok(&["--json", "--host", &host, "status", "github"]);
+    server.join().expect("mock host thread should complete");
+
+    assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_eq!(payload["scope"], "connector");
+    assert_eq!(payload["admin"]["observed_state"], "running");
+    assert_eq!(payload["pin"]["pinned"], false);
+}
+
+#[test]
+fn operator_truth_fixture_mesh_backed_availability_matches_cli_contract() {
+    let fixture = load_operator_truth_fixture("mesh_backed_explain_availability");
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let placement_policy = json!({
+        "min_nodes": 2,
+        "max_node_fraction_bps": 5000,
+        "preferred_devices": [],
+        "excluded_devices": [],
+        "target_coverage_bps": 9000,
+        "min_source_diversity": 2,
+    });
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector]),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            mock_connector_admin_status_json(
+                "mesh_mirror",
+                "/opt/fcp/mirrors/github-enterprise",
+                placement_policy,
+            ),
+        ),
+    ]);
+    let payload = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "mesh",
+        "explain-availability",
+        "github",
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_eq!(payload["subcommand"], "explain-availability");
+    assert_eq!(payload["inventory"]["authoritative"], true);
+    assert!(
+        payload["explanation"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
+}
+
+#[test]
+fn operator_truth_fixture_degraded_health_matches_cli_contract() {
+    let fixture = load_operator_truth_fixture("degraded_connector_health");
+    let github_connector = mock_connector_summary_with_health_json(
+        "fcp.github:enterprise:v1",
+        "GitHub Enterprise",
+        1,
+        "risky",
+        ConnectorHealth::degraded("upstream latency"),
+    );
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector]),
+        ),
+        (
+            "GET /rpc/health".to_owned(),
+            mock_host_health_json("healthy"),
+        ),
+    ]);
+    let payload = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "health",
+        "fcp.github:enterprise:v1",
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_eq!(payload["scope"], "connector");
+    assert_eq!(payload["connector"]["health_status"], "degraded");
+}
+
+#[test]
+fn operator_truth_fixture_fallback_install_matches_cli_contract() {
+    let fixture = load_operator_truth_fixture("fallback_derived_install_activation");
+    let (_package_dir, package_output_path) =
+        write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
+    let package_output_path = package_output_path.display().to_string();
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/connectors/apply".to_owned(),
+            mock_inventory_mutation_response_json("1.2.4"),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            json!({ "status": "not-a-valid-admin-status" }),
+        ),
+    ]);
+    let payload = run_json_ok(&["--json", "--host", &host, "install", &package_output_path]);
+    server.join().expect("mock host thread should complete");
+
+    assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_eq!(payload["availability_fact"]["state"], "unknown");
+    assert_eq!(payload["source_selection"]["state"], "unknown");
+    assert_eq!(payload["offline_readiness"]["state"], "unknown");
+    assert!(
+        payload["warnings"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
 }
 
 /// Verify that the node-local context command produces structured output

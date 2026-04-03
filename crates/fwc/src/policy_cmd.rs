@@ -8,23 +8,23 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    compute_policy_bundle_hash, diff_policy_bundles, preview_policy_bundles,
-    simulate_policy_decision, DecisionReceipt, ObjectHeader, PolicyPreviewSample,
-    PolicySimulationError, PolicySimulationInput, POLICY_BUNDLE_SIGNED_FIELDS,
+    DecisionReceipt, ObjectHeader, POLICY_BUNDLE_SIGNED_FIELDS, PolicyPreviewSample,
+    PolicySimulationError, PolicySimulationInput, compute_policy_bundle_hash, diff_policy_bundles,
+    preview_policy_bundles, simulate_policy_decision,
 };
 use fcp_crypto::ed25519::{Ed25519SigningKey, SECRET_KEY_SIZE};
 use fcp_kernel::{CapabilityId, InvokeRequest, ObjectId, SafetyTier};
 use fcp_policy::{
-    CapabilityObject, CapabilityToken, ConfidentialityLevel, DecisionReceiptPolicy, IntegrityLevel,
-    PolicyBundle, PolicyBundleError, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,
-    PolicyBundleSignature, PolicyPattern, Provenance, ResourceObject, RoleObject, TransportMode,
-    ZoneDefinitionObject, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
+    CapabilityObject, DecisionReceiptPolicy, PolicyBundle, PolicyBundleError, PolicyBundleObject,
+    PolicyBundlePolicyRef, PolicyBundleResolved, PolicyBundleSignature, PolicyPattern, Provenance,
+    ResourceObject, RoleObject, TransportMode, ZoneDefinitionObject, ZoneId, ZonePolicyObject,
+    ZoneTransportPolicy,
 };
 use hex::decode as hex_decode;
 use semver::Version;
@@ -35,6 +35,8 @@ use serde_json::Value;
 use fcp_core::NodeId;
 #[cfg(test)]
 use fcp_kernel::{NodeSignature, RequestId};
+#[cfg(test)]
+use fcp_policy::{CapabilityToken, ConfidentialityLevel, IntegrityLevel};
 
 /// Arguments for the `fcp policy` command.
 #[derive(Args, Debug)]
@@ -741,11 +743,9 @@ fn load_policy_refs(path: &PathBuf) -> Result<Vec<PolicyBundlePolicyRef>> {
         anyhow::bail!("policy refs list is empty");
     }
     for (idx, policy_ref) in refs.iter().enumerate() {
-        policy_ref
-            .validate()
-            .map_err(|err: PolicyBundleError| {
-                anyhow::anyhow!("invalid policy ref at index {idx}: {err}")
-            })?;
+        policy_ref.validate().map_err(|err: PolicyBundleError| {
+            anyhow::anyhow!("invalid policy ref at index {idx}: {err}")
+        })?;
     }
     Ok(refs)
 }
@@ -1650,13 +1650,16 @@ mod tests {
             .and_then(Value::as_array)
             .expect("connector_allow array");
 
-        assert!(connector_allow
-            .iter()
-            .any(|v| v.as_str() == Some("fcp.test:*")));
-        assert!(diff
-            .risk_flags
-            .iter()
-            .any(|flag| flag == "transport_derp_enabled"));
+        assert!(
+            connector_allow
+                .iter()
+                .any(|v| v.as_str() == Some("fcp.test:*"))
+        );
+        assert!(
+            diff.risk_flags
+                .iter()
+                .any(|flag| flag == "transport_derp_enabled")
+        );
     }
 
     // ---- parse_simulation_input ----
@@ -2737,9 +2740,10 @@ mod tests {
             pattern: "user:admin".to_string(),
         });
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff
-            .risk_flags
-            .contains(&"principal_allow_expanded".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"principal_allow_expanded".to_string())
+        );
     }
 
     #[test]
@@ -2751,9 +2755,10 @@ mod tests {
             pattern: "cap:admin".to_string(),
         });
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff
-            .risk_flags
-            .contains(&"capability_allow_expanded".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"capability_allow_expanded".to_string())
+        );
     }
 
     #[test]
@@ -2771,9 +2776,11 @@ mod tests {
             .get("connector_allow")
             .and_then(Value::as_array)
             .unwrap();
-        assert!(removed_connectors
-            .iter()
-            .any(|v| v.as_str() == Some("fcp.test:*")));
+        assert!(
+            removed_connectors
+                .iter()
+                .any(|v| v.as_str() == Some("fcp.test:*"))
+        );
     }
 
     #[test]
@@ -2784,9 +2791,10 @@ mod tests {
         let mut after = base_policy(zone);
         after.transport_policy.allow_lan = true;
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff
-            .risk_flags
-            .contains(&"transport_lan_enabled".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"transport_lan_enabled".to_string())
+        );
     }
 
     #[test]
@@ -2797,9 +2805,10 @@ mod tests {
         let mut after = base_policy(zone);
         after.transport_policy.allow_funnel = true;
         let diff = diff_zone_policy(&before, &after).unwrap();
-        assert!(diff
-            .risk_flags
-            .contains(&"transport_funnel_enabled".to_string()));
+        assert!(
+            diff.risk_flags
+                .contains(&"transport_funnel_enabled".to_string())
+        );
     }
 
     // ---- diff_policy_lists ----

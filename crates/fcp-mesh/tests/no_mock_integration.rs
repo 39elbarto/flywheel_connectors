@@ -1004,11 +1004,13 @@ fn planner_selects_best_node() {
             profile: profile_with_connector("node-a", 4096, 4, "fcp.github", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
         NodeInfo {
             profile: profile_with_connector("node-b", 16384, 16, "fcp.github", "2.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
     ];
     let input = PlannerInput::new(nodes, 1_000_000);
@@ -1030,11 +1032,13 @@ fn planner_excludes_missing_connector() {
             profile: test_device_profile("no-jira", 8192, 8),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
         NodeInfo {
             profile: profile_with_connector("has-jira", 4096, 4, "fcp.jira", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
     ];
     let input = PlannerInput::new(nodes, 1_000_000);
@@ -1056,11 +1060,13 @@ fn planner_data_locality_bonus() {
             profile: profile_with_connector("local-data", 4096, 4, "fcp.test", "1.0.0"),
             local_symbols: local,
             held_leases: vec![],
+            zones: vec![],
         },
         NodeInfo {
             profile: profile_with_connector("remote-data", 4096, 4, "fcp.test", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
     ];
     let input = PlannerInput::new(nodes, 1_000_000);
@@ -1082,11 +1088,13 @@ fn planner_required_symbols_hard_constraint() {
             profile: profile_with_connector("has-sym", 4096, 4, "fcp.test", "1.0.0"),
             local_symbols: has_it,
             held_leases: vec![],
+            zones: vec![],
         },
         NodeInfo {
             profile: profile_with_connector("no-sym", 8192, 8, "fcp.test", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
     ];
     let input = PlannerInput::new(nodes, 1_000_000);
@@ -1105,11 +1113,13 @@ fn planner_excludes_nodes_by_id() {
             profile: profile_with_connector("keep", 4096, 4, "fcp.test", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
         NodeInfo {
             profile: profile_with_connector("exclude", 8192, 8, "fcp.test", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
     ];
     let input = PlannerInput::new(nodes, 1_000_000);
@@ -1141,11 +1151,13 @@ fn planner_gpu_requirement() {
             profile: gpu_profile,
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
         NodeInfo {
             profile: no_gpu_profile,
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
     ];
     let input = PlannerInput::new(nodes, 1_000_000);
@@ -1169,11 +1181,13 @@ fn planner_singleton_writer_lease() {
                 expires_at: 2_000_000,
                 fencing_token: 5,
             }],
+            zones: vec![],
         },
         NodeInfo {
             profile: profile_with_connector("non-holder", 4096, 4, "fcp.db", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         },
     ];
     let input = PlannerInput::new(nodes, 1_000_000).with_singleton_holder("holder");
@@ -1202,6 +1216,7 @@ fn planner_deterministic_ordering() {
             profile: profile_with_connector(&format!("node-{i}"), 4096, 4, "fcp.test", "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         })
         .collect();
     let input = PlannerInput::new(nodes, 1_000_000);

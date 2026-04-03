@@ -2952,16 +2952,19 @@ mod routing {
                 profile: create_profile_with_connector("node-1", &connector_id, "1.0.0"),
                 local_symbols: node1_symbols,
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-2", &connector_id, "1.0.0"),
                 local_symbols: node2_symbols,
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-3", &connector_id, "1.0.0"),
                 local_symbols: node3_symbols,
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3004,12 +3007,14 @@ mod routing {
                 profile: create_profile_with_connector("node-1", &required_connector, "2.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             // Node 2: Has different connector
             NodeInfo {
                 profile: create_profile_with_connector("node-2", &other_connector, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3048,16 +3053,19 @@ mod routing {
                 profile: create_profile_with_connector("node-1", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-2", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-3", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3103,6 +3111,7 @@ mod routing {
                 },
                 local_symbols: HashSet::from([hot_symbol]),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: {
@@ -3114,6 +3123,7 @@ mod routing {
                 },
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3165,6 +3175,7 @@ mod routing {
                 },
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: {
@@ -3176,6 +3187,7 @@ mod routing {
                 },
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: {
@@ -3186,6 +3198,7 @@ mod routing {
                 },
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3229,12 +3242,14 @@ mod routing {
                 profile: create_profile_with_connector("node-old", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             // Node with new version
             NodeInfo {
                 profile: create_profile_with_connector("node-new", &connector_id, "2.1.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3596,6 +3611,7 @@ mod policy_enforcement {
                 profile: create_profile_with_connector("node-work", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3637,6 +3653,7 @@ mod policy_enforcement {
             ),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         }];
 
         let input = PlannerInput::new(nodes, 1000);
@@ -3675,11 +3692,13 @@ mod policy_enforcement {
                 profile: create_profile_with_connector("node-1", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-2", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3731,12 +3750,14 @@ mod policy_enforcement {
                     .build(),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             // Node without GPU
             NodeInfo {
                 profile: create_profile_with_connector("node-cpu", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3778,6 +3799,7 @@ mod policy_enforcement {
                 },
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: {
@@ -3787,6 +3809,7 @@ mod policy_enforcement {
                 },
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -3829,12 +3852,14 @@ mod policy_enforcement {
                 profile: create_profile_with_connector("node-has-symbol", &connector_id, "1.0.0"),
                 local_symbols: node1_symbols,
                 held_leases: vec![],
+                zones: vec![],
             },
             // Node without required symbol
             NodeInfo {
                 profile: create_profile_with_connector("node-no-symbol", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -4872,11 +4897,13 @@ mod lease_coordination {
                     expires_at: 2000,
                     fencing_token: 5,
                 }],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-other", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -4914,11 +4941,13 @@ mod lease_coordination {
                 profile: create_profile_with_connector("node-1", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-2", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -4956,11 +4985,13 @@ mod lease_coordination {
                 profile: create_profile_with_connector("node-1", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-2", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -4998,11 +5029,13 @@ mod lease_coordination {
                 profile: create_profile_with_connector("node-a", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-b", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -5139,11 +5172,13 @@ mod integration_scenarios {
                     expires_at: 5000,
                     fencing_token: 9,
                 }],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-basic", &connector_id, "1.5.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 
@@ -5203,6 +5238,7 @@ mod integration_scenarios {
             profile: create_profile_with_connector("node-target", &connector_id, "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         }];
 
         let input = PlannerInput::new(nodes, now_ms);
@@ -5258,6 +5294,7 @@ mod integration_scenarios {
             profile: create_profile_with_connector("node-target", &connector_id, "1.0.0"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: vec![],
         }];
         let planner = ExecutionPlanner::new();
         let candidates = planner.plan(
@@ -5308,11 +5345,13 @@ mod integration_scenarios {
                 profile: create_profile_with_connector("node-with-data", &connector_id, "1.0.0"),
                 local_symbols: node_symbols,
                 held_leases: vec![],
+                zones: vec![],
             },
             NodeInfo {
                 profile: create_profile_with_connector("node-no-data", &connector_id, "1.0.0"),
                 local_symbols: HashSet::new(),
                 held_leases: vec![],
+                zones: vec![],
             },
         ];
 

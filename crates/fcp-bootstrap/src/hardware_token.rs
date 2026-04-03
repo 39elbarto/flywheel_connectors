@@ -258,7 +258,7 @@ impl TokenDetector {
 
     /// Create a detector with an explicit provider search list.
     #[must_use]
-    pub fn from_provider_paths(provider_paths: Vec<PathBuf>) -> Self {
+    pub const fn from_provider_paths(provider_paths: Vec<PathBuf>) -> Self {
         Self { provider_paths }
     }
 

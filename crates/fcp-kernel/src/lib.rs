@@ -78,6 +78,7 @@ pub use fcp_core::{
 pub use fcp_core::{
     AgentHint, ApprovalMode, EventInfo, Introspection, OperationInfo, ResourceTypeInfo,
 };
+pub use fcp_core::{tool_schema, validate_canonical_id};
 
 // ── Descriptor / Readiness Contracts ─────────────────────────────
 
@@ -100,9 +101,13 @@ pub use fcp_core::{
     ConnectorHealth, HealthSnapshot, HealthState, SelfCheckReport, SelfCheckStatus,
 };
 
+// ── Audit & Evidence ─────────────────────────────────────────────
+
+pub use fcp_core::{AuditEvent, AuditHead};
+
 // ── Identity Types (re-exported for convenience) ─────────────────
 
-pub use fcp_core::{ConnectorId, InstanceId, OperationId};
+pub use fcp_core::{ConnectorId, InstanceId, ObjectId, OperationId, ZoneId};
 
 // ── Error Types ──────────────────────────────────────────────────
 
@@ -116,6 +121,14 @@ pub use execution_control::{
     PartialResult, PhaseTransition, ProgressNotification, ProgressOptions, ProgressPayload,
     ProgressUnit, ProgressUpdate, RolloutAuditEvent, RolloutDecision, RolloutEvidence,
     RolloutObservation, RolloutOutcome,
+};
+
+// ── Supply-chain Evidence ────────────────────────────────────────
+
+pub use fcp_core::{
+    CanonicalEncoding, HashAlgorithm, SoftwareBillOfMaterials, SupplyChainAttestation,
+    SupplyChainVerificationPolicy, VerificationDecision, VerificationEvidence,
+    VerificationPipeline,
 };
 
 // ── Cost & Usage ─────────────────────────────────────────────────
@@ -208,6 +221,25 @@ mod tests {
     }
 
     #[test]
+    fn kernel_exports_tool_schema_and_canonical_id() {
+        let opts = tool_schema::ExportOptions::default();
+        assert!(!opts.sanitize_name);
+        assert!(validate_canonical_id("fcp.test").is_ok());
+    }
+
+    #[test]
+    fn kernel_exports_audit_and_identity_types() {
+        let _: fn(&AuditEvent) -> &ZoneId = AuditEvent::zone_id;
+        let _: fn(&AuditHead) -> &ZoneId = AuditHead::zone_id;
+
+        let zone = ZoneId::work();
+        assert_eq!(zone.as_str(), "z:work");
+
+        let object_id = ObjectId::from_bytes([0_u8; 32]);
+        assert_eq!(object_id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    #[test]
     fn kernel_exports_connector_id() {
         let id = ConnectorId::from_static("fcp.test");
         assert_eq!(id.as_str(), "fcp.test");
@@ -248,6 +280,23 @@ mod tests {
         let _: BudgetEnforcement = BudgetEnforcement::Warn;
         let _: BudgetEnforcement = BudgetEnforcement::Deny;
         let _: BudgetStatus = BudgetStatus::Ok;
+    }
+
+    #[test]
+    fn kernel_exports_supply_chain_types() {
+        let _: CanonicalEncoding = CanonicalEncoding::Json;
+        let _: HashAlgorithm = HashAlgorithm::Blake3_256;
+        let _: VerificationDecision = VerificationDecision::Allow;
+
+        let policy = SupplyChainVerificationPolicy::default();
+        let pipeline = VerificationPipeline::new(policy);
+        let _verify: fn(
+            &VerificationPipeline,
+            &str,
+            Option<&SupplyChainAttestation>,
+            Option<&SoftwareBillOfMaterials>,
+        ) -> VerificationEvidence = VerificationPipeline::verify;
+        let _ = pipeline;
     }
 
     #[test]

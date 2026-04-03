@@ -806,10 +806,9 @@ impl ConnectorStatus {
     #[must_use]
     pub const fn graduation_guidance(&self) -> Option<&'static str> {
         match self {
-            Self::Ready => None,
+            Self::Ready | Self::Deprecated => None,
             Self::Experimental => Some("Stabilize API surface and complete production testing"),
             Self::Stub => Some("Implement all declared operations with real API integration"),
-            Self::Deprecated => None, // Deprecated connectors don't graduate
             Self::Incubating => Some("Complete runtime implementation, add production evidence, pass compliance suite"),
             Self::Quarantined => Some("Resolve architectural concerns, complete safety review, pass security audit"),
         }
@@ -825,6 +824,68 @@ impl std::fmt::Display for ConnectorStatus {
             Self::Deprecated => write!(f, "deprecated"),
             Self::Incubating => write!(f, "incubating"),
             Self::Quarantined => write!(f, "quarantined"),
+        }
+    }
+}
+
+/// Result of a status consistency check between manifest and runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusConsistencyResult {
+    /// Whether the manifest and runtime statuses are consistent.
+    pub consistent: bool,
+    /// The manifest-declared status.
+    pub manifest_status: ConnectorStatus,
+    /// The runtime-reported status string.
+    pub runtime_status: String,
+    /// Explanation of the mismatch (if any).
+    pub mismatch_reason: Option<String>,
+}
+
+impl StatusConsistencyResult {
+    /// Check if manifest status is consistent with a runtime-reported `surface_status` string.
+    ///
+    /// The canonical mapping is:
+    /// - `"ready"` / `"live"` → `ConnectorStatus::Ready`
+    /// - `"stub"` → `ConnectorStatus::Stub`
+    /// - `"experimental"` → `ConnectorStatus::Experimental`
+    /// - `"deprecated"` → `ConnectorStatus::Deprecated`
+    /// - `"incubating"` → `ConnectorStatus::Incubating`
+    /// - `"quarantined"` → `ConnectorStatus::Quarantined`
+    #[must_use]
+    pub fn check(manifest_status: ConnectorStatus, runtime_status: &str) -> Self {
+        let runtime_canonical = match runtime_status {
+            "ready" | "live" => Some(ConnectorStatus::Ready),
+            "stub" => Some(ConnectorStatus::Stub),
+            "experimental" => Some(ConnectorStatus::Experimental),
+            "deprecated" => Some(ConnectorStatus::Deprecated),
+            "incubating" => Some(ConnectorStatus::Incubating),
+            "quarantined" => Some(ConnectorStatus::Quarantined),
+            _ => None,
+        };
+
+        match runtime_canonical {
+            Some(rt) if rt == manifest_status => Self {
+                consistent: true,
+                manifest_status,
+                runtime_status: runtime_status.to_string(),
+                mismatch_reason: None,
+            },
+            Some(rt) => Self {
+                consistent: false,
+                manifest_status,
+                runtime_status: runtime_status.to_string(),
+                mismatch_reason: Some(format!(
+                    "manifest declares '{manifest_status}' but runtime reports '{runtime_status}' (maps to '{rt}')"
+                )),
+            },
+            None => Self {
+                consistent: false,
+                manifest_status,
+                runtime_status: runtime_status.to_string(),
+                mismatch_reason: Some(format!(
+                    "runtime reports unknown status '{runtime_status}'; manifest declares '{manifest_status}'"
+                )),
+            },
         }
     }
 }
@@ -9131,5 +9192,154 @@ schema_version = "2.1"
             message: "must be present".to_string(),
         };
         assert!(err.capability_id_lint_message().is_none());
+    }
+
+    // ── ConnectorStatus tests ──
+
+    #[test]
+    fn connector_status_display_all_variants() {
+        assert_eq!(ConnectorStatus::Ready.to_string(), "ready");
+        assert_eq!(ConnectorStatus::Stub.to_string(), "stub");
+        assert_eq!(ConnectorStatus::Experimental.to_string(), "experimental");
+        assert_eq!(ConnectorStatus::Deprecated.to_string(), "deprecated");
+        assert_eq!(ConnectorStatus::Incubating.to_string(), "incubating");
+        assert_eq!(ConnectorStatus::Quarantined.to_string(), "quarantined");
+    }
+
+    #[test]
+    fn connector_status_serde_roundtrip() {
+        for status in &[
+            ConnectorStatus::Ready,
+            ConnectorStatus::Stub,
+            ConnectorStatus::Experimental,
+            ConnectorStatus::Deprecated,
+            ConnectorStatus::Incubating,
+            ConnectorStatus::Quarantined,
+        ] {
+            let json = serde_json::to_string(status).unwrap();
+            let roundtrip: ConnectorStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(*status, roundtrip, "roundtrip failed for {status}");
+        }
+    }
+
+    #[test]
+    fn connector_status_is_live() {
+        assert!(ConnectorStatus::Ready.is_live());
+        assert!(ConnectorStatus::Experimental.is_live());
+        assert!(!ConnectorStatus::Stub.is_live());
+        assert!(!ConnectorStatus::Deprecated.is_live());
+        assert!(!ConnectorStatus::Incubating.is_live());
+        assert!(!ConnectorStatus::Quarantined.is_live());
+    }
+
+    #[test]
+    fn connector_status_is_hidden_by_default() {
+        assert!(!ConnectorStatus::Ready.is_hidden_by_default());
+        assert!(!ConnectorStatus::Experimental.is_hidden_by_default());
+        assert!(!ConnectorStatus::Deprecated.is_hidden_by_default());
+        assert!(ConnectorStatus::Stub.is_hidden_by_default());
+        assert!(ConnectorStatus::Incubating.is_hidden_by_default());
+        assert!(ConnectorStatus::Quarantined.is_hidden_by_default());
+    }
+
+    #[test]
+    fn connector_status_non_live_rationale() {
+        assert!(ConnectorStatus::Ready.non_live_rationale().is_none());
+        assert!(ConnectorStatus::Experimental.non_live_rationale().is_none());
+        assert!(ConnectorStatus::Stub.non_live_rationale().is_some());
+        assert!(ConnectorStatus::Deprecated.non_live_rationale().is_some());
+        assert!(ConnectorStatus::Incubating.non_live_rationale().is_some());
+        assert!(ConnectorStatus::Quarantined.non_live_rationale().is_some());
+    }
+
+    #[test]
+    fn connector_status_graduation_guidance() {
+        assert!(ConnectorStatus::Ready.graduation_guidance().is_none());
+        assert!(ConnectorStatus::Deprecated.graduation_guidance().is_none());
+        assert!(ConnectorStatus::Incubating.graduation_guidance().is_some());
+        assert!(ConnectorStatus::Quarantined.graduation_guidance().is_some());
+        assert!(ConnectorStatus::Stub.graduation_guidance().is_some());
+        assert!(ConnectorStatus::Experimental.graduation_guidance().is_some());
+    }
+
+    #[test]
+    fn connector_status_default_is_ready() {
+        assert_eq!(ConnectorStatus::default(), ConnectorStatus::Ready);
+    }
+
+    #[test]
+    fn status_consistency_check_matching() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Ready, "ready");
+        assert!(result.consistent);
+        assert!(result.mismatch_reason.is_none());
+    }
+
+    #[test]
+    fn status_consistency_check_live_maps_to_ready() {
+        // "live" is a legacy alias for "ready"
+        let result = StatusConsistencyResult::check(ConnectorStatus::Ready, "live");
+        assert!(result.consistent);
+    }
+
+    #[test]
+    fn status_consistency_check_mismatch() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Stub, "live");
+        assert!(!result.consistent);
+        let reason = result.mismatch_reason.unwrap();
+        assert!(reason.contains("stub"), "should mention manifest status: {reason}");
+        assert!(reason.contains("live"), "should mention runtime status: {reason}");
+    }
+
+    #[test]
+    fn status_consistency_check_incubating_match() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Incubating, "incubating");
+        assert!(result.consistent);
+    }
+
+    #[test]
+    fn status_consistency_check_quarantined_match() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Quarantined, "quarantined");
+        assert!(result.consistent);
+    }
+
+    #[test]
+    fn status_consistency_check_unknown_runtime() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Ready, "banana");
+        assert!(!result.consistent);
+        assert!(result.mismatch_reason.unwrap().contains("unknown"));
+    }
+
+    #[test]
+    fn connector_status_toml_deserialize_incubating() {
+        let toml_str = r#"
+[connector]
+id = "fcp.test"
+name = "Test"
+version = "0.1.0"
+description = "test connector"
+archetypes = ["request-response"]
+format = "native"
+status = "incubating"
+"#;
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let status_str = parsed["connector"]["status"].as_str().unwrap();
+        assert_eq!(status_str, "incubating");
+    }
+
+    #[test]
+    fn connector_status_toml_deserialize_quarantined() {
+        let toml_str = r#"
+[connector]
+id = "fcp.test"
+name = "Test"
+version = "0.1.0"
+description = "test connector"
+archetypes = ["request-response"]
+format = "native"
+status = "quarantined"
+"#;
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let status_str = parsed["connector"]["status"].as_str().unwrap();
+        assert_eq!(status_str, "quarantined");
     }
 }

@@ -28,6 +28,7 @@ use fcp_bootstrap::{
     ColdRecoveryWarning,
     // Hardware token
     DetectedToken,
+    DetectionStage,
     // Genesis
     GenesisState,
     GenesisValidationError,
@@ -682,6 +683,75 @@ fn token_detector_default_empty() {
     let tokens = detector.detect_all();
     // May or may not find tokens depending on system — just verify no crash
     let _ = tokens;
+}
+
+#[test]
+fn token_detector_report_surfaces_missing_provider_reason() {
+    let provider = PathBuf::from("/definitely/missing/fcp-bootstrap-provider.so");
+    let detector = TokenDetector::from_provider_paths(vec![provider.clone()]);
+    let report = detector.detect_report();
+    let provider_report = report
+        .providers
+        .iter()
+        .find(|candidate| candidate.provider == provider)
+        .unwrap();
+
+    assert!(provider_report.tokens.is_empty());
+    assert!(
+        provider_report
+            .issues
+            .iter()
+            .any(|issue| issue.stage == DetectionStage::ProviderMissing)
+    );
+}
+
+#[test]
+fn token_detector_report_surfaces_load_failure_for_plain_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = temp.path().join("plain-text-provider.txt");
+    std::fs::write(&provider, "not a dynamic library").unwrap();
+
+    let detector = TokenDetector::from_provider_paths(vec![provider.clone()]);
+    let report = detector.detect_report();
+    let provider_report = report
+        .providers
+        .iter()
+        .find(|candidate| candidate.provider == provider)
+        .unwrap();
+
+    assert!(provider_report.tokens.is_empty());
+    assert!(
+        provider_report
+            .issues
+            .iter()
+            .any(|issue| issue.stage == DetectionStage::LoadProvider)
+    );
+}
+
+#[test]
+fn token_detector_env_report_emits_json() {
+    let provider = std::env::var_os("FCP_BOOTSTRAP_PKCS11_PROVIDER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/definitely/missing/fcp-bootstrap-provider.so"));
+    let expect_token = std::env::var("FCP_BOOTSTRAP_EXPECT_TOKEN").ok().as_deref() == Some("1");
+
+    let detector = TokenDetector::from_provider_paths(vec![provider.clone()]);
+    let report = detector.detect_report();
+
+    println!(
+        "HARDWARE_TOKEN_REPORT_JSON={}",
+        serde_json::to_string(&report).unwrap()
+    );
+
+    assert_eq!(report.providers.len(), 1);
+    assert_eq!(report.providers[0].provider, provider);
+
+    if expect_token {
+        assert!(
+            report.has_detected_tokens(),
+            "expected at least one hardware-token candidate from configured provider"
+        );
+    }
 }
 
 #[test]

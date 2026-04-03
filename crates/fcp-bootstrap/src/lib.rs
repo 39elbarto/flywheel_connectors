@@ -103,7 +103,10 @@ pub use ceremony::{
 pub use cold_recovery::{ColdRecovery, ColdRecoveryError, ColdRecoveryWarning};
 pub use error::{BootstrapError, BootstrapResult};
 pub use genesis::{GenesisState, GenesisValidationError};
-pub use hardware_token::{DetectedToken, HardwareTokenProvider, TokenDetector};
+pub use hardware_token::{
+    DetectedToken, DetectionIssue, DetectionStage, HardwareTokenProvider, ProviderDetectionResult,
+    TokenDetectionReport, TokenDetector,
+};
 pub use phase::{BootstrapPhase, InitResult, InitSuggestion, PartialStateSuggestion};
 pub use recovery_phrase::{RecoveryPhrase, RecoveryPhraseError};
 pub use time_validation::{TimeValidation, TimeValidationResult};

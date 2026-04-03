@@ -3,8 +3,11 @@
 //! This module provides cross-platform support for detecting and using
 //! hardware security modules (HSMs) and smart cards via PKCS#11.
 
+use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
+use cryptoki::slot::Slot;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// Information about a detected hardware token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +56,127 @@ impl std::fmt::Display for DetectedToken {
             "{} ({}) [slot {}]",
             self.label, self.manufacturer, self.slot
         )
+    }
+}
+
+/// Discovery stages for provider and slot probing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DetectionStage {
+    /// The configured provider path does not exist on disk.
+    ProviderMissing,
+    /// The provider library could not be loaded.
+    LoadProvider,
+    /// The provider library could not be initialized.
+    InitializeProvider,
+    /// Slot enumeration failed.
+    EnumerateSlots,
+    /// The slot identifier could not be represented in `DetectedToken`.
+    NormalizeSlotId,
+    /// Token metadata could not be read for a slot.
+    ReadTokenInfo,
+    /// Mechanism enumeration failed for a slot.
+    ReadMechanisms,
+    /// The provider library could not be finalized cleanly.
+    FinalizeProvider,
+}
+
+/// A specific discovery failure surfaced during PKCS#11 probing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectionIssue {
+    /// Provider library path that produced the issue.
+    pub provider: PathBuf,
+    /// Detection stage that failed.
+    pub stage: DetectionStage,
+    /// Optional raw slot identifier associated with the issue.
+    pub slot: Option<u64>,
+    /// Human-readable failure details.
+    pub message: String,
+}
+
+impl DetectionIssue {
+    fn new(
+        provider: &Path,
+        stage: DetectionStage,
+        slot: Option<u64>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: provider.to_path_buf(),
+            stage,
+            slot,
+            message: message.into(),
+        }
+    }
+}
+
+/// The result of probing a single PKCS#11 provider library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDetectionResult {
+    /// Provider library path that was probed.
+    pub provider: PathBuf,
+    /// Token candidates discovered from this provider.
+    pub tokens: Vec<DetectedToken>,
+    /// Structured issues encountered while probing this provider.
+    pub issues: Vec<DetectionIssue>,
+}
+
+impl ProviderDetectionResult {
+    fn new(provider: &Path) -> Self {
+        Self {
+            provider: provider.to_path_buf(),
+            tokens: Vec::new(),
+            issues: Vec::new(),
+        }
+    }
+
+    fn push_issue(&mut self, stage: DetectionStage, slot: Option<u64>, message: impl Into<String>) {
+        self.issues
+            .push(DetectionIssue::new(&self.provider, stage, slot, message));
+    }
+}
+
+/// Aggregate report for a hardware-token discovery pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TokenDetectionReport {
+    /// Per-provider probe results in probe order.
+    pub providers: Vec<ProviderDetectionResult>,
+}
+
+impl TokenDetectionReport {
+    /// Return every discovered token candidate across all providers.
+    #[must_use]
+    pub fn all_tokens(&self) -> Vec<DetectedToken> {
+        self.providers
+            .iter()
+            .flat_map(|provider| provider.tokens.iter().cloned())
+            .collect()
+    }
+
+    /// Return only FCP-compatible tokens across all providers.
+    #[must_use]
+    pub fn fcp_compatible_tokens(&self) -> Vec<DetectedToken> {
+        self.providers
+            .iter()
+            .flat_map(|provider| provider.tokens.iter().cloned())
+            .filter(DetectedToken::supports_ed25519)
+            .collect()
+    }
+
+    /// Return every structured issue reported during discovery.
+    #[must_use]
+    pub fn issues(&self) -> Vec<DetectionIssue> {
+        self.providers
+            .iter()
+            .flat_map(|provider| provider.issues.iter().cloned())
+            .collect()
+    }
+
+    /// Whether discovery found at least one token candidate.
+    #[must_use]
+    pub fn has_detected_tokens(&self) -> bool {
+        self.providers
+            .iter()
+            .any(|provider| !provider.tokens.is_empty())
     }
 }
 
@@ -129,9 +253,13 @@ impl TokenDetector {
     /// Create a new token detector with default provider paths.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            provider_paths: default_provider_paths(),
-        }
+        Self::from_provider_paths(default_provider_paths())
+    }
+
+    /// Create a detector with an explicit provider search list.
+    #[must_use]
+    pub fn from_provider_paths(provider_paths: Vec<PathBuf>) -> Self {
+        Self { provider_paths }
     }
 
     /// Add a custom provider path.
@@ -139,27 +267,28 @@ impl TokenDetector {
         self.provider_paths.push(path);
     }
 
+    /// Probe all configured providers and return a structured discovery report.
+    #[must_use]
+    pub fn detect_report(&self) -> TokenDetectionReport {
+        TokenDetectionReport {
+            providers: self
+                .provider_paths
+                .iter()
+                .map(|provider| detect_tokens_for_provider(provider.as_path()))
+                .collect(),
+        }
+    }
+
     /// Detect all available tokens.
     #[must_use]
     pub fn detect_all(&self) -> Vec<DetectedToken> {
-        let mut tokens = Vec::new();
-
-        for provider in &self.provider_paths {
-            if provider.exists() {
-                tokens.extend(detect_tokens_for_provider(provider));
-            }
-        }
-
-        tokens
+        self.detect_report().all_tokens()
     }
 
     /// Detect tokens that support the required mechanisms for FCP.
     #[must_use]
     pub fn detect_fcp_compatible(&self) -> Vec<DetectedToken> {
-        self.detect_all()
-            .into_iter()
-            .filter(DetectedToken::supports_ed25519)
-            .collect()
+        self.detect_report().fcp_compatible_tokens()
     }
 }
 
@@ -208,22 +337,135 @@ fn default_provider_paths() -> Vec<PathBuf> {
     }
 }
 
-/// Detect tokens for a specific PKCS#11 provider.
-///
-/// This is a stub implementation - a real implementation would use the
-/// pkcs11 crate to interact with the provider.
-fn detect_tokens_for_provider(provider: &PathBuf) -> Vec<DetectedToken> {
-    // In a real implementation, we would:
-    // 1. Load the PKCS#11 library
-    // 2. Initialize it
-    // 3. List available slots
-    // 4. For each slot with a token, get token info
-    // 5. Get supported mechanisms
+/// Detect tokens for a specific PKCS#11 provider and surface discovery failures.
+fn detect_tokens_for_provider(provider: &Path) -> ProviderDetectionResult {
+    let _probe_guard = provider_probe_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    tracing::debug!(?provider, "Probing PKCS#11 provider");
+    let mut result = ProviderDetectionResult::new(provider);
 
-    // For now, return empty - actual implementation would use pkcs11 crate
-    Vec::new()
+    if !provider.exists() {
+        result.push_issue(
+            DetectionStage::ProviderMissing,
+            None,
+            format!("provider library not found at {}", provider.display()),
+        );
+        return result;
+    }
+
+    tracing::debug!(provider = %provider.display(), "Probing PKCS#11 provider");
+
+    let pkcs11 = match Pkcs11::new(provider) {
+        Ok(pkcs11) => pkcs11,
+        Err(err) => {
+            result.push_issue(DetectionStage::LoadProvider, None, err.to_string());
+            return result;
+        }
+    };
+
+    if let Err(err) = pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
+        result.push_issue(DetectionStage::InitializeProvider, None, err.to_string());
+        return result;
+    }
+
+    match pkcs11.get_slots_with_token() {
+        Ok(slots) => {
+            for slot in slots {
+                probe_slot(&pkcs11, slot, &mut result);
+            }
+        }
+        Err(err) => result.push_issue(DetectionStage::EnumerateSlots, None, err.to_string()),
+    }
+
+    if let Err(err) = pkcs11.finalize() {
+        result.push_issue(DetectionStage::FinalizeProvider, None, err.to_string());
+    }
+
+    result
+}
+
+fn probe_slot(pkcs11: &Pkcs11, slot: Slot, result: &mut ProviderDetectionResult) {
+    let raw_slot = slot.id();
+    let slot_id = match u32::try_from(raw_slot) {
+        Ok(slot_id) => slot_id,
+        Err(err) => {
+            result.push_issue(
+                DetectionStage::NormalizeSlotId,
+                Some(raw_slot),
+                err.to_string(),
+            );
+            return;
+        }
+    };
+
+    let token_info = match pkcs11.get_token_info(slot) {
+        Ok(token_info) => token_info,
+        Err(err) => {
+            result.push_issue(
+                DetectionStage::ReadTokenInfo,
+                Some(raw_slot),
+                err.to_string(),
+            );
+            return;
+        }
+    };
+
+    let mechanisms = match pkcs11.get_mechanism_list(slot) {
+        Ok(mechanisms) => {
+            let mut names: Vec<String> = mechanisms
+                .into_iter()
+                .map(|item| item.to_string())
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        }
+        Err(err) => {
+            result.push_issue(
+                DetectionStage::ReadMechanisms,
+                Some(raw_slot),
+                err.to_string(),
+            );
+            Vec::new()
+        }
+    };
+
+    let label = normalize_token_field(token_info.label());
+    let manufacturer = normalize_token_field(token_info.manufacturer_id());
+    let serial = normalize_token_field(token_info.serial_number());
+
+    tracing::debug!(
+        provider = %result.provider.display(),
+        slot = raw_slot,
+        label = %label,
+        manufacturer = %manufacturer,
+        mechanism_count = mechanisms.len(),
+        "Discovered PKCS#11 token candidate"
+    );
+
+    result.tokens.push(DetectedToken {
+        provider: result.provider.clone(),
+        slot: slot_id,
+        label,
+        manufacturer,
+        serial,
+        mechanisms,
+    });
+}
+
+fn normalize_token_field(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn provider_probe_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Mock token provider for testing.
@@ -292,6 +534,7 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn test_token() -> DetectedToken {
         DetectedToken {
@@ -413,6 +656,13 @@ mod tests {
     }
 
     #[test]
+    fn detector_from_provider_paths() {
+        let providers = vec![PathBuf::from("/one.so"), PathBuf::from("/two.so")];
+        let detector = TokenDetector::from_provider_paths(providers.clone());
+        assert_eq!(detector.provider_paths, providers);
+    }
+
+    #[test]
     fn detector_add_provider() {
         let mut detector = TokenDetector::new();
         let original_count = detector.provider_paths.len();
@@ -433,6 +683,79 @@ mod tests {
         let detector = TokenDetector::new();
         let tokens = detector.detect_fcp_compatible();
         assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn detector_report_records_missing_provider() {
+        let provider = PathBuf::from("/definitely/missing/pkcs11-provider.so");
+        let detector = TokenDetector::from_provider_paths(vec![provider.clone()]);
+        let report = detector.detect_report();
+
+        assert!(!report.has_detected_tokens());
+        assert!(report.all_tokens().is_empty());
+        assert_eq!(report.providers.len(), 1);
+        assert_eq!(report.providers[0].provider, provider);
+        assert_eq!(report.providers[0].issues.len(), 1);
+        assert_eq!(
+            report.providers[0].issues[0].stage,
+            DetectionStage::ProviderMissing
+        );
+    }
+
+    #[test]
+    fn detector_report_records_load_failure_for_non_library_file() {
+        let dir = tempdir().unwrap();
+        let provider = dir.path().join("not-a-library.txt");
+        std::fs::write(&provider, "plain text").unwrap();
+
+        let detector = TokenDetector::from_provider_paths(vec![provider.clone()]);
+        let report = detector.detect_report();
+        let issues = &report.providers[0].issues;
+
+        assert!(report.all_tokens().is_empty());
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.stage == DetectionStage::LoadProvider)
+        );
+        assert_eq!(issues[0].provider, provider);
+    }
+
+    #[test]
+    fn token_detection_report_filters_fcp_compatible_tokens() {
+        let mut incompatible = test_token();
+        incompatible.mechanisms = vec!["CKM_RSA_PKCS".to_string()];
+
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: PathBuf::from("/provider.so"),
+                tokens: vec![test_token(), incompatible],
+                issues: Vec::new(),
+            }],
+        };
+
+        let compatible = report.fcp_compatible_tokens();
+        assert_eq!(compatible.len(), 1);
+        assert!(compatible[0].supports_ed25519());
+    }
+
+    #[test]
+    fn token_detection_report_collects_issues() {
+        let issue = DetectionIssue::new(
+            Path::new("/provider.so"),
+            DetectionStage::LoadProvider,
+            None,
+            "load failed",
+        );
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: PathBuf::from("/provider.so"),
+                tokens: Vec::new(),
+                issues: vec![issue.clone()],
+            }],
+        };
+
+        assert_eq!(report.issues(), vec![issue]);
     }
 
     // ---- MockTokenProvider ----
@@ -701,6 +1024,19 @@ mod tests {
         let err = TokenError::Pkcs11("CKR_DEVICE_ERROR".into());
         let debug = format!("{err:?}");
         assert!(debug.contains("Pkcs11"));
+    }
+
+    #[test]
+    fn detection_issue_serde_roundtrip() {
+        let issue = DetectionIssue::new(
+            Path::new("/provider.so"),
+            DetectionStage::ReadMechanisms,
+            Some(7),
+            "mechanism enumeration failed",
+        );
+        let json = serde_json::to_string(&issue).unwrap();
+        let restored: DetectionIssue = serde_json::from_str(&json).unwrap();
+        assert_eq!(issue, restored);
     }
 
     // ---- MockTokenProvider generate_keypair returns different keys ----

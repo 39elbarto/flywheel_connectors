@@ -8,7 +8,7 @@ use crate::ceremony::{
 };
 use crate::error::{BootstrapError, BootstrapResult};
 use crate::genesis::GenesisState;
-use crate::hardware_token::{DetectedToken, TokenDetector};
+use crate::hardware_token::{DetectedToken, TokenDetectionReport, TokenDetector};
 use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, write_phase_lock};
 use crate::recovery_phrase::RecoveryPhrase;
 use crate::time_validation::{TimeValidation, TimeValidationResult};
@@ -569,8 +569,14 @@ fn check_initialization_state(
 /// Detect available hardware tokens.
 #[must_use]
 pub fn detect_hardware_tokens() -> Vec<DetectedToken> {
+    detect_hardware_tokens_report().fcp_compatible_tokens()
+}
+
+/// Detect available hardware tokens and retain structured discovery failures.
+#[must_use]
+pub fn detect_hardware_tokens_report() -> TokenDetectionReport {
     let detector = TokenDetector::new();
-    detector.detect_fcp_compatible()
+    detector.detect_report()
 }
 
 #[cfg(test)]

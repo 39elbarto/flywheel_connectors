@@ -6334,6 +6334,7 @@ dependencies = [
  "fcp-kernel",
  "fcp-manifest",
  "fcp-mesh",
+ "fcp-policy",
  "fcp-raptorq",
  "fcp-sandbox",
  "fcp-telemetry",

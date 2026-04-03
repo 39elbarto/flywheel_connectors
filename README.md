@@ -8,7 +8,7 @@
 > target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
 > When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. **136 connector crates**, **28 core crates**, **1.4 million lines of Rust**, **58,000+ tests**, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **31 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state.
 
 ---
 
@@ -16,11 +16,11 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 **This repository currently spans three layers:**
 
-1. **FCP specifications and design direction**: the mesh-native protocol model, security invariants, and the current FCP3 ownership/runtime contract
+1. **FCP specifications and a still-migrating ownership split**: the mesh-native protocol model, security invariants, and the emerging FCP3 owner crates (`fcp-kernel`, `fcp-policy`, `fcp-evidence`) that currently still re-export much of `fcp-core`
 
 2. **A real host-first Rust platform**: today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`
 
-3. **A complete connector workspace**: 136 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations, all with typed operations, structured error mapping, and manifest-declared security policy
+3. **A complete connector workspace**: 150 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations, all with typed operations, structured error mapping, and manifest-declared security policy
 
 **Current reality**: the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. The implemented operator surface today is primarily host-first (`fwc` -> `fcp-host` -> connector subprocesses), with the mesh-native data plane proven at the protocol and store layers.
 
@@ -677,7 +677,7 @@ These unlock entire categories of autonomous agent work.
 | `fcp.redis` | Queue/Pub-Sub | Caching, message queues |
 | `fcp.whisper` | CLI/Process | Voice transcription |
 
-### Connector Inventory (136 connector crates)
+### Connector Inventory (150 connector crates)
 
 Every connector follows the same structural contract: a `manifest.toml` declaring capabilities, zones, rate limits, network constraints, and sandbox policy; a `ConnectorErrorMapping` implementation bridging connector-specific errors to the FCP error taxonomy; and typed `OperationInfo` structs with AI agent hints (when to use, common mistakes, examples).
 
@@ -860,7 +860,7 @@ Capability tokens use CBOR Object Signing and Encryption (RFC 9052) with CWT cla
 
 ## Test Infrastructure
 
-The workspace contains 58,000+ tests across several test categories:
+The workspace has a very large crate-local and end-to-end test surface across several categories:
 
 | Category | Where | What It Covers |
 |----------|-------|----------------|
@@ -1078,7 +1078,7 @@ window = "60s"
 | **Multi-device** | Mesh-native with fountain code distribution | Single process | Client-server | Load balancer |
 | **Revocation** | First-class objects with O(1) freshness | N/A | N/A | API key rotation |
 | **Agent UX** | TOON-first CLI with intent compilation | Python SDK | JSON-RPC | REST API |
-| **Connector count** | 89 production connectors | ~50 community tools | Varies by server | Custom per service |
+| **Connector count** | 150 connector crates in the workspace | ~50 community tools | Varies by server | Custom per service |
 | **Supply chain** | Ed25519 signatures, in-toto/SLSA attestations | pip install | npm install | Docker images |
 
 FCP is heavier than MCP or LangChain tools. That weight buys cryptographic isolation, mesh distribution, and auditability. For single-machine prototyping, MCP is simpler. For production agent operations where security matters, FCP provides guarantees the alternatives cannot.
@@ -1148,7 +1148,7 @@ Built with:
 - [ciborium](https://github.com/enarx/ciborium) — CBOR serialization
 - [raptorq](https://github.com/cberner/raptorq) — fountain code encoding/decoding
 - [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client for connector API calls
-- [wiremock](https://github.com/LukeMathWalker/wiremock-rs) — HTTP mocking for all 58,000+ tests
+- [wiremock](https://github.com/LukeMathWalker/wiremock-rs) — HTTP mocking across the workspace test suite
 - [clap](https://github.com/clap-rs/clap) — CLI argument parsing for `fwc`
 - [serde](https://github.com/serde-rs/serde) + [serde_json](https://github.com/serde-rs/json) — serialization throughout
 - [tracing](https://github.com/tokio-rs/tracing) — structured logging and observability
@@ -1312,22 +1312,28 @@ For operator and agent workflows, migration guidance, and evidence-bundle expect
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 28 crates under `crates/` and 136 connector crates under `connectors/`, totaling 1.4 million lines of Rust with 58,000+ tests. Default workspace operations focus on the core platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 31 crates under `crates/` and 150 connector crates under `connectors/`. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/
 ├── crates/
 │   ├── fcp-async-core/        # Transitional async/runtime substrate
 │   ├── fcp-async-core-macros/ # Proc macros for async core
+│   ├── fcp-audit/             # Older audit-chain primitives still used in the migration
+│   ├── fcp-bootstrap/         # Provisioning and first-run ceremony flows
 │   ├── fcp-core/              # Shared domain types: zones, capabilities, provenance, lifecycle
 │   ├── fcp-cbor/              # Deterministic CBOR and schema hashing
 │   ├── fcp-crypto/            # Signing, key exchange, AEAD, HPKE, COSE, Shamir
+│   ├── fcp-evidence/          # Emerging owner for receipts, revocation, checkpoints, attestations
+│   ├── fcp-kernel/            # Emerging owner for execution/lifecycle semantics
 │   ├── fcp-protocol/          # FCPC/FCPS framing, sessions, control-plane encoding
 │   ├── fcp-store/             # Object store, symbol store, repair, GC, offline state
 │   ├── fcp-raptorq/           # RaptorQ codec, chunking, symbol envelopes
 │   ├── fcp-tailscale/         # Mesh identity, peer discovery, ACL/tag integration
 │   ├── fcp-mesh/              # MeshNode routing, admission, gossip, placement, leases
 │   ├── fcp-manifest/          # Connector manifest parsing and validation
+│   ├── fcp-policy/            # Emerging owner for zones, capabilities, provenance, approvals
+│   ├── fcp-ratelimit/         # Shared token-bucket/sliding-window/leaky-bucket enforcement
 │   ├── fcp-sandbox/           # OS/WASI isolation and egress guardrails
 │   ├── fcp-host/              # Node-local host/orchestrator and agent-facing admin surfaces
 │   ├── fcp-sdk/               # Connector authoring SDK
@@ -1343,7 +1349,7 @@ flywheel_connectors/
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
 │   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
-├── connectors/                # 136 connector crates at varying maturity
+├── connectors/                # 150 connector crates at varying maturity
 │   ├── github/
 │   ├── gmail/
 │   ├── slack/
@@ -1374,21 +1380,24 @@ The workspace already clusters into a few clear responsibility bands:
 
 | Band | Current Crates | What Lives There |
 |------|----------------|------------------|
-| **Semantic core** | `fcp-core`, `fcp-cbor`, `fcp-crypto`, `fcp-manifest`, `fcp-audit` | Authority model, canonical encoding, cryptographic primitives, manifests, receipts, and shared domain types |
+| **Transitional semantic bucket** | `fcp-core` | The broad shared vocabulary crate that still carries much of the current request/response, capability, provenance, receipt, lifecycle, and connector contract surface |
+| **Emerging owner crates** | `fcp-kernel`, `fcp-policy`, `fcp-evidence` | The intended long-term homes for execution semantics, policy/trust semantics, and evidence/receipt/revocation semantics; today they mostly re-export from `fcp-core` while the refoundation continues |
+| **Canonicalization and primitive building blocks** | `fcp-cbor`, `fcp-crypto`, `fcp-audit` | Deterministic encoding, cryptographic primitives, and older audit-chain building blocks that higher-level crates still consume |
 | **Durable mesh/data plane** | `fcp-protocol`, `fcp-store`, `fcp-raptorq`, `fcp-tailscale`, `fcp-mesh` | FCPC/FCPS framing, symbol/object handling, repair, routing, admission, gossip, leases, and mesh identity |
 | **Host/operator surfaces** | `fcp-host`, `fwc` | Node-local orchestration, admin/discovery/invoke/status surfaces, and the single supported operator/agent CLI |
-| **Connector authoring/runtime helpers** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery`, `fcp-ratelimit`, `fcp-bootstrap`, `fcp-telemetry` | Connector contracts, streaming/polling supervision, provider helpers, retries, provisioning, and observability |
-| **Evidence and test harnesses** | `fcp-conformance`, `fcp-testkit`, `fcp-e2e` | Golden vectors, schema validation, reusable fixtures, and end-to-end compliance coverage |
+| **Connector authoring/runtime helpers** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery`, `fcp-ratelimit`, `fcp-bootstrap`, `fcp-telemetry`, `fcp-manifest`, `fcp-sandbox`, `fcp-registry` | Connector contracts, streaming/polling supervision, auth/provider helpers, retries, provisioning, manifests, sandboxing, registry/install flows, and observability |
+| **Verification harnesses** | `fcp-conformance`, `fcp-testkit`, `fcp-e2e` | Golden vectors, schema validation, reusable fixtures, and end-to-end compliance coverage |
 
 That split is useful because it shows what is already coherent versus what is still transitional.
-`fcp-core` is carrying much of the long-lived semantic vocabulary. `fcp-host` is already the
-node-local orchestration boundary. `fwc` is now the canonical operational surface.
-The remaining ambiguity is mostly around runtime substrate and where the final FCP3 kernel line
-should be drawn.
+`fcp-host` is already the node-local orchestration boundary. `fwc` is the canonical operational
+surface. The biggest remaining transitional seam is semantic ownership: `fcp-core` still holds a
+large amount of vocabulary, while `fcp-kernel`, `fcp-policy`, and `fcp-evidence` already exist as
+the intended long-term owners and are being introduced through a re-export-first migration.
 
 Two current-reality notes matter when reading the rest of this README:
 
-- `fcp-core` carries most of the semantic request/response, capability, provenance, and receipt vocabulary, while `fcp-protocol` is much narrower and mostly owns FCPC/FCPS framing plus session/control-plane mechanics.
+- `fcp-core` still carries most of the semantic request/response, capability, provenance, receipt, and lifecycle vocabulary in the current tree.
+- `fcp-kernel`, `fcp-policy`, and `fcp-evidence` are already present and document the intended ownership boundaries, but today they still re-export heavily from `fcp-core`.
 - The repo’s integration burden is distributed. The most important end-to-end and conformance coverage lives in crate-local test suites such as `crates/fcp-conformance/tests`, `crates/fcp-e2e/tests`, `crates/fcp-host/tests`, and per-connector integration tests.
 
 ## FCP3 Ownership Direction
@@ -1397,11 +1406,13 @@ The FCP3 re-foundation is converging on a stricter "one concept, one home" rule:
 
 | Long-term boundary | Current source material | Intended ownership rule |
 |--------------------|-------------------------|-------------------------|
-| **Kernel / execution semantics** | `fcp-core`, `fcp-cbor`, `fcp-crypto`, parts of `fcp-protocol`, parts of `fcp-store` | Runtime context, budgets, provenance, outcomes, authority narrowing, durable execution records, and transport contracts belong in the kernel boundary, not in CLIs or connector-specific helper layers |
-| **Mesh + object substrate** | `fcp-mesh`, `fcp-store`, `fcp-raptorq`, `fcp-tailscale` | Placement, repair, checkpoint sync, admission, object durability, and symbol transport stay together as the mesh/object plane rather than being re-implemented inside host or SDK code |
+| **Kernel / execution semantics** | `fcp-kernel`, `fcp-core`, parts of `fcp-protocol`, parts of `fcp-host` | Runtime context, lifecycle, invocation semantics, cancellation/progress, budgets, and operator-facing execution contracts belong in the kernel boundary, not in CLIs or connector-specific helper layers |
+| **Policy / trust semantics** | `fcp-policy`, `fcp-core`, `fcp-manifest` | Zone, capability, provenance, taint, approval, and policy-bundle semantics belong in the policy boundary rather than being smeared across host, CLI, and connector code |
+| **Evidence / receipt semantics** | `fcp-evidence`, `fcp-core`, `fcp-audit` | Receipts, intents, revocation, checkpoints, and supply-chain evidence belong in the evidence boundary rather than in the generic semantic bucket |
+| **Mesh + object substrate** | `fcp-mesh`, `fcp-store`, `fcp-raptorq`, `fcp-tailscale`, `fcp-protocol` | Placement, repair, checkpoint sync, admission, object durability, symbol transport, and session/framing mechanics stay together as the mesh/object plane rather than being re-implemented inside host or SDK code |
 | **Host / supervision** | `fcp-host` | Activation, lifecycle, rollout, health, policy compilation, admin RPC, explain/doctor surfaces, and execution placement belong to the host as a supervised root application |
-| **Connector SDK** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery` | Connector-facing ergonomics, typed I/O helpers, streaming/polling/webhook utilities, and shared provider tooling belong in the SDK/helper layer, not in the kernel |
-| **Tooling and evidence surfaces** | `fwc`, `fcp-conformance`, `fcp-testkit`, `fcp-e2e`, `fcp-telemetry` | Operator UX, agent UX, conformance, replayable evidence, and harnesses stay outside the kernel and host so they can evolve without smearing core semantics |
+| **Connector SDK** | `fcp-sdk`, `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-google-discovery`, `fcp-ratelimit` | Connector-facing ergonomics, typed I/O helpers, streaming/polling/webhook utilities, shared provider tooling, and reusable runtime helpers belong in the SDK/helper layer, not in the kernel |
+| **Tooling and verification surfaces** | `fwc`, `fcp-conformance`, `fcp-testkit`, `fcp-e2e`, `fcp-telemetry` | Operator UX, agent UX, conformance, replayable evidence, and harnesses stay outside the kernel and host so they can evolve without smearing core semantics |
 
 The remaining quarantine surfaces (see `docs/FCP3_Retirement_Kill_List.md` for the full classification):
 
@@ -1820,7 +1831,7 @@ Honest about what FCP doesn't do yet:
 
 ## FAQ
 
-**Q: Why 89 separate connector crates instead of a plugin system?**
+**Q: Why 150 separate connector crates instead of a plugin system?**
 Each connector is a standalone binary with its own manifest, capabilities, and sandbox policy. This eliminates shared-memory vulnerabilities, enables per-connector resource limits, and makes supply-chain verification tractable (you sign one binary, not a runtime + plugin combination).
 
 **Q: Why RaptorQ instead of regular file transfer?**

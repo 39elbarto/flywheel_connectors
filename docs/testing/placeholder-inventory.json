@@ -1,7 +1,18 @@
 {
-  "version": 1,
-  "generated_at": "2026-04-03T02:18:00Z",
-  "purpose": "Authoritative machine-checkable inventory of high-confidence production placeholders, status drift, and narrow approved exception classes for the runtime-placeholder eradication initiative.",
+  "version": 2,
+  "generated_at": "2026-04-05T23:59:00Z",
+  "purpose": "Authoritative machine-checkable inventory of high-confidence production placeholders, status drift, and narrow approved exception classes for the runtime-placeholder eradication initiative. In phase 7 this file also serves as the concrete row inventory for the broader cutover scoreboard.",
+  "scoreboard_contract": {
+    "scope": "Concrete runtime placeholders, status drift, and operator-gap rows that must either be eliminated or explicitly quarantined before cutover closes.",
+    "required_row_fields": [
+      "current_status",
+      "owner_bead",
+      "user_visible_impact",
+      "replacement_path",
+      "proof_artifacts"
+    ],
+    "paired_scoreboard_surface": "docs/FCP3_Retirement_Kill_List.md"
+  },
   "approved_exception_classes": [
     {
       "id": "test_only",
@@ -61,6 +72,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.2.2",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "Operators can discover Tlon as a connector candidate but still hit planned-only and unimplemented runtime behavior instead of a truthful live or quarantined surface.",
+      "replacement_path": "Promote the connector from `stub` and `planned_only` into a truthful live or explicitly quarantined non-live contract with real invoke behavior.",
+      "proof_artifacts": [
+        "docs/testing/placeholder-scan.json",
+        "crates/fwc/tests/cual_integration.rs"
+      ],
       "rationale": "The connector manifest remains `stub`, and the runtime self-description still advertises `planned_only` plus an unimplemented invoke path.",
       "exit_strategy": "Graduate the connector to a truthful live or quarantined non-live state and remove planned-only runtime surfaces.",
       "verification_expectation": "Connector-level unit and integration coverage plus catalog or status proofs that the connector no longer exposes a planned-only runtime contract.",
@@ -86,6 +104,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.2.3",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "Operators can discover Zalo as a connector candidate but still hit planned-only and unimplemented runtime behavior instead of a truthful live or quarantined surface.",
+      "replacement_path": "Promote the connector from `stub` and `planned_only` into a truthful live or explicitly quarantined non-live contract with real invoke behavior.",
+      "proof_artifacts": [
+        "docs/testing/placeholder-scan.json",
+        "crates/fwc/tests/cual_integration.rs"
+      ],
       "rationale": "The connector manifest remains `stub`, and the runtime self-description still advertises `planned_only` plus an unimplemented invoke path.",
       "exit_strategy": "Graduate the connector to a truthful live or quarantined non-live state and remove planned-only runtime surfaces.",
       "verification_expectation": "Connector-level unit and integration coverage plus catalog or status proofs that the connector no longer exposes a planned-only runtime contract.",
@@ -111,6 +136,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.2.4",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "Operators can discover Zalouser as a connector candidate but still hit planned-only and unimplemented runtime behavior instead of a truthful live or quarantined surface.",
+      "replacement_path": "Promote the connector from `stub` and `planned_only` into a truthful live or explicitly quarantined non-live contract with real invoke behavior.",
+      "proof_artifacts": [
+        "docs/testing/placeholder-scan.json",
+        "crates/fwc/tests/cual_integration.rs"
+      ],
       "rationale": "The connector manifest remains `stub`, and the runtime self-description still advertises `planned_only` plus an unimplemented invoke path.",
       "exit_strategy": "Graduate the connector to a truthful live or quarantined non-live state and remove planned-only runtime surfaces.",
       "verification_expectation": "Connector-level unit and integration coverage plus catalog or status proofs that the connector no longer exposes a planned-only runtime contract.",
@@ -136,6 +168,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.2.5",
+      "current_status": "present-status-drift",
+      "user_visible_impact": "Operators and agents see contradictory manifest and runtime status for Hugging Face, so readiness and trust decisions are not mechanically reliable.",
+      "replacement_path": "Make the manifest, handshake, introspection, and catalog surfaces converge on the same live or explicitly quarantined status contract.",
+      "proof_artifacts": [
+        "docs/testing/placeholder-scan.json",
+        "crates/fwc/tests/cual_integration.rs"
+      ],
       "rationale": "The manifest still declares the connector as `stub` while handshake and introspection surfaces emit `surface_status = live` and expose live-request support.",
       "exit_strategy": "Make manifest status, runtime handshake, introspection, and catalog truth converge on the same live or quarantined state.",
       "verification_expectation": "Manifest or catalog consistency checks plus connector tests proving runtime and metadata status stay aligned.",
@@ -161,6 +200,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.3.2",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "AWS requests can look configured while still using fake header-based signing, so real service interaction is impossible or misleading.",
+      "replacement_path": "Adopt the shared SigV4 signer on the live request path and remove the fake `X-Aws-*` header fallback.",
+      "proof_artifacts": [
+        "scripts/e2e/cross_cloud_auth_regression.sh",
+        "connectors/aws/tests/integration.rs"
+      ],
       "rationale": "Self-check and runtime messaging explicitly admit request signing is not implemented, and the client still sends raw `X-Aws-*` headers instead of canonical SigV4 signatures.",
       "exit_strategy": "Adopt the shared SigV4 signer and replace the fake header path on real AWS requests.",
       "verification_expectation": "Cross-cloud auth regression coverage plus connector verification proving real SigV4 request signing on the affected AWS surfaces.",
@@ -182,6 +228,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.3.3",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "Generated presigned S3 URLs remain unusable outside demo flows because the query signature is a literal placeholder.",
+      "replacement_path": "Replace placeholder presigning with real SigV4 query signing built on the shared canonical-request substrate.",
+      "proof_artifacts": [
+        "scripts/e2e/cross_cloud_auth_regression.sh",
+        "connectors/s3/tests/integration.rs"
+      ],
       "rationale": "The presign path still emits a literal `PLACEHOLDER_SIGNATURE` query component instead of a real SigV4 query signature.",
       "exit_strategy": "Replace placeholder presigning with real SigV4 query signing backed by the shared canonical-request substrate.",
       "verification_expectation": "Unit, integration, and connector-level verification that presigned URLs round-trip with real SigV4 query parameters.",
@@ -199,6 +252,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.3.4",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "GCP service-account auth is exposed as a path but hard-refuses at runtime, blocking truthful automation for that credential mode.",
+      "replacement_path": "Implement JWT bearer signing and token exchange for service-account mode instead of hard-refusing the path.",
+      "proof_artifacts": [
+        "scripts/e2e/cross_cloud_auth_regression.sh",
+        "connectors/gcp/tests/integration.rs"
+      ],
       "rationale": "Service-account mode is explicitly rejected because JWT signing is not implemented yet, so the connector cannot truthfully support that auth path.",
       "exit_strategy": "Implement JWT bearer signing and token exchange for service-account mode instead of hard-refusing the path.",
       "verification_expectation": "Cross-cloud auth regression coverage plus connector-level tests proving service-account flows succeed and fail truthfully.",
@@ -220,6 +280,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.4.2",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "Bootstrap advertises hardware-token onboarding but still hard-fails during the real workflow, leaving secure token-backed setup unavailable.",
+      "replacement_path": "Implement real PKCS#11-backed discovery and complete the hardware-token bootstrap workflow instead of stopping at a stub.",
+      "proof_artifacts": [
+        "scripts/e2e/bootstrap_hardware_token_discovery.sh",
+        "crates/fcp-bootstrap/tests/bootstrap_integration.rs"
+      ],
       "rationale": "Hardware-token discovery is still documented as a stub implementation, and the workflow returns `Hardware token support not yet fully implemented` instead of completing bootstrap.",
       "exit_strategy": "Implement real PKCS#11-backed discovery and complete the hardware-token bootstrap path instead of hard-failing.",
       "verification_expectation": "Hardware-token discovery and workflow tests, plus repeatable verification against a mock or soft-token path.",
@@ -241,6 +308,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.5.1",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "Fork resolution can advertise CRDT merge as a strategy but still terminates at a not-implemented error, so recovery semantics remain incomplete.",
+      "replacement_path": "Implement real delta-level CRDT merge semantics for connector-state fork resolution instead of surfacing a placeholder strategy.",
+      "proof_artifacts": [
+        "crates/fcp-core/tests/crdt_merge.rs",
+        "crates/fcp-core/tests/fork_resolution_e2e.rs"
+      ],
       "rationale": "Fork resolution records CRDT merge as a strategy but still fails with a not-implemented detector message rather than performing delta-level merge.",
       "exit_strategy": "Implement real delta-level CRDT merge semantics for connector-state fork resolution.",
       "verification_expectation": "Regression suites for fork resolution and CRDT merge semantics, including golden vectors or recovery scenarios.",
@@ -258,6 +332,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.5.2",
+      "current_status": "present-runtime-blocker",
+      "user_visible_impact": "Mesh placement can report zone filtering without actually narrowing candidate nodes, so scheduling and provenance claims are overstated.",
+      "replacement_path": "Plumb real node-zone data into placement filtering and reject the current no-op zoning path.",
+      "proof_artifacts": [
+        "crates/fcp-mesh/tests/mesh_integration.rs",
+        "crates/fcp-mesh/tests/no_mock_integration.rs"
+      ],
       "rationale": "Placement planning still retains all candidates under zone restrictions because the planner lacks NodeInfo zone integration.",
       "exit_strategy": "Plumb real node zone data into placement filtering and reject no-op zoning.",
       "verification_expectation": "Zone-aware placement tests and diagnostics proving policy zone filters now change candidate selection truthfully.",
@@ -275,6 +356,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.6.2",
+      "current_status": "present-operator-gap",
+      "user_visible_impact": "Intent workflows still explain missing log-tail and lifecycle primitives instead of mapping supported cases onto real host- or mesh-backed operations.",
+      "replacement_path": "Add truthful host- or mesh-backed intent primitives so supported log and lifecycle requests stop falling back to unsupported explanations.",
+      "proof_artifacts": [
+        "docs/FWC_Host_First_Truthfulness_Playbook.md",
+        "crates/fwc/tests/cual_integration.rs"
+      ],
       "rationale": "The compiler still emits truthful but unresolved explanations for log tailing and lifecycle transitions because real host-backed primitives are missing.",
       "exit_strategy": "Implement truthful host- or mesh-backed intent primitives so these verbs stop falling back to unsupported explanations.",
       "verification_expectation": "Compiler and execution tests plus operator transcripts proving supported log and lifecycle intents map to real primitives.",
@@ -296,6 +384,13 @@
       "allowed_scaffold_candidate": false,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.6.3",
+      "current_status": "present-operator-gap",
+      "user_visible_impact": "User-facing `fwc bench` output can still contain placeholder measurements, weakening performance and evidence truthfulness.",
+      "replacement_path": "Replace placeholder benchmark branches with real harnesses, structured logs, and artifact capture on the user-visible bench path.",
+      "proof_artifacts": [
+        "crates/fwc/benches/cual_bench.rs",
+        "docs/testing/live_suite_operator_playbook.md"
+      ],
       "rationale": "User-facing benchmark subcommands still emit `BenchmarkResult::placeholder` results for connector activation, local invoke, mesh invoke, and secrets.",
       "exit_strategy": "Replace placeholder benchmark branches with real harnesses, structured logs, and artifact capture.",
       "verification_expectation": "Benchmark unit coverage, harness integration tests, and end-to-end scripts that capture stable artifacts and real measurements.",
@@ -313,6 +408,13 @@
       "allowed_scaffold_candidate": true,
       "approved_exception_class": null,
       "owner_bead": "flywheel_connectors-24llg.7.3",
+      "current_status": "present-scaffold-gap",
+      "user_visible_impact": "`fwc new` still teaches dead placeholder operations and TODO-heavy limits in generated connectors, so the scaffold normalizes the wrong runtime contract.",
+      "replacement_path": "Redesign `fwc new` to emit truthful minimal viable connectors and enforce that generator contract with regression tests.",
+      "proof_artifacts": [
+        "docs/testing/placeholder-scan.json",
+        "crates/fwc/tests/cual_integration.rs"
+      ],
       "rationale": "The generator is a scaffold surface by design, but it still emits dead runtime placeholders instead of a truthful minimal viable connector baseline.",
       "exit_strategy": "Redesign `fwc new` to emit truthful minimal viable connectors and then enforce that contract with generator regression tests.",
       "verification_expectation": "Generator unit and smoke coverage proving emitted manifests and runtime code no longer contain dead placeholder operations or TODO-heavy runtime paths.",

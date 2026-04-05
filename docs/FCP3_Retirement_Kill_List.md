@@ -42,6 +42,38 @@ per-connector error handling that `ConnectorErrorMapping` replaces.
 | **QUARANTINE** | Keep temporarily; active users require migration first | Isolate in adapter module, set removal trigger |
 | **REPLACE** | Keep until pilot proves replacement; then delete | Implement replacement, validate, then delete |
 
+## Phase-7 Scoreboard Contract
+
+Phase 7 treats this kill list plus `docs/testing/placeholder-inventory.json`
+as one scoreboard.
+
+- This file tracks the broad compatibility seams, host-first teaching holdouts,
+  and transitional adapters that still survive after phase 6.
+- `docs/testing/placeholder-inventory.json` tracks the concrete runtime
+  placeholders, status drift, and operator gaps that still block truthful
+  cutover.
+
+Every surviving seam row must record:
+
+- `current_status`
+- `owner_bead`
+- `user_visible_impact`
+- `replacement_path`
+- proof-artifact pointers
+
+### Current Non-Placeholder Seams
+
+| Seam | Current status | Owner bead | User-visible impact | Replacement path | Proof artifacts |
+|---|---|---|---|---|---|
+| Raw `tokio::io` import in `crates/fwc/src/serve_mcp.rs` | `delete-after-prerequisite` | `flywheel_connectors-9syku.11.2` | MCP stdio transport still depends on Tokio-only I/O traits, so the CLI truth path is not fully expressed through async-core. | Extend `fcp_async_core::io` with the missing trait and `lines()` support, then switch `serve_mcp` to the wrapper surface. | `crates/fwc/tests/cual_integration.rs`; `scripts/ci/asupersync_tokio_guard.sh` |
+| Hand-rolled exception-ledger style error handling | `pattern-delete-in-progress` | `flywheel_connectors-9syku.11.3` | Connector families still risk inconsistent retry, timeout, and FCP error semantics when they keep bespoke mappings. | Finish the `ConnectorErrorMapping` and `RetryLoop` migration waves and delete the remaining bespoke paths. | `crates/fcp-sdk/src/migration.rs`; representative connector archetype tests |
+| `get_or_create_tokio_compat_handle` | `quarantined` | `flywheel_connectors-18irp` | Reqwest and wiremock compatibility still rely on a hidden Tokio runtime, so runtime neutrality is not yet complete. | Replace or eliminate Tokio-dependent HTTP and mock infrastructure so async-core no longer needs the compat handle. | `crates/fcp-testkit/src/mock_server.rs`; `crates/fcp-host/tests/host_connector_integration.rs` |
+| `TokioContextFuture` wrapper | `quarantined` | `flywheel_connectors-18irp` | Spawned tasks still enter Tokio context during polling, which hides a compatibility seam inside the runtime. | Remove it alongside the compat handle once Tokio-dependent callers are retired. | `crates/fcp-testkit/src/mock_server.rs`; `crates/fcp-host/tests/host_connector_integration.rs` |
+| `asupersync-tokio-compat` bridge in `fcp-host` | `quarantined` | `flywheel_connectors-18irp` | The host admin HTTP surface still depends on a Tokio bridge, so the supervision root is not yet natively async-core end to end. | Replace the Hyper bridge with an async-core-native server or explicitly bless a permanent bridge after proof. | `crates/fcp-host/src/bin/fcp-host.rs`; `crates/fcp-host/tests/host_connector_integration.rs` |
+| Workspace `tokio` dependency retained for compatibility | `quarantined-transitive` | `flywheel_connectors-18irp` | The workspace still teaches Tokio as a live dependency because the remaining compat seams keep it in the graph. | Delete the compat seams above, then remove Tokio from the workspace dependency surface. | `Cargo.toml`; `scripts/ci/asupersync_tokio_guard.sh` |
+| Raw `asupersync::` imports in non-core crates | `replace-after-pilot` | `flywheel_connectors-9syku.11.2` | Runtime crates outside async-core still bypass the abstraction boundary, so upstream API drift can break them independently. | Wrap the missing types in `fcp-async-core`, prove the `fcp-streaming` pilot, then migrate the remaining crates. | `crates/fcp-streaming/src/websocket.rs`; targeted crate-local runtime tests |
+| Incomplete `ConnectorRuntime` adoption across connector families | `replace-after-pilot` | `flywheel_connectors-9syku.11.3` | Connectors still vary in cancellation, deadline, retry, and lifecycle behavior instead of sharing one FCP3 runtime contract. | Finish the request-response, streaming, and stateful migration waves and delete the old lifecycle glue from connectors and scaffolds. | `crates/fcp-sdk/src/migration.rs`; migrated connector family tests and transcripts |
+
 ---
 
 ## 1. Abstractions to KEEP (Not on kill list)
